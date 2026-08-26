@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RetiMesh Node</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #3fb950; --warn: #f85149;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, sans-serif;
+    max-width: 640px; margin: 0 auto; padding: 16px;
+  }
+  h1 { font-size: 1.25rem; margin: 8px 0 2px; }
+  h1 .dot { color: var(--accent); }
+  .sub { color: var(--dim); font-size: .8rem; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px,1fr)); gap: 8px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px;
+  }
+  .card .k { color: var(--dim); font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; }
+  .card .v { font-size: 1.15rem; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .offline { color: var(--warn); }
+  h2 { font-size: .95rem; margin: 22px 0 8px; color: var(--dim); }
+  #posts { display: flex; flex-direction: column; gap: 8px; }
+  .post { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .post .a { color: var(--accent); font-size: .8rem; font-weight: 600; }
+  .post .t { white-space: pre-wrap; overflow-wrap: anywhere; }
+  form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  input, textarea, button {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; font: inherit;
+  }
+  textarea { resize: vertical; min-height: 60px; }
+  button { background: var(--accent); color: #04140a; font-weight: 600; cursor: pointer; border: 0; }
+  button:disabled { opacity: .5; cursor: default; }
+  .note { color: var(--dim); font-size: .75rem; margin-top: 6px; }
+  footer { color: var(--dim); font-size: .72rem; margin: 24px 0 8px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1><span class="dot">&#9679;</span> RetiMesh Node</h1>
+  <div class="sub">Standalone Reticulum LoRa gateway &mdash; connect your RNS client to <b>10.42.0.1:4242</b> (TCPClientInterface)</div>
+
+  <div class="grid" id="stats"></div>
+
+  <h2>Community bulletin board</h2>
+  <div id="posts"><div class="post"><span class="t">Loading&hellip;</span></div></div>
+  <form id="postForm">
+    <input id="author" maxlength="32" placeholder="Name (optional)">
+    <textarea id="text" maxlength="280" placeholder="Say something to everyone on this node&hellip;" required></textarea>
+    <button id="send" type="submit">Post</button>
+    <div class="note">&#9888; This board is public and unencrypted &mdash; anyone on this access point can read it.
+      Private messages belong on Reticulum, where they are end-to-end encrypted and this node cannot read them.</div>
+  </form>
+
+  <footer>RetiMesh Node <span id="ver"></span> &mdash; open hardware mesh. No internet here, only the mesh.</footer>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  return (d ? d+"d " : "") + h + "h " + m + "m";
+}
+
+function card(k, v, cls) {
+  const el = document.createElement("div");
+  el.className = "card";
+  const kk = document.createElement("div"); kk.className = "k"; kk.textContent = k;
+  const vv = document.createElement("div"); vv.className = "v" + (cls ? " "+cls : "");
+  vv.textContent = v;
+  el.append(kk, vv);
+  return el;
+}
+
+async function refreshStatus() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    $("ver").textContent = s.version || "";
+    const g = $("stats");
+    g.replaceChildren(
+      card("Uptime", fmtUptime(s.uptime_s)),
+      card("Radio", s.radio.online
+        ? s.radio.freq_mhz.toFixed(3) + " MHz SF" + s.radio.sf : "OFFLINE",
+        s.radio.online ? "" : "offline"),
+      card("RSSI / SNR", s.radio.rssi.toFixed(0) + " dBm / " + s.radio.snr.toFixed(1) + " dB"),
+      card("RNS peers", s.peers.rns_tcp + " tcp / " + s.peers.wifi_sta + " wifi"),
+      card("LoRa RX / TX", s.radio.rx_packets + " / " + s.radio.tx_packets),
+      card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB")
+    );
+  } catch (e) { /* node rebooting — keep last values */ }
+}
+
+async function refreshBoard() {
+  try {
+    const posts = await (await fetch("/api/board")).json();
+    const box = $("posts");
+    box.replaceChildren();
+    if (!posts.length) {
+      const d = document.createElement("div"); d.className = "post";
+      d.textContent = "No posts yet. Be the first!";
+      box.append(d);
+      return;
+    }
+    // Posts are rendered with textContent only — never innerHTML — so a
+    // malicious post cannot inject script into other visitors' browsers.
+    for (const p of posts.slice().reverse()) {
+      const d = document.createElement("div"); d.className = "post";
+      const a = document.createElement("div"); a.className = "a";
+      a.textContent = p.author || "anonymous";
+      const t = document.createElement("div"); t.className = "t";
+      t.textContent = p.text || "";
+      d.append(a, t);
+      box.append(d);
+    }
+  } catch (e) { /* transient */ }
+}
+
+$("postForm").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const btn = $("send");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/board", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ author: $("author").value, text: $("text").value })
+    });
+    if (res.ok) { $("text").value = ""; await refreshBoard(); }
+  } finally { btn.disabled = false; }
+});
+
+refreshStatus(); refreshBoard();
+setInterval(refreshStatus, 2000);
+setInterval(refreshBoard, 10000);
+</script>
+</body>
+</html>

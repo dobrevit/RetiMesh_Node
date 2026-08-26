@@ -1,0 +1,74 @@
+name: Release
+
+# Flow: Release Drafter keeps a draft with the next version while PRs merge.
+# Pushing the matching tag (vX.Y.Z) builds every board, attaches the
+# bundles to that draft, and leaves it for a human to review and publish.
+# Publishing then triggers pages.yml, which rebuilds the web flasher.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: firmware (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        env: [t3s3, esp32s3-qspi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-firmware
+        with:
+          env: ${{ matrix.env }}
+          version: ${{ github.ref_name }}
+
+  publish:
+    name: attach to draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: firmware-*
+          path: dist
+      - name: Normalise artifact layout (firmware-<env>/ -> <env>/)
+        run: |
+          cd dist
+          for d in firmware-*; do mv "$d" "${d#firmware-}"; done
+          ls -R
+      - name: Build release.json and checksums
+        run: python tools/make_manifest.py index --dist dist --version "${{ github.ref_name }}" --repo "${{ github.repository }}"
+
+      - name: Ensure the draft release exists for this tag
+        uses: release-drafter/release-drafter@v6
+        with:
+          tag: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          version: ${{ github.ref_name }}
+          publish: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach assets to the draft
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/release.json
+            dist/sha256sums.txt
+            dist/*/retimesh-node-*.zip
+            dist/*/retimesh-node-*-merged.bin

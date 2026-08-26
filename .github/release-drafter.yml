@@ -1,0 +1,66 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  - title: '🚀 Features'
+    labels: [feature, enhancement]
+  - title: '🐛 Fixes'
+    labels: [fix, bugfix, bug]
+  - title: '📻 Radio / protocol'
+    labels: [radio, protocol]
+  - title: '📖 Documentation'
+    labels: [docs, documentation]
+  - title: '🧰 CI & tooling'
+    labels: [ci, tooling]
+  - title: '📦 Dependencies'
+    labels: [dependencies]
+    collapse-after: 5
+
+exclude-labels: [skip-changelog]
+
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+change-title-escapes: '\<*_&'
+
+version-resolver:
+  major:
+    labels: [major, breaking]
+  minor:
+    labels: [minor, feature, enhancement, radio, protocol]
+  patch:
+    labels: [patch, fix, bugfix, bug, docs, documentation, ci, tooling, dependencies]
+  default: patch
+
+autolabeler:
+  - label: feature
+    branch: ['/^feat(ure)?[\/-].+/']
+    title: ['/^feat(\(.+\))?!?:/i']
+  - label: fix
+    branch: ['/^(fix|bugfix|hotfix)[\/-].+/']
+    title: ['/^fix(\(.+\))?!?:/i']
+  - label: docs
+    branch: ['/^docs?[\/-].+/']
+    title: ['/^docs(\(.+\))?:/i']
+    files: ['*.md', 'docs/**']
+  - label: ci
+    branch: ['/^ci[\/-].+/']
+    title: ['/^ci(\(.+\))?:/i']
+    files: ['.github/**', 'tools/**']
+  - label: radio
+    files: ['src/LoRaRadio.*', 'src/HDLC.h', 'src/RetiTransportServer.*']
+  - label: dependencies
+    title: ['/^(deps|build|chore)(\(deps\))?:/i', '/^bump /i']
+  - label: breaking
+    title: ['/^\w+(\(.+\))?!:/']
+
+template: |
+  ## RetiMesh Node $RESOLVED_VERSION
+
+  $CHANGES
+
+  ## Install
+
+  - **Browser:** open the [web flasher](https://$OWNER.github.io/$REPOSITORY/), pick your board, click *Install*.
+  - **Terminal:** `pipx run --spec "git+https://github.com/$OWNER/$REPOSITORY#subdirectory=tools/retimesh-flash" retimesh-flash install`
+  - **Manual:** flash `retimesh-node-$RESOLVED_VERSION-<board>-merged.bin` at `0x0` with esptool; per-partition files and offsets are in `release.json`.
+
+  SHA-256 checksums for every asset are in `sha256sums.txt`.

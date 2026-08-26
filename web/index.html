@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RetiMesh Node — Web Flasher</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #3fb950; --warn: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, sans-serif;
+         max-width: 680px; margin: 0 auto; padding: 20px 16px; }
+  h1 { font-size: 1.35rem; margin-bottom: 2px; } h1 .dot { color: var(--accent); }
+  .sub { color: var(--dim); font-size: .85rem; margin-bottom: 20px; }
+  h2 { font-size: .95rem; color: var(--dim); margin: 22px 0 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+  label { display: block; color: var(--dim); font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; margin: 10px 0 4px; }
+  select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font: inherit; }
+  .notes { color: var(--dim); font-size: .85rem; margin-top: 8px; }
+  .install { margin-top: 16px; }
+  esp-web-install-button { --esp-tools-button-color: var(--accent); --esp-tools-button-text-color: #04140a; }
+  .warn { color: var(--warn); font-size: .85rem; }
+  code, pre { font: .82rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; }
+  a { color: var(--accent); }
+  ol { padding-left: 20px; } li { margin: 4px 0; }
+  footer { color: var(--dim); font-size: .75rem; margin: 28px 0 8px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1><span class="dot">&#9679;</span> RetiMesh Node</h1>
+  <div class="sub">Standalone Reticulum LoRa gateway &mdash; install the firmware straight from your browser.</div>
+
+  <div class="card">
+    <label for="version">Release</label>
+    <select id="version"></select>
+    <label for="board">Your board</label>
+    <select id="board"></select>
+    <div class="notes" id="notes"></div>
+
+    <div class="install" id="installWrap">
+      <esp-web-install-button id="btn">
+        <span slot="unsupported" class="warn">Your browser has no Web Serial support &mdash; use Chrome or Edge on a desktop, or the CLI below.</span>
+        <span slot="not-allowed" class="warn">Web Serial needs HTTPS.</span>
+      </esp-web-install-button>
+    </div>
+    <div class="notes" id="empty" hidden>No published releases yet.</div>
+  </div>
+
+  <h2>How to flash</h2>
+  <div class="card">
+    <ol>
+      <li>Connect the board over USB. If it is not detected, hold <b>BOOT</b>, tap <b>RST</b>, release <b>BOOT</b>.</li>
+      <li>Pick your board above and click <b>Install</b>; choose the serial port in the browser prompt.</li>
+      <li>First install: select <i>Erase device</i> so the filesystem and settings start clean.</li>
+      <li>Afterwards join the Wi-Fi network <b>RetiMesh-Node</b> and open <a href="http://10.42.0.1/">http://10.42.0.1/</a>.</li>
+    </ol>
+  </div>
+
+  <h2>Terminal install (Linux / macOS / Windows)</h2>
+  <div class="card">
+    <pre id="cli"></pre>
+    <div class="notes">Lists boards, auto-detects the serial port, verifies checksums and flashes with esptool.
+      <code>--mode app</code> keeps your settings and the web app; <code>--mode fs</code> updates only the web app.</div>
+  </div>
+
+  <h2>Manual (esptool)</h2>
+  <div class="card">
+    <pre id="manual"></pre>
+    <div class="notes">Per-partition files and offsets are in each release's <code>release.json</code>; checksums in <code>sha256sums.txt</code>.</div>
+  </div>
+
+  <footer>RetiMesh Node &mdash; GPL-3.0-or-later &mdash; <a id="repoLink" href="#">source on GitHub</a></footer>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let index = { releases: [] };
+
+function currentRelease() { return index.releases.find(r => r.tag === $("version").value); }
+
+function renderBoards() {
+  const rel = currentRelease();
+  const sel = $("board");
+  sel.replaceChildren();
+  if (!rel) return;
+  for (const [env, b] of Object.entries(rel.boards)) {
+    const o = document.createElement("option");
+    o.value = env; o.textContent = b.name;
+    sel.append(o);
+  }
+  renderBoard();
+}
+
+function renderBoard() {
+  const rel = currentRelease();
+  const env = $("board").value;
+  const b = rel && rel.boards[env];
+  if (!b) return;
+  $("notes").textContent = b.notes || "";
+  $("btn").setAttribute("manifest", b.manifest);
+  $("cli").textContent =
+    `pipx run --spec "git+https://github.com/${index.repo}#subdirectory=tools/retimesh-flash" ` +
+    `retimesh-flash install --board ${env} --version ${rel.tag}`;
+  $("manual").textContent =
+    `# single merged image, flash at 0x0 (sha256 ${b.merged_sha256.slice(0, 16)}…)\n` +
+    `pip install esptool\n` +
+    `esptool.py --chip esp32s3 --baud 921600 write_flash --erase-all 0x0 ${b.merged_url ? b.merged_url.split("/").pop() : "retimesh-node-" + rel.tag + "-" + env + "-merged.bin"}`;
+}
+
+async function init() {
+  try { index = await (await fetch("firmware/index.json", { cache: "no-store" })).json(); } catch (e) { /* keep empty */ }
+  $("repoLink").href = "https://github.com/" + (index.repo || "");
+  const vs = $("version");
+  for (const r of index.releases) {
+    const o = document.createElement("option");
+    o.value = r.tag; o.textContent = r.tag + (r.prerelease ? " (pre-release)" : "");
+    vs.append(o);
+  }
+  if (!index.releases.length) {
+    $("installWrap").hidden = true; $("empty").hidden = false;
+    $("cli").textContent = "pipx run --spec \"git+https://github.com/" + (index.repo || "dobrevit/RetiMesh_Node") +
+      "#subdirectory=tools/retimesh-flash\" retimesh-flash install";
+    $("manual").textContent = "esptool.py --chip esp32s3 --baud 921600 write_flash --erase-all 0x0 retimesh-node-<version>-<board>-merged.bin";
+    return;
+  }
+  vs.addEventListener("change", renderBoards);
+  $("board").addEventListener("change", renderBoard);
+  renderBoards();
+}
+init();
+</script>
+</body>
+</html>

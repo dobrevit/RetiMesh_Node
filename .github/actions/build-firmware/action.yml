@@ -1,0 +1,56 @@
+name: Build firmware
+description: Compile one PlatformIO env, build its LittleFS image and package a release bundle into dist/<env>
+
+inputs:
+  env:
+    description: PlatformIO environment name (key in boards.json)
+    required: true
+  version:
+    description: Version string baked into the firmware (FW_VERSION)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Cache PlatformIO toolchains and libraries
+      uses: actions/cache@v4
+      with:
+        path: ~/.platformio
+        key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+        restore-keys: pio-${{ runner.os }}-
+
+    - name: Install PlatformIO and esptool
+      shell: bash
+      run: python -m pip install --upgrade pip platformio esptool
+
+    - name: Compile ${{ inputs.env }}
+      shell: bash
+      env:
+        PLATFORMIO_BUILD_FLAGS: -DFW_VERSION=\"${{ inputs.version }}\"
+      run: |
+        pio run -e "${{ inputs.env }}" | tee build.log
+        pio run -e "${{ inputs.env }}" -t buildfs
+
+    - name: Report size
+      shell: bash
+      run: |
+        {
+          echo "### ${{ inputs.env }} — ${{ inputs.version }}"
+          echo '```'
+          grep -E '^(RAM|Flash):' build.log
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Package
+      shell: bash
+      run: python tools/make_manifest.py build --env "${{ inputs.env }}" --version "${{ inputs.version }}" --out dist
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: firmware-${{ inputs.env }}
+        path: dist/${{ inputs.env }}
+        if-no-files-found: error

@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+dist/
+_site/
+__pycache__/
+*.egg-info/
+build/
+*.pyc

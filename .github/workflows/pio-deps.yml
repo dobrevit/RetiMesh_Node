@@ -1,0 +1,42 @@
+name: PlatformIO dependency bumps
+
+# Dependabot cannot read platformio.ini; this monthly job does the same
+# thing via the PlatformIO registry and opens a PR that CI then compiles.
+# Note: PRs opened with GITHUB_TOKEN do not trigger other workflows. To get
+# CI on these PRs automatically, add a fine-grained PAT (contents + pull
+# requests: write) as the DEPS_PR_TOKEN secret; the job falls back to
+# GITHUB_TOKEN otherwise (then run CI on the PR manually / close-reopen).
+
+on:
+  schedule:
+    - cron: '17 6 1 * *'
+  workflow_dispatch:
+    inputs:
+      allow_major:
+        description: Allow major version bumps (new ESP-IDF!)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Query the PlatformIO registry
+        run: python tools/bump_deps.py ${{ inputs.allow_major && '--allow-major' || '' }} | tee bump.md
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.DEPS_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          branch: deps/platformio
+          delete-branch: true
+          commit-message: 'deps: bump PlatformIO libraries'
+          title: 'deps: bump PlatformIO libraries'
+          body-path: bump.md
+          labels: dependencies

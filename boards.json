@@ -1,0 +1,15 @@
+{
+  "_comment": "Single source of truth for release packaging, the web flasher and the CLI. Keys are PlatformIO env names.",
+  "t3s3": {
+    "name": "LilyGO T3-S3 v1.2/v1.3 (SX1262)",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "notes": "0.96\" OLED, 4 MB flash, 2 MB PSRAM. Native USB — hold BOOT while pressing RST if the port is not detected."
+  },
+  "esp32s3-qspi": {
+    "name": "Generic ESP32-S3 DevKitC-1 + SX1262 module",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "notes": "8 MB flash, quad PSRAM. Wire the SX1262 as documented in platformio.ini (PIN_LORA_* overrides)."
+  }
+}

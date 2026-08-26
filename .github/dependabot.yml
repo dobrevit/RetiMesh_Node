@@ -1,0 +1,19 @@
+# Dependabot has no PlatformIO ecosystem; lib_deps in platformio.ini are
+# bumped by .github/workflows/pio-deps.yml instead.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: pip
+    directory: /tools/retimesh-flash
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    commit-message:
+      prefix: deps
