@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import struct
 import sys
 import zipfile
 from pathlib import Path
@@ -71,7 +72,6 @@ def env_config(env: str) -> dict:
 
     return {
         "board": get("board"),
-        "partitions": get("board_build.partitions", "default.csv"),
         "flash_size": get("board_upload.flash_size"),
     }
 
@@ -84,26 +84,28 @@ def board_json(board: str) -> dict:
     sys.exit(f"board definition {board}.json not found")
 
 
-def partition_offsets(csv_name: str) -> tuple[int, int]:
-    for candidate in (ROOT / csv_name, FRAMEWORK / "tools" / "partitions" / csv_name):
-        if candidate.exists():
-            csv = candidate
-            break
-    else:
-        sys.exit(f"partition table {csv_name} not found")
+def partition_offsets(partitions_bin: Path) -> tuple[int, int]:
+    """App and filesystem offsets from the partition table PlatformIO built.
 
+    The binary table is authoritative: it reflects the CSV actually used,
+    whether it came from platformio.ini or the board definition (the devkit
+    inherits default_8MB.csv from its board json without naming it in
+    platformio.ini). Entries are 32 bytes: magic AA 50, type, subtype,
+    offset, size, label[16], flags.
+    """
+    data = partitions_bin.read_bytes()
     app_off = fs_off = None
-    for line in csv.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        name, ptype, subtype, offset, *_ = [c.strip() for c in line.split(",")]
-        if ptype == "app" and app_off is None:
-            app_off = int(offset, 0)
-        if subtype in ("spiffs", "littlefs") and fs_off is None:
-            fs_off = int(offset, 0)
+    for i in range(0, len(data) - 32 + 1, 32):
+        entry = data[i:i + 32]
+        if entry[:2] != b"\xaa\x50":
+            break
+        ptype, subtype, offset, _size = struct.unpack_from("<BBII", entry, 2)
+        if ptype == 0x00 and app_off is None:                      # app
+            app_off = offset
+        if ptype == 0x01 and subtype in (0x82, 0x83) and fs_off is None:  # data/spiffs, data/littlefs
+            fs_off = offset
     if app_off is None or fs_off is None:
-        sys.exit(f"{csv}: could not find app / filesystem partitions")
+        sys.exit(f"{partitions_bin}: could not find app / filesystem partitions")
     return app_off, fs_off
 
 
@@ -118,9 +120,8 @@ def cmd_build(args):
     flash_mode = bj["build"].get("flash_mode", "dio")
     flash_size = cfg["flash_size"] or bj["upload"]["flash_size"]
     flash_freq = str(int(bj["build"].get("f_flash", "40000000L").rstrip("L")) // 1_000_000) + "m"
-    app_off, fs_off = partition_offsets(cfg["partitions"])
-
     build_dir = ROOT / ".pio" / "build" / env
+    app_off, fs_off = partition_offsets(build_dir / "partitions.bin")
     parts = [
         (BOOTLOADER_OFFSET.get(mcu, 0x0), build_dir / "bootloader.bin"),
         (PARTITION_TABLE_OFFSET,           build_dir / "partitions.bin"),
