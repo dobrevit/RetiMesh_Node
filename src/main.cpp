@@ -52,6 +52,7 @@
 #include <LittleFS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>
+#include <esp_heap_caps.h>
 
 #include "Config.h"
 #include "Settings.h"
@@ -66,13 +67,27 @@
 
 NodeStats g_stats;
 
-// The two directions of the bridge. NOSPLIT keeps every item (= one RNS
+// Ring buffer storage lives in PSRAM (only tasks touch the rings; the radio
+// ISR just posts a notification). The control blocks stay internal.
+static RingbufHandle_t psramRing(size_t bytes) {
+  uint8_t* storage = (uint8_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  StaticRingbuffer_t* cb = (StaticRingbuffer_t*)heap_caps_malloc(sizeof(StaticRingbuffer_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!storage || !cb) return xRingbufferCreate(bytes, RINGBUF_TYPE_NOSPLIT);   // no PSRAM: internal
+  return xRingbufferCreateStatic(bytes, RINGBUF_TYPE_NOSPLIT, storage, cb);
+}
+
+// The directions of the bridge. NOSPLIT keeps every item (= one RNS
 // packet) contiguous, so consumers get a plain pointer + length.
 static RingbufHandle_t txRing = nullptr;   // TCP  -> LoRa
 static RingbufHandle_t rxRing = nullptr;   // LoRa -> Transport
 static RingbufHandle_t tcpInRing = nullptr; // TCP clients -> Transport
 
 void setup() {
+  // Prefer PSRAM for anything larger than a few hundred bytes — packet
+  // buffers, JSON documents, strings, Transport containers. Done first so
+  // every later allocation benefits.
+  if (psramFound()) heap_caps_malloc_extmem_enable(PSRAM_MALLOC_THRESHOLD);
+
   Serial.begin(115200);
   delay(300);                              // let the USB CDC host attach
   log_i("%s %s booting (IDF %s)", FW_NAME, FW_VERSION, esp_get_idf_version());
@@ -84,9 +99,11 @@ void setup() {
 
   settings.load();                         // NVS: radio channel, AP, admin
 
-  txRing = xRingbufferCreate(TX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
-  rxRing = xRingbufferCreate(RX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
-  tcpInRing = xRingbufferCreate(TCP_IN_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
+  txRing = psramRing(TX_RING_BYTES);
+  rxRing = psramRing(RX_RING_BYTES);
+  tcpInRing = psramRing(TCP_IN_RING_BYTES);
+  log_i("memory: internal %u free, PSRAM %u free (threshold %d B)",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), PSRAM_MALLOC_THRESHOLD);
   configASSERT(txRing && rxRing && tcpInRing);
 
   nodeIdentity.begin();                    // Reticulum identity keys (NVS)
@@ -129,14 +146,16 @@ void setup() {
 void loop() {
   static uint32_t lastBeat = 0;
   wifiManager.tick();
-  g_stats.heapMinFree = ESP.getMinFreeHeap();
+  g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+  g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   if (millis() - lastBeat >= 30000) {
     lastBeat = millis();
-    log_i("up %lus | peers tcp %u auto %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u | heap %u (min %u)",
+    log_i("up %lus | peers tcp %u auto %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u | internal %u (min %u) psram %u",
           millis() / 1000, (unsigned)g_stats.tcpClients, (unsigned)AutoInterface::peerCount(),
           (unsigned)g_stats.loraRxPackets, (unsigned)g_stats.loraTxPackets,
           (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.announcesRx,
-          (unsigned)g_stats.announcesTx, (unsigned)ESP.getFreeHeap(), (unsigned)g_stats.heapMinFree);
+          (unsigned)g_stats.announcesTx, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+          (unsigned)g_stats.heapMinFree, (unsigned)g_stats.psramFree);
   }
   vTaskDelay(pdMS_TO_TICKS(200));
 }

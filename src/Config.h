@@ -275,6 +275,16 @@
 #define CSMA_MAX_WAIT_MS    2000            // give up deferring after this
 
 // ---------------------------------------------------------------------------
+// PSRAM. The core routes only malloc() > 4 KB to PSRAM by default; almost
+// nothing here is that large, so internal RAM fills up while 2 MB sit idle.
+// Allocations above this threshold prefer PSRAM instead (ISR code never
+// allocates, so it is safe); ring buffer storage goes there explicitly.
+// ---------------------------------------------------------------------------
+#ifndef PSRAM_MALLOC_THRESHOLD
+  #define PSRAM_MALLOC_THRESHOLD 128      // measured: 512 B -> +28 KB internal, 128 B -> +42 KB
+#endif
+
+// ---------------------------------------------------------------------------
 // Ring buffers bridging TCP <-> LoRa (created in main.cpp)
 // ---------------------------------------------------------------------------
 #define TX_RING_BYTES       8192            // TCP  -> LoRa direction
@@ -301,7 +311,8 @@ struct NodeStats {
   volatile uint32_t beaconsRx     = 0;
   volatile uint32_t announcesTx   = 0;
   volatile uint32_t announcesRx   = 0;    // verified announces heard (any side)
-  volatile uint32_t heapMinFree   = 0;    // lowest free heap seen (soak monitoring)
+  volatile uint32_t heapMinFree   = 0;    // lowest free internal heap seen (soak monitoring)
+  volatile uint32_t psramFree     = 0;
   volatile float    lastRssi      = 0.0f;   // dBm, last LoRa RX
   volatile float    lastSnr       = 0.0f;   // dB,  last LoRa RX
   volatile uint32_t loraRxPackets = 0;      // reassembled RNS packets

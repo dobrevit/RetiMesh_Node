@@ -67,5 +67,6 @@ a file (sections optional) — clone a configuration onto other nodes.
 | `HAS_SD`, `PIN_SD_*`, `SD_SPI_HZ`, `SD_PARTIAL_PERCENT` | 1 / T3-S3 map / 20 MHz / 50 | microSD slot |
 | `DISPLAY_SLEEP_MS`, `DISPLAY_PAGE_TIMEOUT_MS` | 60000 / 30000 | |
 | `RNS_MAX_CLIENTS` | 4 | simultaneous TCP peers |
+| `PSRAM_MALLOC_THRESHOLD` | 128 | allocations above this size prefer PSRAM |
 | `FW_VERSION` | `dev` | set by CI from the tag |
 | `CORE_DEBUG_LEVEL`, `RNS_LOG_LEVEL` | 3 / DEBUG compiled | console verbosity (runtime RNS level is INFO) |

@@ -23,6 +23,7 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
+#include <esp_heap_caps.h>
 #include <ESPmDNS.h>
 #include "LoRaRadio.h"
 #include "Neighbors.h"
@@ -275,7 +276,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["identity"]     = nodeIdentity.identityHex();
   doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
   doc["uptime_s"]     = millis() / 1000;
-  doc["heap_free"]    = ESP.getFreeHeap();
+  doc["heap_free"]    = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);   // internal RAM
   doc["heap_min_free"] = g_stats.heapMinFree;
   doc["psram_free"]   = ESP.getFreePsram();
 

@@ -86,6 +86,13 @@ sequenceDiagram
 | LittleFS `/` | `index.html`, `settings.html`, `board.json` |
 | LittleFS `/rns` | Transport persistence: paths, known destinations, hash list, cache |
 
-## Budgets (T3-S3, v0.0.3)
-Flash 1.29 MB of 3 MB app partition · heap ~180 KB free steady · PSRAM 2 MB
-mostly unused (reserved for future tables/buffers).
+## Memory (T3-S3)
+Flash 1.38 MB of the 3 MB app partition. Internal RAM is the scarce
+resource: the core routes only `malloc()` > 4 KB to PSRAM by default and
+nothing here is that large, so the firmware lowers the threshold to
+`PSRAM_MALLOC_THRESHOLD` (128 B) at boot and places the ring-buffer storage
+in PSRAM explicitly. Result with transport, AutoInterface, mDNS and SD on:
+**~200 KB internal free (min ~200 KB)** and ~90 KB in PSRAM, versus ~160 KB
+internal before. ISR code never allocates, so PSRAM-backed heap is safe;
+Wi-Fi/lwIP keep their own internal pools. `/api/status` reports
+`heap_free` (internal), `heap_min_free` and `psram_free`.
