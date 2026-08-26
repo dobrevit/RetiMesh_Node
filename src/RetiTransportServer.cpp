@@ -23,6 +23,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "Neighbors.h"
+#include "SdCard.h"
 
 RetiTransportServer transportServer;
 
@@ -179,4 +180,8 @@ void RetiTransportServer::noteAnnounce(const uint8_t* raw, size_t len, bool viaW
   g_stats.announcesRx++;
   log_i("announce via %s: %s <%s> \"%s\" hops %u", viaWifi ? "wifi" : "lora",
         aspect ? aspect : "unknown-aspect", n.hash, n.name, a.hops);
+  char line[160];
+  snprintf(line, sizeof(line), "announce %s %s <%s> \"%s\" hops=%u rssi=%.0f", viaWifi ? "wifi" : "lora",
+           aspect ? aspect : "?", n.hash, n.name, a.hops, (double)n.rssi);
+  sdCard.log(line);
 }

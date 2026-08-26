@@ -92,7 +92,7 @@ private:
       return microStore::File(new FileImpl(f));
     }
     bool exists(const char* path) override { return present(normalize(path)); }
-    bool remove(const char* path) override { return LittleFS.remove(normalize(path).c_str()); }
+    bool remove(const char* path) override { std::string p = normalize(path); return present(p) && LittleFS.remove(p.c_str()); }
     bool rename(const char* a, const char* b) override { return LittleFS.rename(normalize(a).c_str(), normalize(b).c_str()); }
     bool mkdir(const char* path) override { std::string p = normalize(path); return present(p) || LittleFS.mkdir(p.c_str()); }
     bool rmdir(const char* path) override { return LittleFS.rmdir(normalize(path).c_str()); }

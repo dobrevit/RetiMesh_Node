@@ -25,6 +25,7 @@
 #include "Settings.h"
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
+#include "SdCard.h"
 
 Display display;
 
@@ -248,7 +249,9 @@ void Display::paintNetwork() {
            (unsigned)g_stats.tcpClients);                                                  _oled.setCursor(0, 32); _oled.print(line);
   _oled.setCursor(0, 42); _oled.print("dest ");
   _oled.print(String(nodeIdentity.destHex()).substring(0, 16));
-  _oled.setCursor(0, 52); _oled.print("  ");
-  _oled.print(String(nodeIdentity.destHex()).substring(16));
+  SdCard::Info si = sdCard.info();
+  if (si.state == SdCard::State::Absent) snprintf(line, sizeof(line), "SD: none");
+  else snprintf(line, sizeof(line), "SD: %.0fG %s", si.cardBytes / 1e9, SdCard::stateName(si.state));
+  _oled.setCursor(0, 52); _oled.print(line);
 #endif
 }

@@ -111,6 +111,15 @@
     <div class="msg" id="transportMsg"></div>
   </form>
 
+  <h2>SD card</h2>
+  <div class="card">
+    <div class="note" id="sdInfo">Checking…</div>
+    <button class="danger" id="sdFormat" disabled>Format card (erase everything)</button>
+    <div class="msg" id="sdMsg"></div>
+    <div class="note">The node uses a single FAT32 volume across the whole card. Cards with other layouts (e.g. a Raspberry Pi image:
+      small boot partition + Linux partitions) mount only partially and can be reformatted here. Formatting erases all data on the card.</div>
+  </div>
+
   <h2>Admin password</h2>
   <form class="card" id="adminForm">
     <label>New password (4&ndash;32)</label><input name="password" type="password" minlength="4" maxlength="32" autocomplete="new-password" required>
@@ -237,6 +246,33 @@ $("resetBtn").addEventListener("click", async () => {
     setMsg("resetMsg", "Reset. Restarting with default settings.", "warn");
   } catch (e) { setMsg("resetMsg", e.message, "bad"); }
 });
+
+async function refreshSd() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    const sd = s.sd || { state: "absent" };
+    const gb = b => (b / 1e9).toFixed(2) + " GB";
+    let text;
+    if (sd.state === "absent") text = "No card inserted.";
+    else if (sd.state === "mounted") text = `${sd.type} card ${gb(sd.card_bytes)} — volume ${gb(sd.volume_bytes)}, used ${gb(sd.used_bytes)}.`;
+    else if (sd.state === "partial") text = `${sd.type} card ${gb(sd.card_bytes)} but the mounted volume is only ${gb(sd.volume_bytes)} — the card has other partitions.`;
+    else if (sd.state === "unformatted") text = `${sd.type || ""} card ${gb(sd.card_bytes)} with no filesystem this node recognises.`;
+    else if (sd.state === "formatting") text = "Formatting… this can take a minute.";
+    else text = "Card error." ;
+    if (sd.last_format) text += " Last format: " + sd.last_format + ".";
+    $("sdInfo").textContent = text;
+    $("sdFormat").disabled = !(sd.state === "mounted" || sd.state === "partial" || sd.state === "unformatted" || sd.state === "error");
+  } catch (e) { $("sdInfo").textContent = "Status unavailable."; }
+}
+$("sdFormat").addEventListener("click", async () => {
+  if (prompt("This erases EVERYTHING on the card. Type FORMAT to continue.") !== "FORMAT") return;
+  try {
+    await api("/api/settings/sd/format", { confirm: "FORMAT" });
+    setMsg("sdMsg", "Formatting…", "warn");
+    setTimeout(refreshSd, 5000); setTimeout(refreshSd, 20000); setTimeout(refreshSd, 60000);
+  } catch (e) { setMsg("sdMsg", e.message, "bad"); }
+});
+refreshSd(); setInterval(refreshSd, 10000);
 
 load().catch(e => setMsg("radioMsg", "Could not load settings: " + e.message, "bad"));
 </script>

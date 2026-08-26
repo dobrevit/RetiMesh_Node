@@ -170,6 +170,29 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// microSD (T3-S3: MOSI 11 / MISO 2 / SCK 14 / CS 13) on the second SPI bus
+// ---------------------------------------------------------------------------
+#ifndef HAS_SD
+  #define HAS_SD            1
+#endif
+#ifndef PIN_SD_MOSI
+  #define PIN_SD_MOSI       11
+#endif
+#ifndef PIN_SD_MISO
+  #define PIN_SD_MISO       2
+#endif
+#ifndef PIN_SD_SCK
+  #define PIN_SD_SCK        14
+#endif
+#ifndef PIN_SD_CS
+  #define PIN_SD_CS         13
+#endif
+#define SD_SPI_HZ           20000000
+#define SD_POLL_MS          3000
+#define SD_PARTIAL_PERCENT  50            // volume < 50 % of the card => "partial"
+#define SD_LOG_MAX_BYTES    (1024UL * 1024UL)
+
+// ---------------------------------------------------------------------------
 // OLED — SSD1306 128x64 on I2C (T3-S3: SDA 18 / SCL 17, address 0x3C)
 // ---------------------------------------------------------------------------
 #ifndef HAS_DISPLAY

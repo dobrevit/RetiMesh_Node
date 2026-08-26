@@ -61,6 +61,7 @@
 #include "Display.h"
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
+#include "SdCard.h"
 
 NodeStats g_stats;
 
@@ -92,6 +93,9 @@ void setup() {
   // Bring up services. Radio failure is survivable: the AP + web UI stay
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
+  #if HAS_SD
+    sdCard.begin();                        // optional; hot-plug polled on core 0
+  #endif
   wifiManager.begin();
   transportServer.begin(tcpInRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());

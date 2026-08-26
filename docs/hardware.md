@@ -17,9 +17,21 @@
 | BOOT button | 0 (active low) |
 | LED | 37 |
 | Battery ADC | 1 (100k/100k divider) — not yet used |
+| microSD MOSI / MISO / SCK / CS | 11 / 2 / 14 / 13 (HSPI, separate from the radio bus) |
 
 The SX1262 probe waits on BUSY (GPIO 34 = DIO2 on SX127x boards) and takes
 ~27 s to fail, so the SX127x is probed first (~100 ms to fail on SX1262).
+
+## microSD card
+Optional; hot-plug polled every 3 s. The card is mounted as one FAT volume at
+`/sd`. Status values: `mounted`, `partial` (the FAT volume covers less than
+half the card — e.g. a Raspberry Pi image with a small boot partition),
+`unformatted` (no filesystem the node recognises), `formatting`, `error`,
+`absent`. The settings page can format the whole card to a single FAT32
+volume (admin, explicit confirmation — erases everything). First consumer:
+`/retimesh/events.log` (announces, boots; rotated at 1 MB). Transport
+persistence and the propagation-node store move to the card in later
+releases.
 
 ## OLED and button
 Pages: status → neighbours → radio → network (dots bottom-right). Short press:

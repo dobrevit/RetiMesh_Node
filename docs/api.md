@@ -16,6 +16,8 @@ require HTTP Basic Auth (user `admin`).
              "rssi": -68, "snr": 11.5, "rx_packets": 27, "tx_packets": 9, "rx_dropped": 0,
              "announces_tx": 3, "announces_rx": 5, "beacons_tx": 0, "beacons_rx": 2, "apply_error": 0 },
   "peers": { "rns_tcp": 1, "wifi_sta": 1, "tcp_rx_packets": 12 },
+  "sd": { "state": "partial", "type": "SDHC", "card_bytes": 15931539456, "volume_bytes": 268435456,
+          "used_bytes": 60000000, "last_format": "" },
   "transport": { "enabled": true, "online": true, "lora_mode": "full", "wifi_mode": "access_point",
                  "interfaces": [ { "name": "LoRa", "mode": "full", "rx_bytes": 1234, "tx_bytes": 567 },
                                  { "name": "WiFi/10.42.0.2", "mode": "access_point", "rx_bytes": 0, "tx_bytes": 0 } ],
@@ -38,6 +40,7 @@ require HTTP Basic Auth (user `admin`).
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode}` (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary) → saves, restarts
 - `POST /api/settings/admin` `{password}`
 - `POST /api/settings/reset` → factory defaults, restarts (identity kept)
+- `POST /api/settings/sd/format` `{"confirm":"FORMAT"}` → erases the SD card and creates one FAT32 volume; poll `sd.state`/`sd.last_format` in `/api/status` (409 if no card or already formatting)
 
 Errors: `{"error":"<reason>"}` with 400/401/413/500.
 

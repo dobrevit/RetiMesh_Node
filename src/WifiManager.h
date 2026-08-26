@@ -77,6 +77,7 @@ private:
   void handleWifiPost(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleAdminPost(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleTransportPost(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleSdFormat(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleReset(AsyncWebServerRequest* request);
 
   DNSServer       _dns;

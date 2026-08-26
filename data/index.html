@@ -106,7 +106,11 @@ async function refreshStatus() {
       card("RSSI / SNR", s.radio.rssi.toFixed(0) + " dBm / " + s.radio.snr.toFixed(1) + " dB"),
       card("RNS peers", s.peers.rns_tcp + " tcp / " + s.peers.wifi_sta + " wifi"),
       card("LoRa RX / TX", s.radio.rx_packets + " / " + s.radio.tx_packets),
-      card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB")
+      card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB"),
+      card("SD card", !s.sd || s.sd.state === "absent" ? "none"
+        : s.sd.state === "mounted" ? (s.sd.used_bytes/1e9).toFixed(2) + " / " + (s.sd.volume_bytes/1e9).toFixed(1) + " GB"
+        : s.sd.state + " (" + (s.sd.card_bytes/1e9).toFixed(1) + " GB)",
+        s.sd && (s.sd.state === "partial" || s.sd.state === "unformatted" || s.sd.state === "error") ? "offline" : "")
     );
     const tr = $("transport"); tr.replaceChildren();
     if (s.transport) {

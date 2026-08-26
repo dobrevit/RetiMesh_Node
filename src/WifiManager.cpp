@@ -27,6 +27,7 @@
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
+#include "SdCard.h"
 
 WifiManager wifiManager;
 
@@ -197,6 +198,7 @@ void WifiManager::setupRoutes() {
     { "/api/settings/wifi",  &WifiManager::handleWifiPost  },
     { "/api/settings/admin", &WifiManager::handleAdminPost },
     { "/api/settings/transport", &WifiManager::handleTransportPost },
+    { "/api/settings/sd/format", &WifiManager::handleSdFormat },
   };
   for (const Route& rt : posts) {
     auto fn = rt.fn;
@@ -276,6 +278,17 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   peers["rns_tcp"]    = g_stats.tcpClients;      // Reticulum clients on :4242
   peers["wifi_sta"]   = WiFi.softAPgetStationNum();
   peers["tcp_rx_packets"] = g_stats.tcpRxPackets;
+
+  {
+    SdCard::Info si = sdCard.info();
+    JsonObject sd = doc["sd"].to<JsonObject>();
+    sd["state"]        = SdCard::stateName(si.state);
+    sd["type"]         = si.type == CARD_SDHC ? "SDHC" : si.type == CARD_SD ? "SD" : si.type == CARD_MMC ? "MMC" : "";
+    sd["card_bytes"]   = si.cardBytes;
+    sd["volume_bytes"] = si.volumeBytes;
+    sd["used_bytes"]   = si.usedBytes;
+    sd["last_format"]  = si.lastFormat;
+  }
 
   // Reticulum transport: interfaces with their modes, and the path table
   JsonObject tr = doc["transport"].to<JsonObject>();
@@ -530,6 +543,18 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   out["ok"] = true; out["restart"] = true;
   sendJson(request, 200, out);
   scheduleRestart(1500);                 // interfaces are registered at boot
+}
+
+// POST /api/settings/sd/format {"confirm":"FORMAT"} — wipes the whole card.
+void WifiManager::handleSdFormat(AsyncWebServerRequest* request, const char* body, size_t len) {
+  JsonDocument in;
+  if (deserializeJson(in, body, len) != DeserializationError::Ok || strcmp(in["confirm"] | "", "FORMAT") != 0) {
+    sendError(request, 400, "send {\"confirm\":\"FORMAT\"} to erase the card"); return;
+  }
+  SdCard::Info si = sdCard.info();
+  if (si.state == SdCard::State::Absent) { sendError(request, 409, "no card"); return; }
+  if (!sdCard.requestFormat())           { sendError(request, 409, "format already running"); return; }
+  request->send(200, "application/json", "{\"ok\":true,\"formatting\":true}");
 }
 
 void WifiManager::handleReset(AsyncWebServerRequest* request) {

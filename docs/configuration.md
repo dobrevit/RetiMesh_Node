@@ -56,6 +56,7 @@ settings but keeps the identity keys.
 | `ADMIN_PASSWORD_DEFAULT` | `retimesh` | |
 | `ANNOUNCE_INTERVAL_S`, `BEACON_INTERVAL_S` | 600 / 0 | |
 | `HAS_DISPLAY`, `OLED_ADDR`, `OLED_ROTATION` | 1 / 0x3C / 0 | |
+| `HAS_SD`, `PIN_SD_*`, `SD_SPI_HZ`, `SD_PARTIAL_PERCENT` | 1 / T3-S3 map / 20 MHz / 50 | microSD slot |
 | `DISPLAY_SLEEP_MS`, `DISPLAY_PAGE_TIMEOUT_MS` | 60000 / 30000 | |
 | `RNS_MAX_CLIENTS` | 4 | simultaneous TCP peers |
 | `FW_VERSION` | `dev` | set by CI from the tag |
