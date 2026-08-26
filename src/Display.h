@@ -59,6 +59,9 @@ private:
 #endif
   void paintTransport();
   void pollButton();
+  void header(const char* title);        // page name + the cell
+  void meter(uint8_t row, const char* label, const char* value, uint8_t pct);
+
 
   // The GNSS page exists only where there is a receiver to read.
 #if HAS_GPS
@@ -69,6 +72,7 @@ private:
   // Typed, so paint()'s switch can list every page and let the compiler
   // object when one is added without being drawn (-Werror=switch).
   Page     _page = STATUS;
+  uint8_t  _chargeSweep = 0;             // animates the battery fill while charging
   bool     _blank = false;
   uint32_t _pageChangedMs = 0;
   uint32_t _lastActivityMs = 0;          // last button press (boot counts)

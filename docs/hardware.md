@@ -40,6 +40,11 @@ Battery voltage, charge state and percentage come from the PMU rather than an
 ADC divider, which is why this board can say whether a cell is actually
 connected and whether it is charging.
 
+Charging is set up at boot — 4.2 V target, up to 500 mA (450 mA on an AXP192)
+— and the board's indicator LED is left under the charger's control, so it
+blinks while current is going into the cell and settles when it is full. The
+display shows `bat 42%+` while charging and the status page says so in words.
+
 | Function | GPIO |
 |---|---|
 | LoRa SCK / MISO / MOSI / CS / RST | 5 / 19 / 27 / 18 / 23 |
@@ -83,8 +88,19 @@ count) → radio → network (dots bottom-right). Short press:
 next page (wakes the panel first if asleep); long press (1.5 s): blank/wake.
 Panel sleeps after 60 s without a press; page returns to status after 30 s.
 
-Pages: status, neighbours, transport, radio, network, QR. The QR page shows a
-scan-to-join code for the access point.
+Pages: status, neighbours, transport, radio, network, GNSS (where fitted) and
+QR. The QR page shows a scan-to-join code for the access point and uses the
+whole panel; every other page has a header carrying the page name on the left
+and, where a cell is fitted, a battery icon on the right — filling in steps
+while charging so a glance tells you whether the node is gaining or draining.
+
+Signal strength is deliberately *not* in that header. A bar chart with no
+label and no number says nothing, so the meters live on the pages that can
+explain them: the radio page shows `sig -87dBm` and `snr 8.5dB` with bars
+beside each figure, and the network page shows the Wi-Fi uplink the same way
+when the node has joined a network. Quality is scaled against a floor that
+moves with the spreading factor, because the same SNR means something
+different at SF7 and SF12.
 
 ## Adding a board
 1. `src/boards/<name>.h`: the pin map and the capability flags (`HAS_SD`,

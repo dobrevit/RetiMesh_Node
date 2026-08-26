@@ -65,12 +65,33 @@ bool begin() {
   }
   sGpsOn = false;
 
-  sPmu->setChargingLedMode(XPOWERS_CHG_LED_OFF);        // no blinking beacon
   sPmu->enableBattDetection();
   sPmu->enableBattVoltageMeasure();
 
-  log_i("%s power-management chip: battery %.2f V, radio rail on, GPS rail off",
-        sModel, sPmu->getBattVoltage() / 1000.0f);
+  // Charging. The chip does it, but the terms are ours to set: a 4.2 V target
+  // (the standard for the 18650 these boards carry) and a conservative current
+  // — 500 mA on an AXP2101, 450 mA on an AXP192, which is the nearest step it
+  // offers. Both are under 0.25 C for a typical cell and inside what a USB
+  // port will give. Left at the chip's power-on defaults the current can be
+  // low enough that a flat cell barely gains on a running node.
+  if (strcmp(sModel, "AXP192") == 0) {
+    sPmu->setChargeTargetVoltage(XPOWERS_AXP192_CHG_VOL_4V2);
+    sPmu->setChargerConstantCurr(XPOWERS_AXP192_CHG_CUR_450MA);
+  } else {
+    sPmu->setChargeTargetVoltage(XPOWERS_AXP2101_CHG_VOL_4V2);
+    sPmu->setChargerConstantCurr(XPOWERS_AXP2101_CHG_CUR_500MA);
+  }
+
+  // Hand the indicator LED back to the charger, which blinks it while current
+  // is going into the cell and settles when it is full. It is the only signal
+  // a node gives without a screen or a network, and switching it off — as this
+  // did — makes a charging board look dead.
+  sPmu->setChargingLedMode(XPOWERS_CHG_LED_CTRL_CHG);
+
+  log_i("%s power-management chip: battery %.2f V%s, charging at up to %s, radio rail on, GPS rail off",
+        sModel, sPmu->getBattVoltage() / 1000.0f,
+        sPmu->isCharging() ? " (charging)" : (sPmu->isBatteryConnect() ? "" : ", no cell"),
+        strcmp(sModel, "AXP192") == 0 ? "450 mA" : "500 mA");
   delay(50);                                            // let the rails settle
   return true;
 }
