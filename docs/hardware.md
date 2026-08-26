@@ -1,10 +1,38 @@
 # Hardware
 
-## Supported boards (v0.0.3)
-| Env | Board | Radio | Display | Status |
-|---|---|---|---|---|
-| `t3s3` | LilyGO T3-S3 v1.2/v1.3 (ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM) | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | verified (SX1276), SX1262 expected |
-| `esp32s3-qspi` | ESP32-S3 DevKitC-1 (8 MB) + SX1262 module | SX1262 | optional SSD1306 | builds; wire per flags |
+## Supported boards
+| Env | Board | Radio | Display | Extras | Status |
+|---|---|---|---|---|---|
+| `t3s3` | LilyGO T3-S3 v1.2/v1.3 (ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM) | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
+| `tbeam` | LilyGO T-Beam v1.1/v1.2 (ESP32, 4 MB flash, no PSRAM) | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS; **no SD slot** | see below |
+| `esp32s3-qspi` | ESP32-S3 DevKitC-1 (8 MB) + SX1262 module | SX1262 | optional SSD1306 | — | builds; wire per flags |
+
+### T-Beam notes
+The transceiver, the GPS and the display are not wired to 3V3 on this board:
+each hangs off a regulator inside the power-management chip, and they come up
+*off*. The firmware brings the PMU up before probing the radio — v1.1 carries
+an AXP192, v1.2 an AXP2101, both at I²C `0x34` and told apart by their chip id,
+so one build covers either revision.
+
+The GPS rail is deliberately left **off**: nothing reads it yet and it costs
+tens of milliamps. Position support will switch it on when it lands.
+
+Without a card slot the Reticulum store lives in the flash partition (~900 KB
+shared with the web app), so `transport.sd_store` has no effect here.
+
+Battery voltage, charge state and percentage come from the PMU rather than an
+ADC divider, which is why this board can say whether a cell is actually
+connected and whether it is charging.
+
+| Function | GPIO |
+|---|---|
+| LoRa SCK / MISO / MOSI / CS / RST | 5 / 19 / 27 / 18 / 23 |
+| LoRa DIO0 (SX1276) | 26 |
+| LoRa DIO1 / BUSY (SX1262) | 33 / 32 |
+| OLED + PMU I²C (SDA / SCL) | 21 / 22 |
+| PMU IRQ | 35 |
+| GPS RX / TX | 34 / 12 |
+| User button | 38 |
 
 ## T3-S3 pin map (defaults in `Config.h`)
 | Function | GPIO |
@@ -43,14 +71,21 @@ Pages: status, neighbours, transport, radio, network, QR. The QR page shows a
 scan-to-join code for the access point.
 
 ## Adding a board
-1. `platformio.ini`: a new `[env:<name>]` (memory type, flash size,
-   partitions, `PIN_*` overrides).
-2. `boards.json`: name, chip family, notes — drives CI, release packaging, the
+1. `src/boards/<name>.h`: the pin map and the capability flags (`HAS_SD`,
+   `HAS_PMU`, `HAS_GPS`, `HAS_DISPLAY`, `HAS_BATTERY_ADC`, `BOARD_NAME`).
+   Everything in `Config.h` is `#ifndef`-guarded, so the board header wins and
+   anything it omits falls back to a sensible default.
+2. `src/Config.h`: one line in the board-selection block mapping `-DBOARD_<X>`
+   to the header.
+3. `platformio.ini`: a new `[env:<name>]` (board, partitions, `-DBOARD_<X>`,
+   and `build_unflags` for anything the base env sets that the board lacks —
+   PSRAM and native-USB CDC are the usual ones).
+4. `boards.json`: name, chip family, notes — drives CI, release packaging, the
    web flasher and the CLI.
-3. Workflow matrices in `.github/workflows/ci.yml` and `release.yml`.
-4. If the display or radio differ: `Display.*` / `LoRaRadio.*` (probe order,
-   TCXO, RF switch). Keep board specifics behind build flags.
-5. Verify: boot log clean, radio detected, announce accepted by an RNS peer.
+5. Workflow matrices in `.github/workflows/ci.yml` and `release.yml`.
+6. If the display or radio differ: `Display.*` / `LoRaRadio.*` (probe order,
+   TCXO, RF switch). Keep board specifics behind the capability flags.
+7. Verify: boot log clean, radio detected, announce accepted by an RNS peer.
 
 ## Flashing details
 Offsets (from the env's partition table): bootloader `0x0`, partitions

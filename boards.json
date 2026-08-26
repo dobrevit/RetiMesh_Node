@@ -11,5 +11,11 @@
     "chip": "esp32s3",
     "chip_family": "ESP32-S3",
     "notes": "8 MB flash, quad PSRAM. Wire the SX1262 as documented in platformio.ini (PIN_LORA_* overrides)."
+  },
+  "tbeam": {
+    "name": "LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262)",
+    "chip": "esp32",
+    "chip_family": "ESP32",
+    "notes": "18650 holder, AXP192/AXP2101 power management, u-blox GPS, 0.96\" OLED, no SD card slot. The transceiver and the PMU revision are both detected at boot. Serial is a CH9102 bridge — hold the middle button while pressing RST if flashing does not start."
   }
 }

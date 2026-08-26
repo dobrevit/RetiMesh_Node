@@ -22,6 +22,7 @@
 #include "WifiManager.h"
 #include <sys/stat.h>
 #include "QrCode.h"
+#include "Pmu.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
@@ -329,6 +330,9 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     pw["profile"] = Power::profileName(Power::profile());
     pw["cpu_mhz"] = getCpuFrequencyMhz();
     pw["battery_present"] = b.present;
+    pw["battery_charging"] = b.charging;
+    pw["pmu"] = Pmu::model();          // "AXP192" / "AXP2101" / "none"
+    pw["board"] = BOARD_NAME;
     pw["battery_v"] = b.volts;
     pw["battery_pct"] = b.percent;
   }
@@ -366,6 +370,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   peers["wifi_sta"]   = WiFi.softAPgetStationNum();
   peers["tcp_rx_packets"] = g_stats.tcpRxPackets;
 
+#if HAS_SD
   {
     SdCard::Info si = sdCard.info();
     JsonObject sd = doc["sd"].to<JsonObject>();
@@ -378,6 +383,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     sd["reserved"]     = sdCard.reserved();      // Reticulum store lives here
     sd["storage_lost"] = sdCard.storageLost();   // ... and the card was pulled
   }
+#endif
 
   {
     // Channel use and the hourly transmit budget (see Airtime.h)

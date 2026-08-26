@@ -74,6 +74,8 @@ void SdCard::reserve(bool on) {
 }
 
 bool SdCard::reserved() {
+  if (!_lock) return false;
+
   xSemaphoreTake(_lock, portMAX_DELAY);
   bool r = _reserved;
   xSemaphoreGive(_lock);
@@ -81,6 +83,8 @@ bool SdCard::reserved() {
 }
 
 bool SdCard::storageLost() {
+  if (!_lock) return false;
+
   xSemaphoreTake(_lock, portMAX_DELAY);
   bool l = _storageLost;
   xSemaphoreGive(_lock);
@@ -88,6 +92,8 @@ bool SdCard::storageLost() {
 }
 
 SdCard::Info SdCard::info() {
+  if (!_lock) return Info{};
+
   xSemaphoreTake(_lock, portMAX_DELAY);
   Info i = _info;
   xSemaphoreGive(_lock);
@@ -95,6 +101,8 @@ SdCard::Info SdCard::info() {
 }
 
 bool SdCard::mounted() {
+  if (!_lock) return false;
+
   xSemaphoreTake(_lock, portMAX_DELAY);
   bool m = _mounted;
   xSemaphoreGive(_lock);
@@ -266,7 +274,7 @@ void SdCard::doFormat() {
 
 // ---------------------------------------------------------------------------
 void SdCard::log(const char* line) {
-  if (!_mounted || !line) return;
+  if (!_lock || !_mounted || !line) return;
   xSemaphoreTake(_lock, portMAX_DELAY);
   if (_logBytes > SD_LOG_MAX_BYTES) {
     SD.remove(SdCard::LOG_PREV_PATH);

@@ -27,6 +27,19 @@
 #include <Arduino.h>
 
 // ---------------------------------------------------------------------------
+// Board selection. One header per board under boards/ defines the pin map and
+// the capability flags (HAS_SD, HAS_PMU, HAS_GPS, ...); everything below is
+// guarded by #ifndef, so a board header wins and anything it leaves out falls
+// back to the general default. Pass -DBOARD_TBEAM (or another BOARD_*) from
+// platformio.ini; without one, the T3-S3 is assumed.
+// ---------------------------------------------------------------------------
+#if defined(BOARD_TBEAM)
+  #include "boards/tbeam.h"
+#else
+  #include "boards/t3s3.h"
+#endif
+
+// ---------------------------------------------------------------------------
 // Firmware version — single-sourced from the git tag by CI
 // (PLATFORMIO_BUILD_FLAGS=-DFW_VERSION=\"v1.2.3\"); local builds say "dev".
 // ---------------------------------------------------------------------------
@@ -119,9 +132,10 @@
 #define LORA_SEQ_UNSET      0xFF
 
 // ---------------------------------------------------------------------------
-// LoRa radio on SPI (defaults: LilyGO T3-S3 v1.2/v1.3). The board exists
-// with an SX1262 (DIO1 33, BUSY 34) or an SX1276/78 (DIO0 9, DIO1 33);
-// LoRaRadio::begin() probes both, so the same build serves either.
+// LoRa radio on SPI. The pin map comes from the board header; these are the
+// fallbacks for a board that does not define one. Both the SX1262 lines
+// (DIO1/BUSY) and the SX127x line (DIO0) exist because LoRaRadio::begin()
+// probes for either transceiver.
 // ---------------------------------------------------------------------------
 #ifndef PIN_LORA_SCK
   #define PIN_LORA_SCK      5
@@ -185,7 +199,8 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// microSD (T3-S3: MOSI 11 / MISO 2 / SCK 14 / CS 13) on the second SPI bus
+// microSD on its own SPI bus. Boards without a slot set HAS_SD 0 and the
+// whole driver compiles out.
 // ---------------------------------------------------------------------------
 #ifndef HAS_SD
   #define HAS_SD            1
@@ -275,8 +290,21 @@
 #define NEIGHBOR_STALE_MS   (3UL * 60UL * 1000UL)
 
 // ---------------------------------------------------------------------------
-// Power / battery (T3-S3: cell through 100k/100k on GPIO 1)
+// Power / battery. Boards with a power-management chip (HAS_PMU) read the
+// cell through it; the rest use an ADC divider (HAS_BATTERY_ADC).
 // ---------------------------------------------------------------------------
+#ifndef HAS_PMU
+  #define HAS_PMU           0
+#endif
+#ifndef HAS_GPS
+  #define HAS_GPS           0
+#endif
+#ifndef HAS_BATTERY_ADC
+  #define HAS_BATTERY_ADC   1
+#endif
+#ifndef BOARD_NAME
+  #define BOARD_NAME        "unknown board"
+#endif
 #ifndef PIN_BATTERY_ADC
   #define PIN_BATTERY_ADC   1
 #endif

@@ -20,6 +20,7 @@
 //  Power.cpp — see Power.h
 // ============================================================================
 #include "Power.h"
+#include "Pmu.h"
 #include <WiFi.h>
 #include <esp32-hal-cpu.h>
 #include "Settings.h"
@@ -43,6 +44,7 @@ uint8_t percentFor(float v) {
   return 0;
 }
 
+#if HAS_BATTERY_ADC
 void sample() {
   // 12-bit ADC with 11 dB attenuation reads up to ~3.1 V; the divider halves
   // the cell voltage. Average a few readings; the pin floats without a cell.
@@ -51,6 +53,7 @@ void sample() {
   sVolts = (acc / 8) / 1000.0f * BATTERY_DIVIDER_RATIO;
   sLastSample = millis();
 }
+#endif
 }
 
 namespace Power {
@@ -85,18 +88,33 @@ uint32_t displaySleepMs() {
 }
 
 void begin() {
+#if HAS_BATTERY_ADC
   analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
   sample();
+#endif
   apply((Profile)settings.transport().powerProfile);
 }
 
 Battery battery() {
+#if HAS_PMU
+  // The power-management chip measures the cell itself, and knows things an
+  // ADC divider cannot: whether a battery is actually connected, and whether
+  // it is charging.
+  Pmu::Battery p = Pmu::battery();
+  Battery b;
+  b.volts    = p.volts;
+  b.present  = p.present;
+  b.charging = p.charging;
+  b.percent  = p.present ? p.percent : 0;
+  return b;
+#else
   if (millis() - sLastSample > BATTERY_SAMPLE_MS) sample();
   Battery b;
   b.volts   = sVolts;
   b.present = sVolts >= BATTERY_MIN_V && sVolts <= BATTERY_MAX_V;
   b.percent = b.present ? percentFor(sVolts) : 0;
   return b;
+#endif
 }
 
 } // namespace Power
