@@ -85,6 +85,7 @@ void Settings::load() {
   LOAD(_transport.announceRatePenalty, "t_arp",   getUShort("t_arp"));
   LOAD(_transport.autoEnabled,         "t_auto",  getBool  ("t_auto"));
   LOAD(_transport.powerProfile,        "t_pwr",   getUChar ("t_pwr"));
+  LOAD(_transport.sdStore,             "t_sdst",  getBool  ("t_sdst"));
   if (_prefs.isKey("t_agrp")) _prefs.getString("t_agrp", _transport.autoGroupId, sizeof(_transport.autoGroupId));
   if (_admin.password[0] == '\0') strlcpy(_admin.password, ADMIN_PASSWORD_DEFAULT, sizeof(_admin.password));
   #undef LOAD
@@ -143,6 +144,7 @@ bool Settings::saveTransport(const TransportSettings& t) {
          && _prefs.putUShort("t_arp",   t.announceRatePenalty) > 0
          && _prefs.putBool  ("t_auto",  t.autoEnabled) > 0
          && _prefs.putUChar ("t_pwr",   t.powerProfile) > 0
+         && _prefs.putBool  ("t_sdst",  t.sdStore) > 0
          && _prefs.putString("t_agrp",  t.autoGroupId) >= 0;
   if (!ok) log_e("NVS write failed (transport)");
   return ok;

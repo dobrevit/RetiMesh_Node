@@ -79,6 +79,7 @@ struct TransportSettings {
   bool     autoEnabled = true;          // RNS AutoInterface peering on the AP
   char     autoGroupId[33] = "";        // "" = RNS default "reticulum"
   uint8_t  powerProfile = 0;            // 0 performance, 1 balanced, 2 battery (Power.h)
+  bool     sdStore = true;              // keep the Reticulum store on the SD card when one is present
 };
 
 struct AdminSettings {

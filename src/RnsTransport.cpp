@@ -59,6 +59,38 @@ static RNS::Type::Interface::modes toMode(uint8_t m) {
   }
 }
 
+// One line per store directory at boot ("path_store: 2 files, 12 KB").
+// It is the quickest way to tell whether the tables survived a restart —
+// an empty list after an uptime with traffic means the store is not
+// persisting, on either backend.
+static void logStoreContents() {
+  fs::FS* fs = RnsFileSystem::backend();
+  fs::File root = fs->open(RNS_FS_ROOT);
+  if (!root || !root.isDirectory()) { log_i("store %s: empty", RnsTransport::storagePath()); return; }
+  for (fs::File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
+    const char* path = entry.path() ? entry.path() : entry.name();
+    if (entry.isDirectory()) {
+      unsigned files = 0; unsigned long bytes = 0;
+      fs::File sub = fs->open(path);
+      for (fs::File f = sub.openNextFile(); f; f = sub.openNextFile()) { files++; bytes += f.size(); f.close(); }
+      sub.close();
+      if (files) log_i("store %s: %u files, %lu KB", path, files, bytes / 1024);
+    } else if (entry.size()) {
+      log_i("store %s: %lu B", path, (unsigned long)entry.size());
+    }
+    entry.close();
+  }
+  root.close();
+}
+
+const char* RnsTransport::storageBackend() { return RnsFileSystem::backendName(); }
+
+const char* RnsTransport::storagePath() {
+  static char path[32];
+  snprintf(path, sizeof(path), "%s%s", RnsFileSystem::prefix(), RNS_FS_ROOT);
+  return path;
+}
+
 const char* RnsTransport::modeName(uint8_t m) {
   switch (m) {
     case 2: return "gateway";
@@ -210,7 +242,25 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
 
   try {
     RNS::loglevel(RNS::LOG_INFO);        // DEBUG is compiled in; raise here when tracing
+
+    // Storage: the SD card when the operator wants it and one is mounted,
+    // otherwise the LittleFS partition shared with the web app. Decided once,
+    // here, because microStore holds files open for the life of the store.
+    // Nothing is migrated between the two — the path table, announce cache
+    // and hashlist all rebuild themselves from the mesh; the node identity
+    // lives in NVS either way.
+#if HAS_SD
+    if (settings.transport().sdStore && sdCard.mounted()) {
+      RnsFileSystem::useSd();
+      sdCard.reserve(true);              // no formatting, and removal is an error
+    } else {
+      RnsFileSystem::useLittleFs();
+    }
+#endif
     rnsFs.init(false);
+    log_i("Reticulum storage: %s%s (%u KB free)", RnsFileSystem::prefix(), RNS_FS_ROOT,
+          (unsigned)(rnsFs.storageAvailable() / 1024));
+    logStoreContents();
     RNS::Utilities::OS::register_filesystem(rnsFs);
     reticulum = RNS::Reticulum();          // ctor resets the storage path, so set it after
     RNS::Reticulum::storagepath(RNS_FS_ROOT);
@@ -306,22 +356,31 @@ static void drainTcp() {
 static std::vector<PathInfo>  sPaths;
 static std::vector<IfaceInfo> sIfaces;
 static uint32_t sSnapAtMs = 0;
+static size_t   sPathCount = 0;          // full table size; sPaths is capped
 
 static void refreshSnapshots() {
-  if (millis() - sSnapAtMs < 2000) return;
+  // Walking the path table reads every record back through microStore
+  // (LittleFS or the SD card), so refresh it slowly and keep the list short —
+  // the count is free, the rows are not.
+  if (millis() - sSnapAtMs < SNAPSHOT_INTERVAL_MS) return;
   sSnapAtMs = millis();
   std::vector<PathInfo> p;
   std::vector<IfaceInfo> i;
   double now = RNS::Utilities::OS::time();
-  for (const auto& kv : RNS::Transport::path_table()) {
+  // Paths live in the microStore-backed table (Transport::path_table() is the
+  // legacy in-memory container and stays empty in 0.5.x). begin()/end() are
+  // non-const, hence the cast off the const accessor.
+  auto& pathTable = const_cast<RNS::Persistence::NewPathTable&>(RNS::Transport::new_path_table());
+  sPathCount = pathTable.size();
+  for (auto it = pathTable.begin(); it != pathTable.end(); ++it) {
+    RNS::Persistence::NewPathTable::Entry& e = *it;
     PathInfo pi = {};
-    strlcpy(pi.hash, kv.first.toHex().c_str(), sizeof(pi.hash));
-    auto& de = const_cast<RNS::Persistence::DestinationEntry&>(kv.second);
-    pi.hops = de._hops;
-    strlcpy(pi.via, de.receiving_interface() ? de.receiving_interface().name().c_str() : "?", sizeof(pi.via));
-    pi.ageS = (uint32_t)max(0.0, now - de._timestamp);
+    strlcpy(pi.hash, e.key.toHex().c_str(), sizeof(pi.hash));
+    pi.hops = e.value._hops;
+    strlcpy(pi.via, e.value.receiving_interface() ? e.value.receiving_interface().name().c_str() : "?", sizeof(pi.via));
+    pi.ageS = (uint32_t)max(0.0, now - e.value._timestamp);
     p.push_back(pi);
-    if (p.size() >= 64) break;
+    if (p.size() >= SNAPSHOT_MAX_PATHS) break;
   }
   for (const auto& iface : RNS::Transport::get_interfaces()) {
     IfaceInfo ii = {};
@@ -353,7 +412,7 @@ size_t interfaces(IfaceInfo* out, size_t max) {
 
 size_t pathCount() {
   xSemaphoreTake(sSnapLock, portMAX_DELAY);
-  size_t n = sPaths.size();
+  size_t n = sPathCount;                 // whole table, even when the list is capped
   xSemaphoreGive(sSnapLock);
   return n;
 }

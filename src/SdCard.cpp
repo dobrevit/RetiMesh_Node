@@ -42,9 +42,42 @@ const char* SdCard::stateName(State s) {
 void SdCard::begin() {
   _lock = xSemaphoreCreateMutex();
   _spi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+  // Mount synchronously: the transport asks right after boot whether it can
+  // keep its store here. The first attempt after SPI init regularly fails
+  // ("the physical drive cannot work") — the card needs a few milliseconds —
+  // so retry before concluding there is no filesystem on it.
+  _quietProbe = true;
+  for (uint8_t attempt = 0; attempt < SD_MOUNT_ATTEMPTS && !_mounted; attempt++) {
+    if (attempt) delay(SD_MOUNT_RETRY_MS);
+    poll();
+  }
+  _quietProbe = false;
+  if (!_mounted && info().state == State::Unformatted)
+    log_w("SD card present (%.1f GB) but no recognised filesystem — format it from the settings page",
+          info().cardBytes / 1e9);
   // 8 KB: the FAT layer (mount probes, rename on log rotation) left under
   // 1 KB of a 4 KB stack at idle and tripped the stack canary on core 0.
   xTaskCreatePinnedToCore(task, "sdcard", 8192, this, 1, nullptr, 0);
+}
+
+void SdCard::reserve(bool on) {
+  xSemaphoreTake(_lock, portMAX_DELAY);
+  _reserved = on;
+  xSemaphoreGive(_lock);
+}
+
+bool SdCard::reserved() {
+  xSemaphoreTake(_lock, portMAX_DELAY);
+  bool r = _reserved;
+  xSemaphoreGive(_lock);
+  return r;
+}
+
+bool SdCard::storageLost() {
+  xSemaphoreTake(_lock, portMAX_DELAY);
+  bool l = _storageLost;
+  xSemaphoreGive(_lock);
+  return l;
 }
 
 SdCard::Info SdCard::info() {
@@ -63,6 +96,9 @@ bool SdCard::mounted() {
 
 bool SdCard::requestFormat() {
   if (_formatRequested) return false;
+  // Formatting the card the Reticulum store is open on would pull the
+  // filesystem out from under microStore mid-write.
+  if (reserved()) { log_w("SD: format refused, the Reticulum store is on this card"); return false; }
   _formatRequested = true;
   return true;
 }
@@ -90,6 +126,9 @@ bool SdCard::probeCardPresent() {
 }
 
 bool SdCard::mount() {
+  // sd_diskio's "f_mount failed" line on a miss comes from the Arduino HAL
+  // logger, which has no runtime level control — it is expected during the
+  // boot retries and on a card with a foreign filesystem.
   if (!SD.begin(PIN_SD_CS, _spi, SD_SPI_HZ, kMount, 8, false)) return false;
   _mounted = true;
   measure();
@@ -125,10 +164,15 @@ void SdCard::poll() {
     // Removal check: a raw read of sector 0 fails once the card is gone.
     uint8_t sector[512];
     if (!SD.readRAW(sector, 0)) {
-      log_w("SD card removed");
+      bool res = reserved();
+      if (res) log_e("SD card removed while the Reticulum store was on it — "
+                     "path table and caches are frozen until the node reboots");
+      else     log_w("SD card removed");
       unmount();
       xSemaphoreTake(_lock, portMAX_DELAY);
       _info = Info{};
+      _reserved = res;                   // stays reserved: the store cannot move at runtime
+      _storageLost = res;
       xSemaphoreGive(_lock);
     }
     return;
@@ -153,7 +197,7 @@ void SdCard::poll() {
   State now = _info.state;
   uint64_t bytes = _info.cardBytes;
   xSemaphoreGive(_lock);
-  if (now != prev && now == State::Unformatted)
+  if (!_quietProbe && now != prev && now == State::Unformatted)
     log_w("SD card present (%.1f GB) but no recognised filesystem — format it from the settings page", bytes / 1e9);
 }
 

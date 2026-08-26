@@ -20,6 +20,7 @@
 //  WifiManager.cpp — see WifiManager.h for the service overview.
 // ============================================================================
 #include "WifiManager.h"
+#include <sys/stat.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
@@ -361,6 +362,15 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     sd["volume_bytes"] = si.volumeBytes;
     sd["used_bytes"]   = si.usedBytes;
     sd["last_format"]  = si.lastFormat;
+    sd["reserved"]     = sdCard.reserved();      // Reticulum store lives here
+    sd["storage_lost"] = sdCard.storageLost();   // ... and the card was pulled
+  }
+
+  {
+    JsonObject st = doc["storage"].to<JsonObject>();
+    st["backend"] = RnsTransport::storageBackend();     // "sd" | "littlefs"
+    st["path"]    = RnsTransport::storagePath();
+    st["lost"]    = sdCard.storageLost();
   }
 
   // Reticulum transport: interfaces with their modes, and the path table
@@ -421,9 +431,17 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
 // Bulletin board — deliberately public and unencrypted; lives on this node
 // only. Private traffic belongs on Reticulum, which this node cannot read.
 // ---------------------------------------------------------------------------
+// LittleFS.exists() and open() log a VFS error line for a file that is not
+// there, and the board is empty until someone posts — so every status poll
+// printed an error. stat() answers the same question silently.
+static bool littleFsHas(const char* path) {
+  struct stat st;
+  return stat((String("/littlefs") + path).c_str(), &st) == 0;
+}
+
 void WifiManager::handleBoardGet(AsyncWebServerRequest* request) {
   String out = "[]";
-  if (LittleFS.exists(BOARD_FILE)) {
+  if (littleFsHas(BOARD_FILE)) {
     File f = LittleFS.open(BOARD_FILE, "r");
     if (f) { out = f.readString(); f.close(); }
   }
@@ -447,7 +465,7 @@ void WifiManager::handleBoardPost(AsyncWebServerRequest* request, const char* bo
 
   // All HTTP handlers run on the single AsyncTCP task: no file locking needed.
   JsonDocument boardDoc;
-  {
+  if (littleFsHas(BOARD_FILE)) {
     File f = LittleFS.open(BOARD_FILE, "r");
     if (f) { deserializeJson(boardDoc, f); f.close(); }
   }
@@ -520,6 +538,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   tr["auto_enabled"] = settings.transport().autoEnabled;
   tr["auto_group_id"] = settings.transport().autoGroupId;
   tr["power_profile"] = Power::profileName((Power::Profile)settings.transport().powerProfile);
+  tr["sd_store"] = settings.transport().sdStore;
   tr["online"]    = g_stats.transportOnline;
 
   doc["admin"]["user"] = ADMIN_USER;
@@ -646,6 +665,7 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   if (in["announce_rate_grace"].is<int>())   t.announceRateGrace   = in["announce_rate_grace"];
   if (in["announce_rate_penalty"].is<int>()) t.announceRatePenalty = in["announce_rate_penalty"];
   if (in["auto_enabled"].is<bool>()) t.autoEnabled = in["auto_enabled"];
+  if (in["sd_store"].is<bool>())    t.sdStore     = in["sd_store"];
   if (in["power_profile"].is<const char*>()) {
     Power::Profile pp;
     if (!Power::profileFromName(in["power_profile"], pp)) { sendError(request, 400, "power_profile must be performance|balanced|battery"); return; }
@@ -663,7 +683,7 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   Power::apply((Power::Profile)t.powerProfile);                  // live
   bool needRestart = before.enabled != t.enabled || before.loraMode != t.loraMode || before.wifiMode != t.wifiMode
                   || before.autoEnabled != t.autoEnabled || strcmp(before.autoGroupId, t.autoGroupId) != 0
-                  || before.announceCap != t.announceCap;
+                  || before.announceCap != t.announceCap || before.sdStore != t.sdStore;
   JsonDocument out;
   out["ok"] = true; out["restart"] = needRestart;
   sendJson(request, 200, out);
@@ -691,6 +711,8 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   t["enabled"] = ts.enabled; t["lora_mode"] = ts.loraMode; t["wifi_mode"] = ts.wifiMode;
   t["announce_cap"] = ts.announceCap; t["announce_rate_target"] = ts.announceRateTarget;
   t["announce_rate_grace"] = ts.announceRateGrace; t["announce_rate_penalty"] = ts.announceRatePenalty;
+  t["auto_enabled"] = ts.autoEnabled; t["auto_group_id"] = ts.autoGroupId;
+  t["power_profile"] = ts.powerProfile; t["sd_store"] = ts.sdStore;
   doc["admin"]["password"] = settings.admin().password;
   String out; serializeJsonPretty(doc, out);
   AsyncWebServerResponse* res = request->beginResponse(200, "application/json", out);
@@ -733,6 +755,9 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     ts.enabled = t["enabled"] | ts.enabled; ts.loraMode = t["lora_mode"] | ts.loraMode; ts.wifiMode = t["wifi_mode"] | ts.wifiMode;
     ts.announceCap = t["announce_cap"] | ts.announceCap; ts.announceRateTarget = t["announce_rate_target"] | ts.announceRateTarget;
     ts.announceRateGrace = t["announce_rate_grace"] | ts.announceRateGrace; ts.announceRatePenalty = t["announce_rate_penalty"] | ts.announceRatePenalty;
+    ts.autoEnabled = t["auto_enabled"] | ts.autoEnabled; ts.sdStore = t["sd_store"] | ts.sdStore;
+    ts.powerProfile = t["power_profile"] | ts.powerProfile;
+    if (t["auto_group_id"].is<const char*>()) strlcpy(ts.autoGroupId, t["auto_group_id"], sizeof(ts.autoGroupId));
     if (ts.loraMode < 1 || ts.loraMode > 5 || ts.wifiMode < 1 || ts.wifiMode > 5 || ts.announceCap < 1 || ts.announceCap > 100) { sendError(request, 400, "transport section invalid"); return; }
     settings.saveTransport(ts);
   }
@@ -752,6 +777,7 @@ void WifiManager::handleSdFormat(AsyncWebServerRequest* request, const char* bod
   }
   SdCard::Info si = sdCard.info();
   if (si.state == SdCard::State::Absent) { sendError(request, 409, "no card"); return; }
+  if (sdCard.reserved())                 { sendError(request, 409, "the Reticulum store is on this card; turn off \"Reticulum store on SD\" and reboot first"); return; }
   if (!sdCard.requestFormat())           { sendError(request, 409, "format already running"); return; }
   request->send(200, "application/json", "{\"ok\":true,\"formatting\":true}");
 }

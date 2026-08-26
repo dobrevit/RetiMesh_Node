@@ -1,17 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
 // ============================================================================
-//  RnsFileSystem.h — microStore filesystem for microReticulum on LittleFS
+//  RnsFileSystem.h — microStore filesystem for microReticulum
 //
 //  microReticulum builds some of its storage paths relative ("./cache",
 //  "./transport_identity"), but the ESP32 VFS only accepts absolute paths.
 //  This adapter maps every relative path under RNS_FS_ROOT and never
 //  formats: the LittleFS partition also holds the web app and the board.
+//
+//  The backing filesystem is chosen once at boot (useSd() / useLittleFs()),
+//  before the store is opened: LittleFS (~900 KB shared with the web app) or
+//  the microSD card when one is mounted. Both are fs::FS, and both take
+//  paths relative to their own mount point, so only the VFS prefix used for
+//  the silent stat() existence check differs. It is deliberately not
+//  switchable at runtime — microStore keeps files open across calls.
 // ============================================================================
 #pragma once
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#include "Config.h"
+#if HAS_SD
+  #include <SD.h>
+#endif
 #include <string>
 #include <list>
 #include <memory>
@@ -27,11 +38,23 @@ class RnsFileSystem : public microStore::FileSystem {
 public:
   RnsFileSystem() : microStore::FileSystem(new Impl()) {}
 
-  // LittleFS.exists() opens the file read-only and logs an error when it is
-  // missing; stat() on the VFS path is silent.
+  // Backing filesystem. Function-local statics so the header stays
+  // self-contained under gnu++11 (no inline variables).
+  static fs::FS*& backend()    { static fs::FS* fs = &LittleFS;      return fs; }
+  static const char*& prefix() { static const char* p = "/littlefs"; return p; }
+  static bool& onSd()          { static bool sd = false;             return sd; }
+
+  static void useLittleFs() { backend() = &LittleFS; prefix() = "/littlefs"; onSd() = false; }
+#if HAS_SD
+  static void useSd()       { backend() = &SD;       prefix() = "/sd";       onSd() = true;  }
+#endif
+  static const char* backendName() { return onSd() ? "sd" : "littlefs"; }
+
+  // exists() on either filesystem opens the file read-only and logs an error
+  // when it is missing; stat() on the VFS path is silent.
   static bool present(const std::string& p) {
     struct stat st;
-    return stat(("/littlefs" + p).c_str(), &st) == 0;
+    return stat((std::string(prefix()) + p).c_str(), &st) == 0;
   }
 
   static std::string normalize(const char* path) {
@@ -72,7 +95,7 @@ private:
   class Impl : public microStore::FileSystemImpl {
   public:
     bool format() override { return false; }               // never
-    bool init(bool = true) override { LittleFS.mkdir(RNS_FS_ROOT); return true; }
+    bool init(bool = true) override { backend()->mkdir(RNS_FS_ROOT); return true; }
     microStore::File open(const char* path, microStore::File::Mode mode, const bool = false) override {
       const char* pm;
       switch (mode) {
@@ -87,19 +110,19 @@ private:
       // Reading a missing file is routine for the library (first boot,
       // empty stores); checking first avoids the VFS error log line.
       if (mode == microStore::File::ModeRead && !present(p)) return {};
-      fs::File* f = new fs::File(LittleFS.open(p.c_str(), pm));
+      fs::File* f = new fs::File(backend()->open(p.c_str(), pm));
       if (!f || !(*f)) { delete f; return {}; }
       return microStore::File(new FileImpl(f));
     }
     bool exists(const char* path) override { return present(normalize(path)); }
-    bool remove(const char* path) override { std::string p = normalize(path); return present(p) && LittleFS.remove(p.c_str()); }
-    bool rename(const char* a, const char* b) override { return LittleFS.rename(normalize(a).c_str(), normalize(b).c_str()); }
-    bool mkdir(const char* path) override { std::string p = normalize(path); return present(p) || LittleFS.mkdir(p.c_str()); }
-    bool rmdir(const char* path) override { return LittleFS.rmdir(normalize(path).c_str()); }
+    bool remove(const char* path) override { std::string p = normalize(path); return present(p) && backend()->remove(p.c_str()); }
+    bool rename(const char* a, const char* b) override { return backend()->rename(normalize(a).c_str(), normalize(b).c_str()); }
+    bool mkdir(const char* path) override { std::string p = normalize(path); return present(p) || backend()->mkdir(p.c_str()); }
+    bool rmdir(const char* path) override { return backend()->rmdir(normalize(path).c_str()); }
     bool isDirectory(const char* path) override {
       std::string p = normalize(path);
       if (!present(p)) return false;      // avoid the VFS error log
-      fs::File f = LittleFS.open(p.c_str(), FILE_READ);
+      fs::File f = backend()->open(p.c_str(), FILE_READ);
       if (!f) return false;
       bool d = f.isDirectory(); f.close(); return d;
     }
@@ -107,7 +130,7 @@ private:
       std::list<std::string> out;
       std::string p = normalize(path);
       if (!present(p)) return out;
-      fs::File root = LittleFS.open(p.c_str());
+      fs::File root = backend()->open(p.c_str());
       if (!root) return out;
       for (fs::File f = root.openNextFile(); f; f = root.openNextFile()) {
         if (cb) cb((char*)f.name()); else out.push_back(f.name());
@@ -116,7 +139,18 @@ private:
       root.close();
       return out;
     }
-    size_t storageSize() override { return LittleFS.totalBytes(); }
-    size_t storageAvailable() override { return LittleFS.totalBytes() - LittleFS.usedBytes(); }
+    // totalBytes()/usedBytes() are not part of the fs::FS interface.
+    size_t storageSize() override {
+#if HAS_SD
+      if (onSd()) return (size_t)SD.totalBytes();
+#endif
+      return LittleFS.totalBytes();
+    }
+    size_t storageAvailable() override {
+#if HAS_SD
+      if (onSd()) return (size_t)(SD.totalBytes() - SD.usedBytes());
+#endif
+      return LittleFS.totalBytes() - LittleFS.usedBytes();
+    }
   };
 };

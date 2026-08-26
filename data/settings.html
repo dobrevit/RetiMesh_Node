@@ -122,6 +122,10 @@
     </div>
     <div class="note">Announce cap limits how much of each interface's airtime announces may use (rnsd default 2 %). The rate target/grace/penalty
       throttle destinations that announce too often — the same knobs as rnsd's <code>announce_rate_*</code>.</div>
+    <div class="note">The Reticulum store (path table, announce cache, known destinations) is kept on the microSD card when one is mounted at boot,
+      otherwise in internal flash next to this web app. The choice is made once at startup, so changing it &mdash; or inserting a card &mdash; takes
+      effect after a restart. Nothing is copied between the two: the tables rebuild themselves from the mesh and the node identity lives in NVS.
+      While the store is on the card it cannot be formatted, and removing it stops the node learning new paths until it reboots.</div>
     <button type="submit">Save &amp; restart</button>
     <div class="msg" id="transportMsg"></div>
   </form>

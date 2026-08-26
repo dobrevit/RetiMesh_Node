@@ -28,6 +28,9 @@
 //  format-on-empty, which lets FatFS mkfs the whole card).
 //
 //  Runs on its own SPI bus (HSPI) — it never contends with the radio.
+//
+//  begin() mounts synchronously so that whoever boots next (the Reticulum
+//  transport, which may want to keep its store here) sees the final state.
 // ============================================================================
 #pragma once
 
@@ -51,10 +54,17 @@ public:
     char     lastFormat[40] = "";       // result of the last format request
   };
 
-  void begin();                          // creates the poll task
+  void begin();                          // first mount attempt, then the poll task
   Info info();
   bool mounted();
-  bool requestFormat();                  // performed by the task; false if busy
+  bool requestFormat();                  // performed by the task; false if busy or reserved
+
+  // "The Reticulum store lives on this card." Set at boot by RnsTransport
+  // when it puts its microStore files on the card. While reserved the card
+  // may not be formatted, and losing it is an error rather than a shrug.
+  void reserve(bool on);
+  bool reserved();
+  bool storageLost();                    // reserved card was removed
 
   static constexpr const char* LOG_PATH = "/retimesh/events.log";        // relative to /sd
   static constexpr const char* LOG_PREV_PATH = "/retimesh/events.1.log";
@@ -79,6 +89,9 @@ private:
   Info              _info;
   volatile bool     _formatRequested = false;
   bool              _mounted = false;
+  bool              _quietProbe = false; // boot retries: do not warn on a failed attempt
+  bool              _reserved = false;   // Reticulum store lives here
+  bool              _storageLost = false;
   uint32_t          _logBytes = 0;
 };
 

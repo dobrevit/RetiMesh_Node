@@ -69,4 +69,8 @@ size_t pathCount();
 
 const char* modeName(uint8_t mode);        // settings value -> "full", ...
 
+// Where the microStore files live: "sd" or "littlefs" (chosen at boot).
+const char* storageBackend();
+const char* storagePath();                 // VFS path, e.g. "/sd/rns"
+
 } // namespace RnsTransport

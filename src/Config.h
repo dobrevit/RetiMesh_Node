@@ -205,6 +205,13 @@
 #define SD_SPI_HZ           20000000
 #define SD_POLL_MS          3000
 #define SD_PARTIAL_PERCENT  50            // volume < 50 % of the card => "partial"
+#define SD_MOUNT_ATTEMPTS   4             // boot: the first mount after SPI init often fails
+#define SD_MOUNT_RETRY_MS   60
+
+// Web-layer snapshots of the Reticulum path table. Each row is read back
+// through microStore (flash or SD), so this is deliberately unhurried.
+#define SNAPSHOT_INTERVAL_MS  5000
+#define SNAPSHOT_MAX_PATHS    64
 #define SD_LOG_MAX_BYTES    (1024UL * 1024UL)
 
 // ---------------------------------------------------------------------------
