@@ -136,6 +136,15 @@ and the env name in the two workflow matrices.
 
 ## Notes & limits
 
+- **Settings** (radio channel, access point, admin password) live in NVS and
+  are edited at `http://10.42.0.1/settings.html` (user `admin`, default
+  password `retimesh` — change it). Radio changes apply live; Wi-Fi changes
+  restart the node.
+- **WPA3 on the access point is not available on this build.** SoftAP-side
+  SAE requires ESP-IDF 5; the pinned Arduino core (2.0.17 / IDF 4.4.7)
+  rejects the mode, so the node runs WPA2 and greys out the WPA3 options.
+  The code path is in place for a core-3 migration.
+
 - Max `RNS_MAX_CLIENTS` (4) simultaneous TCP peers; slow consumers get
   packets dropped, not queued forever.
 - The bulletin board is deliberately public/plaintext and local to the

@@ -51,6 +51,7 @@
 #include <freertos/ringbuf.h>
 
 #include "Config.h"
+#include "Settings.h"
 #include "WifiManager.h"
 #include "RetiTransportServer.h"
 #include "LoRaRadio.h"
@@ -73,6 +74,8 @@ void setup() {
     log_e("LittleFS mount failed even after format");
   }
 
+  settings.load();                         // NVS: radio channel, AP, admin
+
   txRing = xRingbufferCreate(TX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
   rxRing = xRingbufferCreate(RX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
   configASSERT(txRing && rxRing);
@@ -82,7 +85,7 @@ void setup() {
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   wifiManager.begin();
   transportServer.begin(txRing, rxRing);
-  g_stats.radioOnline = loraRadio.begin(txRing, rxRing);
+  g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
 
   // ---- Task layout (see the diagram above) -------------------------------
   xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",
@@ -101,11 +104,16 @@ void setup() {
         wifiManager.ssid(), RNS_TCP_PORT);
 }
 
-// Arduino's loopTask (core 1, prio 1) is only used as a heartbeat.
+// Arduino's loopTask (core 1, prio 1): scheduled restarts + a heartbeat.
 void loop() {
-  vTaskDelay(pdMS_TO_TICKS(30000));
-  log_i("up %lus | rns peers %u | lora rx/tx %u/%u (drop %u) | heap %u",
-        millis() / 1000, (unsigned)g_stats.tcpClients,
-        (unsigned)g_stats.loraRxPackets, (unsigned)g_stats.loraTxPackets,
-        (unsigned)g_stats.loraRxDropped, (unsigned)ESP.getFreeHeap());
+  static uint32_t lastBeat = 0;
+  wifiManager.tick();
+  if (millis() - lastBeat >= 30000) {
+    lastBeat = millis();
+    log_i("up %lus | rns peers %u | lora rx/tx %u/%u (drop %u) | heap %u",
+          millis() / 1000, (unsigned)g_stats.tcpClients,
+          (unsigned)g_stats.loraRxPackets, (unsigned)g_stats.loraTxPackets,
+          (unsigned)g_stats.loraRxDropped, (unsigned)ESP.getFreeHeap());
+  }
+  vTaskDelay(pdMS_TO_TICKS(200));
 }

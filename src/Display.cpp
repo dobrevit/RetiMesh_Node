@@ -22,6 +22,7 @@
 #include "Display.h"
 #include <WiFi.h>
 #include "WifiManager.h"
+#include "Settings.h"
 
 Display display;
 
@@ -102,7 +103,7 @@ void Display::paint() {
   _oled.setCursor(0, 22);
   if (g_stats.radioOnline) {
     snprintf(line, sizeof(line), "%s %.3fM SF%d", g_stats.radioModel,
-             (double)RF_FREQ_MHZ, RF_SF);
+             (double)settings.radio().freqMhz, settings.radio().sf);
   } else {
     snprintf(line, sizeof(line), "RADIO OFFLINE");
   }

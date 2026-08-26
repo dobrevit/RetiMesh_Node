@@ -26,6 +26,10 @@
 //  interface — RxDone/TxDone both arrive on the chip's primary IRQ line
 //  (DIO1 on SX126x, DIO0 on SX127x), which is what the task waits on.
 //
+//  Channel parameters come from Settings (NVS). The web UI changes them
+//  at runtime via requestReconfigure(); the radio task — sole owner of
+//  the chip — applies them between packets, no reboot needed.
+//
 //  Packet flow, radio side:
 //
 //    TCP -> LoRa:   radioTask blocks on the TX ring buffer. Each item is
@@ -33,7 +37,7 @@
 //                   into RNode-framed LoRa frames and transmitted after
 //                   a CSMA clear-channel check.
 //
-//    LoRa -> TCP:   DIO1 fires on RxDone -> ISR notifies radioTask ->
+//    LoRa -> TCP:   IRQ fires on RxDone -> ISR notifies radioTask ->
 //                   frame is read, reassembled (split packets), and the
 //                   complete RNS packet is pushed to the RX ring buffer,
 //                   where the bridge task picks it up for TCP broadcast.
@@ -55,16 +59,22 @@
 #include <freertos/task.h>
 #include <freertos/ringbuf.h>
 #include "Config.h"
+#include "Settings.h"
 
 class LoRaRadio {
 public:
-  // Initializes SPI + SX1262 and enters receive mode.
-  // Returns false when the radio is not responding (web UI stays up so
-  // the node is still debuggable in the field).
-  bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing);
+  // Initializes SPI, detects the transceiver and enters receive mode with
+  // the given channel settings. Returns false when no radio answers (the
+  // web UI stays up so the node is still debuggable in the field).
+  bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const RadioSettings& s);
 
   bool online() const { return _online; }
   const char* modelName() const { return _modelName; }
+  int8_t maxTxDbm() const { return _sx1262 ? 22 : 17; }
+
+  // Hand new channel settings to the radio task. Thread-safe; returns
+  // immediately. Result is visible in g_stats.radioApplyError.
+  void requestReconfigure(const RadioSettings& s);
 
   // FreeRTOS entry point — created pinned to core 1 from main.cpp.
   static void radioTask(void* self);
@@ -77,17 +87,26 @@ private:
   void waitClearChannel();               // simplified CSMA (CAD + backoff)
   bool sendFrame(const uint8_t* frame, size_t len);
 
-  bool probeSX1262();
-  bool probeSX127x();
+  bool probeSX1262(const RadioSettings& s);
+  bool probeSX127x(const RadioSettings& s);
+  bool applySettings(const RadioSettings& s);   // radio task context only
+  void logActive() const;
 
   static void IRAM_ATTR onRadioIrq();    // just notifies radioTask
 
-  PhysicalLayer* _radio = nullptr;       // common runtime surface
-  const char*  _modelName = "none";
-  SPIClass     _spi{FSPI};
+  PhysicalLayer* _radio  = nullptr;      // common runtime surface
+  SX1262*        _sx1262 = nullptr;      // exactly one of these is set
+  SX1276*        _sx1276 = nullptr;
+  const char*    _modelName = "none";
+  SPIClass       _spi{FSPI};
   RingbufHandle_t _txRing = nullptr;
   RingbufHandle_t _rxRing = nullptr;
-  bool         _online = false;
+  bool           _online = false;
+
+  RadioSettings  _active;                // what the chip is running now
+  RadioSettings  _pending;               // handed over by requestReconfigure
+  volatile bool  _reconfigure = false;
+  portMUX_TYPE   _mux = portMUX_INITIALIZER_UNLOCKED;
 
   // RX reassembly state (mirrors RNode's seq/read_len logic)
   uint8_t  _frame[LORA_FRAME_MAX + 1];   // one raw LoRa frame
@@ -96,7 +115,6 @@ private:
   uint8_t  _rxSeq  = LORA_SEQ_UNSET;
 
   uint8_t  _txFrame[LORA_FRAME_MAX];
-  bool     _isSX127x = false;
 
   static TaskHandle_t s_taskHandle;      // notification target for the ISR
 };

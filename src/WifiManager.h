@@ -20,15 +20,21 @@
 //  WifiManager.h — SoftAP, captive portal DNS, and the port-80 web app
 //
 //  Runs entirely on core 0 (next to the ESP32 Wi-Fi/LwIP stack):
-//    - SoftAP "retimesh-XXXXXX" (prefix + last 3 MAC octets) at 10.42.0.1
+//    - SoftAP "retimesh-XXXXXX" (prefix + last 3 MAC octets, or a custom
+//      SSID from settings) at 10.42.0.1 — open, WPA2, WPA2/WPA3 or WPA3
 //    - DNSServer answering every A query with 10.42.0.1 (captive portal);
 //      polled from a small task pinned to core 0
 //    - AsyncWebServer on port 80:
-//        /               single-page app from LittleFS (data/index.html)
-//        /api/status     JSON node stats (uptime, RSSI/SNR, peers, ...)
-//        /api/board      GET list / POST new post — public bulletin board,
-//                        persisted to LittleFS, deliberately unencrypted
-//        (unknown host)  302 -> portal, which triggers the OS sign-in UI
+//        /                 single-page app from LittleFS (data/index.html)
+//        /api/status       JSON node stats (uptime, RSSI/SNR, peers, ...)
+//        /api/board        GET list / POST new post — public bulletin board
+//        /settings.html    admin page (HTTP Basic Auth, user "admin")
+//        /api/settings     GET all / POST radio|wifi|admin|reset (auth)
+//        (unknown host)    302 -> portal, which triggers the OS sign-in UI
+//
+//  Radio changes apply live through LoRaRadio::requestReconfigure();
+//  Wi-Fi changes are saved and followed by a scheduled restart, because
+//  reconfiguring the AP drops the very connection the request came on.
 // ============================================================================
 #pragma once
 
@@ -37,30 +43,46 @@
 #include <DNSServer.h>
 #include <ESPAsyncWebServer.h>
 #include "Config.h"
+#include "Settings.h"
 
 class WifiManager {
 public:
-  // Brings up the AP, DNS and HTTP server. LittleFS must be mounted first.
+  // Brings up the AP, DNS and HTTP server. LittleFS + Settings must be
+  // ready first.
   void begin();
 
-  // The SSID actually in use (derived from the MAC unless AP_SSID is set).
+  // The SSID actually in use (derived from the MAC unless configured).
   const char* ssid() const { return _ssid; }
+  const char* securityName() const { return _securityName; }
+
+  // Called from loop(): performs a restart scheduled by a settings change
+  // once the HTTP response has had time to leave.
+  void tick();
+  void scheduleRestart(uint32_t delayMs) { _restartAt = millis() + delayMs; }
 
   // FreeRTOS entry point — created pinned to core 0 from main.cpp.
   // DNSServer has no async mode; it needs a polling loop.
   static void dnsTask(void* self);
 
 private:
+  void startAccessPoint();
   void setupRoutes();
+  bool authed(AsyncWebServerRequest* request);
+
   void handleStatus(AsyncWebServerRequest* request);
   void handleBoardGet(AsyncWebServerRequest* request);
-  void handleBoardPost(AsyncWebServerRequest* request,
-                       const uint8_t* data, size_t len,
-                       size_t index, size_t total);
+  void handleBoardPost(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleSettingsGet(AsyncWebServerRequest* request);
+  void handleRadioPost(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleWifiPost(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleAdminPost(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleReset(AsyncWebServerRequest* request);
 
   DNSServer       _dns;
   AsyncWebServer  _http{HTTP_PORT};
   char            _ssid[33] = {0};       // 32 chars max + NUL
+  const char*     _securityName = "open";
+  uint32_t        _restartAt = 0;
 };
 
 extern WifiManager wifiManager;

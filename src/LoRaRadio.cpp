@@ -25,6 +25,12 @@
 LoRaRadio loraRadio;
 TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
 
+static int8_t clampPower(int8_t dbm, int8_t maxDbm) {
+  if (dbm > maxDbm) return maxDbm;
+  if (dbm < 2) return 2;
+  return dbm;
+}
+
 // ---------------------------------------------------------------------------
 // ISR: the radio's IRQ line (DIO1 on SX126x, DIO0 on SX127x) rises on
 // RxDone / TxDone. Nothing is decided here — the task owns the radio and
@@ -37,9 +43,10 @@ void IRAM_ATTR LoRaRadio::onRadioIrq() {
 }
 
 // ---------------------------------------------------------------------------
-bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing) {
+bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const RadioSettings& s) {
   _txRing = txRing;
   _rxRing = rxRing;
+  _active = s;
 
   _spi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
 
@@ -47,26 +54,24 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing) {
   // register read that fails within ~100 ms on an SX1262, whereas the
   // SX1262 check waits on BUSY (GPIO 34 = DIO2 on an SX127x board) and
   // needs ~27 s to give up. Both are harmless to the other chip.
-  if (!probeSX127x() && !probeSX1262()) {
-    log_e("No LoRa transceiver found (tried SX1262 on DIO1=%d/BUSY=%d and "
-          "SX127x on DIO0=%d) — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY,
-          PIN_LORA_DIO0);
+  if (!probeSX127x(s) && !probeSX1262(s)) {
+    log_e("No LoRa transceiver found (tried SX127x on DIO0=%d and SX1262 on "
+          "DIO1=%d/BUSY=%d) — check wiring", PIN_LORA_DIO0, PIN_LORA_DIO1, PIN_LORA_BUSY);
     return false;
   }
 
   _radio->setPacketReceivedAction(onRadioIrq);   // DIO1 / DIO0 as appropriate
   _online = true;
   g_stats.radioModel = _modelName;
-  log_i("%s online: %.3f MHz, BW %.1f kHz, SF%d, CR 4/%d, %d dBm",
-        _modelName, RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_TX_DBM);
+  logActive();
   return true;
 }
 
-bool LoRaRadio::probeSX1262() {
+bool LoRaRadio::probeSX1262(const RadioSettings& s) {
   Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
   SX1262* sx  = new SX1262(mod);
-  int16_t state = sx->begin(RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_SYNCWORD,
-                            RF_TX_DBM, RF_PREAMBLE_SYMS, RF_TCXO_VOLTAGE, false);
+  int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
+                            clampPower(s.txDbm, 22), s.preamble, RF_TCXO_VOLTAGE, false);
   if (state != RADIOLIB_ERR_NONE) {
     log_w("SX1262 not found (code %d)", state);
     delete sx; delete mod;
@@ -77,19 +82,19 @@ bool LoRaRadio::probeSX1262() {
   #endif
   sx->setCurrentLimit(140.0);
   sx->setCRC(true);
-  _radio = sx;
+  _radio = _sx1262 = sx;
   _modelName = "SX1262";
   return true;
 }
 
-bool LoRaRadio::probeSX127x() {
+bool LoRaRadio::probeSX127x(const RadioSettings& s) {
   // SX1276 and SX1278 share silicon version 0x12 and this driver; the
   // class only differs in the accepted frequency range, and SX1276 spans
   // both sub-GHz bands.
   Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO0, PIN_LORA_RST, PIN_LORA_DIO1, _spi);
   SX1276* sx  = new SX1276(mod);
-  int16_t state = sx->begin(RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_SYNCWORD,
-                            RF_TX_DBM, RF_PREAMBLE_SYMS, 0);
+  int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
+                            clampPower(s.txDbm, 17), s.preamble, 0);
   if (state != RADIOLIB_ERR_NONE) {
     log_w("SX127x not found (code %d)", state);
     delete sx; delete mod;
@@ -97,15 +102,59 @@ bool LoRaRadio::probeSX127x() {
   }
   sx->setCurrentLimit(140);
   sx->setCRC(true);
-  _radio = sx;
+  _radio = _sx1276 = sx;
   _modelName = "SX1276";
-  _isSX127x = true;
+  return true;
+}
+
+void LoRaRadio::logActive() const {
+  log_i("%s online: %.3f MHz, BW %.1f kHz, SF%d, CR 4/%d, %d dBm, sync 0x%02X, preamble %u",
+        _modelName, _active.freqMhz, _active.bwKhz, _active.sf, _active.cr,
+        clampPower(_active.txDbm, maxTxDbm()), _active.syncWord, _active.preamble);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime reconfiguration
+// ---------------------------------------------------------------------------
+void LoRaRadio::requestReconfigure(const RadioSettings& s) {
+  portENTER_CRITICAL(&_mux);
+  _pending = s;
+  _reconfigure = true;
+  portEXIT_CRITICAL(&_mux);
+}
+
+// Called from the radio task only. Leaves the chip in standby; the caller
+// re-arms receive. On failure the previous settings are restored.
+bool LoRaRadio::applySettings(const RadioSettings& s) {
+  // The LoRa modulation setters are not part of PhysicalLayer, so they go
+  // through whichever concrete driver was detected.
+  #define CHIP(call) (_sx1262 ? _sx1262->call : _sx1276->call)
+  struct Step { const char* what; int16_t code; };
+  Step steps[] = {
+    { "standby",          _radio->standby() },
+    { "frequency",        CHIP(setFrequency(s.freqMhz)) },
+    { "bandwidth",        CHIP(setBandwidth(s.bwKhz)) },
+    { "spreading factor", CHIP(setSpreadingFactor(s.sf)) },
+    { "coding rate",      CHIP(setCodingRate(s.cr)) },
+    { "tx power",         CHIP(setOutputPower(clampPower(s.txDbm, maxTxDbm()))) },
+    { "preamble",         CHIP(setPreambleLength(s.preamble)) },
+    { "sync word",        CHIP(setSyncWord(s.syncWord)) },
+  };
+  #undef CHIP
+  for (const Step& st : steps) {
+    if (st.code != RADIOLIB_ERR_NONE) {
+      log_e("radio reconfigure failed at %s (code %d)", st.what, st.code);
+      g_stats.radioApplyError = st.code;
+      return false;
+    }
+  }
   return true;
 }
 
 // ---------------------------------------------------------------------------
 // Task body — pinned to CORE 1 by main.cpp. This task is the only code
-// that ever touches the SX1262 after begin(), so no radio lock is needed.
+// that ever touches the transceiver after begin(), so no radio lock is
+// needed.
 // ---------------------------------------------------------------------------
 void LoRaRadio::radioTask(void* self) {
   s_taskHandle = xTaskGetCurrentTaskHandle();
@@ -118,7 +167,26 @@ void LoRaRadio::taskLoop() {
   _radio->startReceive();
 
   for (;;) {
-    // (1) Service the radio: block up to 10 ms for a DIO1 notification.
+    // (0) Settings changed from the web UI? Apply between packets.
+    if (_reconfigure) {
+      RadioSettings s;
+      portENTER_CRITICAL(&_mux);
+      s = _pending;
+      _reconfigure = false;
+      portEXIT_CRITICAL(&_mux);
+
+      if (applySettings(s)) {
+        _active = s;
+        g_stats.radioApplyError = 0;
+        logActive();
+      } else {
+        applySettings(_active);              // roll back to what worked
+      }
+      _rxSeq = LORA_SEQ_UNSET; _rxLen = 0;   // half packets are meaningless now
+      _radio->startReceive();
+    }
+
+    // (1) Service the radio: block up to 10 ms for an IRQ notification.
     //     This doubles as the poll interval for the TX ring below.
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0) {
       handleRadioIrq();
@@ -246,9 +314,9 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
     return false;
   }
 
-  // Wait for TxDone via DIO1. SF8/125k worst case is ~450 ms per frame;
-  // 5 s means the radio wedged, in which case finishTransmit() cleans up.
-  ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+  // Wait for TxDone. SF12/125k worst case is ~5 s per frame; 8 s means the
+  // radio wedged, in which case finishTransmit() cleans up.
+  ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(8000));
   _radio->finishTransmit();
   return true;
 }
@@ -273,7 +341,7 @@ void LoRaRadio::waitClearChannel() {
     }
     if (sawTraffic) continue;
 
-    // scanChannel() is blocking and drives DIO1 itself; any stray
+    // scanChannel() is blocking and drives the IRQ line itself; any stray
     // notification it produces is flushed by sendFrame() afterwards.
     int16_t cad = _radio->scanChannel();
     if (cad == RADIOLIB_CHANNEL_FREE) return;

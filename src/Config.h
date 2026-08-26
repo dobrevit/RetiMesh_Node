@@ -47,12 +47,30 @@
 #ifndef AP_PASSWORD
   #define AP_PASSWORD       ""              // empty = open network
 #endif
+// SoftAP WPA3 (SAE) needs ESP-IDF 5; the pinned Arduino core 2.x (IDF 4.4)
+// rejects the auth mode (verified: esp_wifi_set_config -> ESP_ERR_INVALID_ARG,
+// AP stays WPA2). The code path is kept for an IDF 5 core.
+#include <esp_idf_version.h>
+#define WPA3_SOFTAP_SUPPORTED (ESP_IDF_VERSION_MAJOR >= 5)
+
+// Default security when no setting is stored: 0 open, 1 WPA2,
+// 2 WPA2+WPA3 mixed, 3 WPA3-only. Ignored unless AP_PASSWORD has >= 8 chars.
+#ifndef AP_SECURITY_DEFAULT
+  #define AP_SECURITY_DEFAULT 1
+#endif
 #ifndef AP_CHANNEL
   #define AP_CHANNEL        6
 #endif
 #ifndef AP_MAX_STATIONS
   #define AP_MAX_STATIONS   8
 #endif
+
+// Admin password protecting the settings API/page (HTTP Basic Auth,
+// user "admin"). Change it from the settings page; stored in NVS.
+#ifndef ADMIN_PASSWORD_DEFAULT
+  #define ADMIN_PASSWORD_DEFAULT "retimesh"
+#endif
+#define NVS_NAMESPACE       "retimesh"
 
 // AP address 10.42.0.1 — "42" as a nod to the transport port.
 #define AP_IP               IPAddress(10, 42, 0, 1)
@@ -115,8 +133,9 @@
   #define PIN_LORA_DIO0     9               // SX127x only
 #endif
 
-// PHY parameters. These MUST match every other node on the channel
-// (including real RNodes — configure the RNode side with the same values).
+// PHY defaults — the running values live in NVS (see Settings.h) and are
+// editable from the settings page. They MUST match every other node on
+// the channel (including real RNodes — configure the RNode side alike).
 #ifndef RF_FREQ_MHZ
   #define RF_FREQ_MHZ       869.525         // EU868 SRD band, 500 mW sub-band
 #endif
@@ -198,6 +217,7 @@ struct NodeStats {
   volatile bool     radioOnline   = false;
   const char*       radioModel    = "none"; // "SX1262" / "SX1276" once probed
   volatile bool     displayPresent = false;
+  volatile int16_t  radioApplyError = 0;   // last RadioLib error applying settings
   volatile float    lastRssi      = 0.0f;   // dBm, last LoRa RX
   volatile float    lastSnr       = 0.0f;   // dB,  last LoRa RX
   volatile uint32_t loraRxPackets = 0;      // reassembled RNS packets

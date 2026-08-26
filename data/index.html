@@ -42,12 +42,14 @@
   button { background: var(--accent); color: #04140a; font-weight: 600; cursor: pointer; border: 0; }
   button:disabled { opacity: .5; cursor: default; }
   .note { color: var(--dim); font-size: .75rem; margin-top: 6px; }
+  a { color: var(--accent); text-decoration: none; }
   footer { color: var(--dim); font-size: .72rem; margin: 24px 0 8px; text-align: center; }
 </style>
 </head>
 <body>
   <h1><span class="dot">&#9679;</span> <span id="ssid">RetiMesh Node</span></h1>
-  <div class="sub">Standalone Reticulum LoRa gateway &mdash; connect your RNS client to <b>10.42.0.1:4242</b> (TCPClientInterface)</div>
+  <div class="sub">Standalone Reticulum LoRa gateway &mdash; connect your RNS client to <b>10.42.0.1:4242</b> (TCPClientInterface)
+    &middot; <a href="/settings.html">&#9881; settings</a></div>
 
   <div class="grid" id="stats"></div>
 
@@ -91,7 +93,7 @@ async function refreshStatus() {
     g.replaceChildren(
       card("Uptime", fmtUptime(s.uptime_s)),
       card("Radio " + (s.radio.model || ""), s.radio.online
-        ? s.radio.freq_mhz.toFixed(3) + " MHz SF" + s.radio.sf : "OFFLINE",
+        ? s.radio.freq_mhz.toFixed(3) + " MHz SF" + s.radio.sf + " " + s.radio.tx_dbm + "dBm" : "OFFLINE",
         s.radio.online ? "" : "offline"),
       card("RSSI / SNR", s.radio.rssi.toFixed(0) + " dBm / " + s.radio.snr.toFixed(1) + " dB"),
       card("RNS peers", s.peers.rns_tcp + " tcp / " + s.peers.wifi_sta + " wifi"),
