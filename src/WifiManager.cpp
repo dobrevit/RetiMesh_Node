@@ -410,12 +410,20 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     gps["sentences"]  = g.sentences;
     gps["clock_set"]  = g.clockSet;
     gps["utc"]        = g.utc;
-    if (g.valid) {
-      gps["latitude"]  = g.latitude;
-      gps["longitude"] = g.longitude;
+    // Everything above says whether the receiver is working. Where the node
+    // physically is says something else, and /api/status is public — on an
+    // open access point that is anyone within radio range. Coordinates are
+    // therefore withheld unless the operator has published them, or the
+    // caller holds the admin credentials.
+    const bool sharePosition = settings.radio().gpsSharePosition ||
+                               request->authenticate(ADMIN_USER, settings.admin().password);
+    gps["position_public"] = settings.radio().gpsSharePosition;
+    if (g.valid && sharePosition) {
+      gps["latitude"]   = g.latitude;
+      gps["longitude"]  = g.longitude;
       gps["altitude_m"] = g.altitude;
-      gps["hdop"]      = g.hdop;
-      gps["speed_kmh"] = g.speedKmh;
+      gps["hdop"]       = g.hdop;
+      gps["speed_kmh"]  = g.speedKmh;
     }
   }
 #endif
@@ -580,6 +588,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["callsign"]  = rs.callsign;              // "" = SSID
   radio["duty_cycle_pct"] = rs.dutyCyclePct;     // 0 = limiter off
   radio["gps_enabled"] = rs.gpsEnabled;
+  radio["gps_share_position"] = rs.gpsSharePosition;
   radio["has_gps"] = HAS_GPS ? true : false;
   radio["callsign_active"] = loraRadio.callsign();
   radio["model"]     = g_stats.radioModel;
@@ -636,6 +645,7 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (in["announce_interval"].is<int>()) r.announceInterval = in["announce_interval"];
   if (in["duty_cycle_pct"].is<int>()) r.dutyCyclePct = in["duty_cycle_pct"];
   if (in["gps_enabled"].is<bool>())   r.gpsEnabled   = in["gps_enabled"];
+  if (in["gps_share_position"].is<bool>()) r.gpsSharePosition = in["gps_share_position"];
   if (in["callsign"].is<const char*>()) {
     String c = in["callsign"].as<String>(); c.trim();
     for (size_t i = 0; i < c.length(); i++)

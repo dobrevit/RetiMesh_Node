@@ -33,9 +33,11 @@
 //  the SD event log and anything later that timestamps a message all become
 //  meaningful across restarts.
 //
-//  The receiver hangs off a switched PMU rail and is off until enabled. On an
-//  AXP2101 the backup rail is kept powered so it holds its almanac and can
-//  warm-start in seconds rather than cold-starting in minutes.
+//  The receiver hangs off a switched PMU rail. Boards that have one start it
+//  at boot — the clock is worth more than the tens of milliamps — and the
+//  settings page powers it down for a node running on a cell. On an AXP2101
+//  the backup rail stays powered either way, so the receiver holds its almanac
+//  and warm-starts in seconds rather than cold-starting in minutes.
 // ============================================================================
 #pragma once
 
@@ -61,6 +63,7 @@ struct Fix {
 };
 
 // Powers the receiver (via the PMU) and opens its UART, or shuts both down.
+// Safe to call from any task: it holds the same lock as the reader.
 void setEnabled(bool on);
 bool enabled();
 

@@ -155,11 +155,15 @@ void resetState() {
 
 void task(void*) {
   for (;;) {
+    // The lock is taken before the enabled test, not after it: setEnabled()
+    // closes the UART while holding the same lock, and a reader that decided
+    // to run just before that would otherwise go on to read a port that has
+    // since been shut down.
+    xSemaphoreTake(sLock, portMAX_DELAY);
     if (sFix.enabled) {
       // Bounded per pass so a chatty receiver cannot monopolise the task.
       // 9600 baud is under 1 KB/s, and this runs ten times a second.
       uint16_t budget = 256;
-      xSemaphoreTake(sLock, portMAX_DELAY);
       while (sSerial.available() && budget--) {
         char c = sSerial.read();
         if (c == '$') { sLen = 0; sOverflow = false; }
@@ -175,8 +179,8 @@ void task(void*) {
       // longer stands behind.
       if (sFix.valid && millis() - sLastFixMs >= FIX_TIMEOUT) sFix.valid = false;
       sFix.ageMs = sFix.sentences ? millis() - sLastSentenceMs : 0;
-      xSemaphoreGive(sLock);
     }
+    xSemaphoreGive(sLock);
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }

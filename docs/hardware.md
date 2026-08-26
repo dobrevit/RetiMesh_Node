@@ -25,7 +25,10 @@ become meaningful across restarts.
 Sentences are parsed on the device (RMC and GGA, checksum-verified,
 talker-agnostic so GP/GN/GL/GA all work) — about a hundred lines, no library.
 The display gains a **GNSS page** showing fix state, satellite count,
-position, altitude and UTC, and `/api/status` reports the same under `gps`.
+position, altitude and UTC. `/api/status` reports the receiver's health under
+`gps`, but not where the node is: that endpoint needs no credentials, so
+coordinates are held back unless the caller logs in as the admin or the
+operator publishes them from the settings page.
 Indoors expect `searching, 0 sats` with the sentence counter climbing: that
 tells you the receiver is wired and talking, and only the sky view is
 missing.

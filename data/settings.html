@@ -64,6 +64,8 @@
       <div><label>Duty cycle (% of the hour, 0 = off)</label><input name="duty_cycle_pct" type="number" min="0" max="100" required></div>
       <div id="gpsField" hidden><label>GNSS receiver</label>
         <select name="gps_enabled"><option value="1">On — position and clock</option><option value="0">Off — saves power</option></select></div>
+      <div id="gpsShareField" hidden><label>Publish position</label>
+        <select name="gps_share_position"><option value="0">No — coordinates need the admin login</option><option value="1">Yes — anyone can read them</option></select></div>
     </div>
     <button type="submit">Apply radio settings</button>
     <div class="msg" id="radioMsg"></div>
@@ -73,6 +75,9 @@
       channel sits) and 10 % on 869.4&ndash;869.65 MHz; set it to your region's limit, or 0 to turn the limiter off &mdash; staying legal
       is then your responsibility. When the budget is spent, packets wait in the queue instead of being dropped; the status page shows how
       much is left and when it frees up.<br>
+      <b>GNSS.</b> The receiver gives the node a real clock, which it has no other way to get: without one its idea of time restarts at zero
+      on every reboot. Its health (fix, satellites, UTC) is public on the status API; the coordinates are not, unless you publish them
+      &mdash; the status page is reachable by anyone who can join this access point.<br>
       Applied live, no reboot. Every node on the channel &mdash; including real RNodes &mdash; must use the same values.
       Matching <code>rnsd</code> interface config:</div>
     <pre id="rnsSnippet"></pre>
@@ -214,8 +219,10 @@ async function load() {
 
   const r = cfg.radio;
   fill($("radioForm"), { ...r, sync_word: r.sync_word.toString(16).toUpperCase().padStart(2, "0"),
-    gps_enabled: r.gps_enabled ? "1" : "0" });
+    gps_enabled: r.gps_enabled ? "1" : "0",
+    gps_share_position: r.gps_share_position ? "1" : "0" });
   $("gpsField").hidden = !r.has_gps;
+  $("gpsShareField").hidden = !r.has_gps;
   $("radioForm").elements.tx_dbm.max = r.tx_dbm_max;
   $("pmax").textContent = "max " + r.tx_dbm_max;
   $("radioModel").textContent = r.online ? "Transceiver: " + r.model : "Transceiver: OFFLINE — settings are saved but not applied";
@@ -248,6 +255,7 @@ $("radioForm").addEventListener("submit", async ev => {
     beacon_interval: +f.beacon_interval.value, announce_interval: +f.announce_interval.value, callsign: f.callsign.value,
     duty_cycle_pct: +f.duty_cycle_pct.value };
   if (f.gps_enabled) body.gps_enabled = f.gps_enabled.value === "1";
+  if (f.gps_share_position) body.gps_share_position = f.gps_share_position.value === "1";
   try {
     const res = await api("/api/settings/radio", body);
     setMsg("radioMsg", res.applied ? "Applied." : "Saved (radio offline).", "ok");
