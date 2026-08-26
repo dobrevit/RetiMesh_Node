@@ -26,6 +26,7 @@
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
 #include "SdCard.h"
+#include "RnsTransport.h"
 
 Display display;
 
@@ -131,6 +132,7 @@ void Display::paint() {
   _oled.clearDisplay();
   switch (_page) {
     case NEIGHBORS: paintNeighbors(); break;
+    case TRANSPORT: paintTransport(); break;
     case RADIO:     paintRadio();     break;
     case NETWORK:   paintNetwork();   break;
     default:        paintStatus();    break;
@@ -221,6 +223,26 @@ void Display::paintNeighbors() {
     _oled.setCursor(0, 12 + i * 10);
     _oled.print(line);
   }
+#endif
+}
+
+void Display::paintTransport() {
+#if HAS_DISPLAY
+  char line[24];
+  RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
+  size_t n = RnsTransport::interfaces(ifs, RNS_MAX_CLIENTS + 1);
+  snprintf(line, sizeof(line), "Transport %s %u path%s",
+           g_stats.transportOnline ? "up" : "OFF", (unsigned)RnsTransport::pathCount(),
+           RnsTransport::pathCount() == 1 ? "" : "s");
+  header(_oled, line);
+  uint8_t row = 0;
+  for (size_t i = 0; i < n && row < 5; i++, row++) {
+    char name[12]; strlcpy(name, ifs[i].name, sizeof(name));
+    if (strncmp(name, "WiFi/", 5) == 0) memmove(name, name + 5, strlen(name + 5) + 1);   // just the IP
+    snprintf(line, sizeof(line), "%-9s %-6.6s %3luk", name, ifs[i].mode, (unsigned long)((ifs[i].rxb + ifs[i].txb) / 1024));
+    _oled.setCursor(0, 12 + row * 10); _oled.print(line);
+  }
+  if (n == 0) { _oled.setCursor(0, 14); _oled.print("no interfaces"); }
 #endif
 }
 

@@ -77,6 +77,10 @@ void Settings::load() {
   LOAD(_transport.enabled,  "t_en",    getBool ("t_en"));
   LOAD(_transport.loraMode, "t_lmode", getUChar("t_lmode"));
   LOAD(_transport.wifiMode, "t_wmode", getUChar("t_wmode"));
+  LOAD(_transport.announceCap,         "t_acap",  getUChar ("t_acap"));
+  LOAD(_transport.announceRateTarget,  "t_art",   getUShort("t_art"));
+  LOAD(_transport.announceRateGrace,   "t_arg",   getUChar ("t_arg"));
+  LOAD(_transport.announceRatePenalty, "t_arp",   getUShort("t_arp"));
   if (_admin.password[0] == '\0') strlcpy(_admin.password, ADMIN_PASSWORD_DEFAULT, sizeof(_admin.password));
   #undef LOAD
 
@@ -125,7 +129,11 @@ bool Settings::saveTransport(const TransportSettings& t) {
   _transport = t;
   bool ok = _prefs.putBool ("t_en",    t.enabled)  > 0
          && _prefs.putUChar("t_lmode", t.loraMode) > 0
-         && _prefs.putUChar("t_wmode", t.wifiMode) > 0;
+         && _prefs.putUChar("t_wmode", t.wifiMode) > 0
+         && _prefs.putUChar ("t_acap",  t.announceCap) > 0
+         && _prefs.putUShort("t_art",   t.announceRateTarget) > 0
+         && _prefs.putUChar ("t_arg",   t.announceRateGrace) > 0
+         && _prefs.putUShort("t_arp",   t.announceRatePenalty) > 0;
   if (!ok) log_e("NVS write failed (transport)");
   return ok;
 }

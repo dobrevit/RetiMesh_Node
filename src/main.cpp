@@ -125,13 +125,14 @@ void setup() {
 void loop() {
   static uint32_t lastBeat = 0;
   wifiManager.tick();
+  g_stats.heapMinFree = ESP.getMinFreeHeap();
   if (millis() - lastBeat >= 30000) {
     lastBeat = millis();
-    log_i("up %lus | rns peers %u | lora rx/tx %u/%u (drop %u) | beacons rx/tx %u/%u | heap %u",
+    log_i("up %lus | rns peers %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u | heap %u (min %u)",
           millis() / 1000, (unsigned)g_stats.tcpClients,
           (unsigned)g_stats.loraRxPackets, (unsigned)g_stats.loraTxPackets,
-          (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.beaconsRx,
-          (unsigned)g_stats.beaconsTx, (unsigned)ESP.getFreeHeap());
+          (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.announcesRx,
+          (unsigned)g_stats.announcesTx, (unsigned)ESP.getFreeHeap(), (unsigned)g_stats.heapMinFree);
   }
   vTaskDelay(pdMS_TO_TICKS(200));
 }

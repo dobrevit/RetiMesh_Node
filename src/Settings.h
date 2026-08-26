@@ -64,9 +64,15 @@ struct WifiSettings {
 // 4 roaming, 5 boundary. Changing these needs a restart (interfaces are
 // registered with Transport at boot), same as editing rnsd's config.
 struct TransportSettings {
-  bool    enabled  = true;
-  uint8_t loraMode = 1;                 // full: the LoRa channel is the mesh
-  uint8_t wifiMode = 3;                 // access_point: phones come and go
+  bool     enabled  = true;
+  uint8_t  loraMode = 1;                // full: the LoRa channel is the mesh
+  uint8_t  wifiMode = 3;                // access_point: phones come and go
+  // rnsd's announce_cap / announce_rate_target / announce_rate_grace /
+  // announce_rate_penalty, applied to every interface.
+  uint8_t  announceCap        = 2;      // % of interface bandwidth for announces
+  uint16_t announceRateTarget = 0;      // s between announces from one destination (0 = off)
+  uint8_t  announceRateGrace  = 0;      // violations tolerated before blocking
+  uint16_t announceRatePenalty = 0;     // s added to the block
 };
 
 struct AdminSettings {

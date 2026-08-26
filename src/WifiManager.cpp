@@ -199,6 +199,7 @@ void WifiManager::setupRoutes() {
     { "/api/settings/admin", &WifiManager::handleAdminPost },
     { "/api/settings/transport", &WifiManager::handleTransportPost },
     { "/api/settings/sd/format", &WifiManager::handleSdFormat },
+    { "/api/settings/import", &WifiManager::handleImport },
   };
   for (const Route& rt : posts) {
     auto fn = rt.fn;
@@ -211,6 +212,8 @@ void WifiManager::setupRoutes() {
                if (body && authed(r)) (this->*fn)(r, body, t);
              });
   }
+  _http.on("/api/settings/export", HTTP_GET,
+           [this](AsyncWebServerRequest* r) { if (authed(r)) handleExport(r); });
   _http.on("/api/settings/reset", HTTP_POST,
            [this](AsyncWebServerRequest* r) { if (authed(r)) handleReset(r); });
 
@@ -247,6 +250,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
   doc["uptime_s"]     = millis() / 1000;
   doc["heap_free"]    = ESP.getFreeHeap();
+  doc["heap_min_free"] = g_stats.heapMinFree;
   doc["psram_free"]   = ESP.getFreePsram();
 
   JsonObject radio    = doc["radio"].to<JsonObject>();
@@ -429,6 +433,10 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   tr["enabled"]   = settings.transport().enabled;
   tr["lora_mode"] = settings.transport().loraMode;
   tr["wifi_mode"] = settings.transport().wifiMode;
+  tr["announce_cap"] = settings.transport().announceCap;
+  tr["announce_rate_target"] = settings.transport().announceRateTarget;
+  tr["announce_rate_grace"] = settings.transport().announceRateGrace;
+  tr["announce_rate_penalty"] = settings.transport().announceRatePenalty;
   tr["online"]    = g_stats.transportOnline;
 
   doc["admin"]["user"] = ADMIN_USER;
@@ -537,12 +545,88 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   if (in["enabled"].is<bool>())  t.enabled  = in["enabled"];
   if (in["lora_mode"].is<int>()) t.loraMode = in["lora_mode"];
   if (in["wifi_mode"].is<int>()) t.wifiMode = in["wifi_mode"];
+  if (in["announce_cap"].is<int>())          t.announceCap         = in["announce_cap"];
+  if (in["announce_rate_target"].is<int>())  t.announceRateTarget  = in["announce_rate_target"];
+  if (in["announce_rate_grace"].is<int>())   t.announceRateGrace   = in["announce_rate_grace"];
+  if (in["announce_rate_penalty"].is<int>()) t.announceRatePenalty = in["announce_rate_penalty"];
   if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5) { sendError(request, 400, "mode must be 1-5"); return; }
+  if (t.announceCap < 1 || t.announceCap > 100) { sendError(request, 400, "announce cap must be 1-100 %"); return; }
   if (!settings.saveTransport(t)) { sendError(request, 500, "nvs"); return; }
   JsonDocument out;
   out["ok"] = true; out["restart"] = true;
   sendJson(request, 200, out);
   scheduleRestart(1500);                 // interfaces are registered at boot
+}
+
+// GET /api/settings/export — everything needed to clone a node's
+// configuration (identity keys are deliberately NOT included).
+void WifiManager::handleExport(AsyncWebServerRequest* request) {
+  const RadioSettings& rs = settings.radio();
+  const WifiSettings&  ws = settings.wifi();
+  const TransportSettings& ts = settings.transport();
+  JsonDocument doc;
+  doc["retimesh_settings"] = 1;                 // schema version
+  doc["firmware"] = FW_VERSION;
+  JsonObject r = doc["radio"].to<JsonObject>();
+  r["freq_mhz"] = rs.freqMhz; r["bw_khz"] = rs.bwKhz; r["sf"] = rs.sf; r["cr"] = rs.cr; r["tx_dbm"] = rs.txDbm;
+  r["sync_word"] = rs.syncWord; r["preamble"] = rs.preamble; r["announce_interval"] = rs.announceInterval;
+  r["beacon_interval"] = rs.beaconInterval; r["callsign"] = rs.callsign;
+  JsonObject w = doc["wifi"].to<JsonObject>();
+  w["ssid"] = ws.ssid; w["security"] = Settings::securityName(ws.security); w["password"] = ws.password;
+  w["channel"] = ws.channel; w["max_stations"] = ws.maxStations; w["hidden"] = ws.hidden;
+  JsonObject t = doc["transport"].to<JsonObject>();
+  t["enabled"] = ts.enabled; t["lora_mode"] = ts.loraMode; t["wifi_mode"] = ts.wifiMode;
+  t["announce_cap"] = ts.announceCap; t["announce_rate_target"] = ts.announceRateTarget;
+  t["announce_rate_grace"] = ts.announceRateGrace; t["announce_rate_penalty"] = ts.announceRatePenalty;
+  doc["admin"]["password"] = settings.admin().password;
+  String out; serializeJsonPretty(doc, out);
+  AsyncWebServerResponse* res = request->beginResponse(200, "application/json", out);
+  res->addHeader("Content-Disposition", "attachment; filename=\"retimesh-settings.json\"");
+  request->send(res);
+}
+
+// POST /api/settings/import — applies an export (sections are optional),
+// then restarts. Same validation as the individual endpoints.
+void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body, size_t len) {
+  JsonDocument in;
+  if (deserializeJson(in, body, len) != DeserializationError::Ok || !in["retimesh_settings"].is<int>()) {
+    sendError(request, 400, "not a RetiMesh settings export"); return;
+  }
+  if (in["radio"].is<JsonObject>()) {
+    JsonObject r = in["radio"]; RadioSettings rs = settings.radio();
+    rs.freqMhz = r["freq_mhz"] | rs.freqMhz; rs.bwKhz = r["bw_khz"] | rs.bwKhz; rs.sf = r["sf"] | rs.sf; rs.cr = r["cr"] | rs.cr;
+    rs.txDbm = r["tx_dbm"] | rs.txDbm; rs.syncWord = r["sync_word"] | rs.syncWord; rs.preamble = r["preamble"] | rs.preamble;
+    rs.announceInterval = r["announce_interval"] | rs.announceInterval; rs.beaconInterval = r["beacon_interval"] | rs.beaconInterval;
+    if (r["callsign"].is<const char*>()) strlcpy(rs.callsign, r["callsign"], sizeof(rs.callsign));
+    if (rs.freqMhz < 137 || rs.freqMhz > 1020 || !Settings::validBandwidth(rs.bwKhz) || rs.sf < 7 || rs.sf > 12 || rs.cr < 5 || rs.cr > 8) {
+      sendError(request, 400, "radio section invalid"); return;
+    }
+    settings.saveRadio(rs);
+  }
+  if (in["wifi"].is<JsonObject>()) {
+    JsonObject w = in["wifi"]; WifiSettings ws = settings.wifi();
+    if (w["ssid"].is<const char*>()) strlcpy(ws.ssid, w["ssid"], sizeof(ws.ssid));
+    if (w["password"].is<const char*>()) strlcpy(ws.password, w["password"], sizeof(ws.password));
+    if (w["security"].is<const char*>()) Settings::securityFromName(w["security"], ws.security);
+    ws.channel = w["channel"] | ws.channel; ws.maxStations = w["max_stations"] | ws.maxStations; ws.hidden = w["hidden"] | ws.hidden;
+    if (ws.security != ApSecurity::Open && strlen(ws.password) < 8) ws.security = ApSecurity::Open;
+    if (ws.channel < 1 || ws.channel > 13 || ws.maxStations < 1 || ws.maxStations > 10) { sendError(request, 400, "wifi section invalid"); return; }
+    settings.saveWifi(ws);
+  }
+  if (in["transport"].is<JsonObject>()) {
+    JsonObject t = in["transport"]; TransportSettings ts = settings.transport();
+    ts.enabled = t["enabled"] | ts.enabled; ts.loraMode = t["lora_mode"] | ts.loraMode; ts.wifiMode = t["wifi_mode"] | ts.wifiMode;
+    ts.announceCap = t["announce_cap"] | ts.announceCap; ts.announceRateTarget = t["announce_rate_target"] | ts.announceRateTarget;
+    ts.announceRateGrace = t["announce_rate_grace"] | ts.announceRateGrace; ts.announceRatePenalty = t["announce_rate_penalty"] | ts.announceRatePenalty;
+    if (ts.loraMode < 1 || ts.loraMode > 5 || ts.wifiMode < 1 || ts.wifiMode > 5 || ts.announceCap < 1 || ts.announceCap > 100) { sendError(request, 400, "transport section invalid"); return; }
+    settings.saveTransport(ts);
+  }
+  if (in["admin"]["password"].is<const char*>()) {
+    const char* p = in["admin"]["password"];
+    if (strlen(p) >= 4 && strlen(p) <= 32) settings.saveAdminPassword(p);
+  }
+  request->send(200, "application/json", "{\"ok\":true,\"restart\":true}");
+  scheduleRestart(1500);
 }
 
 // POST /api/settings/sd/format {"confirm":"FORMAT"} — wipes the whole card.

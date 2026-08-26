@@ -81,11 +81,14 @@ static const char* modeNameOf(RNS::Type::Interface::modes m) {
 // ---------------------------------------------------------------------------
 // LoRa interface: rings shared with radioTask (see LoRaRadio.h)
 // ---------------------------------------------------------------------------
+static void applyAnnounceLimits(RNS::InterfaceImpl& impl);
+
 class LoRaRnsInterface : public RNS::InterfaceImpl {
 public:
   LoRaRnsInterface() : RNS::InterfaceImpl("LoRa") {
     _IN = _OUT = true;
     _HW_MTU = RNS_MTU;
+    applyAnnounceLimits(*this);
     const RadioSettings& r = settings.radio();
     _bitrate = (uint32_t)(r.sf * ((4.0 / r.cr) / (pow(2.0, r.sf) / r.bwKhz)) * 1000.0);
   }
@@ -121,6 +124,7 @@ public:
   TcpClientRnsInterface(uint32_t id, const char* name) : RNS::InterfaceImpl(name), _id(id) {
     _IN = _OUT = true;
     _HW_MTU = RNS_MTU;
+    applyAnnounceLimits(*this);
     _bitrate = 10000000;                    // Wi-Fi; only used for airtime maths
   }
   bool send_outgoing(const Bytes& data) override {
@@ -133,6 +137,20 @@ public:
 private:
   uint32_t _id;
 };
+
+// The limits live in protected InterfaceImpl fields; a tiny subclass view
+// lets one helper set them for every interface type.
+struct LimitsView : RNS::InterfaceImpl {
+  void apply(const TransportSettings& t) {
+    _announce_cap          = t.announceCap / 100.0f;
+    _announce_rate_target  = t.announceRateTarget;
+    _announce_rate_grace   = t.announceRateGrace;
+    _announce_rate_penalty = t.announceRatePenalty;
+  }
+};
+static void applyAnnounceLimits(RNS::InterfaceImpl& impl) {
+  static_cast<LimitsView&>(impl).apply(settings.transport());
+}
 
 static RNS::Interface loraIface({RNS::Type::NONE});
 struct TcpIface { RNS::Interface handle; TcpClientRnsInterface* impl; };

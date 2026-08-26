@@ -106,7 +106,13 @@
         <select name="lora_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
       <div><label>Wi-Fi clients mode</label>
         <select name="wifi_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
+      <div><label>Announce cap (% of bandwidth)</label><input name="announce_cap" type="number" min="1" max="100" required></div>
+      <div><label>Announce rate target (s, 0 = off)</label><input name="announce_rate_target" type="number" min="0" max="3600" required></div>
+      <div><label>Rate grace (violations)</label><input name="announce_rate_grace" type="number" min="0" max="100" required></div>
+      <div><label>Rate penalty (s)</label><input name="announce_rate_penalty" type="number" min="0" max="7200" required></div>
     </div>
+    <div class="note">Announce cap limits how much of each interface's airtime announces may use (rnsd default 2 %). The rate target/grace/penalty
+      throttle destinations that announce too often — the same knobs as rnsd's <code>announce_rate_*</code>.</div>
     <button type="submit">Save &amp; restart</button>
     <div class="msg" id="transportMsg"></div>
   </form>
@@ -127,6 +133,17 @@
     <div class="msg" id="adminMsg"></div>
     <div class="note">Protects this page and the settings API (HTTP Basic Auth, user <b>admin</b>). Your browser will ask again after the change.</div>
   </form>
+
+  <h2>Backup &amp; provisioning</h2>
+  <div class="card">
+    <div class="row">
+      <div><button id="exportBtn" type="button">Download settings (JSON)</button></div>
+      <div><input id="importFile" type="file" accept="application/json"><button id="importBtn" type="button">Import &amp; restart</button></div>
+    </div>
+    <div class="msg" id="backupMsg"></div>
+    <div class="note">The export contains radio, Wi-Fi (including the password), transport and admin settings &mdash; keep it private.
+      It never contains the node's identity keys. Importing on another node clones its configuration; the SSID stays automatic unless set.</div>
+  </div>
 
   <h2>Danger zone</h2>
   <div class="card">
@@ -181,7 +198,9 @@ async function load() {
   $("rnsSnippet").textContent = rnsSnippet(r);
 
   fill($("wifiForm"), cfg.wifi);
-  fill($("transportForm"), { enabled: cfg.transport.enabled ? "1" : "0", lora_mode: cfg.transport.lora_mode, wifi_mode: cfg.transport.wifi_mode });
+  fill($("transportForm"), { enabled: cfg.transport.enabled ? "1" : "0", lora_mode: cfg.transport.lora_mode, wifi_mode: cfg.transport.wifi_mode,
+    announce_cap: cfg.transport.announce_cap, announce_rate_target: cfg.transport.announce_rate_target,
+    announce_rate_grace: cfg.transport.announce_rate_grace, announce_rate_penalty: cfg.transport.announce_rate_penalty });
   if (cfg.transport.enabled && !cfg.transport.online) setMsg("transportMsg", "Transport is enabled but did not start — check the console.", "bad");
   if (!cfg.wifi.wpa3_supported) {
     for (const o of $("wifiForm").elements.security.options) {
@@ -225,7 +244,9 @@ $("transportForm").addEventListener("submit", async ev => {
   ev.preventDefault();
   const f = ev.target.elements;
   try {
-    await api("/api/settings/transport", { enabled: f.enabled.value === "1", lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value });
+    await api("/api/settings/transport", { enabled: f.enabled.value === "1", lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value,
+      announce_cap: +f.announce_cap.value, announce_rate_target: +f.announce_rate_target.value,
+      announce_rate_grace: +f.announce_rate_grace.value, announce_rate_penalty: +f.announce_rate_penalty.value });
     setMsg("transportMsg", "Saved. Restarting to re-register the interfaces…", "warn");
   } catch (e) { setMsg("transportMsg", e.message, "bad"); }
 });
@@ -237,6 +258,17 @@ $("adminForm").addEventListener("submit", async ev => {
     setMsg("adminMsg", "Changed. Reload and sign in with the new password.", "ok");
     ev.target.reset();
   } catch (e) { setMsg("adminMsg", e.message, "bad"); }
+});
+
+$("exportBtn").addEventListener("click", () => { window.location.href = "/api/settings/export"; });
+$("importBtn").addEventListener("click", async () => {
+  const f = $("importFile").files[0];
+  if (!f) { setMsg("backupMsg", "Choose a settings JSON file first.", "bad"); return; }
+  try {
+    const body = JSON.parse(await f.text());
+    await api("/api/settings/import", body);
+    setMsg("backupMsg", "Imported. Restarting…", "warn");
+  } catch (e) { setMsg("backupMsg", e.message, "bad"); }
 });
 
 $("resetBtn").addEventListener("click", async () => {

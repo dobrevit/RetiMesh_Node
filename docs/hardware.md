@@ -34,7 +34,8 @@ persistence and the propagation-node store move to the card in later
 releases.
 
 ## OLED and button
-Pages: status → neighbours → radio → network (dots bottom-right). Short press:
+Pages: status → neighbours → transport (interfaces, modes, traffic, path
+count) → radio → network (dots bottom-right). Short press:
 next page (wakes the panel first if asleep); long press (1.5 s): blank/wake.
 Panel sleeps after 60 s without a press; page returns to status after 30 s.
 

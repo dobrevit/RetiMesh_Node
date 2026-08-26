@@ -9,7 +9,7 @@ require HTTP Basic Auth (user `admin`).
   "firmware": "RetiMesh Node", "version": "v0.0.3",
   "ssid": "retimesh-8249CC", "security": "open", "display": true,
   "identity": "69dd5082…", "destination": "8836929b…",
-  "uptime_s": 1234, "heap_free": 180000, "psram_free": 2000000,
+  "uptime_s": 1234, "heap_free": 180000, "heap_min_free": 178000, "psram_free": 2000000,
   "radio": { "online": true, "model": "SX1276", "freq_mhz": 868.1, "bw_khz": 125,
              "sf": 8, "cr": 5, "tx_dbm": 7, "sync_word": 18, "preamble": 18,
              "announce_interval": 600, "beacon_interval": 0, "callsign": "retimesh-8249CC",
@@ -37,7 +37,9 @@ require HTTP Basic Auth (user `admin`).
 - `GET /api/settings` → `{ radio, wifi, transport, admin }` (password never returned; `has_password`, `default_password` flags)
 - `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden}` → saves, restarts (`"restart":true`)
-- `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode}` (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary) → saves, restarts
+- `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty}` (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
+- `GET /api/settings/export` → downloadable JSON of all settings (no identity keys)
+- `POST /api/settings/import` (a settings export; sections optional) → applies, restarts
 - `POST /api/settings/admin` `{password}`
 - `POST /api/settings/reset` → factory defaults, restarts (identity kept)
 - `POST /api/settings/sd/format` `{"confirm":"FORMAT"}` → erases the SD card and creates one FAT32 volume; poll `sd.state`/`sd.last_format` in `/api/status` (409 if no card or already formatting)

@@ -37,12 +37,19 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 | Transport | enabled | disabled = plain bridge (no routing, no announces re-broadcast) |
 | LoRa interface mode | `full` | `full`, `gateway`, `access_point`, `roaming`, `boundary` |
 | Wi-Fi clients mode | `access_point` | applied to every TCP client interface |
+| Announce cap | 2 % | share of each interface's bandwidth announces may use (rnsd `announce_cap`) |
+| Announce rate target / grace / penalty | 0 / 0 / 0 | throttle destinations announcing too often (rnsd `announce_rate_*`); 0 = off |
 
 See [reticulum.md](reticulum.md#interface-modes) for what the modes do.
 
 ## Admin
 Password 4–32 chars (HTTP Basic Auth, user `admin`). *Factory reset* clears
 settings but keeps the identity keys.
+
+## Backup & provisioning
+*Download settings (JSON)* exports radio, Wi-Fi (with password), transport
+and admin settings — never the identity keys. *Import & restart* applies such
+a file (sections optional) — clone a configuration onto other nodes.
 
 ## Build flags (platformio.ini / `-D`)
 | Flag | Default | Purpose |

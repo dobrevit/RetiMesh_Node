@@ -286,6 +286,7 @@ struct NodeStats {
   volatile uint32_t beaconsRx     = 0;
   volatile uint32_t announcesTx   = 0;
   volatile uint32_t announcesRx   = 0;    // verified announces heard (any side)
+  volatile uint32_t heapMinFree   = 0;    // lowest free heap seen (soak monitoring)
   volatile float    lastRssi      = 0.0f;   // dBm, last LoRa RX
   volatile float    lastSnr       = 0.0f;   // dB,  last LoRa RX
   volatile uint32_t loraRxPackets = 0;      // reassembled RNS packets
