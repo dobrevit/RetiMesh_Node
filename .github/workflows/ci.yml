@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [t3s3, esp32s3-qspi]
+        env: [t3s3, esp32s3-qspi, tbeam]
     steps:
       - uses: actions/checkout@v7
       - id: ver

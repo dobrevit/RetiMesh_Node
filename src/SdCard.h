@@ -29,6 +29,9 @@
 //
 //  Runs on its own SPI bus (HSPI) — it never contends with the radio.
 //
+//  Boards without a slot (HAS_SD 0) never call begin(), so every accessor
+//  answers "no card" rather than touching a mutex that was never created.
+//
 //  begin() mounts synchronously so that whoever boots next (the Reticulum
 //  transport, which may want to keep its store here) sees the final state.
 // ============================================================================

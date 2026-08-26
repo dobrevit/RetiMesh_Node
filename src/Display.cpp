@@ -331,9 +331,15 @@ void Display::paintNetwork() {
            (unsigned)g_stats.tcpClients);                                                  _oled.setCursor(0, 32); _oled.print(line);
   _oled.setCursor(0, 42); _oled.print("dest ");
   _oled.print(String(nodeIdentity.destHex()).substring(0, 16));
+#if HAS_SD
   SdCard::Info si = sdCard.info();
   if (si.state == SdCard::State::Absent) snprintf(line, sizeof(line), "SD: none");
   else snprintf(line, sizeof(line), "SD: %.0fG %s", si.cardBytes / 1e9, SdCard::stateName(si.state));
+#else
+  Power::Battery bat = Power::battery();
+  if (bat.present) snprintf(line, sizeof(line), "batt %.2fV %u%%%s", (double)bat.volts, bat.percent, bat.charging ? " chg" : "");
+  else             snprintf(line, sizeof(line), "USB power");
+#endif
   _oled.setCursor(0, 52); _oled.print(line);
 #endif
 }

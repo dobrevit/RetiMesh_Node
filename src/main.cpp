@@ -65,6 +65,7 @@
 #include "SdCard.h"
 #include "AutoInterface.h"
 #include "Power.h"
+#include "Pmu.h"
 
 NodeStats g_stats;
 
@@ -91,7 +92,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);                              // let the USB CDC host attach
-  log_i("%s %s booting (IDF %s)", FW_NAME, FW_VERSION, esp_get_idf_version());
+  log_i("%s %s on %s (IDF %s)", FW_NAME, FW_VERSION, BOARD_NAME, esp_get_idf_version());
 
   // Filesystem first — the web app and the bulletin board live here.
   if (!LittleFS.begin(true)) {
@@ -99,6 +100,12 @@ void setup() {
   }
 
   settings.load();                         // NVS: radio channel, AP, admin
+  #if HAS_PMU
+    // Before anything touches SPI or I2C: on boards with a power-management
+    // chip the transceiver and display rails come up off, so probing the
+    // radio first would simply find nothing.
+    Pmu::begin();
+  #endif
   Power::begin();                          // profile (CPU clock, Wi-Fi sleep) + battery gauge
 
   txRing = psramRing(TX_RING_BYTES);
@@ -131,8 +138,11 @@ void setup() {
   xTaskCreatePinnedToCore(LoRaRadio::radioTask, "radio",
                           8192, &loraRadio, 5, nullptr, 1);
 
+  // 6 KB: the panel driver and the I2C stack are deep enough that 4 KB left
+  // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
+  // transaction to every network page.
   xTaskCreatePinnedToCore(Display::displayTask, "display",
-                          4096, &display, 1, nullptr, 0);
+                          6144, &display, 1, nullptr, 0);
 
   // The RNS task owns every call into microReticulum (Transport is
   // single-threaded): interface loops, forwarding, announces, persistence.

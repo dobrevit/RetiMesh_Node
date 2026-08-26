@@ -26,7 +26,9 @@
 //  LoRa and Transport timing are unaffected by the CPU clock at these
 //  rates; the radio task waits on interrupts either way.
 //
-//  Battery: the T3-S3 exposes the cell through a 100k/100k divider on
+//  Battery: boards with a power-management chip (HAS_PMU) ask it — it knows
+//  whether a cell is connected and whether it is charging. Otherwise the
+//  T3-S3 exposes the cell through a 100k/100k divider on
 //  GPIO 1. Voltage below BATTERY_MIN_V means "no battery" (USB-only bench).
 // ============================================================================
 #pragma once
@@ -45,7 +47,8 @@ const char* profileName(Profile p);
 bool profileFromName(const char* name, Profile& out);
 
 struct Battery {
-  bool  present;                    // voltage in a plausible cell range
+  bool  present;                    // a cell is connected
+  bool  charging = false;           // only a PMU can tell; false on ADC boards
   float volts;
   uint8_t percent;                  // rough LiPo curve; 0 when absent
 };
