@@ -371,9 +371,15 @@ static void refreshSnapshots() {
   // legacy in-memory container and stays empty in 0.5.x). begin()/end() are
   // non-const, hence the cast off the const accessor.
   auto& pathTable = const_cast<RNS::Persistence::NewPathTable&>(RNS::Transport::new_path_table());
-  sPathCount = pathTable.size();
+  // A stored path names the interface it was heard on. Interface hashes are
+  // derived from the name, so "LoRa" survives a restart but a Wi-Fi client's
+  // "WiFi/<ip>" does not — and neither does a peer that has since gone away.
+  // Those entries cannot be routed on, so drop them instead of carrying them
+  // (and their "Path Interface … not found" warning) forever.
+  std::vector<RNS::Bytes> stale;
   for (auto it = pathTable.begin(); it != pathTable.end(); ++it) {
     RNS::Persistence::NewPathTable::Entry& e = *it;
+    if (!e.value.receiving_interface()) { stale.push_back(e.key); continue; }
     PathInfo pi = {};
     strlcpy(pi.hash, e.key.toHex().c_str(), sizeof(pi.hash));
     pi.hops = e.value._hops;
@@ -382,6 +388,11 @@ static void refreshSnapshots() {
     p.push_back(pi);
     if (p.size() >= SNAPSHOT_MAX_PATHS) break;
   }
+  if (!stale.empty()) {
+    uint16_t dropped = RNS::Transport::remove_paths(stale);
+    log_i("dropped %u stored path(s) whose interface is gone", (unsigned)dropped);
+  }
+  sPathCount = pathTable.size();
   for (const auto& iface : RNS::Transport::get_interfaces()) {
     IfaceInfo ii = {};
     strlcpy(ii.name, iface.name().c_str(), sizeof(ii.name));
