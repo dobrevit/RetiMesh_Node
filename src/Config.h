@@ -86,7 +86,9 @@
 #define LORA_SEQ_UNSET      0xFF
 
 // ---------------------------------------------------------------------------
-// LoRa radio — SX1262 on SPI  (defaults: LilyGO T3-S3 v1.x)
+// LoRa radio on SPI (defaults: LilyGO T3-S3 v1.2/v1.3). The board exists
+// with an SX1262 (DIO1 33, BUSY 34) or an SX1276/78 (DIO0 9, DIO1 33);
+// LoRaRadio::begin() probes both, so the same build serves either.
 // ---------------------------------------------------------------------------
 #ifndef PIN_LORA_SCK
   #define PIN_LORA_SCK      5
@@ -108,6 +110,9 @@
 #endif
 #ifndef PIN_LORA_DIO1
   #define PIN_LORA_DIO1     33
+#endif
+#ifndef PIN_LORA_DIO0
+  #define PIN_LORA_DIO0     9               // SX127x only
 #endif
 
 // PHY parameters. These MUST match every other node on the channel
@@ -171,6 +176,7 @@
 // ---------------------------------------------------------------------------
 struct NodeStats {
   volatile bool     radioOnline   = false;
+  const char*       radioModel    = "none"; // "SX1262" / "SX1276" once probed
   volatile float    lastRssi      = 0.0f;   // dBm, last LoRa RX
   volatile float    lastSnr       = 0.0f;   // dB,  last LoRa RX
   volatile uint32_t loraRxPackets = 0;      // reassembled RNS packets

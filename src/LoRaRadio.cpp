@@ -26,10 +26,11 @@ LoRaRadio loraRadio;
 TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
 
 // ---------------------------------------------------------------------------
-// ISR: DIO1 rises on RxDone / TxDone. Nothing is decided here — the task
-// owns the radio and knows (via its own state) which operation finished.
+// ISR: the radio's IRQ line (DIO1 on SX126x, DIO0 on SX127x) rises on
+// RxDone / TxDone. Nothing is decided here — the task owns the radio and
+// knows (via its own state) which operation finished.
 // ---------------------------------------------------------------------------
-void IRAM_ATTR LoRaRadio::onDio1() {
+void IRAM_ATTR LoRaRadio::onRadioIrq() {
   BaseType_t higherPrioWoken = pdFALSE;
   if (s_taskHandle) vTaskNotifyGiveFromISR(s_taskHandle, &higherPrioWoken);
   portYIELD_FROM_ISR(higherPrioWoken);
@@ -41,27 +42,63 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing) {
   _rxRing = rxRing;
 
   _spi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
-  _radio = new SX1262(new Module(PIN_LORA_CS, PIN_LORA_DIO1,
-                                 PIN_LORA_RST, PIN_LORA_BUSY, _spi));
 
-  int16_t state = _radio->begin(RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR,
-                                RF_SYNCWORD, RF_TX_DBM, RF_PREAMBLE_SYMS,
-                                RF_TCXO_VOLTAGE, false);
-  if (state != RADIOLIB_ERR_NONE) {
-    log_e("SX1262 init failed, code %d (check TCXO voltage / wiring)", state);
+  // Probe order matters: the SX1262 check waits on BUSY (GPIO 34), which
+  // on an SX127x board is DIO2 — it just times out, harmlessly. The SX127x
+  // probe reads the silicon version register and is unambiguous.
+  if (!probeSX1262() && !probeSX127x()) {
+    log_e("No LoRa transceiver found (tried SX1262 on DIO1=%d/BUSY=%d and "
+          "SX127x on DIO0=%d) — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY,
+          PIN_LORA_DIO0);
     return false;
   }
 
-  #if RF_DIO2_AS_SWITCH
-    _radio->setDio2AsRfSwitch(true);
-  #endif
-  _radio->setCurrentLimit(140.0);
-  _radio->setCRC(true);
-  _radio->setDio1Action(onDio1);
-
+  _radio->setPacketReceivedAction(onRadioIrq);   // DIO1 / DIO0 as appropriate
   _online = true;
-  log_i("SX1262 online: %.3f MHz, BW %.1f kHz, SF%d, CR 4/%d, %d dBm",
-        RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_TX_DBM);
+  g_stats.radioModel = _modelName;
+  log_i("%s online: %.3f MHz, BW %.1f kHz, SF%d, CR 4/%d, %d dBm",
+        _modelName, RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_TX_DBM);
+  return true;
+}
+
+bool LoRaRadio::probeSX1262() {
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
+  SX1262* sx  = new SX1262(mod);
+  int16_t state = sx->begin(RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_SYNCWORD,
+                            RF_TX_DBM, RF_PREAMBLE_SYMS, RF_TCXO_VOLTAGE, false);
+  if (state != RADIOLIB_ERR_NONE) {
+    log_w("SX1262 not found (code %d)", state);
+    delete sx; delete mod;
+    return false;
+  }
+  #if RF_DIO2_AS_SWITCH
+    sx->setDio2AsRfSwitch(true);
+  #endif
+  sx->setCurrentLimit(140.0);
+  sx->setCRC(true);
+  _radio = sx;
+  _modelName = "SX1262";
+  return true;
+}
+
+bool LoRaRadio::probeSX127x() {
+  // SX1276 and SX1278 share silicon version 0x12 and this driver; the
+  // class only differs in the accepted frequency range, and SX1276 spans
+  // both sub-GHz bands.
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO0, PIN_LORA_RST, PIN_LORA_DIO1, _spi);
+  SX1276* sx  = new SX1276(mod);
+  int16_t state = sx->begin(RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_SYNCWORD,
+                            RF_TX_DBM, RF_PREAMBLE_SYMS, 0);
+  if (state != RADIOLIB_ERR_NONE) {
+    log_w("SX127x not found (code %d)", state);
+    delete sx; delete mod;
+    return false;
+  }
+  sx->setCurrentLimit(140);
+  sx->setCRC(true);
+  _radio = sx;
+  _modelName = "SX1276";
+  _isSX127x = true;
   return true;
 }
 

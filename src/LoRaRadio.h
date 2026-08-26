@@ -17,7 +17,14 @@
 // with RetiMesh Node. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================================
-//  LoRaRadio.h — SX1262 driver (RadioLib) + RNode-compatible RF framing
+//  LoRaRadio.h — LoRa driver (RadioLib) + RNode-compatible RF framing
+//
+//  The LilyGO T3-S3 ships with either an SX1262 or an SX1276/SX1278, on
+//  partly different pins. begin() probes for the SX1262 first (DIO1 33,
+//  BUSY 34) and then for the SX127x (DIO0 9), so one build fits every
+//  variant. After that everything runs through RadioLib's PhysicalLayer
+//  interface — RxDone/TxDone both arrive on the chip's primary IRQ line
+//  (DIO1 on SX126x, DIO0 on SX127x), which is what the task waits on.
 //
 //  Packet flow, radio side:
 //
@@ -57,6 +64,7 @@ public:
   bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing);
 
   bool online() const { return _online; }
+  const char* modelName() const { return _modelName; }
 
   // FreeRTOS entry point — created pinned to core 1 from main.cpp.
   static void radioTask(void* self);
@@ -69,9 +77,13 @@ private:
   void waitClearChannel();               // simplified CSMA (CAD + backoff)
   bool sendFrame(const uint8_t* frame, size_t len);
 
-  static void IRAM_ATTR onDio1();        // just notifies radioTask
+  bool probeSX1262();
+  bool probeSX127x();
 
-  SX1262*      _radio  = nullptr;
+  static void IRAM_ATTR onRadioIrq();    // just notifies radioTask
+
+  PhysicalLayer* _radio = nullptr;       // common runtime surface
+  const char*  _modelName = "none";
   SPIClass     _spi{FSPI};
   RingbufHandle_t _txRing = nullptr;
   RingbufHandle_t _rxRing = nullptr;
@@ -84,6 +96,7 @@ private:
   uint8_t  _rxSeq  = LORA_SEQ_UNSET;
 
   uint8_t  _txFrame[LORA_FRAME_MAX];
+  bool     _isSX127x = false;
 
   static TaskHandle_t s_taskHandle;      // notification target for the ISR
 };

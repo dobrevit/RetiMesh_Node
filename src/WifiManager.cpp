@@ -126,6 +126,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
 
   JsonObject radio    = doc["radio"].to<JsonObject>();
   radio["online"]     = g_stats.radioOnline;
+  radio["model"]      = g_stats.radioModel;
   radio["freq_mhz"]   = RF_FREQ_MHZ;
   radio["bw_khz"]     = RF_BW_KHZ;
   radio["sf"]         = RF_SF;
