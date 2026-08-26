@@ -60,6 +60,15 @@ struct WifiSettings {
   bool       hidden       = false;
 };
 
+// Interface modes use rnsd's vocabulary: 1 full, 2 gateway, 3 access_point,
+// 4 roaming, 5 boundary. Changing these needs a restart (interfaces are
+// registered with Transport at boot), same as editing rnsd's config.
+struct TransportSettings {
+  bool    enabled  = true;
+  uint8_t loraMode = 1;                 // full: the LoRa channel is the mesh
+  uint8_t wifiMode = 3;                 // access_point: phones come and go
+};
+
 struct AdminSettings {
   char password[33] = ADMIN_PASSWORD_DEFAULT;
 };
@@ -71,10 +80,12 @@ public:
   const RadioSettings& radio() const { return _radio; }
   const WifiSettings&  wifi()  const { return _wifi;  }
   const AdminSettings& admin() const { return _admin; }
+  const TransportSettings& transport() const { return _transport; }
 
   bool saveRadio(const RadioSettings& r);
   bool saveWifi(const WifiSettings& w);
   bool saveAdminPassword(const char* password);
+  bool saveTransport(const TransportSettings& t);
   void factoryReset();                    // wipes the namespace, restores defaults
 
   // Valid LoRa bandwidths shared by SX126x and SX127x, in kHz.
@@ -87,6 +98,7 @@ private:
   RadioSettings _radio;
   WifiSettings  _wifi;
   AdminSettings _admin;
+  TransportSettings _transport;
 };
 
 extern Settings settings;

@@ -17,7 +17,7 @@
 // with RetiMesh Node. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================================
-//  RetiTransportServer.h — raw Reticulum transport on TCP port 4242
+//  RetiTransportServer.h — Reticulum clients over TCP port 4242
 //
 //  Speaks the exact wire format of RNS.Interfaces.TCPInterface (HDLC
 //  framing, see HDLC.h), so any stock Reticulum client — Sideband on a
@@ -29,25 +29,13 @@
 //        target_host = 10.42.0.1
 //        target_port = 4242
 //
-//  The node is a *transparent bridge*, not an RNS Transport instance: it
-//  never parses, decrypts or routes packet contents. End-to-end encryption
-//  stays entirely between the connected peers. Routing intelligence
-//  (announces, path requests) lives in the RNS stacks of the clients.
+//  This class only moves bytes. Every client is registered with the
+//  Reticulum Transport as its own interface (RnsTransport.h), which
+//  decides what gets forwarded where — exactly like rnsd's
+//  TCPServerInterface spawning one interface per connection.
 //
-//  Packet flow:
-//
-//    TCP client A ──HDLC──► onData (AsyncTCP task, core 0)
-//                              │ deframe
-//                              ├──► TX ring buffer ──► radioTask ──► LoRa RF
-//                              └──► other TCP clients (local hub relay)
-//
-//    LoRa RF ──► radioTask ──► RX ring buffer ──► bridgeTask (core 1)
-//                                                    │ HDLC frame
-//                                                    └──► every TCP client
-//
-//  LoRa-received packets are never re-transmitted on LoRa, and client
-//  packets are never echoed back to their sender, so the bridge cannot
-//  create RF loops.
+//    client -> onData -> HDLC deframe -> tcpInRing [id | packet] -> RNS task
+//    RNS task -> sendTo(id, packet) -> HDLC frame -> client socket
 // ============================================================================
 #pragma once
 
@@ -62,18 +50,23 @@
 
 class RetiTransportServer {
 public:
-  // Starts listening on 0.0.0.0:RNS_TCP_PORT. annRing receives copies of
-  // announces sent by Wi-Fi clients, parsed by the bridge task.
-  void begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t annRing);
+  // Starts listening on 0.0.0.0:RNS_TCP_PORT. Deframed packets go to
+  // tcpInRing, prefixed with the client id (RnsTransport::TcpItemHeader).
+  void begin(RingbufHandle_t tcpInRing);
 
   size_t clientCount();
 
-  // FreeRTOS entry point — created pinned to core 1 from main.cpp.
-  // Drains the RX ring (LoRa -> TCP direction) and broadcasts.
-  static void bridgeTask(void* self);
+  // Called from the RNS task: frames and writes one packet to one client.
+  bool sendTo(uint32_t clientId, const uint8_t* packet, size_t len);
+
+  // Verifies an announce (hash chain + Ed25519) and records the sender in
+  // the neighbour table. Called by the RNS interfaces for metadata only;
+  // Transport does its own validation.
+  static void noteAnnounce(const uint8_t* raw, size_t len, bool viaWifi);
 
 private:
   struct ClientCtx {
+    uint32_t       id;
     AsyncClient*   client;
     HDLC::Deframer deframer;             // per-connection stream state
   };
@@ -82,20 +75,11 @@ private:
   void onData(ClientCtx* ctx, const uint8_t* data, size_t len);
   void onDisconnect(ClientCtx* ctx);
 
-  static void noteAnnounce(const uint8_t* raw, size_t len, bool viaWifi);
-
-public:
-  // HDLC-frames `packet` and writes it to every connected client except
-  // `exclude` (nullptr = all). Serialized by _lock; safe from any task.
-  void broadcast(const uint8_t* packet, size_t len, ClientCtx* exclude);
-private:
-
   AsyncServer*            _server = nullptr;
-  RingbufHandle_t         _txRing = nullptr;   // TCP  -> LoRa
-  RingbufHandle_t         _rxRing = nullptr;   // LoRa -> TCP
-  RingbufHandle_t         _annRing = nullptr;  // TCP announces -> bridge task (parse only)
+  RingbufHandle_t         _tcpInRing = nullptr;
   std::vector<ClientCtx*> _clients;
   SemaphoreHandle_t       _lock   = nullptr;   // guards _clients + _frameBuf
+  uint32_t                _nextId = 1;
 
   // Shared framing scratch: worst case 2 + 2*508 bytes.
   uint8_t _frameBuf[HDLC::frameCapacity(2 * LORA_FRAG_PAYLOAD)];

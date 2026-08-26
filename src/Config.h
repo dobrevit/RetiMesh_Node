@@ -213,7 +213,7 @@
 #endif
 #define ANNOUNCE_BOOT_DELAY_MS 6000
 #define ANNOUNCE_MAX_LEN    256
-#define ANN_RING_BYTES      4096          // announces from TCP clients -> bridge task
+#define TCP_IN_RING_BYTES   8192          // TCP clients -> Transport
 #define BEACON_MAX_LEN      64            // printable payload bytes
 // RetiMesh beacons are valid Reticulum packets: a broadcast to the PLAIN
 // destination "retimesh.beacon" (hash = RNS.Destination.hash(None,
@@ -255,6 +255,7 @@
 // ---------------------------------------------------------------------------
 struct NodeStats {
   volatile bool     radioOnline   = false;
+  volatile bool     transportOnline = false;
   const char*       radioModel    = "none"; // "SX1262" / "SX1276" once probed
   volatile bool     displayPresent = false;
   volatile int16_t  radioApplyError = 0;   // last RadioLib error applying settings

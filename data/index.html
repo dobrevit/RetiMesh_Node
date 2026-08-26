@@ -53,6 +53,9 @@
 
   <div class="grid" id="stats"></div>
 
+  <h2>Reticulum transport</h2>
+  <div id="transport"><div class="post"><span class="t">Loading&hellip;</span></div></div>
+
   <h2>Neighbours on the channel</h2>
   <div id="neighbors"><div class="post"><span class="t">Nothing heard yet.</span></div></div>
 
@@ -105,6 +108,20 @@ async function refreshStatus() {
       card("LoRa RX / TX", s.radio.rx_packets + " / " + s.radio.tx_packets),
       card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB")
     );
+    const tr = $("transport"); tr.replaceChildren();
+    if (s.transport) {
+      const d = document.createElement("div"); d.className = "post";
+      const a = document.createElement("div"); a.className = "a";
+      a.textContent = s.transport.enabled ? (s.transport.online ? "Transport node · " + s.transport.path_count + " known path" + (s.transport.path_count === 1 ? "" : "s") : "Transport enabled but not running") : "Transport disabled (bridge only)";
+      const t = document.createElement("div"); t.className = "t";
+      t.textContent = (s.transport.interfaces || []).map(i => i.name + " [" + i.mode + "] ↓" + i.rx_bytes + " ↑" + i.tx_bytes + " B").join("\n") || "no interfaces";
+      d.append(a, t); tr.append(d);
+      for (const p of (s.transport.paths || [])) {
+        const e = document.createElement("div"); e.className = "post";
+        e.textContent = "<" + p.hash.slice(0, 12) + "…> " + p.hops + " hop" + (p.hops === 1 ? "" : "s") + " via " + p.via + " · " + fmtAge(p.age_s) + " ago";
+        tr.append(e);
+      }
+    }
     const nb = $("neighbors");
     nb.replaceChildren();
     if (!s.neighbors || !s.neighbors.length) {

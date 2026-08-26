@@ -74,6 +74,9 @@ void Settings::load() {
   LOAD(_wifi.hidden,      "w_hid",  getBool ("w_hid"));
 
   if (_prefs.isKey("a_pass")) _prefs.getString("a_pass", _admin.password, sizeof(_admin.password));
+  LOAD(_transport.enabled,  "t_en",    getBool ("t_en"));
+  LOAD(_transport.loraMode, "t_lmode", getUChar("t_lmode"));
+  LOAD(_transport.wifiMode, "t_wmode", getUChar("t_wmode"));
   if (_admin.password[0] == '\0') strlcpy(_admin.password, ADMIN_PASSWORD_DEFAULT, sizeof(_admin.password));
   #undef LOAD
 
@@ -118,10 +121,20 @@ bool Settings::saveAdminPassword(const char* password) {
   return ok;
 }
 
+bool Settings::saveTransport(const TransportSettings& t) {
+  _transport = t;
+  bool ok = _prefs.putBool ("t_en",    t.enabled)  > 0
+         && _prefs.putUChar("t_lmode", t.loraMode) > 0
+         && _prefs.putUChar("t_wmode", t.wifiMode) > 0;
+  if (!ok) log_e("NVS write failed (transport)");
+  return ok;
+}
+
 void Settings::factoryReset() {
   _prefs.clear();
   _radio = RadioSettings();
   _wifi  = WifiSettings();
   _admin = AdminSettings();
+  _transport = TransportSettings();
   log_w("settings: factory reset");
 }

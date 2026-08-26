@@ -21,16 +21,15 @@
 // ============================================================================
 #include "RetiTransportServer.h"
 #include "RnsAnnounce.h"
+#include "RnsTransport.h"
 #include "Neighbors.h"
 
 RetiTransportServer transportServer;
 
 // ---------------------------------------------------------------------------
-void RetiTransportServer::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t annRing) {
-  _txRing = txRing;
-  _rxRing = rxRing;
-  _annRing = annRing;
-  _lock   = xSemaphoreCreateMutex();
+void RetiTransportServer::begin(RingbufHandle_t tcpInRing) {
+  _tcpInRing = tcpInRing;
+  _lock = xSemaphoreCreateMutex();
 
   _server = new AsyncServer(RNS_TCP_PORT);
   _server->setNoDelay(true);
@@ -62,7 +61,7 @@ void RetiTransportServer::onClient(AsyncClient* client) {
     return;
   }
 
-  auto* ctx = new ClientCtx{ client, {} };
+  auto* ctx = new ClientCtx{ _nextId++, client, {} };
   client->setNoDelay(true);              // packets are latency-sensitive
   client->setKeepAlive(10000, 3);        // detect vanished phones
 
@@ -84,8 +83,10 @@ void RetiTransportServer::onClient(AsyncClient* client) {
   g_stats.tcpClients = _clients.size();
   xSemaphoreGive(_lock);
 
-  log_i("Reticulum peer connected: %s (%d total)",
-        client->remoteIP().toString().c_str(), (int)g_stats.tcpClients);
+  String ip = client->remoteIP().toString();
+  RnsTransport::clientConnected(ctx->id, ip.c_str());
+  log_i("Reticulum peer connected: %s (#%lu, %d total)", ip.c_str(),
+        (unsigned long)ctx->id, (int)g_stats.tcpClients);
 }
 
 void RetiTransportServer::onDisconnect(ClientCtx* ctx) {
@@ -96,6 +97,7 @@ void RetiTransportServer::onDisconnect(ClientCtx* ctx) {
   g_stats.tcpClients = _clients.size();
   xSemaphoreGive(_lock);
 
+  RnsTransport::clientDisconnected(ctx->id);
   AsyncClient* client = ctx->client;
   delete ctx;
   delete client;                         // server-accepted clients are ours
@@ -103,86 +105,54 @@ void RetiTransportServer::onDisconnect(ClientCtx* ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// Inbound: TCP bytes -> HDLC deframer -> ring buffer + local relay.
-// Runs on the AsyncTCP task (core 0); it only copies bytes, the radio
-// work happens on core 1.
+// Inbound: TCP bytes -> HDLC deframer -> [client id | packet] -> RNS task.
+// Runs on the AsyncTCP task (core 0); it only copies bytes.
 // ---------------------------------------------------------------------------
 void RetiTransportServer::onData(ClientCtx* ctx, const uint8_t* data, size_t len) {
   for (size_t i = 0; i < len; i++) {
     ctx->deframer.feed(data[i], [this, ctx](const uint8_t* pkt, size_t pktLen) {
       g_stats.tcpRxPackets++;
-
-      // (a) Queue for RF. If the air is saturated and the ring is full,
-      //     drop rather than back-pressure the socket — Reticulum links
-      //     tolerate loss, a stalled AsyncTCP task takes down everything.
-      if (xRingbufferSend(_txRing, pkt, pktLen, pdMS_TO_TICKS(20)) != pdTRUE) {
-        log_w("TX ring full, dropping %u-byte packet", (unsigned)pktLen);
-      }
-
-      // (b) Local hub: relay to the other Wi-Fi clients so two phones on
-      //     this AP can reach each other without a round-trip over RF.
-      //     Never echoed to the sender.
-      broadcast(pkt, pktLen, ctx);
-
-      // (c) Announces from Wi-Fi peers feed the neighbour list; signature
-      //     checks are slow, so the bridge task does them, not this one.
-      if (Rns::isAnnounce(pkt, pktLen)) xRingbufferSend(_annRing, pkt, pktLen, 0);
+      uint8_t item[sizeof(RnsTransport::TcpItemHeader) + RNS_MTU];
+      RnsTransport::TcpItemHeader h{ ctx->id };
+      memcpy(item, &h, sizeof(h));
+      memcpy(item + sizeof(h), pkt, pktLen);
+      // Drop rather than back-pressure the socket: a stalled AsyncTCP task
+      // takes the web server down with it, and Reticulum tolerates loss.
+      if (xRingbufferSend(_tcpInRing, item, sizeof(h) + pktLen, pdMS_TO_TICKS(20)) != pdTRUE)
+        log_w("TCP-in ring full, dropping %u-byte packet", (unsigned)pktLen);
     });
   }
 }
 
 // ---------------------------------------------------------------------------
-// Outbound fan-out. Called from the AsyncTCP task (client relay) and the
-// bridge task below (LoRa RX); _lock serializes both the client list and
-// the shared framing scratch buffer.
+// Outbound: one packet to one client. Called from the RNS task; _lock
+// serialises the client list and the framing scratch buffer.
 // ---------------------------------------------------------------------------
-void RetiTransportServer::broadcast(const uint8_t* packet, size_t len,
-                                    ClientCtx* exclude) {
+bool RetiTransportServer::sendTo(uint32_t clientId, const uint8_t* packet, size_t len) {
+  bool ok = false;
   xSemaphoreTake(_lock, portMAX_DELAY);
-
   size_t frameLen = HDLC::frame(packet, len, _frameBuf, sizeof(_frameBuf));
   if (frameLen > 0) {
     for (auto* ctx : _clients) {
-      if (ctx == exclude) continue;
+      if (ctx->id != clientId) continue;
       AsyncClient* c = ctx->client;
       // Slow-consumer policy: if the socket's window can't take the whole
       // frame right now, drop it for that client instead of blocking.
       if (c->connected() && c->canSend() && c->space() >= frameLen) {
         c->write((const char*)_frameBuf, frameLen);
+        ok = true;
       }
+      break;
     }
   }
-
   xSemaphoreGive(_lock);
+  return ok;
 }
 
 // ---------------------------------------------------------------------------
-// Bridge task — pinned to CORE 1 by main.cpp. Completes the LoRa -> TCP
-// path: blocks on the RX ring buffer that radioTask fills with reassembled
-// RNS packets, and fans each one out to all connected clients.
+// Neighbour bookkeeping from announces (any interface). Our own announces
+// coming back are ignored.
 // ---------------------------------------------------------------------------
-void RetiTransportServer::bridgeTask(void* selfPtr) {
-  auto* self = static_cast<RetiTransportServer*>(selfPtr);
-  for (;;) {
-    size_t itemSize = 0;
-    uint8_t* item = (uint8_t*)xRingbufferReceive(self->_rxRing, &itemSize,
-                                                 pdMS_TO_TICKS(50));
-    if (item != nullptr) {
-      self->broadcast(item, itemSize, nullptr);       // forward first, parse after
-      if (Rns::isAnnounce(item, itemSize)) noteAnnounce(item, itemSize, false);
-      vRingbufferReturnItem(self->_rxRing, item);
-    }
-
-    uint8_t* ann = (uint8_t*)xRingbufferReceive(self->_annRing, &itemSize, 0);
-    if (ann != nullptr) {
-      noteAnnounce(ann, itemSize, true);
-      vRingbufferReturnItem(self->_annRing, ann);
-    }
-  }
-}
-
-// Verifies an announce (hash chain + Ed25519 signature) and records the
-// sender as a neighbour. Our own announces coming back are ignored.
 void RetiTransportServer::noteAnnounce(const uint8_t* raw, size_t len, bool viaWifi) {
   Rns::Announce a;
   if (!Rns::parseAnnounce(raw, len, a)) {
@@ -197,8 +167,7 @@ void RetiTransportServer::noteAnnounce(const uint8_t* raw, size_t len, bool viaW
   strlcpy(n.aspect, aspect ? aspect : "", sizeof(n.aspect));
   Rns::displayName(a, n.name, sizeof(n.name));
   if (aspect && strcmp(aspect, "retimesh.node") == 0) {
-    // app_data is "<callsign> <version>"
-    char* sp = strchr(n.name, ' ');
+    char* sp = strchr(n.name, ' ');        // app_data is "<callsign> <version>"
     if (sp) { strlcpy(n.version, sp + 1, sizeof(n.version)); *sp = '\0'; }
   }
   n.kind = NeighborKind::Announce;

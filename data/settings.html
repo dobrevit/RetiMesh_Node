@@ -92,6 +92,25 @@
     <div class="note" id="wifiNote"></div>
   </form>
 
+  <h2>Reticulum transport</h2>
+  <form class="card" id="transportForm">
+    <div class="note">The node routes for the mesh like <code>rnsd</code> with <code>enable_transport</code>. Each interface has its own
+      mode &mdash; the same vocabulary as rnsd: <b>full</b> propagates everything, <b>gateway</b>/<b>boundary</b> limit what crosses
+      network edges, <b>access point</b> sends no announces to clients (they use path requests instead, which keeps phones off the
+      flood), <b>roaming</b> for mobile links.</div>
+    <div class="row">
+      <div><label>Transport</label>
+        <select name="enabled"><option value="1">Enabled (route for others)</option><option value="0">Disabled (bridge only)</option></select></div>
+      <div></div>
+      <div><label>LoRa interface mode</label>
+        <select name="lora_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
+      <div><label>Wi-Fi clients mode</label>
+        <select name="wifi_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
+    </div>
+    <button type="submit">Save &amp; restart</button>
+    <div class="msg" id="transportMsg"></div>
+  </form>
+
   <h2>Admin password</h2>
   <form class="card" id="adminForm">
     <label>New password (4&ndash;32)</label><input name="password" type="password" minlength="4" maxlength="32" autocomplete="new-password" required>
@@ -153,6 +172,8 @@ async function load() {
   $("rnsSnippet").textContent = rnsSnippet(r);
 
   fill($("wifiForm"), cfg.wifi);
+  fill($("transportForm"), { enabled: cfg.transport.enabled ? "1" : "0", lora_mode: cfg.transport.lora_mode, wifi_mode: cfg.transport.wifi_mode });
+  if (cfg.transport.enabled && !cfg.transport.online) setMsg("transportMsg", "Transport is enabled but did not start — check the console.", "bad");
   if (!cfg.wifi.wpa3_supported) {
     for (const o of $("wifiForm").elements.security.options) {
       if (o.value.includes("wpa3")) { o.disabled = true; o.textContent += " — needs an ESP-IDF 5 build"; }
@@ -189,6 +210,15 @@ $("wifiForm").addEventListener("submit", async ev => {
     const res = await api("/api/settings/wifi", body);
     setMsg("wifiMsg", "Saved. Restarting — join \"" + res.ssid + "\" (" + res.security + ") and open http://10.42.0.1/", "warn");
   } catch (e) { setMsg("wifiMsg", e.message, "bad"); }
+});
+
+$("transportForm").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const f = ev.target.elements;
+  try {
+    await api("/api/settings/transport", { enabled: f.enabled.value === "1", lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value });
+    setMsg("transportMsg", "Saved. Restarting to re-register the interfaces…", "warn");
+  } catch (e) { setMsg("transportMsg", e.message, "bad"); }
 });
 
 $("adminForm").addEventListener("submit", async ev => {

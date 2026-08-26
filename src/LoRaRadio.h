@@ -101,7 +101,6 @@ private:
   void waitClearChannel();               // simplified CSMA (CAD + backoff)
   bool sendFrame(const uint8_t* frame, size_t len);
 
-  void sendAnnounce();
   bool isRetiMeshBeacon(const uint8_t* p, size_t len) const;
   bool isStationId(const uint8_t* p, size_t len) const;
   void handleBeacon(const uint8_t* p, size_t len);
@@ -139,7 +138,6 @@ private:
   uint32_t _lastTxMs  = 0;               // any transmission (packet or beacon)
   uint32_t _helloAtMs = 0;               // boot probe due time (0 = done)
   uint32_t _replyAtMs = 0;               // pending reply to someone's hello
-  uint32_t _announceAtMs = 0;            // next announce due time (0 = never)
 
   static TaskHandle_t s_taskHandle;      // notification target for the ISR
 };

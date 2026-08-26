@@ -30,7 +30,7 @@
 //  └────────────────────────────────────────────────────────────┘
 //  ┌────────────────────────── CORE 1 ──────────────────────────┐
 //  │  radioTask   (prio 5)   SX1262 IRQs, CSMA, fragmentation   │
-//  │  bridgeTask  (prio 3)   RX ring -> HDLC -> TCP broadcast   │
+//  │  rns task    (prio 3)   Reticulum Transport + interfaces   │
 //  │  loopTask    (prio 1)   heartbeat log                      │
 //  └────────────────────────────────────────────────────────────┘
 //
@@ -38,12 +38,15 @@
 //
 //   Sideband/RNS client        this node                     LoRa channel
 //   ─────────────────────────────────────────────────────────────────────
-//   TCP :4242 ──HDLC──► AsyncTCP task ──► txRing ──► radioTask ──► RF
-//   TCP :4242 ◄──HDLC── bridgeTask ◄── rxRing ◄── radioTask ◄────── RF
+//   TCP :4242 ──HDLC──► AsyncTCP task ──► tcpInRing ─┐
+//                                                     ├─► Transport (rns task)
+//   RF ──► radioTask ──► rxRing ─────────────────────┘        │
+//   TCP :4242 ◄──HDLC── sendTo() ◄─────────────────────────────┤
+//   RF ◄── radioTask ◄── txRing ◄───────────────────────────────┘
 //
 //  The rings carry raw RNS packets (one item = one packet, <= ~508 B).
-//  Nothing on this node parses packet contents — end-to-end encryption
-//  stays between the Reticulum peers.
+//  Transport routes them per Reticulum's rules and each interface's mode;
+//  packet payloads stay end-to-end encrypted between the peers.
 // ============================================================================
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -64,8 +67,8 @@ NodeStats g_stats;
 // The two directions of the bridge. NOSPLIT keeps every item (= one RNS
 // packet) contiguous, so consumers get a plain pointer + length.
 static RingbufHandle_t txRing = nullptr;   // TCP  -> LoRa
-static RingbufHandle_t rxRing = nullptr;   // LoRa -> TCP
-static RingbufHandle_t annRing = nullptr;  // announces from TCP clients -> bridge task
+static RingbufHandle_t rxRing = nullptr;   // LoRa -> Transport
+static RingbufHandle_t tcpInRing = nullptr; // TCP clients -> Transport
 
 void setup() {
   Serial.begin(115200);
@@ -81,18 +84,18 @@ void setup() {
 
   txRing = xRingbufferCreate(TX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
   rxRing = xRingbufferCreate(RX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
-  annRing = xRingbufferCreate(ANN_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
-  configASSERT(txRing && rxRing && annRing);
+  tcpInRing = xRingbufferCreate(TCP_IN_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
+  configASSERT(txRing && rxRing && tcpInRing);
 
-  nodeIdentity.begin();                    // Reticulum identity + retimesh.node destination
-  RnsTransport::begin();                   // spike: microReticulum transport core
+  nodeIdentity.begin();                    // Reticulum identity keys (NVS)
 
   // Bring up services. Radio failure is survivable: the AP + web UI stay
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   wifiManager.begin();
-  transportServer.begin(txRing, rxRing, annRing);
+  transportServer.begin(tcpInRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
+  g_stats.transportOnline = RnsTransport::begin(txRing, rxRing, tcpInRing);
 
   // ---- Task layout (see the diagram above) -------------------------------
   xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",
@@ -101,16 +104,14 @@ void setup() {
   xTaskCreatePinnedToCore(LoRaRadio::radioTask, "radio",
                           8192, &loraRadio, 5, nullptr, 1);
 
-  xTaskCreatePinnedToCore(RetiTransportServer::bridgeTask, "bridge",
-                          8192, &transportServer, 3, nullptr, 1);
-
   xTaskCreatePinnedToCore(Display::displayTask, "display",
                           4096, &display, 1, nullptr, 0);
 
-  // spike: the RNS task owns every call into microReticulum
+  // The RNS task owns every call into microReticulum (Transport is
+  // single-threaded): interface loops, forwarding, announces, persistence.
   xTaskCreatePinnedToCore([](void*) {
     for (;;) { RnsTransport::loop(); vTaskDelay(pdMS_TO_TICKS(10)); }
-  }, "rns", 12288, nullptr, 2, nullptr, 1);
+  }, "rns", 16384, nullptr, 3, nullptr, 1);
 
   log_i("RetiMesh Node up — join \"%s\", portal http://10.42.0.1, RNS TCP :%d",
         wifiManager.ssid(), RNS_TCP_PORT);

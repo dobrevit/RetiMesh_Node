@@ -23,8 +23,6 @@
 #include <esp_random.h>
 #include "Neighbors.h"
 #include "WifiManager.h"
-#include "RnsAnnounce.h"
-#include "RetiTransportServer.h"
 
 LoRaRadio loraRadio;
 TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
@@ -171,7 +169,6 @@ void LoRaRadio::taskLoop() {
   _radio->startReceive();
   _lastTxMs  = millis();
   _helloAtMs = millis() + BEACON_HELLO_DELAY_MS;
-  _announceAtMs = _active.announceInterval ? millis() + ANNOUNCE_BOOT_DELAY_MS : 0;
 
   for (;;) {
     // (0) Settings changed from the web UI? Apply between packets.
@@ -183,12 +180,9 @@ void LoRaRadio::taskLoop() {
       portEXIT_CRITICAL(&_mux);
 
       if (applySettings(s)) {
-        bool announcesTurnedOn = s.announceInterval && !_active.announceInterval;
         _active = s;
         g_stats.radioApplyError = 0;
         logActive();
-        if (announcesTurnedOn) _announceAtMs = millis() + 1000;
-        if (!s.announceInterval) _announceAtMs = 0;
       } else {
         applySettings(_active);              // roll back to what worked
       }
@@ -200,12 +194,6 @@ void LoRaRadio::taskLoop() {
     //     This doubles as the poll interval for the TX ring below.
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0) {
       handleRadioIrq();
-    }
-
-    // (1a) Announce this node's destination on boot and periodically.
-    if (_announceAtMs && (int32_t)(millis() - _announceAtMs) >= 0) {
-      sendAnnounce();
-      _announceAtMs = _active.announceInterval ? millis() + (uint32_t)_active.announceInterval * 1000UL : 0;
     }
 
     // (1b) Beacons: boot hello, pending reply, periodic id when idle.
@@ -353,21 +341,6 @@ void LoRaRadio::handleBeacon(const uint8_t* p, size_t len) {
     neighbors.seen(n);
     log_i("station id \"%s\" (%.0f dBm / %.1f dB)", n.name, g_stats.lastRssi, g_stats.lastSnr);
   }
-}
-
-// Our own Reticulum announce: on the air, and to every Wi-Fi client so
-// their RNS learns a 1-hop path to this node too.
-void LoRaRadio::sendAnnounce() {
-  char app[64];
-  int n = snprintf(app, sizeof(app), "%s %s", callsign(), FW_VERSION);
-  if (n <= 0) return;
-  uint8_t pkt[ANNOUNCE_MAX_LEN];
-  size_t len = nodeIdentity.buildAnnounce((const uint8_t*)app, (size_t)n, pkt, sizeof(pkt));
-  if (len == 0) { log_e("announce: build failed"); return; }
-  transmitPacket(pkt, len);
-  transportServer.broadcast(pkt, len, nullptr);
-  g_stats.announcesTx++;
-  log_i("announce sent: retimesh.node <%s> \"%s\" (%u bytes)", nodeIdentity.destHex(), app, (unsigned)len);
 }
 
 void LoRaRadio::sendBeacon(char type) {

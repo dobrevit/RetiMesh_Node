@@ -26,6 +26,7 @@
 #include "LoRaRadio.h"
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
+#include "RnsTransport.h"
 
 WifiManager wifiManager;
 
@@ -195,6 +196,7 @@ void WifiManager::setupRoutes() {
     { "/api/settings/radio", &WifiManager::handleRadioPost },
     { "/api/settings/wifi",  &WifiManager::handleWifiPost  },
     { "/api/settings/admin", &WifiManager::handleAdminPost },
+    { "/api/settings/transport", &WifiManager::handleTransportPost },
   };
   for (const Route& rt : posts) {
     auto fn = rt.fn;
@@ -274,6 +276,30 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   peers["rns_tcp"]    = g_stats.tcpClients;      // Reticulum clients on :4242
   peers["wifi_sta"]   = WiFi.softAPgetStationNum();
   peers["tcp_rx_packets"] = g_stats.tcpRxPackets;
+
+  // Reticulum transport: interfaces with their modes, and the path table
+  JsonObject tr = doc["transport"].to<JsonObject>();
+  tr["enabled"] = settings.transport().enabled;
+  tr["online"]  = g_stats.transportOnline;
+  tr["lora_mode"] = RnsTransport::modeName(settings.transport().loraMode);
+  tr["wifi_mode"] = RnsTransport::modeName(settings.transport().wifiMode);
+  {
+    RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
+    size_t k = RnsTransport::interfaces(ifs, RNS_MAX_CLIENTS + 1);
+    JsonArray ia = tr["interfaces"].to<JsonArray>();
+    for (size_t i = 0; i < k; i++) {
+      JsonObject o = ia.add<JsonObject>();
+      o["name"] = ifs[i].name; o["mode"] = ifs[i].mode; o["rx_bytes"] = ifs[i].rxb; o["tx_bytes"] = ifs[i].txb;
+    }
+    RnsTransport::PathInfo ps[32];
+    size_t pk = RnsTransport::paths(ps, 32);
+    tr["path_count"] = RnsTransport::pathCount();
+    JsonArray pa = tr["paths"].to<JsonArray>();
+    for (size_t i = 0; i < pk; i++) {
+      JsonObject o = pa.add<JsonObject>();
+      o["hash"] = ps[i].hash; o["hops"] = ps[i].hops; o["via"] = ps[i].via; o["age_s"] = ps[i].ageS;
+    }
+  }
 
   // Stations heard on the channel (beacons / RNode station IDs)
   Neighbor snap[MAX_NEIGHBORS];
@@ -386,6 +412,12 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   wifi["max_stations"] = ws.maxStations;
   wifi["hidden"]     = ws.hidden;
 
+  JsonObject tr = doc["transport"].to<JsonObject>();
+  tr["enabled"]   = settings.transport().enabled;
+  tr["lora_mode"] = settings.transport().loraMode;
+  tr["wifi_mode"] = settings.transport().wifiMode;
+  tr["online"]    = g_stats.transportOnline;
+
   doc["admin"]["user"] = ADMIN_USER;
   doc["admin"]["default_password"] = strcmp(settings.admin().password, ADMIN_PASSWORD_DEFAULT) == 0;
 
@@ -483,6 +515,21 @@ void WifiManager::handleAdminPost(AsyncWebServerRequest* request, const char* bo
   if (pl < 4 || pl > 32) { sendError(request, 400, "password must be 4-32 characters"); return; }
   if (!settings.saveAdminPassword(p)) { sendError(request, 500, "nvs"); return; }
   request->send(200, "application/json", "{\"ok\":true}");
+}
+
+void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char* body, size_t len) {
+  JsonDocument in;
+  if (deserializeJson(in, body, len) != DeserializationError::Ok) { sendError(request, 400, "bad json"); return; }
+  TransportSettings t = settings.transport();
+  if (in["enabled"].is<bool>())  t.enabled  = in["enabled"];
+  if (in["lora_mode"].is<int>()) t.loraMode = in["lora_mode"];
+  if (in["wifi_mode"].is<int>()) t.wifiMode = in["wifi_mode"];
+  if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5) { sendError(request, 400, "mode must be 1-5"); return; }
+  if (!settings.saveTransport(t)) { sendError(request, 500, "nvs"); return; }
+  JsonDocument out;
+  out["ok"] = true; out["restart"] = true;
+  sendJson(request, 200, out);
+  scheduleRestart(1500);                 // interfaces are registered at boot
 }
 
 void WifiManager::handleReset(AsyncWebServerRequest* request) {

@@ -24,10 +24,15 @@ captive-portal status page and bridges stock Reticulum clients (Sideband,
   directions. The node never parses, decrypts or routes packet contents —
   end-to-end encryption stays entirely between the Reticulum peers, using
   their own keys.
-- **Not an RNS Transport instance.** Routing intelligence (announces, path
-  requests, retransmission) lives in the connected clients' RNS stacks.
-  Enable *Transport* on one of the connected peers if you want this hop to
-  route for a wider network.
+- **A Reticulum Transport node.** The firmware embeds
+  [microReticulum](https://github.com/attermann/microReticulum) (Apache-2.0),
+  a C++ port of RNS, with transport enabled: it keeps a path table, propagates
+  announces, answers path requests and forwards packets hop by hop — exactly
+  `rnsd` with `enable_transport = yes`. Each interface has its own **mode**
+  (`full`, `gateway`, `access_point`, `roaming`, `boundary` — rnsd's
+  vocabulary), set on the settings page: the LoRa channel defaults to `full`,
+  Wi-Fi clients to `access_point` so phones never receive the announce
+  flood. Transport can be disabled to fall back to a plain bridge.
 - **RNode-compatible RF layer.** The LoRa framing (1-byte header with
   sequence nibble + split flag, ≤255-byte frames, two-fragment packets up
   to RNS's 500-byte MTU) is byte-identical to
