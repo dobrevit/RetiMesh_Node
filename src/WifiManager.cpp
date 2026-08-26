@@ -23,6 +23,7 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
+#include <ESPmDNS.h>
 #include "LoRaRadio.h"
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
@@ -83,6 +84,15 @@ void WifiManager::begin() {
 
   setupRoutes();
   _http.begin();
+
+  // http://retimesh.local/ (and http://<ssid>.local/) for clients whose
+  // captive-portal detection does not fire.
+  if (MDNS.begin(MDNS_HOSTNAME)) {
+    MDNS.addService("http", "tcp", HTTP_PORT);
+    MDNS.addService("rns", "tcp", RNS_TCP_PORT);
+  } else {
+    log_w("mDNS start failed");
+  }
 
   log_i("SoftAP \"%s\" (%s) up at %s (http:%d, rns:%d)", _ssid, _securityName,
         WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);

@@ -72,6 +72,10 @@
 #endif
 #define NVS_NAMESPACE       "retimesh"
 
+#ifndef MDNS_HOSTNAME
+  #define MDNS_HOSTNAME     "retimesh"      // http://retimesh.local/
+#endif
+
 // AP address 10.42.0.1 — "42" as a nod to the transport port.
 #define AP_IP               IPAddress(10, 42, 0, 1)
 #define AP_NETMASK          IPAddress(255, 255, 255, 0)

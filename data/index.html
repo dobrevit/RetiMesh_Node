@@ -144,7 +144,17 @@ async function refreshStatus() {
       const sig = n.via === "wifi" ? "via Wi-Fi" : n.rssi.toFixed(0) + " dBm / " + n.snr.toFixed(1) + " dB";
       t.textContent = sig + (n.kind === "announce" ? " · " + n.hops + " hop" + (n.hops === 1 ? "" : "s") : "") +
         " · heard " + fmtAge(n.age_s) + " ago · " + n.count + "×";
-      d.append(a, t); nb.append(d);
+      d.append(a, t);
+      if (n.kind === "announce" && n.aspect === "lxmf.delivery" && n.hash) {
+        // Hand-off to the messaging app on this phone: Sideband opens
+        // lxmf:// links; the copy button covers every other client.
+        const row = document.createElement("div"); row.className = "t";
+        const open = document.createElement("a"); open.href = "lxmf://" + n.hash; open.textContent = "Message in Sideband";
+        const copy = document.createElement("a"); copy.href = "#"; copy.textContent = "copy address"; copy.style.marginLeft = "12px";
+        copy.addEventListener("click", ev => { ev.preventDefault(); navigator.clipboard && navigator.clipboard.writeText(n.hash).then(() => { copy.textContent = "copied"; }); });
+        row.append(open, copy); d.append(row);
+      }
+      nb.append(d);
     }
   } catch (e) { /* node rebooting — keep last values */ }
 }

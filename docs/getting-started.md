@@ -22,9 +22,10 @@ The node starts an open Wi-Fi network named **`retimesh-XXXXXX`** (last three
 octets of its MAC — also shown on the OLED). Join it; the captive-portal page
 opens at <http://10.42.0.1/> (open it manually if your OS does not pop it up).
 
-The status page shows the radio (model, channel, RSSI/SNR), transport
-interfaces and known paths, neighbours heard on the channel, and a public
-bulletin board.
+The status page (also at <http://retimesh.local/>) shows the radio (model,
+channel, RSSI/SNR), transport interfaces and known paths, neighbours heard on
+the channel — LXMF peers get a *Message in Sideband* link and an address copy
+button — and a public bulletin board.
 
 ## 3. Connect Sideband (or any Reticulum client)
 
