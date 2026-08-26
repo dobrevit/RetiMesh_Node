@@ -36,6 +36,8 @@ jobs:
       pull-requests: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0                 # full history: the commit list needs the previous tag
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -73,3 +75,23 @@ jobs:
           gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber --repo "${{ github.repository }}"
           gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" --json isDraft,assets \
             --jq '"draft=\(.isDraft) assets=\(.assets | length)"'
+
+      # Release Drafter only lists merged pull requests; direct commits to
+      # main would leave the notes at "No changes". Append the commits since
+      # the previous tag so the draft always describes what shipped.
+      - name: Add commit list to the draft notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)
+          range="${prev:+$prev..}$tag"
+          {
+            echo "## Commits ${prev:+since $prev}"
+            echo
+            git log --reverse --pretty='- %s (%h)' "$range"
+            echo
+            gh release view "$tag" --repo "${{ github.repository }}" --json body --jq .body
+          } > notes.md
+          gh release edit "$tag" --repo "${{ github.repository }}" --notes-file notes.md
