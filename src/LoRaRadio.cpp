@@ -79,6 +79,17 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   ap.preambleSyms = s.preamble; ap.crcOn = true; ap.implicitHeader = false;
   _airtime.configure(ap);
   g_stats.csmaSlotMs = (uint16_t)_airtime.slotMs();
+
+  // The transmit budget belongs to the sub-band, so it is re-derived whenever
+  // the channel moves.
+  const Airtime::Band* band = Airtime::bandFor(s.freqMhz);
+  const uint16_t limit = Airtime::effectivePermille(s.freqMhz, s.dutyCyclePct);
+  g_stats.dutyLimitPermille = limit;
+  if (band) log_i("channel is in EU SRD %s — holding to %.1f %% of the hour", band->name, limit / 10.0f);
+  else if (limit) log_w("%.3f MHz is outside the EU 863-870 plan: applying the configured %u %% limit, "
+                        "check your local rules", (double)s.freqMhz, (unsigned)s.dutyCyclePct);
+  else log_w("%.3f MHz is outside the EU 863-870 plan and no duty cycle is set — transmitting unlimited, "
+             "which is unlikely to be legal anywhere", (double)s.freqMhz);
 }
 
 bool LoRaRadio::probeSX1262(const RadioSettings& s) {
@@ -504,12 +515,14 @@ void LoRaRadio::refreshAirtimeStats() {
   g_stats.airtimeShort = _airtime.shortTermUtil(now);
   g_stats.csmaBand     = _airtime.cwBand(g_stats.airtimeShort);
   g_stats.airtimeLong  = _airtime.longTermUtil(now);
-  g_stats.dutyBudget   = _airtime.budgetUsed(now, _active.dutyCyclePct);
-  const bool locked    = _airtime.locked(now, _active.dutyCyclePct);
+  const uint16_t limit = Airtime::effectivePermille(_active.freqMhz, _active.dutyCyclePct);
+  g_stats.dutyLimitPermille = limit;
+  g_stats.dutyBudget   = _airtime.budgetUsed(now, limit);
+  const bool locked    = _airtime.locked(now, limit);
   if (locked != g_stats.dutyLocked)
-    log_w("duty cycle %s: %.2f %% of the hour used, limit %u %%",
+    log_w("duty cycle %s: %.2f %% of the hour used, limit %.1f %%",
           locked ? "reached, holding transmissions" : "back under the limit",
-          g_stats.airtimeLong * 100.0f, (unsigned)_active.dutyCyclePct);
+          g_stats.airtimeLong * 100.0f, limit / 10.0f);
   g_stats.dutyLocked = locked;
-  g_stats.dutyRetryS = _airtime.retryAfterS(now, _active.dutyCyclePct);
+  g_stats.dutyRetryS = _airtime.retryAfterS(now, limit);
 }

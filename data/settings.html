@@ -61,7 +61,7 @@
       <div><label>Announce interval (s, 0 = off)</label><input name="announce_interval" type="number" min="0" max="43200" required></div>
       <div><label>Beacon interval (s, 0 = off)</label><input name="beacon_interval" type="number" min="0" max="3600" required></div>
       <div><label>Callsign / beacon name (blank = SSID)</label><input name="callsign" maxlength="32" pattern="[\x21-\x7E]*"></div>
-      <div><label>Duty cycle (% of the hour, 0 = off)</label><input name="duty_cycle_pct" type="number" min="0" max="100" required></div>
+      <div><label>Duty cycle cap (%, 0 = follow the band)</label><input name="duty_cycle_pct" type="number" min="0" max="100" required></div>
       <div id="gpsField" hidden><label>GNSS receiver</label>
         <select name="gps_enabled"><option value="1">On — position and clock</option><option value="0">Off — saves power</option></select></div>
       <div id="gpsShareField" hidden><label>Publish position</label>
@@ -71,10 +71,12 @@
     <div class="msg" id="radioMsg"></div>
     <div class="note"><b>Announces</b> make this node a visible Reticulum destination (<code>retimesh.node</code>) to every RNS peer &mdash; the normal way to be discovered.
       <b>Beacons</b> are a RetiMesh-only quick probe (hello on boot, replies within seconds); off by default.<br>
-      <b>Duty cycle</b> caps how much of each hour this node may transmit for. ETSI allows 1 % on 868.0&ndash;868.6 MHz (where the default
-      channel sits) and 10 % on 869.4&ndash;869.65 MHz; set it to your region's limit, or 0 to turn the limiter off &mdash; staying legal
-      is then your responsibility. When the budget is spent, packets wait in the queue instead of being dropped; the status page shows how
-      much is left and when it frees up.<br>
+      <b>Duty cycle.</b> How much of each hour the node may transmit for is set by the sub-band the frequency falls in, not by preference:
+      the EU 863&ndash;870 MHz plan allows 0.1 %, 1 % or 10 % depending on where you land (868.0&ndash;868.6 is 1 %, 869.4&ndash;869.65 is 10 %).
+      The node reads the frequency, applies that allowance less a small safety margin, and shows the result on the status page. The field above
+      is an optional stricter cap &mdash; leave it at 0 to follow the band. On a channel outside that plan there is nothing to look up, so the
+      cap becomes your own limit and the local rules are yours to know. When the budget is spent, packets wait in the queue instead of being
+      dropped.<br>
       <b>GNSS.</b> The receiver gives the node a real clock, which it has no other way to get: without one its idea of time restarts at zero
       on every reboot. Its health (fix, satellites, UTC) is public on the status API; the coordinates are not, unless you publish them
       &mdash; the status page is reachable by anyone who can join this access point.<br>

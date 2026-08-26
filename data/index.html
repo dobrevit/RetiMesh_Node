@@ -131,9 +131,10 @@ async function refreshStatus() {
         s.sd && (s.sd.state === "partial" || s.sd.state === "unformatted" || s.sd.state === "error") ? "offline" : ""),
       card("Channel use", !s.airtime ? "" :
         s.airtime.long_pct.toFixed(2) + " % of the hour" +
-        (s.airtime.duty_limit_pct ? " (limit " + s.airtime.duty_limit_pct + " %)" : " (no limit)") +
+        (s.airtime.duty_limit_pct ? " of " + s.airtime.duty_limit_pct + " % allowed" : " — no limit set") +
+        (s.airtime.band ? " · " + s.airtime.band : "") +
         (s.airtime.locked ? " — holding TX, frees in " + s.airtime.retry_after_s + " s" : ""),
-        s.airtime && s.airtime.locked ? "offline" : ""),
+        s.airtime && (s.airtime.locked || !s.airtime.duty_limit_pct) ? "offline" : ""),
       card("Reticulum store", !s.storage ? "" :
         s.storage.lost ? "lost — card removed, restart to use flash"
         : s.storage.sd_available ? "internal flash · restart to move it to the SD card"

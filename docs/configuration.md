@@ -78,14 +78,32 @@ a file (sections optional) — clone a configuration onto other nodes.
 The node keeps a rolling record of how long it has transmitted in the last
 hour, in one-minute bins, and uses it for two things.
 
-**The duty-cycle limiter.** ETSI gives the EU 868 MHz sub-bands an hourly
-transmit budget — 1 % on 868.0–868.6 MHz, where the default 868.1 MHz channel
-sits, and 10 % on 869.4–869.65 MHz. Set `duty_cycle_pct` on the settings page
-to your region's limit (default 1, `0` turns the limiter off and makes staying
-legal your problem). When the budget is spent the radio stops taking packets
-off the queue: nothing is dropped, senders simply see back-pressure until the
-window slides. `/api/status` reports `airtime.locked` and
-`airtime.retry_after_s`, and the display's radio page shows `duty FULL <n>s`.
+**The duty-cycle limiter.** How much of each hour a node may transmit for is
+decided by the sub-band its channel falls in, so the node looks it up rather
+than asking. The EU 863–870 MHz SRD plan (ERC 70-03) is built in:
+
+| Sub-band | Allowance |
+|---|---|
+| 863–865 MHz | 0.1 % |
+| 865–868 MHz | 1 % |
+| 868–868.6 MHz | 1 % |
+| 868.7–869.2 MHz | 0.1 % |
+| 869.4–869.65 MHz | 10 % |
+| 869.7–870 MHz | 1 % |
+
+The node holds itself to 95 % of the allowance — airtime is accounted after
+each frame, so aiming exactly at the ceiling would cross it. `duty_cycle_pct`
+on the settings page is an optional stricter cap and never a looser one; leave
+it at `0` to follow the band. The frequencies between those rows are not
+allocated to this class of device, and a channel outside the plan entirely
+(another region) has nothing to look up — there the cap becomes your own limit,
+and `0` means no limiter at all, which the status page flags.
+
+When the budget is spent the radio stops taking packets off the queue: nothing
+is dropped, senders simply see back-pressure until the window slides.
+`/api/status` reports the band, the enforced `duty_limit_pct`, `locked` and
+`retry_after_s`; the display's radio page shows `duty 0.42/9.5%` or
+`duty FULL <n>s`.
 
 At the default SF8/BW125/CR4-5, a full 255-byte frame takes about 0.73 s on
 air, so a 1 % budget is worth roughly 49 frames an hour. Announces and beacons

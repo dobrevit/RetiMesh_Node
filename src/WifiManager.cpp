@@ -391,7 +391,11 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     JsonObject at = doc["airtime"].to<JsonObject>();
     at["short_pct"]     = roundf(g_stats.airtimeShort * 10000.0f) / 100.0f;
     at["long_pct"]      = roundf(g_stats.airtimeLong * 10000.0f) / 100.0f;
-    at["duty_limit_pct"] = settings.radio().dutyCyclePct;
+    const Airtime::Band* band = Airtime::bandFor(settings.radio().freqMhz);
+    at["band"]           = band ? band->name : "outside the EU 863-870 plan";
+    at["band_limit_pct"] = band ? band->permille / 10.0f : 0.0f;
+    at["duty_limit_pct"] = g_stats.dutyLimitPermille / 10.0f;   // what is enforced
+    at["duty_manual_pct"] = settings.radio().dutyCyclePct;      // 0 = follow the band
     at["budget_used"]   = roundf(g_stats.dutyBudget * 1000.0f) / 1000.0f;
     at["locked"]        = g_stats.dutyLocked;
     at["retry_after_s"] = g_stats.dutyRetryS;
@@ -586,7 +590,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["beacon_interval"] = rs.beaconInterval;
   radio["announce_interval"] = rs.announceInterval;
   radio["callsign"]  = rs.callsign;              // "" = SSID
-  radio["duty_cycle_pct"] = rs.dutyCyclePct;     // 0 = limiter off
+  radio["duty_cycle_pct"] = rs.dutyCyclePct;     // manual cap; 0 = follow the band
   radio["gps_enabled"] = rs.gpsEnabled;
   radio["gps_share_position"] = rs.gpsSharePosition;
   radio["has_gps"] = HAS_GPS ? true : false;

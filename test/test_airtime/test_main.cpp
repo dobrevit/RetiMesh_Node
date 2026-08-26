@@ -53,23 +53,54 @@ void test_long_term_util_over_the_hour() {
 void test_duty_cycle_lock_and_release() {
   Airtime a = make();
   uint32_t now = 0;
-  TEST_ASSERT_FALSE(a.locked(now, 1));
+  TEST_ASSERT_FALSE(a.locked(now, 10));
   // 36 s in one bin is the whole 1 % hourly allowance.
   a.addTx(now, 36000.0f);
-  TEST_ASSERT_TRUE(a.locked(now, 1));
-  TEST_ASSERT_FALSE(a.locked(now, 10));               // still fine in a 10 % band
-  TEST_ASSERT_FALSE(a.locked(now, 0));                // 0 disables the limiter
-  TEST_ASSERT_TRUE(a.retryAfterS(now, 1) > 0);
+  TEST_ASSERT_TRUE(a.locked(now, 10));                 // 10 permille = 1 %
+  TEST_ASSERT_FALSE(a.locked(now, 100));               // still fine in a 10 % band
+  TEST_ASSERT_FALSE(a.locked(now, 0));                 // 0 = no limit
+  TEST_ASSERT_TRUE(a.retryAfterS(now, 10) > 0);
   // An hour later that bin has rolled out of the window.
   uint32_t later = now + (uint32_t)Airtime::BINS * Airtime::BIN_MS;
-  TEST_ASSERT_FALSE(a.locked(later, 1));
-  TEST_ASSERT_EQUAL_UINT32(0, a.retryAfterS(later, 1));
+  TEST_ASSERT_FALSE(a.locked(later, 10));
+  TEST_ASSERT_EQUAL_UINT32(0, a.retryAfterS(later, 10));
 }
 
 void test_budget_used_reports_fraction_of_allowance() {
   Airtime a = make();
   a.addTx(0, 18000.0f);                                // half of the 1 % budget
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5f, a.budgetUsed(0, 1));
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5f, a.budgetUsed(0, 10));
+}
+
+// The allowance belongs to the sub-band, not to the operator's preference.
+void test_band_lookup_covers_the_eu_plan() {
+  TEST_ASSERT_EQUAL_UINT16(10,  Airtime::bandFor(868.100f)->permille);   // 1 %
+  TEST_ASSERT_EQUAL_UINT16(100, Airtime::bandFor(869.410f)->permille);   // 10 %
+  TEST_ASSERT_EQUAL_UINT16(1,   Airtime::bandFor(868.800f)->permille);   // 0.1 %
+  TEST_ASSERT_EQUAL_UINT16(10,  Airtime::bandFor(865.500f)->permille);   // 1 %
+  TEST_ASSERT_EQUAL_UINT16(1,   Airtime::bandFor(864.000f)->permille);   // 0.1 %
+  TEST_ASSERT_EQUAL_UINT16(10,  Airtime::bandFor(869.850f)->permille);   // 1 %
+  // Gaps in the plan and anything outside it have no automatic allowance.
+  TEST_ASSERT_NULL(Airtime::bandFor(868.650f));        // between sub-bands
+  TEST_ASSERT_NULL(Airtime::bandFor(869.300f));        // between sub-bands
+  TEST_ASSERT_NULL(Airtime::bandFor(915.000f));        // another region
+  TEST_ASSERT_NULL(Airtime::bandFor(433.000f));
+}
+
+void test_effective_limit_follows_the_band() {
+  // No manual cap: the band decides, less the safety margin.
+  TEST_ASSERT_EQUAL_UINT16(9,  Airtime::effectivePermille(868.100f, 0));   // 1 % -> 0.95 %
+  TEST_ASSERT_EQUAL_UINT16(95, Airtime::effectivePermille(869.410f, 0));   // 10 % -> 9.5 %
+  TEST_ASSERT_EQUAL_UINT16(1,  Airtime::effectivePermille(868.800f, 0));   // 0.1 % never rounds to 0
+
+  // A manual cap only ever tightens things.
+  TEST_ASSERT_EQUAL_UINT16(10, Airtime::effectivePermille(869.410f, 1));   // 1 % cap in a 10 % band
+  TEST_ASSERT_EQUAL_UINT16(9,  Airtime::effectivePermille(868.100f, 5));   // 5 % cap cannot loosen 1 %
+
+  // Outside the plan we cannot know the rule: the operator's setting stands,
+  // and 0 there means no limiter at all.
+  TEST_ASSERT_EQUAL_UINT16(20, Airtime::effectivePermille(915.000f, 2));
+  TEST_ASSERT_EQUAL_UINT16(0,  Airtime::effectivePermille(915.000f, 0));
 }
 
 void test_bins_expire_rather_than_accumulate() {
@@ -112,6 +143,8 @@ int main() {
   RUN_TEST(test_long_term_util_over_the_hour);
   RUN_TEST(test_duty_cycle_lock_and_release);
   RUN_TEST(test_budget_used_reports_fraction_of_allowance);
+  RUN_TEST(test_band_lookup_covers_the_eu_plan);
+  RUN_TEST(test_effective_limit_follows_the_band);
   RUN_TEST(test_bins_expire_rather_than_accumulate);
   RUN_TEST(test_contention_window_widens_with_channel_use);
   RUN_TEST(test_short_term_util_uses_recent_bins_only);

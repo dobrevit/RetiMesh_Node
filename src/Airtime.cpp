@@ -71,21 +71,50 @@ float Airtime::longTermUtil(uint32_t nowMs) {
   return sum / (float)((uint32_t)BINS * BIN_MS);
 }
 
-float Airtime::budgetUsed(uint32_t nowMs, uint8_t limitPct) {
-  if (limitPct == 0) return 0.0f;
-  return longTermUtil(nowMs) / ((float)limitPct / 100.0f);
+// EU 863-870 MHz SRD sub-bands (ERC 70-03 annex 1, EN 300 220-2). The gaps
+// between entries are not allocated to this class of device, so a channel
+// landing in one gets no band and therefore no automatic allowance.
+static const Airtime::Band kEuBands[] = {
+  { 863.0f,  865.0f,    1, "863-865 (0.1 %)"      },
+  { 865.0f,  868.0f,   10, "865-868 (1 %)"        },
+  { 868.0f,  868.6f,   10, "868-868.6 (1 %)"      },
+  { 868.7f,  869.2f,    1, "868.7-869.2 (0.1 %)"  },
+  { 869.4f,  869.65f, 100, "869.4-869.65 (10 %)"  },
+  { 869.7f,  870.0f,   10, "869.7-870 (1 %)"      },
+};
+
+/*static*/ const Airtime::Band* Airtime::bandFor(float freqMhz) {
+  for (const Band& b : kEuBands)
+    if (freqMhz >= b.lowMhz && freqMhz < b.highMhz) return &b;
+  return nullptr;
 }
 
-bool Airtime::locked(uint32_t nowMs, uint8_t limitPct) {
-  if (limitPct == 0) return false;
-  return longTermUtil(nowMs) >= (float)limitPct / 100.0f;
+/*static*/ uint16_t Airtime::effectivePermille(float freqMhz, uint8_t manualPct) {
+  const Band* band = bandFor(freqMhz);
+  const uint16_t manual = (uint16_t)manualPct * 10;         // percent -> per-mille
+  if (!band) return manual;                                 // unknown plan: operator's call
+  // Keep a little back from the legal ceiling, then honour a stricter manual cap.
+  uint16_t allowed = (uint16_t)((uint32_t)band->permille * (100 - DUTY_MARGIN_PCT) / 100);
+  if (allowed == 0) allowed = 1;                            // never round 0.1 % away entirely
+  if (manual > 0 && manual < allowed) return manual;
+  return allowed;
 }
 
-uint32_t Airtime::retryAfterS(uint32_t nowMs, uint8_t limitPct) {
-  if (!locked(nowMs, limitPct)) return 0;
+float Airtime::budgetUsed(uint32_t nowMs, uint16_t limitPermille) {
+  if (limitPermille == 0) return 0.0f;
+  return longTermUtil(nowMs) / ((float)limitPermille / 1000.0f);
+}
+
+bool Airtime::locked(uint32_t nowMs, uint16_t limitPermille) {
+  if (limitPermille == 0) return false;
+  return longTermUtil(nowMs) >= (float)limitPermille / 1000.0f;
+}
+
+uint32_t Airtime::retryAfterS(uint32_t nowMs, uint16_t limitPermille) {
+  if (!locked(nowMs, limitPermille)) return 0;
   // Bins expire oldest first; find how many must roll off before the total
   // drops under the allowance.
-  const float allowance = ((float)limitPct / 100.0f) * (float)((uint32_t)BINS * BIN_MS);
+  const float allowance = ((float)limitPermille / 1000.0f) * (float)((uint32_t)BINS * BIN_MS);
   float total = 0.0f;
   for (uint16_t i = 0; i < BINS; i++) total += _bins[i];
   const uint16_t cur = binOf(nowMs);

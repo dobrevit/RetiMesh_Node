@@ -62,6 +62,10 @@ public:
   static const uint32_t SLOT_MAX_MS    = 100;
   static const uint8_t  CW_BANDS       = 4;
   static const uint8_t  CW_PER_BAND    = 15;
+  // Stop a little short of the legal ceiling: airtime is accounted per frame
+  // after the fact, and a node that aims exactly at the limit will cross it.
+  static const uint16_t DUTY_MARGIN_PCT = 5;   // hold to 95 % of the allowance
+
   static const uint8_t  BAND_1_MAX_PCT = 7;    // <= 7 % channel use stays in band 1
   static const uint8_t  BAND_N_MIN_PCT = 85;   // >= 85 % is the top band
 
@@ -74,13 +78,37 @@ public:
   // needs after coding, with the low-data-rate optimisation where it applies.
   float timeOnAirMs(size_t payloadBytes) const;
 
+  // ---- Regulatory bands ---------------------------------------------------
+  // The transmit budget is not ours to choose: it belongs to the sub-band the
+  // channel sits in. In the EU 863-870 MHz SRD plan (ERC 70-03 / EN 300 220)
+  // the allowance ranges from 0.1 % to 10 % depending on where you are, which
+  // is why the limit is carried in per-mille rather than whole percent.
+  struct Band {
+    float       lowMhz;
+    float       highMhz;
+    uint16_t    permille;     // 1 = 0.1 %, 10 = 1 %, 100 = 10 %
+    const char* name;
+  };
+
+  // The band containing this frequency, or nullptr when it falls outside the
+  // plan we know — in which case the local rules are the operator's to apply.
+  static const Band* bandFor(float freqMhz);
+
+  // What the node will actually hold itself to: the band's allowance less a
+  // safety margin, tightened further by a manual cap when one is set.
+  // manualPct 0 means "whatever the band allows". Returns 0 for "no limit",
+  // which happens only outside the known plan with no manual cap.
+  static uint16_t effectivePermille(float freqMhz, uint8_t manualPct);
+
   void  addTx(uint32_t nowMs, float airMs);   // record a transmission
   float shortTermUtil(uint32_t nowMs);        // 0..1 over the last two bins
   float longTermUtil(uint32_t nowMs);         // 0..1 over the hour
-  float budgetUsed(uint32_t nowMs, uint8_t limitPct);   // 0..1+ of the allowance
-  bool  locked(uint32_t nowMs, uint8_t limitPct);       // limitPct 0 = no limit
+  // All three take the limit in per-mille (0 = no limit), as returned by
+  // effectivePermille().
+  float budgetUsed(uint32_t nowMs, uint16_t limitPermille);   // 0..1+ of the allowance
+  bool  locked(uint32_t nowMs, uint16_t limitPermille);
   // Seconds until the hourly figure falls back under the limit, 0 when free.
-  uint32_t retryAfterS(uint32_t nowMs, uint8_t limitPct);
+  uint32_t retryAfterS(uint32_t nowMs, uint16_t limitPermille);
 
   uint32_t slotMs() const;
   uint32_t difsMs() const { return 2 * slotMs(); }
