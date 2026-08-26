@@ -60,14 +60,16 @@ jobs:
           publish: false
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # gh resolves draft releases by tag and only uploads — it never
+      # flips the draft flag. (softprops/action-gh-release published the
+      # draft when updating it, which is exactly what this flow must avoid.)
       - name: Attach assets to the draft
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          draft: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/release.json
-            dist/sha256sums.txt
-            dist/*/retimesh-node-*.zip
-            dist/*/retimesh-node-*-merged.bin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          files=(dist/release.json dist/sha256sums.txt dist/*/retimesh-node-*.zip dist/*/retimesh-node-*-merged.bin)
+          ls -l "${files[@]}"
+          gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber --repo "${{ github.repository }}"
+          gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" --json isDraft,assets \
+            --jq '"draft=\(.isDraft) assets=\(.assets | length)"'
