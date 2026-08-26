@@ -55,7 +55,7 @@ void RetiTransportServer::onClient(AsyncClient* client) {
   if (clientCount() >= RNS_MAX_CLIENTS) {
     log_w("Rejecting %s: client limit (%d) reached",
           client->remoteIP().toString().c_str(), RNS_MAX_CLIENTS);
-    client->close(true);
+    client->close();
     return;
   }
 

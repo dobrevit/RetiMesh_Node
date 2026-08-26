@@ -20,7 +20,7 @@
 //  WifiManager.h — SoftAP, captive portal DNS, and the port-80 web app
 //
 //  Runs entirely on core 0 (next to the ESP32 Wi-Fi/LwIP stack):
-//    - SoftAP "RetiMesh-Node" at 10.42.0.1
+//    - SoftAP "retimesh-XXXXXX" (prefix + last 3 MAC octets) at 10.42.0.1
 //    - DNSServer answering every A query with 10.42.0.1 (captive portal);
 //      polled from a small task pinned to core 0
 //    - AsyncWebServer on port 80:
@@ -43,6 +43,9 @@ public:
   // Brings up the AP, DNS and HTTP server. LittleFS must be mounted first.
   void begin();
 
+  // The SSID actually in use (derived from the MAC unless AP_SSID is set).
+  const char* ssid() const { return _ssid; }
+
   // FreeRTOS entry point — created pinned to core 0 from main.cpp.
   // DNSServer has no async mode; it needs a polling loop.
   static void dnsTask(void* self);
@@ -57,6 +60,7 @@ private:
 
   DNSServer       _dns;
   AsyncWebServer  _http{HTTP_PORT};
+  char            _ssid[33] = {0};       // 32 chars max + NUL
 };
 
 extern WifiManager wifiManager;

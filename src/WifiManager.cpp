@@ -29,13 +29,23 @@ static const char PORTAL_URL[] = "http://10.42.0.1/";
 
 // ---------------------------------------------------------------------------
 void WifiManager::begin() {
+  #ifdef AP_SSID
+    strlcpy(_ssid, AP_SSID, sizeof(_ssid));
+  #else
+    // Factory base MAC from efuse: stable across boots and identical to the
+    // STA MAC (the SoftAP MAC is base+1, so it is deliberately not used).
+    uint64_t mac = ESP.getEfuseMac();      // little-endian: octet 0 in the LSB
+    snprintf(_ssid, sizeof(_ssid), "%s-%02X%02X%02X", AP_SSID_PREFIX,
+             (uint8_t)(mac >> 24), (uint8_t)(mac >> 32), (uint8_t)(mac >> 40));
+  #endif
+
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
 
   // Fewer than 8 password characters means WPA2 would reject it — run open.
   const char* pass = (strlen(AP_PASSWORD) >= 8) ? AP_PASSWORD : nullptr;
-  WiFi.softAP(AP_SSID, pass, AP_CHANNEL, 0, AP_MAX_STATIONS);
+  WiFi.softAP(_ssid, pass, AP_CHANNEL, 0, AP_MAX_STATIONS);
 
   // Captive portal: answer every DNS query with our own address. The OS
   // connectivity probes then hit port 80 and get redirected below, which
@@ -48,7 +58,7 @@ void WifiManager::begin() {
   _http.begin();
 
   log_i("SoftAP \"%s\" up at %s (http:%d, rns:%d)",
-        AP_SSID, WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
+        _ssid, WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +119,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
 
   doc["firmware"]     = FW_NAME;
   doc["version"]      = FW_VERSION;
+  doc["ssid"]         = _ssid;
   doc["uptime_s"]     = millis() / 1000;
   doc["heap_free"]    = ESP.getFreeHeap();
   doc["psram_free"]   = ESP.getFreePsram();

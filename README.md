@@ -37,7 +37,7 @@ captive-portal status page and bridges stock Reticulum clients (Sideband,
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| — | Wi-Fi SoftAP `RetiMesh-Node`, `10.42.0.1/24` | open network, captive portal DNS |
+| — | Wi-Fi SoftAP `retimesh-XXXXXX` (last three MAC octets), `10.42.0.1/24` | open network, captive portal DNS |
 | 80 | HTTP (ESPAsyncWebServer) | single-page status app + **unencrypted** community bulletin board (LittleFS) |
 | 4242 | raw TCP, RNS HDLC framing | Reticulum transport — connect any stock RNS client |
 

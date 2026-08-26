@@ -46,7 +46,7 @@
 </style>
 </head>
 <body>
-  <h1><span class="dot">&#9679;</span> RetiMesh Node</h1>
+  <h1><span class="dot">&#9679;</span> <span id="ssid">RetiMesh Node</span></h1>
   <div class="sub">Standalone Reticulum LoRa gateway &mdash; connect your RNS client to <b>10.42.0.1:4242</b> (TCPClientInterface)</div>
 
   <div class="grid" id="stats"></div>
@@ -86,6 +86,7 @@ async function refreshStatus() {
   try {
     const s = await (await fetch("/api/status")).json();
     $("ver").textContent = s.version || "";
+    if (s.ssid) $("ssid").textContent = s.ssid;
     const g = $("stats");
     g.replaceChildren(
       card("Uptime", fmtUptime(s.uptime_s)),

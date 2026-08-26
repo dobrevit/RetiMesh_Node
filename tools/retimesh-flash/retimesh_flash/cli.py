@@ -210,7 +210,8 @@ def cmd_install(args):
                 sys.exit("aborted")
 
         flash(board, tmp, port, args.mode, args.baud)
-        print("\nDone. Join the Wi-Fi network \"RetiMesh-Node\" and open http://10.42.0.1/")
+        print("\nDone. Join the Wi-Fi network \"retimesh-XXXXXX\" (last six hex digits of the board MAC)\n"
+              "and open http://10.42.0.1/")
 
 
 def main(argv=None):

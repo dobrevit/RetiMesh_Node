@@ -92,7 +92,7 @@ void setup() {
                           8192, &transportServer, 3, nullptr, 1);
 
   log_i("RetiMesh Node up — join \"%s\", portal http://10.42.0.1, RNS TCP :%d",
-        AP_SSID, RNS_TCP_PORT);
+        wifiManager.ssid(), RNS_TCP_PORT);
 }
 
 // Arduino's loopTask (core 1, prio 1) is only used as a heartbeat.

@@ -38,8 +38,11 @@
 // ---------------------------------------------------------------------------
 // Wi-Fi SoftAP
 // ---------------------------------------------------------------------------
-#ifndef AP_SSID
-  #define AP_SSID           "RetiMesh-Node"
+// SSID = AP_SSID_PREFIX + "-" + last three octets of the factory MAC,
+// e.g. "retimesh-A1B2C3", so several nodes in range never collide.
+// Define AP_SSID to force a fixed name instead.
+#ifndef AP_SSID_PREFIX
+  #define AP_SSID_PREFIX    "retimesh"
 #endif
 #ifndef AP_PASSWORD
   #define AP_PASSWORD       ""              // empty = open network
