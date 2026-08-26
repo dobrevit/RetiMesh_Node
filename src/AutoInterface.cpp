@@ -44,6 +44,10 @@ char sLocal[46] = "";
 SemaphoreHandle_t sLock;
 AutoInterface::Peer sPeers[AUTOIF_MAX_PEERS];
 
+// RNS hashes the RFC 5952 text of the address: lowercase, compressed, no
+// scope suffix. lwIP prints uppercase, so normalise before hashing/logging.
+void lowercase(char* s) { for (; *s; s++) if (*s >= 'A' && *s <= 'F') *s += 'a' - 'A'; }
+
 void token(const char* addrText, uint8_t out[32]) {
   std::string m = std::string(kGroupId) + addrText;
   Rns::sha256((const uint8_t*)m.data(), m.size(), out);
@@ -61,6 +65,7 @@ bool localLinkLocal(char* out, size_t cap) {
   a.zone = 0;
 #endif
   strlcpy(out, ip6addr_ntoa(&a), cap);
+  lowercase(out);
   return out[0] != '\0';
 }
 
@@ -146,18 +151,18 @@ void task(void*) {
 
     sockaddr_in6 src; socklen_t sl = sizeof(src);
     int n = recvfrom(sDisc, buf, sizeof(buf), 0, (sockaddr*)&src, &sl);
-    if (n == 32) {
-      char addr[46]; inet_ntop(AF_INET6, &src.sin6_addr, addr, sizeof(addr));
+    if (n > 0) {
+      char addr[46]; inet_ntop(AF_INET6, &src.sin6_addr, addr, sizeof(addr)); lowercase(addr);
       if (strcmp(addr, sLocal) != 0) {
         uint8_t expect[32]; token(addr, expect);
-        if (memcmp(expect, buf, 32) == 0) notePeer(addr, false);
-        else log_d("AutoInterface: bad token from %s", addr);
+        if (n == 32 && memcmp(expect, buf, 32) == 0) notePeer(addr, false);
+        else log_w("AutoInterface: discovery datagram (%d bytes) from %s with a non-matching token", n, addr);
       }
     }
     sl = sizeof(src);
     n = recvfrom(sData, buf, sizeof(buf), 0, (sockaddr*)&src, &sl);
     if (n > 0) {
-      char addr[46]; inet_ntop(AF_INET6, &src.sin6_addr, addr, sizeof(addr));
+      char addr[46]; inet_ntop(AF_INET6, &src.sin6_addr, addr, sizeof(addr)); lowercase(addr);
       notePeer(addr, true);
       log_i("AutoInterface: %d-byte datagram from %s (RNS packet%s)", n, addr, Rns::isAnnounce(buf, n) ? ", announce" : "");
     }
