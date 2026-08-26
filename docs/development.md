@@ -79,14 +79,50 @@ docs/           this documentation
 - Web handlers read snapshots (`RnsTransport::paths/interfaces`), never
   Transport tables directly.
 
+## Branches and pull requests
+
+Work lands on `main` through pull requests, never by pushing directly. The
+branch prefix and the PR title are not decoration: Release Drafter reads both.
+
+| Prefix | Label it gets | Release section | Version bump |
+|---|---|---|---|
+| `feat/…` | `feature` | 🚀 Features | minor |
+| `fix/…`, `bugfix/…`, `hotfix/…` | `fix` | 🐛 Fixes | patch |
+| `docs/…` | `docs` | 📖 Documentation | patch |
+| `ci/…` | `ci` | 🧰 CI & tooling | patch |
+
+Touching `src/LoRaRadio.*`, `src/HDLC.h` or `src/RetiTransportServer.*` also
+adds `radio`, which files the change under 📻 Radio / protocol and makes the
+release a minor one. A `!` after the type in the title (`feat!: …`) marks a
+breaking change and bumps the major version. Add `skip-changelog` to a PR that
+should not appear in the notes at all.
+
+**The PR title becomes the release-note line**, verbatim, as
+`- <title> (#<number>) @<author>`. Write it for someone deciding whether to
+upgrade, not for your future self reading `git log`: say what changed for the
+operator of a node.
+
+```
+feat: keep the Reticulum store on the SD card so it survives reboots
+fix: stop the SD store falling back to internal flash at boot
+docs: explain the duty-cycle limiter and channel access
+```
+
+A conventional-commit prefix in the title (`feat:`, `fix:`, `docs:`, `ci:`)
+labels the PR on its own, so it works even when the branch is named something
+else. Commit messages inside the branch are for reviewers and can be as
+detailed as they need to be.
+
 ## Releases
-Push a tag `vX.Y.Z` → CI builds every board, packages bundles, attaches them
-to the drafted release with a commit list → smoke-test the merged image →
+Release Drafter keeps a draft up to date as pull requests merge, so the notes
+are written by the time they are needed — one line per PR, in the section its
+label selected. Push a tag `vX.Y.Z` → CI builds every board, packages bundles,
+attaches them to that draft with a commit list → smoke-test the merged image →
 **Publish** → the Pages workflow redeploys the web flasher. Details in the
 README's *Development workflow* table.
 
 ## Contributing
-Branch prefixes `feat/`, `fix/`, `docs/`, `ci/` (autolabelled). Keep the
+Branch and PR conventions are above. Keep the
 threading rules, the RNode wire format and RNS framing byte-exact, and update
 docs/settings/API alongside code. New boards: `platformio.ini` env +
 `boards.json` + workflow matrices + a docs/hardware.md row. License:
