@@ -43,18 +43,25 @@ void SdCard::begin() {
   _lock = xSemaphoreCreateMutex();
   _spi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
   // Mount synchronously: the transport asks right after boot whether it can
-  // keep its store here. The first attempt after SPI init regularly fails
-  // ("the physical drive cannot work") — the card needs a few milliseconds —
-  // so retry before concluding there is no filesystem on it.
-  _quietProbe = true;
+  // keep its store here, and that decision cannot be revisited later. The
+  // first attempt after SPI init regularly fails ("the physical drive cannot
+  // work") because the card is still waking up, so retry — but with plain
+  // mounts only. Going through poll() also ran the low-level presence probe
+  // between attempts, which re-initialises the card and left it unready for
+  // the next mount: the card would then turn up seconds later on the poll
+  // task, after the store had already fallen back to internal flash.
   for (uint8_t attempt = 0; attempt < SD_MOUNT_ATTEMPTS && !_mounted; attempt++) {
     if (attempt) delay(SD_MOUNT_RETRY_MS);
-    poll();
+    if (mount()) {
+      Info i = info();
+      log_i("SD card mounted: %s, card %.1f GB, volume %.1f GB (%s)%s",
+            i.type == CARD_SDHC ? "SDHC" : i.type == CARD_SD ? "SD" : i.type == CARD_MMC ? "MMC" : "?",
+            i.cardBytes / 1e9, i.volumeBytes / 1e9, stateName(i.state),
+            attempt ? " [after retry]" : "");
+      log("boot: card mounted");
+    }
   }
-  _quietProbe = false;
-  if (!_mounted && info().state == State::Unformatted)
-    log_w("SD card present (%.1f GB) but no recognised filesystem — format it from the settings page",
-          info().cardBytes / 1e9);
+  if (!_mounted) poll();                 // settles the state: unformatted, or no card
   // 8 KB: the FAT layer (mount probes, rename on log rotation) left under
   // 1 KB of a 4 KB stack at idle and tripped the stack canary on core 0.
   xTaskCreatePinnedToCore(task, "sdcard", 8192, this, 1, nullptr, 0);
@@ -197,7 +204,7 @@ void SdCard::poll() {
   State now = _info.state;
   uint64_t bytes = _info.cardBytes;
   xSemaphoreGive(_lock);
-  if (!_quietProbe && now != prev && now == State::Unformatted)
+  if (now != prev && now == State::Unformatted)
     log_w("SD card present (%.1f GB) but no recognised filesystem — format it from the settings page", bytes / 1e9);
 }
 

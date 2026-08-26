@@ -397,6 +397,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     st["backend"] = RnsTransport::storageBackend();     // "sd" | "littlefs"
     st["path"]    = RnsTransport::storagePath();
     st["lost"]    = sdCard.storageLost();
+    // The backend is chosen at boot. A card that turned up afterwards, or was
+    // inserted since, can only be used after a restart — say so rather than
+    // leaving the operator to wonder why the card is idle.
+    st["sd_available"] = sdCard.mounted() && !sdCard.reserved() && settings.transport().sdStore;
   }
 
   // Reticulum transport: interfaces with their modes, and the path table

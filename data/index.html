@@ -135,9 +135,10 @@ async function refreshStatus() {
         (s.airtime.locked ? " — holding TX, frees in " + s.airtime.retry_after_s + " s" : ""),
         s.airtime && s.airtime.locked ? "offline" : ""),
       card("Reticulum store", !s.storage ? "" :
-        s.storage.lost ? "lost — card removed, reboot to use flash"
+        s.storage.lost ? "lost — card removed, restart to use flash"
+        : s.storage.sd_available ? "internal flash · restart to move it to the SD card"
         : (s.storage.backend === "sd" ? "SD card" : "internal flash") + " · " + s.storage.path,
-        s.storage && s.storage.lost ? "offline" : "")
+        s.storage && (s.storage.lost || s.storage.sd_available) ? "offline" : "")
     );
     const qr = $("qrimg");
     if (qr && !qr.dataset.loaded) { qr.dataset.loaded = "1"; qr.src = "/api/qr?what=portal"; }

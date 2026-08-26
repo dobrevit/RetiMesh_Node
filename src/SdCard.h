@@ -89,7 +89,6 @@ private:
   Info              _info;
   volatile bool     _formatRequested = false;
   bool              _mounted = false;
-  bool              _quietProbe = false; // boot retries: do not warn on a failed attempt
   bool              _reserved = false;   // Reticulum store lives here
   bool              _storageLost = false;
   uint32_t          _logBytes = 0;
