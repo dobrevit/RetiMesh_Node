@@ -14,6 +14,20 @@ Envs: `t3s3` (LilyGO T3-S3, `qio_qspi`, 4 MB, `huge_app.csv`),
 `PLATFORMIO_BUILD_FLAGS='-DFW_VERSION=\"v1.2.3\"'` bakes a version (CI does this
 from the tag).
 
+### Building against the upstream fix branches
+
+`[env:t3s3-upstream]` builds the firmware against local checkouts of
+microReticulum and microStore that carry fixes not yet merged upstream
+(configurable `Transport::jobs()` interval, packet-carrying announce callback,
+compaction closing the active segment). It expects the two repositories as
+siblings of this one (`../microReticulum`, `../microStore`) and sets
+`RETIMESH_UPSTREAM_FIXES=1`, which switches `RnsTransport.cpp` to the new
+library APIs. The stock `t3s3` env keeps working against the registry versions.
+
+```sh
+pio run -e t3s3-upstream -t upload --upload-port /dev/serial/by-id/<node>
+```
+
 ## Hardware-in-the-loop checks
 With the node on USB and a local `rnsd` + RNode on the same channel:
 ```sh
