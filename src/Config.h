@@ -196,6 +196,7 @@
 #define BUTTON_POLL_MS      20
 #define BUTTON_LONG_MS      1500
 #define DISPLAY_PAGE_TIMEOUT_MS 30000     // back to the status page when idle
+#define DISPLAY_SLEEP_MS    60000         // panel off after this much button inactivity
 
 // ---------------------------------------------------------------------------
 // Beacons / neighbour discovery (see LoRaRadio.h). Interval in seconds,

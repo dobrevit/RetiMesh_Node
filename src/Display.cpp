@@ -77,13 +77,16 @@ void Display::displayTask(void* self) {
   if (!d->_ok) { vTaskDelete(nullptr); return; }
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   uint32_t lastPaint = 0;
+  d->_lastActivityMs = millis();
   for (;;) {
     d->pollButton();
     uint32_t now = millis();
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
       d->_page = STATUS; d->_pageChangedMs = now; lastPaint = 0;
     }
-    if (now - lastPaint >= DISPLAY_REFRESH_MS) { lastPaint = now; d->paint(); }
+    // Battery saving: switch the panel off after a minute without a press.
+    if (!d->_blank && now - d->_lastActivityMs > DISPLAY_SLEEP_MS) d->setBlank(true);
+    if (!d->_blank && now - lastPaint >= DISPLAY_REFRESH_MS) { lastPaint = now; d->paint(); }
     vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
   }
 }
@@ -93,24 +96,32 @@ void Display::displayTask(void* self) {
 void Display::pollButton() {
   bool down = digitalRead(PIN_BUTTON) == LOW;
   uint32_t now = millis();
-  if (down && _pressedAtMs == 0) { _pressedAtMs = now; _longFired = false; return; }
+  if (down && _pressedAtMs == 0) { _pressedAtMs = now; _longFired = false; _lastActivityMs = now; return; }
   if (down && !_longFired && now - _pressedAtMs >= BUTTON_LONG_MS) {
     _longFired = true;
-    _blank = !_blank;
-#if HAS_DISPLAY
-    if (_blank) { _oled.clearDisplay(); _oled.display(); }
-#endif
+    setBlank(!_blank);
     return;
   }
   if (!down && _pressedAtMs != 0) {
     if (!_longFired && now - _pressedAtMs >= 30) {          // short press
-      if (_blank) _blank = false;
-      else _page = (_page + 1) % PAGE_COUNT;
-      _pageChangedMs = now;
-      paint();
+      if (_blank) setBlank(false);                           // wake only
+      else { _page = (_page + 1) % PAGE_COUNT; _pageChangedMs = now; paint(); }
     }
     _pressedAtMs = 0;
   }
+}
+
+void Display::setBlank(bool blank) {
+  _blank = blank;
+#if HAS_DISPLAY
+  if (blank) {
+    _oled.ssd1306_command(SSD1306_DISPLAYOFF);           // panel + charge pump off
+  } else {
+    _oled.ssd1306_command(SSD1306_DISPLAYON);
+    _pageChangedMs = millis();
+    paint();
+  }
+#endif
 }
 
 void Display::paint() {

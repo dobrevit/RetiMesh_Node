@@ -15,6 +15,7 @@
 #include <string>
 #include <list>
 #include <memory>
+#include <sys/stat.h>
 #include <microStore/File.h>
 #include <microStore/FileSystem.h>
 
@@ -25,6 +26,13 @@
 class RnsFileSystem : public microStore::FileSystem {
 public:
   RnsFileSystem() : microStore::FileSystem(new Impl()) {}
+
+  // LittleFS.exists() opens the file read-only and logs an error when it is
+  // missing; stat() on the VFS path is silent.
+  static bool present(const std::string& p) {
+    struct stat st;
+    return stat(("/littlefs" + p).c_str(), &st) == 0;
+  }
 
   static std::string normalize(const char* path) {
     std::string p = path ? path : "";
@@ -76,23 +84,30 @@ private:
         default: return {};
       }
       std::string p = normalize(path);
+      // Reading a missing file is routine for the library (first boot,
+      // empty stores); checking first avoids the VFS error log line.
+      if (mode == microStore::File::ModeRead && !present(p)) return {};
       fs::File* f = new fs::File(LittleFS.open(p.c_str(), pm));
       if (!f || !(*f)) { delete f; return {}; }
       return microStore::File(new FileImpl(f));
     }
-    bool exists(const char* path) override { return LittleFS.exists(normalize(path).c_str()); }
+    bool exists(const char* path) override { return present(normalize(path)); }
     bool remove(const char* path) override { return LittleFS.remove(normalize(path).c_str()); }
     bool rename(const char* a, const char* b) override { return LittleFS.rename(normalize(a).c_str(), normalize(b).c_str()); }
-    bool mkdir(const char* path) override { std::string p = normalize(path); return LittleFS.exists(p.c_str()) || LittleFS.mkdir(p.c_str()); }
+    bool mkdir(const char* path) override { std::string p = normalize(path); return present(p) || LittleFS.mkdir(p.c_str()); }
     bool rmdir(const char* path) override { return LittleFS.rmdir(normalize(path).c_str()); }
     bool isDirectory(const char* path) override {
-      fs::File f = LittleFS.open(normalize(path).c_str(), FILE_READ);
+      std::string p = normalize(path);
+      if (!present(p)) return false;      // avoid the VFS error log
+      fs::File f = LittleFS.open(p.c_str(), FILE_READ);
       if (!f) return false;
       bool d = f.isDirectory(); f.close(); return d;
     }
     std::list<std::string> listDirectory(const char* path, Callbacks::DirectoryListing cb = nullptr) override {
       std::list<std::string> out;
-      fs::File root = LittleFS.open(normalize(path).c_str());
+      std::string p = normalize(path);
+      if (!present(p)) return out;
+      fs::File root = LittleFS.open(p.c_str());
       if (!root) return out;
       for (fs::File f = root.openNextFile(); f; f = root.openNextFile()) {
         if (cb) cb((char*)f.name()); else out.push_back(f.name());

@@ -59,6 +59,8 @@ private:
   uint8_t  _page = STATUS;
   bool     _blank = false;
   uint32_t _pageChangedMs = 0;
+  uint32_t _lastActivityMs = 0;          // last button press (boot counts)
+  void setBlank(bool blank);             // DISPLAYOFF/ON on the panel
   uint32_t _pressedAtMs = 0;             // 0 = not pressed
   bool     _longFired = false;
 
