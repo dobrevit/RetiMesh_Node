@@ -62,6 +62,8 @@
       <div><label>Beacon interval (s, 0 = off)</label><input name="beacon_interval" type="number" min="0" max="3600" required></div>
       <div><label>Callsign / beacon name (blank = SSID)</label><input name="callsign" maxlength="32" pattern="[\x21-\x7E]*"></div>
       <div><label>Duty cycle (% of the hour, 0 = off)</label><input name="duty_cycle_pct" type="number" min="0" max="100" required></div>
+      <div id="gpsField" hidden><label>GNSS receiver</label>
+        <select name="gps_enabled"><option value="1">On — position and clock</option><option value="0">Off — saves power</option></select></div>
     </div>
     <button type="submit">Apply radio settings</button>
     <div class="msg" id="radioMsg"></div>
@@ -211,7 +213,9 @@ async function load() {
   $("pwBanner").hidden = !cfg.admin.default_password;
 
   const r = cfg.radio;
-  fill($("radioForm"), { ...r, sync_word: r.sync_word.toString(16).toUpperCase().padStart(2, "0") });
+  fill($("radioForm"), { ...r, sync_word: r.sync_word.toString(16).toUpperCase().padStart(2, "0"),
+    gps_enabled: r.gps_enabled ? "1" : "0" });
+  $("gpsField").hidden = !r.has_gps;
   $("radioForm").elements.tx_dbm.max = r.tx_dbm_max;
   $("pmax").textContent = "max " + r.tx_dbm_max;
   $("radioModel").textContent = r.online ? "Transceiver: " + r.model : "Transceiver: OFFLINE — settings are saved but not applied";
@@ -243,6 +247,7 @@ $("radioForm").addEventListener("submit", async ev => {
     tx_dbm: +f.tx_dbm.value, sync_word: parseInt(f.sync_word.value, 16), preamble: +f.preamble.value,
     beacon_interval: +f.beacon_interval.value, announce_interval: +f.announce_interval.value, callsign: f.callsign.value,
     duty_cycle_pct: +f.duty_cycle_pct.value };
+  if (f.gps_enabled) body.gps_enabled = f.gps_enabled.value === "1";
   try {
     const res = await api("/api/settings/radio", body);
     setMsg("radioMsg", res.applied ? "Applied." : "Saved (radio offline).", "ok");

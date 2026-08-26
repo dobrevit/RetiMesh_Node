@@ -54,10 +54,18 @@ private:
   void paintRadio();
   void paintNetwork();
   void paintQr();
+#if HAS_GPS
+  void paintGps();
+#endif
   void paintTransport();
   void pollButton();
 
+  // The GNSS page exists only where there is a receiver to read.
+#if HAS_GPS
+  enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, GPS, QR, PAGE_COUNT };
+#else
   enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, QR, PAGE_COUNT };
+#endif
   // Typed, so paint()'s switch can list every page and let the compiler
   // object when one is added without being drawn (-Werror=switch).
   Page     _page = STATUS;

@@ -40,6 +40,14 @@ require HTTP Basic Auth (user `admin`).
 transmissions are being held until `retry_after_s` seconds from now. The CSMA
 slot and contention-window band come from the same figures.
 
+`gps` appears on boards with a receiver:
+`{"enabled":true,"fix":true,"quality":1,"satellites":7,"sentences":1204,
+"clock_set":true,"utc":"2026-08-26 21:04:11","latitude":51.5,"longitude":-0.1,
+"altitude_m":35,"hdop":1.2,"speed_kmh":0}`. Position fields are present only
+while a fix is held; `clock_set` says the node adopted the receiver's UTC for
+its system clock. `POST /api/settings/radio {"gps_enabled":false}` powers the
+receiver down without a restart.
+
 `storage` reports where the Reticulum store lives: `{"backend":"sd"|"littlefs",
 "path":"/sd/rns","lost":false}`. `lost` is true when the card holding the store
 was removed — the node keeps routing with what it has in memory but learns no

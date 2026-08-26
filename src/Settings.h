@@ -49,6 +49,7 @@ struct RadioSettings {
   uint16_t announceInterval = ANNOUNCE_INTERVAL_S; // s, 0 = off
   char     callsign[33]   = "";                  // "" = use the SSID
   uint8_t  dutyCyclePct   = RF_DUTY_CYCLE_PCT;   // hourly transmit budget, 0 = unlimited
+  bool     gpsEnabled     = true;                // boards with a receiver; ignored elsewhere
 };
 
 struct WifiSettings {
