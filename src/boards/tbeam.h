@@ -32,6 +32,12 @@
 #define PIN_LORA_DIO1       33               // SX1262 (v1.2)
 #define PIN_LORA_DIO0       26               // SX127x (v1.1)
 
+// SPI host for the transceiver. On the classic ESP32 the buses are numbered
+// differently from the S3: FSPI there is SPI1, which is wired to the internal
+// flash — driving it wedges the chip and the watchdog reboots the board. VSPI
+// is the general-purpose bus, and the one the T-Beam routes to the radio.
+#define LORA_SPI_BUS        VSPI
+
 #define HAS_SD              0                // no slot on this board
 
 #define HAS_DISPLAY         1

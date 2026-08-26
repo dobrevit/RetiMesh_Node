@@ -121,7 +121,7 @@ private:
   SX1262*        _sx1262 = nullptr;      // exactly one of these is set
   SX1276*        _sx1276 = nullptr;
   const char*    _modelName = "none";
-  SPIClass       _spi{FSPI};
+  SPIClass       _spi{LORA_SPI_BUS};   // bus number differs per MCU, see boards/
   RingbufHandle_t _txRing = nullptr;
   RingbufHandle_t _rxRing = nullptr;
   bool           _online = false;

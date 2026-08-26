@@ -137,6 +137,9 @@
 // (DIO1/BUSY) and the SX127x line (DIO0) exist because LoRaRadio::begin()
 // probes for either transceiver.
 // ---------------------------------------------------------------------------
+#ifndef LORA_SPI_BUS
+  #define LORA_SPI_BUS      FSPI            // general-purpose bus on the ESP32-S3
+#endif
 #ifndef PIN_LORA_SCK
   #define PIN_LORA_SCK      5
 #endif

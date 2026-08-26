@@ -21,6 +21,10 @@
 #define PIN_LORA_DIO1       33               // SX1262
 #define PIN_LORA_DIO0       9                // SX127x
 
+// SPI host for the transceiver. On the ESP32-S3 FSPI is a general-purpose
+// bus; the SD card gets HSPI.
+#define LORA_SPI_BUS        FSPI
+
 #define HAS_SD              1
 #define PIN_SD_MOSI         11
 #define PIN_SD_MISO         2
