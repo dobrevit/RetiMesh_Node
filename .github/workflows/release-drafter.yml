@@ -1,9 +1,16 @@
 name: Release Drafter
 
+# v7 split the drafter and the autolabeler into two actions.
+# - draft:     on pushes to main, maintains the draft release notes.
+# - autolabel: on PR events, applies labels from the autolabeler rules in
+#              .github/release-drafter.yml. Uses pull_request_target so it
+#              has a write token for Dependabot and fork PRs; it never checks
+#              out or runs PR code.
+
 on:
   push:
     branches: [main]
-  pull_request:
+  pull_request_target:
     types: [opened, reopened, synchronize, edited]
 
 permissions:
@@ -11,11 +18,23 @@ permissions:
 
 jobs:
   draft:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
+    steps:
+      - uses: release-drafter/release-drafter@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  autolabel:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
       pull-requests: write
     steps:
-      - uses: release-drafter/release-drafter@v6
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: release-drafter/release-drafter/autolabeler@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
