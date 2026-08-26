@@ -249,6 +249,10 @@ void WifiManager::setupRoutes() {
   }
 
   // The single-page app lives in LittleFS (data/ -> `pio run -t uploadfs`).
+  // Explicit routes for the two hottest paths avoid the static handler's
+  // .gz / directory probes (each one logs a VFS error at debug level 3).
+  _http.on("/", HTTP_GET, [](AsyncWebServerRequest* r) { r->send(LittleFS, "/index.html", "text/html"); });
+  _http.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* r) { r->send(204); });
   _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
   // Everything else (arbitrary hostnames typed by the user, probe paths
@@ -376,8 +380,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
 // ---------------------------------------------------------------------------
 void WifiManager::handleBoardGet(AsyncWebServerRequest* request) {
   String out = "[]";
-  File f = LittleFS.open(BOARD_FILE, "r");
-  if (f) { out = f.readString(); f.close(); }
+  if (LittleFS.exists(BOARD_FILE)) {
+    File f = LittleFS.open(BOARD_FILE, "r");
+    if (f) { out = f.readString(); f.close(); }
+  }
   request->send(200, "application/json", out);
 }
 

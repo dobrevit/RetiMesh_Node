@@ -241,8 +241,8 @@ static void processEvents() {
       auto it = tcpIfaces.find(e.id);
       if (it != tcpIfaces.end()) {
         RNS::Transport::deregister_interface(it->second.handle);
+        log_i("deregistered %s", it->second.handle.name().c_str());
         tcpIfaces.erase(it);
-        log_i("deregistered Wi-Fi client %lu", (unsigned long)e.id);
       }
     }
   }
