@@ -53,6 +53,9 @@
 
   <div class="grid" id="stats"></div>
 
+  <h2>Neighbours on the channel</h2>
+  <div id="neighbors"><div class="post"><span class="t">Nothing heard yet.</span></div></div>
+
   <h2>Community bulletin board</h2>
   <div id="posts"><div class="post"><span class="t">Loading&hellip;</span></div></div>
   <form id="postForm">
@@ -73,6 +76,8 @@ function fmtUptime(s) {
   const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
   return (d ? d+"d " : "") + h + "h " + m + "m";
 }
+
+function fmtAge(s) { return s < 60 ? s + " s" : s < 3600 ? Math.floor(s/60) + " min" : Math.floor(s/3600) + " h"; }
 
 function card(k, v, cls) {
   const el = document.createElement("div");
@@ -100,6 +105,21 @@ async function refreshStatus() {
       card("LoRa RX / TX", s.radio.rx_packets + " / " + s.radio.tx_packets),
       card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB")
     );
+    const nb = $("neighbors");
+    nb.replaceChildren();
+    if (!s.neighbors || !s.neighbors.length) {
+      const d = document.createElement("div"); d.className = "post";
+      d.textContent = "Nothing heard yet — beacons every " + s.radio.beacon_interval + " s as " + s.radio.callsign;
+      nb.append(d);
+    }
+    for (const n of (s.neighbors || [])) {
+      const d = document.createElement("div"); d.className = "post";
+      const a = document.createElement("div"); a.className = "a";
+      a.textContent = n.name + (n.version ? "  " + n.version : "") + (n.kind === "station-id" ? "  (RNode station ID)" : "");
+      const t = document.createElement("div"); t.className = "t";
+      t.textContent = n.rssi.toFixed(0) + " dBm / " + n.snr.toFixed(1) + " dB · heard " + fmtAge(n.age_s) + " ago · " + n.beacons + " beacon" + (n.beacons === 1 ? "" : "s");
+      d.append(a, t); nb.append(d);
+    }
   } catch (e) { /* node rebooting — keep last values */ }
 }
 

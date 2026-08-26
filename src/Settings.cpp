@@ -62,6 +62,8 @@ void Settings::load() {
   LOAD(_radio.txDbm,    "r_pwr",  getChar  ("r_pwr"));
   LOAD(_radio.syncWord, "r_sync", getUChar ("r_sync"));
   LOAD(_radio.preamble, "r_pre",  getUShort("r_pre"));
+  LOAD(_radio.beaconInterval, "r_bcn", getUShort("r_bcn"));
+  if (_prefs.isKey("r_call")) _prefs.getString("r_call", _radio.callsign, sizeof(_radio.callsign));
 
   if (_prefs.isKey("w_ssid")) _prefs.getString("w_ssid", _wifi.ssid, sizeof(_wifi.ssid));
   if (_prefs.isKey("w_pass")) _prefs.getString("w_pass", _wifi.password, sizeof(_wifi.password));
@@ -87,7 +89,9 @@ bool Settings::saveRadio(const RadioSettings& r) {
          && _prefs.putUChar ("r_cr",   r.cr)       > 0
          && _prefs.putChar  ("r_pwr",  r.txDbm)    > 0
          && _prefs.putUChar ("r_sync", r.syncWord) > 0
-         && _prefs.putUShort("r_pre",  r.preamble) > 0;
+         && _prefs.putUShort("r_pre",  r.preamble) > 0
+         && _prefs.putUShort("r_bcn",  r.beaconInterval) > 0
+         && _prefs.putString("r_call", r.callsign) >= 0;
   if (!ok) log_e("NVS write failed (radio)");
   return ok;
 }

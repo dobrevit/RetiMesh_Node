@@ -39,7 +39,7 @@ captive-portal status page and bridges stock Reticulum clients (Sideband,
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | — | Wi-Fi SoftAP `retimesh-XXXXXX` (last three MAC octets), `10.42.0.1/24` | open network, captive portal DNS |
-| 80 | HTTP (ESPAsyncWebServer) | single-page status app + **unencrypted** community bulletin board (LittleFS) |
+| 80 | HTTP (ESPAsyncWebServer) | status page, neighbour list, **unencrypted** community bulletin board; `/settings.html` admin page (user `admin`, default password **`retimesh`** — change it there) |
 | 4242 | raw TCP, RNS HDLC framing | Reticulum transport — connect any stock RNS client |
 
 Client-side config (`~/.reticulum/config` — in Sideband just add a
@@ -89,10 +89,31 @@ All tunables (pins, RF parameters, SSID, ports, buffer sizes) live in
 `-D` build flags.
 
 **Radio parameters must match every node on the channel** — frequency,
-bandwidth, spreading factor, coding rate *and* sync word (`0x12`). For a
-real RNode peer, configure its RNS interface with the same values. Check
-your local regulations before changing `RF_FREQ_MHZ` / `RF_TX_DBM`
-(default: 869.525 MHz, EU868 SRD).
+bandwidth, spreading factor, coding rate *and* sync word (`0x12`). Defaults
+are 868.100 MHz, BW 125 kHz, SF8, CR 4/5, 7 dBm; change them at runtime on
+the settings page (the page prints the matching `rnsd` `RNodeInterface`
+block). Check your local regulations before changing frequency or power.
+
+## Neighbour discovery (beacons)
+
+Every `beacon_interval` seconds of TX silence (default 45; 0 = off) the node
+transmits a short printable beacon `RM1 I <callsign> <version>`; on boot it
+sends a hello (`RM1 H …`) and other RetiMesh nodes answer with a reply
+(`RM1 R …`) after a random delay, so a new node learns its neighbours within
+seconds. Everything heard is listed on the status page and counted on the
+OLED (`NB`). Reticulum peers drop these frames as invalid packets, so they
+never interfere with RNS traffic. The on-air form is the same as an RNode's
+station ID, so an RNode with
+
+```ini
+  id_interval = 45
+  id_callsign = MYCALL
+```
+
+(note: `beacon`/`beacon_interval` are not RNS config keys — `id_*` are)
+appears in the neighbour list too. The callsign defaults to the SSID.
+This is RetiMesh-local presence, not Reticulum discovery: RNS-level
+announces come with the Transport-node milestone.
 
 ## Architecture
 

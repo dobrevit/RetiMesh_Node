@@ -30,6 +30,18 @@
 //  at runtime via requestReconfigure(); the radio task — sole owner of
 //  the chip — applies them between packets, no reboot needed.
 //
+//  Beacons / neighbour discovery. A beacon is a short frame whose payload
+//  is printable ASCII only — the same on-air form as an RNode's station
+//  ID (`id_callsign` in RNS), so those show up as neighbours too. RNS
+//  drops such frames as invalid packets, so they never disturb Reticulum
+//  peers. RetiMesh nodes send a structured variant:
+//
+//      "RM1 <T> <name> <version>"     T = H hello (boot probe)
+//                                        R reply to a hello (random delay)
+//                                        I periodic id while idle
+//
+//  Beacons are never forwarded to TCP clients; they only feed Neighbors.
+//
 //  Packet flow, radio side:
 //
 //    TCP -> LoRa:   radioTask blocks on the TX ring buffer. Each item is
@@ -71,6 +83,7 @@ public:
   bool online() const { return _online; }
   const char* modelName() const { return _modelName; }
   int8_t maxTxDbm() const { return _sx1262 ? 22 : 17; }
+  const char* callsign() const;          // beacon name: configured, else SSID
 
   // Hand new channel settings to the radio task. Thread-safe; returns
   // immediately. Result is visible in g_stats.radioApplyError.
@@ -86,6 +99,10 @@ private:
   void transmitPacket(const uint8_t* data, size_t len);
   void waitClearChannel();               // simplified CSMA (CAD + backoff)
   bool sendFrame(const uint8_t* frame, size_t len);
+
+  bool isBeacon(const uint8_t* p, size_t len) const;
+  void handleBeacon(const uint8_t* p, size_t len);
+  void sendBeacon(char type);
 
   bool probeSX1262(const RadioSettings& s);
   bool probeSX127x(const RadioSettings& s);
@@ -115,6 +132,10 @@ private:
   uint8_t  _rxSeq  = LORA_SEQ_UNSET;
 
   uint8_t  _txFrame[LORA_FRAME_MAX];
+
+  uint32_t _lastTxMs  = 0;               // any transmission (packet or beacon)
+  uint32_t _helloAtMs = 0;               // boot probe due time (0 = done)
+  uint32_t _replyAtMs = 0;               // pending reply to someone's hello
 
   static TaskHandle_t s_taskHandle;      // notification target for the ISR
 };

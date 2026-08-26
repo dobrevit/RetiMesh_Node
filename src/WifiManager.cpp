@@ -24,6 +24,7 @@
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include "LoRaRadio.h"
+#include "Neighbors.h"
 
 WifiManager wifiManager;
 
@@ -258,10 +259,31 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   radio["tx_packets"] = g_stats.loraTxPackets;
   radio["rx_dropped"] = g_stats.loraRxDropped;
 
+  radio["beacon_interval"] = rs.beaconInterval;
+  radio["callsign"]   = loraRadio.callsign();
+  radio["beacons_tx"] = g_stats.beaconsTx;
+  radio["beacons_rx"] = g_stats.beaconsRx;
+
   JsonObject peers    = doc["peers"].to<JsonObject>();
   peers["rns_tcp"]    = g_stats.tcpClients;      // Reticulum clients on :4242
   peers["wifi_sta"]   = WiFi.softAPgetStationNum();
   peers["tcp_rx_packets"] = g_stats.tcpRxPackets;
+
+  // Stations heard on the channel (beacons / RNode station IDs)
+  Neighbor snap[MAX_NEIGHBORS];
+  size_t n = neighbors.snapshot(snap, MAX_NEIGHBORS);
+  JsonArray nb = doc["neighbors"].to<JsonArray>();
+  uint32_t now = millis();
+  for (size_t i = 0; i < n; i++) {
+    JsonObject o = nb.add<JsonObject>();
+    o["name"]    = snap[i].name;
+    o["version"] = snap[i].version;
+    o["kind"]    = snap[i].kind == NeighborKind::RetiMesh ? "retimesh" : "station-id";
+    o["rssi"]    = snap[i].rssi;
+    o["snr"]     = snap[i].snr;
+    o["age_s"]   = (now - snap[i].lastSeen) / 1000;
+    o["beacons"] = snap[i].beacons;
+  }
 
   sendJson(request, 200, doc);
 }
@@ -334,6 +356,9 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["tx_dbm_max"]= loraRadio.online() ? loraRadio.maxTxDbm() : 22;
   radio["sync_word"] = rs.syncWord;
   radio["preamble"]  = rs.preamble;
+  radio["beacon_interval"] = rs.beaconInterval;
+  radio["callsign"]  = rs.callsign;              // "" = SSID
+  radio["callsign_active"] = loraRadio.callsign();
   radio["model"]     = g_stats.radioModel;
   radio["online"]    = g_stats.radioOnline;
   radio["apply_error"] = g_stats.radioApplyError;
@@ -367,6 +392,14 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (in["tx_dbm"].is<int>())      r.txDbm    = in["tx_dbm"];
   if (in["sync_word"].is<int>())   r.syncWord = in["sync_word"];
   if (in["preamble"].is<int>())    r.preamble = in["preamble"];
+  if (in["beacon_interval"].is<int>()) r.beaconInterval = in["beacon_interval"];
+  if (in["callsign"].is<const char*>()) {
+    String c = in["callsign"].as<String>(); c.trim();
+    for (size_t i = 0; i < c.length(); i++)
+      if (c[i] < 0x21 || c[i] > 0x7E) { sendError(request, 400, "callsign: printable ASCII without spaces only"); return; }
+    if (c.length() > 32) { sendError(request, 400, "callsign must be at most 32 characters"); return; }
+    strlcpy(r.callsign, c.c_str(), sizeof(r.callsign));
+  }
 
   int8_t maxDbm = loraRadio.online() ? loraRadio.maxTxDbm() : 22;
   if (r.freqMhz < 137.0f || r.freqMhz > 1020.0f) { sendError(request, 400, "frequency must be 137-1020 MHz"); return; }
@@ -375,6 +408,7 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (r.cr < 5 || r.cr > 8)                        { sendError(request, 400, "coding rate must be 5-8 (4/5..4/8)"); return; }
   if (r.txDbm < 2 || r.txDbm > maxDbm)             { sendError(request, 400, "tx power out of range for this transceiver"); return; }
   if (r.preamble < 6 || r.preamble > 1000)         { sendError(request, 400, "preamble must be 6-1000 symbols"); return; }
+  if (r.beaconInterval != 0 && (r.beaconInterval < 10 || r.beaconInterval > 3600)) { sendError(request, 400, "beacon interval must be 0 (off) or 10-3600 s"); return; }
 
   if (!settings.saveRadio(r)) { sendError(request, 500, "nvs"); return; }
   if (loraRadio.online()) loraRadio.requestReconfigure(r);

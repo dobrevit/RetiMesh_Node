@@ -137,7 +137,7 @@
 // editable from the settings page. They MUST match every other node on
 // the channel (including real RNodes — configure the RNode side alike).
 #ifndef RF_FREQ_MHZ
-  #define RF_FREQ_MHZ       869.525         // EU868 SRD band, 500 mW sub-band
+  #define RF_FREQ_MHZ       868.100         // EU868 SRD band
 #endif
 #ifndef RF_BW_KHZ
   #define RF_BW_KHZ         125.0
@@ -149,7 +149,7 @@
   #define RF_CR             5               // 4/5
 #endif
 #ifndef RF_TX_DBM
-  #define RF_TX_DBM         17              // SX1262 max is 22
+  #define RF_TX_DBM         7               // SX1262 max 22, SX1276 max 17
 #endif
 #ifndef RF_PREAMBLE_SYMS
   #define RF_PREAMBLE_SYMS  18              // RNode's LORA_PREAMBLE_SYMBOLS_MIN
@@ -190,6 +190,19 @@
 #define DISPLAY_REFRESH_MS  500
 
 // ---------------------------------------------------------------------------
+// Beacons / neighbour discovery (see LoRaRadio.h). Interval in seconds,
+// 0 disables. Matches RNS's RNodeInterface `id_interval` semantics closely
+// enough that an RNode's `id_callsign` shows up in our neighbour table.
+// ---------------------------------------------------------------------------
+#ifndef BEACON_INTERVAL_S
+  #define BEACON_INTERVAL_S 45
+#endif
+#define BEACON_MAX_LEN      64            // printable payload bytes
+#define BEACON_HELLO_DELAY_MS 3000        // boot probe
+#define MAX_NEIGHBORS       16
+#define NEIGHBOR_STALE_MS   (3UL * 60UL * 1000UL)
+
+// ---------------------------------------------------------------------------
 // CSMA (simplified: CAD check + random slotted backoff — see LoRaRadio.cpp)
 // ---------------------------------------------------------------------------
 #define CSMA_SLOT_MS        10
@@ -218,6 +231,8 @@ struct NodeStats {
   const char*       radioModel    = "none"; // "SX1262" / "SX1276" once probed
   volatile bool     displayPresent = false;
   volatile int16_t  radioApplyError = 0;   // last RadioLib error applying settings
+  volatile uint32_t beaconsTx     = 0;
+  volatile uint32_t beaconsRx     = 0;
   volatile float    lastRssi      = 0.0f;   // dBm, last LoRa RX
   volatile float    lastSnr       = 0.0f;   // dB,  last LoRa RX
   volatile uint32_t loraRxPackets = 0;      // reassembled RNS packets

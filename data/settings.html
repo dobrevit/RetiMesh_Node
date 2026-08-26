@@ -58,6 +58,8 @@
       <div><label>TX power (dBm) <span id="pmax"></span></label><input name="tx_dbm" type="number" min="2" max="22" required></div>
       <div><label>Sync word (hex)</label><input name="sync_word" pattern="[0-9a-fA-F]{1,2}" required></div>
       <div><label>Preamble (symbols)</label><input name="preamble" type="number" min="6" max="1000" required></div>
+      <div><label>Beacon interval (s, 0 = off)</label><input name="beacon_interval" type="number" min="0" max="3600" required></div>
+      <div><label>Callsign / beacon name (blank = SSID)</label><input name="callsign" maxlength="32" pattern="[\x21-\x7E]*"></div>
     </div>
     <button type="submit">Apply radio settings</button>
     <div class="msg" id="radioMsg"></div>
@@ -129,7 +131,8 @@ function fill(form, obj) {
 function rnsSnippet(r) {
   return `[[RetiMesh RNode peer]]\n  type = RNodeInterface\n  interface_enabled = True\n  port = /dev/ttyUSB0\n` +
     `  frequency = ${Math.round(r.freq_mhz * 1e6)}\n  bandwidth = ${Math.round(r.bw_khz * 1000)}\n` +
-    `  txpower = ${r.tx_dbm}\n  spreadingfactor = ${r.sf}\n  codingrate = ${r.cr}`;
+    `  txpower = ${r.tx_dbm}\n  spreadingfactor = ${r.sf}\n  codingrate = ${r.cr}\n` +
+    `  # station ID beacons — shows up in this node's neighbour list\n  id_interval = ${r.beacon_interval || 45}\n  id_callsign = <your callsign>`;
 }
 
 async function load() {
@@ -161,7 +164,8 @@ $("radioForm").addEventListener("submit", async ev => {
   ev.preventDefault();
   const f = ev.target.elements;
   const body = { freq_mhz: +f.freq_mhz.value, bw_khz: +f.bw_khz.value, sf: +f.sf.value, cr: +f.cr.value,
-    tx_dbm: +f.tx_dbm.value, sync_word: parseInt(f.sync_word.value, 16), preamble: +f.preamble.value };
+    tx_dbm: +f.tx_dbm.value, sync_word: parseInt(f.sync_word.value, 16), preamble: +f.preamble.value,
+    beacon_interval: +f.beacon_interval.value, callsign: f.callsign.value };
   try {
     const res = await api("/api/settings/radio", body);
     setMsg("radioMsg", res.applied ? "Applied." : "Saved (radio offline).", "ok");

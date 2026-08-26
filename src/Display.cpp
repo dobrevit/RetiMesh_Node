@@ -23,6 +23,7 @@
 #include <WiFi.h>
 #include "WifiManager.h"
 #include "Settings.h"
+#include "Neighbors.h"
 
 Display display;
 
@@ -117,8 +118,9 @@ void Display::paint() {
 
   // Row 4 — traffic
   _oled.setCursor(0, 42);
-  snprintf(line, sizeof(line), "RX %-6lu TX %-6lu",
-           (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
+  snprintf(line, sizeof(line), "RX %-5lu TX %-5lu NB %u",
+           (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets,
+           (unsigned)neighbors.count(NEIGHBOR_STALE_MS));
   _oled.print(line);
 
   // Row 5 — peers + uptime

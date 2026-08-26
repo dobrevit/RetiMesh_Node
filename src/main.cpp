@@ -110,10 +110,11 @@ void loop() {
   wifiManager.tick();
   if (millis() - lastBeat >= 30000) {
     lastBeat = millis();
-    log_i("up %lus | rns peers %u | lora rx/tx %u/%u (drop %u) | heap %u",
+    log_i("up %lus | rns peers %u | lora rx/tx %u/%u (drop %u) | beacons rx/tx %u/%u | heap %u",
           millis() / 1000, (unsigned)g_stats.tcpClients,
           (unsigned)g_stats.loraRxPackets, (unsigned)g_stats.loraTxPackets,
-          (unsigned)g_stats.loraRxDropped, (unsigned)ESP.getFreeHeap());
+          (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.beaconsRx,
+          (unsigned)g_stats.beaconsTx, (unsigned)ESP.getFreeHeap());
   }
   vTaskDelay(pdMS_TO_TICKS(200));
 }

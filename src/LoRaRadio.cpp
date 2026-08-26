@@ -21,6 +21,8 @@
 // ============================================================================
 #include "LoRaRadio.h"
 #include <esp_random.h>
+#include "Neighbors.h"
+#include "WifiManager.h"
 
 LoRaRadio loraRadio;
 TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
@@ -165,6 +167,8 @@ void LoRaRadio::taskLoop() {
   if (!_online) { vTaskDelete(nullptr); return; }
 
   _radio->startReceive();
+  _lastTxMs  = millis();
+  _helloAtMs = millis() + BEACON_HELLO_DELAY_MS;
 
   for (;;) {
     // (0) Settings changed from the web UI? Apply between packets.
@@ -190,6 +194,17 @@ void LoRaRadio::taskLoop() {
     //     This doubles as the poll interval for the TX ring below.
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0) {
       handleRadioIrq();
+    }
+
+    // (1b) Beacons: boot hello, pending reply, periodic id when idle.
+    //      At most one beacon per loop pass, and the idle check reads the
+    //      clock fresh — a transmission above would otherwise make the
+    //      stale `now` minus _lastTxMs wrap and fire immediately.
+    if (_active.beaconInterval > 0) {
+      uint32_t now = millis();
+      if (_helloAtMs && (int32_t)(now - _helloAtMs) >= 0)      { _helloAtMs = 0; sendBeacon('H'); }
+      else if (_replyAtMs && (int32_t)(now - _replyAtMs) >= 0) { _replyAtMs = 0; sendBeacon('R'); }
+      else if ((int32_t)(now - _lastTxMs) >= (int32_t)_active.beaconInterval * 1000) sendBeacon('I');
     }
 
     // (2) TCP -> LoRa: pull one complete RNS packet from the ring buffer
@@ -261,9 +276,62 @@ void LoRaRadio::handleRadioIrq() {
     ready  = true;
   }
 
-  if (ready && _rxLen > 0) deliverPacket(_rxLen);
+  if (ready && _rxLen > 0) {
+    if (isBeacon(_rxBuf, _rxLen)) { handleBeacon(_rxBuf, _rxLen); _rxLen = 0; }
+    else                          deliverPacket(_rxLen);
+  }
 
   _radio->startReceive();
+}
+
+// ---------------------------------------------------------------------------
+// Beacons
+// ---------------------------------------------------------------------------
+const char* LoRaRadio::callsign() const {
+  return _active.callsign[0] ? _active.callsign : wifiManager.ssid();
+}
+
+// Printable ASCII only and short: an RNode station ID or a RetiMesh beacon.
+// A real RNS packet is >= 19 bytes with a 16-byte random hash inside, so
+// the chance of one passing this test is ~(95/256)^16 — negligible.
+bool LoRaRadio::isBeacon(const uint8_t* p, size_t len) const {
+  if (len == 0 || len > BEACON_MAX_LEN) return false;
+  for (size_t i = 0; i < len; i++) if (p[i] < 0x20 || p[i] > 0x7E) return false;
+  return true;
+}
+
+void LoRaRadio::handleBeacon(const uint8_t* p, size_t len) {
+  char text[BEACON_MAX_LEN + 1];
+  memcpy(text, p, len); text[len] = '\0';
+  g_stats.beaconsRx++;
+
+  if (strncmp(text, "RM1 ", 4) == 0 && len >= 6) {
+    char type = text[4];
+    char name[33] = {0}, ver[16] = {0};
+    sscanf(text + 5, " %32s %15s", name, ver);
+    if (name[0] == '\0') return;
+    if (strcmp(name, callsign()) == 0) return;      // our own echo
+    neighbors.seen(name, ver, NeighborKind::RetiMesh, g_stats.lastRssi, g_stats.lastSnr);
+    log_i("beacon %c from %s %s (%.0f dBm / %.1f dB)", type, name, ver, g_stats.lastRssi, g_stats.lastSnr);
+    // Answer a hello after a random delay so several neighbours don't collide.
+    if (type == 'H' && _active.beaconInterval > 0 && _replyAtMs == 0)
+      _replyAtMs = millis() + 300 + (esp_random() % 1700);
+  } else {
+    char name[33]; strlcpy(name, text, sizeof(name));
+    neighbors.seen(name, "", NeighborKind::StationId, g_stats.lastRssi, g_stats.lastSnr);
+    log_i("station id \"%s\" (%.0f dBm / %.1f dB)", name, g_stats.lastRssi, g_stats.lastSnr);
+  }
+}
+
+void LoRaRadio::sendBeacon(char type) {
+  char text[BEACON_MAX_LEN + 1];
+  int n = snprintf(text, sizeof(text), "RM1 %c %s %s", type, callsign(), FW_VERSION);
+  if (n <= 0) return;
+  if ((size_t)n > BEACON_MAX_LEN) n = BEACON_MAX_LEN;
+  transmitPacket((const uint8_t*)text, (size_t)n);
+  g_stats.loraTxPackets--;               // transmitPacket counted it as data
+  g_stats.beaconsTx++;
+  log_i("beacon %c sent: \"%s\"", type, text);
 }
 
 void LoRaRadio::deliverPacket(size_t len) {
@@ -302,6 +370,7 @@ void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
   }
 
   g_stats.loraTxPackets++;
+  _lastTxMs = millis();
   _radio->startReceive();                // back to listening
 }
 
