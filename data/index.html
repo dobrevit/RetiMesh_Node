@@ -110,6 +110,8 @@ async function refreshStatus() {
         s.station && s.station.configured && !s.station.connected ? "offline" : ""),
       card("LoRa RX / TX", s.radio.rx_packets + " / " + s.radio.tx_packets),
       card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB"),
+      card("Power", (s.power ? s.power.profile + " · " + s.power.cpu_mhz + " MHz" : "") +
+        (s.power && s.power.battery_present ? " · battery " + s.power.battery_pct + "% (" + s.power.battery_v.toFixed(2) + " V)" : " · USB")),
       card("SD card", !s.sd || s.sd.state === "absent" ? "none"
         : s.sd.state === "mounted" ? (s.sd.used_bytes/1e9).toFixed(2) + " / " + (s.sd.volume_bytes/1e9).toFixed(1) + " GB"
         : s.sd.state + " (" + (s.sd.card_bytes/1e9).toFixed(1) + " GB)",

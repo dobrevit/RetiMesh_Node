@@ -113,6 +113,8 @@
       <div><label>Zero-config peering (AutoInterface)</label>
         <select name="auto_enabled"><option value="1">Enabled — phones find the node automatically</option><option value="0">Disabled</option></select></div>
       <div><label>AutoInterface group id (blank = reticulum)</label><input name="auto_group_id" maxlength="32" placeholder="reticulum"></div>
+      <div><label>Power profile</label>
+        <select name="power_profile"><option value="performance">performance (240 MHz)</option><option value="balanced">balanced (160 MHz, Wi-Fi sleep)</option><option value="battery">battery (80 MHz, Wi-Fi sleep, display 20 s)</option></select></div>
       <div><label>Announce cap (% of bandwidth)</label><input name="announce_cap" type="number" min="1" max="100" required></div>
       <div><label>Announce rate target (s, 0 = off)</label><input name="announce_rate_target" type="number" min="0" max="3600" required></div>
       <div><label>Rate grace (violations)</label><input name="announce_rate_grace" type="number" min="0" max="100" required></div>
@@ -211,7 +213,8 @@ async function load() {
   fill($("transportForm"), { enabled: cfg.transport.enabled ? "1" : "0", lora_mode: cfg.transport.lora_mode, wifi_mode: cfg.transport.wifi_mode,
     announce_cap: cfg.transport.announce_cap, announce_rate_target: cfg.transport.announce_rate_target,
     announce_rate_grace: cfg.transport.announce_rate_grace, announce_rate_penalty: cfg.transport.announce_rate_penalty,
-    auto_enabled: cfg.transport.auto_enabled ? "1" : "0", auto_group_id: cfg.transport.auto_group_id || "" });
+    auto_enabled: cfg.transport.auto_enabled ? "1" : "0", auto_group_id: cfg.transport.auto_group_id || "",
+    power_profile: cfg.transport.power_profile || "performance" });
   if (cfg.transport.enabled && !cfg.transport.online) setMsg("transportMsg", "Transport is enabled but did not start — check the console.", "bad");
   if (!cfg.wifi.wpa3_supported) {
     for (const o of $("wifiForm").elements.security.options) {
@@ -257,11 +260,11 @@ $("transportForm").addEventListener("submit", async ev => {
   ev.preventDefault();
   const f = ev.target.elements;
   try {
-    await api("/api/settings/transport", { enabled: f.enabled.value === "1", lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value,
+    const res = await api("/api/settings/transport", { enabled: f.enabled.value === "1", lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value,
       announce_cap: +f.announce_cap.value, announce_rate_target: +f.announce_rate_target.value,
       announce_rate_grace: +f.announce_rate_grace.value, announce_rate_penalty: +f.announce_rate_penalty.value,
-      auto_enabled: f.auto_enabled.value === "1", auto_group_id: f.auto_group_id.value });
-    setMsg("transportMsg", "Saved. Restarting to re-register the interfaces…", "warn");
+      auto_enabled: f.auto_enabled.value === "1", auto_group_id: f.auto_group_id.value, power_profile: f.power_profile.value });
+    setMsg("transportMsg", res.restart ? "Saved. Restarting to re-register the interfaces…" : "Saved and applied.", res.restart ? "warn" : "ok");
   } catch (e) { setMsg("transportMsg", e.message, "bad"); }
 });
 

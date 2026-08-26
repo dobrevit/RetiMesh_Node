@@ -31,6 +31,7 @@
 #include "RnsTransport.h"
 #include "SdCard.h"
 #include "AutoInterface.h"
+#include "Power.h"
 
 WifiManager wifiManager;
 
@@ -308,6 +309,15 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["identity"]     = nodeIdentity.identityHex();
   doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
   doc["uptime_s"]     = millis() / 1000;
+  {
+    Power::Battery b = Power::battery();
+    JsonObject pw = doc["power"].to<JsonObject>();
+    pw["profile"] = Power::profileName(Power::profile());
+    pw["cpu_mhz"] = getCpuFrequencyMhz();
+    pw["battery_present"] = b.present;
+    pw["battery_v"] = b.volts;
+    pw["battery_pct"] = b.percent;
+  }
   doc["heap_free"]    = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);   // internal RAM
   doc["heap_min_free"] = g_stats.heapMinFree;
   doc["psram_free"]   = ESP.getFreePsram();
@@ -509,6 +519,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   tr["announce_rate_penalty"] = settings.transport().announceRatePenalty;
   tr["auto_enabled"] = settings.transport().autoEnabled;
   tr["auto_group_id"] = settings.transport().autoGroupId;
+  tr["power_profile"] = Power::profileName((Power::Profile)settings.transport().powerProfile);
   tr["online"]    = g_stats.transportOnline;
 
   doc["admin"]["user"] = ADMIN_USER;
@@ -635,6 +646,11 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   if (in["announce_rate_grace"].is<int>())   t.announceRateGrace   = in["announce_rate_grace"];
   if (in["announce_rate_penalty"].is<int>()) t.announceRatePenalty = in["announce_rate_penalty"];
   if (in["auto_enabled"].is<bool>()) t.autoEnabled = in["auto_enabled"];
+  if (in["power_profile"].is<const char*>()) {
+    Power::Profile pp;
+    if (!Power::profileFromName(in["power_profile"], pp)) { sendError(request, 400, "power_profile must be performance|balanced|battery"); return; }
+    t.powerProfile = (uint8_t)pp;
+  }
   if (in["auto_group_id"].is<const char*>()) {
     String g = in["auto_group_id"].as<String>(); g.trim();
     if (g.length() > 32) { sendError(request, 400, "group id must be at most 32 characters"); return; }
@@ -642,11 +658,16 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   }
   if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5) { sendError(request, 400, "mode must be 1-5"); return; }
   if (t.announceCap < 1 || t.announceCap > 100) { sendError(request, 400, "announce cap must be 1-100 %"); return; }
+  TransportSettings before = settings.transport();
   if (!settings.saveTransport(t)) { sendError(request, 500, "nvs"); return; }
+  Power::apply((Power::Profile)t.powerProfile);                  // live
+  bool needRestart = before.enabled != t.enabled || before.loraMode != t.loraMode || before.wifiMode != t.wifiMode
+                  || before.autoEnabled != t.autoEnabled || strcmp(before.autoGroupId, t.autoGroupId) != 0
+                  || before.announceCap != t.announceCap;
   JsonDocument out;
-  out["ok"] = true; out["restart"] = true;
+  out["ok"] = true; out["restart"] = needRestart;
   sendJson(request, 200, out);
-  scheduleRestart(1500);                 // interfaces are registered at boot
+  if (needRestart) scheduleRestart(1500);   // interfaces are registered at boot
 }
 
 // GET /api/settings/export — everything needed to clone a node's

@@ -14,6 +14,15 @@ Envs: `t3s3` (LilyGO T3-S3, `qio_qspi`, 4 MB, `huge_app.csv`),
 `PLATFORMIO_BUILD_FLAGS='-DFW_VERSION=\"v1.2.3\"'` bakes a version (CI does this
 from the tag).
 
+## Hardware-in-the-loop checks
+With the node on USB and a local `rnsd` + RNode on the same channel:
+```sh
+python tools/hil.py --port /dev/serial/by-id/<node> --rns-bin ~/venv/bin --reset
+```
+Checks boot (identity, radio, transport, no error lines), that rnsd holds a
+path to the node, that plain packets sent through rnsd arrive on LoRa, and
+that the RNode hears the node. Exit code = number of failures.
+
 ## Unit tests
 Pure headers are tested on the host, no hardware needed:
 ```sh

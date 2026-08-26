@@ -78,6 +78,7 @@ struct TransportSettings {
   uint16_t announceRatePenalty = 0;     // s added to the block
   bool     autoEnabled = true;          // RNS AutoInterface peering on the AP
   char     autoGroupId[33] = "";        // "" = RNS default "reticulum"
+  uint8_t  powerProfile = 0;            // 0 performance, 1 balanced, 2 battery (Power.h)
 };
 
 struct AdminSettings {

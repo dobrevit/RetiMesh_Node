@@ -64,6 +64,7 @@
 #include "RnsTransport.h"
 #include "SdCard.h"
 #include "AutoInterface.h"
+#include "Power.h"
 
 NodeStats g_stats;
 
@@ -98,6 +99,7 @@ void setup() {
   }
 
   settings.load();                         // NVS: radio channel, AP, admin
+  Power::begin();                          // profile (CPU clock, Wi-Fi sleep) + battery gauge
 
   txRing = psramRing(TX_RING_BYTES);
   rxRing = psramRing(RX_RING_BYTES);

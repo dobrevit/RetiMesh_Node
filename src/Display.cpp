@@ -27,6 +27,7 @@
 #include "RnsAnnounce.h"
 #include "SdCard.h"
 #include "RnsTransport.h"
+#include "Power.h"
 
 Display display;
 
@@ -87,7 +88,7 @@ void Display::displayTask(void* self) {
       d->_page = STATUS; d->_pageChangedMs = now; lastPaint = 0;
     }
     // Battery saving: switch the panel off after a minute without a press.
-    if (!d->_blank && now - d->_lastActivityMs > DISPLAY_SLEEP_MS) d->setBlank(true);
+    if (!d->_blank && now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
     if (!d->_blank && now - lastPaint >= DISPLAY_REFRESH_MS) { lastPaint = now; d->paint(); }
     vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
   }
@@ -193,9 +194,14 @@ void Display::paintStatus() {
 
   // Row 5 — peers + uptime
   _oled.setCursor(0, 52);
-  snprintf(line, sizeof(line), "rns %u wifi %u  %luh%02lum",
-           (unsigned)g_stats.tcpClients, (unsigned)WiFi.softAPgetStationNum(),
-           (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
+  Power::Battery bat = Power::battery();
+  if (bat.present)
+    snprintf(line, sizeof(line), "bat %u%% %.2fV  %luh%02lum", bat.percent, (double)bat.volts,
+             (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
+  else
+    snprintf(line, sizeof(line), "rns %u wifi %u  %luh%02lum",
+             (unsigned)g_stats.tcpClients, (unsigned)WiFi.softAPgetStationNum(),
+             (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
   _oled.print(line);
 #endif
 }

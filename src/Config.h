@@ -268,6 +268,18 @@
 #define NEIGHBOR_STALE_MS   (3UL * 60UL * 1000UL)
 
 // ---------------------------------------------------------------------------
+// Power / battery (T3-S3: cell through 100k/100k on GPIO 1)
+// ---------------------------------------------------------------------------
+#ifndef PIN_BATTERY_ADC
+  #define PIN_BATTERY_ADC   1
+#endif
+#define BATTERY_DIVIDER_RATIO 2.0f
+#define BATTERY_MIN_V       3.0f            // below: no cell attached (USB bench)
+#define BATTERY_MAX_V       4.35f
+#define BATTERY_SAMPLE_MS   10000
+#define DISPLAY_SLEEP_BATTERY_MS 20000
+
+// ---------------------------------------------------------------------------
 // CSMA (simplified: CAD check + random slotted backoff — see LoRaRadio.cpp)
 // ---------------------------------------------------------------------------
 #define CSMA_SLOT_MS        10
