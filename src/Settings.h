@@ -58,6 +58,9 @@ struct WifiSettings {
   uint8_t    channel      = AP_CHANNEL;
   uint8_t    maxStations  = AP_MAX_STATIONS;
   bool       hidden       = false;
+  // Station mode: also join an existing Wi-Fi network (AP stays up).
+  char       staSsid[33]     = "";      // "" = station mode off
+  char       staPassword[65] = "";
 };
 
 // Interface modes use rnsd's vocabulary: 1 full, 2 gateway, 3 access_point,

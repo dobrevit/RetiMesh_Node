@@ -105,6 +105,9 @@ async function refreshStatus() {
         s.radio.online ? "" : "offline"),
       card("RSSI / SNR", s.radio.rssi.toFixed(0) + " dBm / " + s.radio.snr.toFixed(1) + " dB"),
       card("RNS peers", s.peers.rns_tcp + " tcp / " + s.peers.wifi_sta + " wifi"),
+      card("Station", !s.station || !s.station.configured ? "off"
+        : s.station.connected ? s.station.ssid + " " + s.station.ip + " (" + s.station.rssi + " dBm)" : s.station.ssid + " (connecting)",
+        s.station && s.station.configured && !s.station.connected ? "offline" : ""),
       card("LoRa RX / TX", s.radio.rx_packets + " / " + s.radio.tx_packets),
       card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB"),
       card("SD card", !s.sd || s.sd.state === "absent" ? "none"

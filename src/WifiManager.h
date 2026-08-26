@@ -53,6 +53,8 @@ public:
 
   // The SSID actually in use (derived from the MAC unless configured).
   const char* ssid() const { return _ssid; }
+  bool stationConfigured() const { return settings.wifi().staSsid[0] != '\0'; }
+  bool stationConnected() const { return WiFi.status() == WL_CONNECTED; }
   const char* securityName() const { return _securityName; }
 
   // Called from loop(): performs a restart scheduled by a settings change
@@ -87,6 +89,7 @@ private:
   char            _ssid[33] = {0};       // 32 chars max + NUL
   const char*     _securityName = "open";
   uint32_t        _restartAt = 0;
+  uint32_t        _staRetryAt = 0;
 };
 
 extern WifiManager wifiManager;

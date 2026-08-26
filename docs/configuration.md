@@ -30,6 +30,7 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 | Channel | 6 | 1–13 |
 | Max clients | 8 | 1–10 |
 | Hidden SSID | no | |
+| Station network / password | off | also join an existing LAN (AP+STA); the AP follows the LAN's channel; AutoInterface and mDNS work on both |
 
 ## Reticulum transport (saves and restarts)
 | Setting | Default | Notes |

@@ -122,9 +122,18 @@ void WifiManager::startAccessPoint() {
   const char* pass = secured ? w.password : nullptr;
 
   WiFi.persistent(false);
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(stationConfigured() ? WIFI_AP_STA : WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
   WiFi.softAP(_ssid, pass, w.channel, w.hidden ? 1 : 0, w.maxStations);
+
+  // Station mode: join the configured LAN too. The AP and the STA share
+  // one radio, so the AP follows the LAN's channel once connected.
+  if (stationConfigured()) {
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
+    log_i("station: joining \"%s\"", w.staSsid);
+    _staRetryAt = millis() + 30000;
+  }
   _securityName = secured ? "wpa2" : "open";
 
   // The Arduino wrapper only knows open/WPA2. WPA3 (SAE) is set through
@@ -150,6 +159,21 @@ void WifiManager::startAccessPoint() {
 }
 
 void WifiManager::tick() {
+  // Station watchdog: log transitions, kick a reconnect if auto-reconnect
+  // gave up (e.g. the LAN was down at boot).
+  if (stationConfigured()) {
+    static bool wasConnected = false;
+    bool now = stationConnected();
+    if (now != wasConnected) {
+      wasConnected = now;
+      if (now) log_i("station: connected to \"%s\", IP %s, RSSI %d dBm", settings.wifi().staSsid, WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      else     log_w("station: disconnected from \"%s\"", settings.wifi().staSsid);
+    }
+    if (!now && (int32_t)(millis() - _staRetryAt) >= 0) {
+      _staRetryAt = millis() + 30000;
+      WiFi.reconnect();
+    }
+  }
   if (_restartAt && (int32_t)(millis() - _restartAt) >= 0) {
     log_w("restarting to apply settings");
     delay(50);
@@ -272,6 +296,14 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["version"]      = FW_VERSION;
   doc["ssid"]         = _ssid;
   doc["security"]     = _securityName;
+  {
+    JsonObject st = doc["station"].to<JsonObject>();
+    st["configured"] = stationConfigured();
+    st["ssid"]       = settings.wifi().staSsid;
+    st["connected"]  = stationConnected();
+    st["ip"]         = stationConnected() ? WiFi.localIP().toString() : "";
+    st["rssi"]       = stationConnected() ? WiFi.RSSI() : 0;
+  }
   doc["display"]      = g_stats.displayPresent;
   doc["identity"]     = nodeIdentity.identityHex();
   doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
@@ -463,6 +495,9 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   wifi["channel"]    = ws.channel;
   wifi["max_stations"] = ws.maxStations;
   wifi["hidden"]     = ws.hidden;
+  wifi["sta_ssid"]   = ws.staSsid;
+  wifi["sta_has_password"] = ws.staPassword[0] != '\0';
+  wifi["sta_connected"] = stationConnected();
 
   JsonObject tr = doc["transport"].to<JsonObject>();
   tr["enabled"]   = settings.transport().enabled;
@@ -547,6 +582,19 @@ void WifiManager::handleWifiPost(AsyncWebServerRequest* request, const char* bod
   if (in["channel"].is<int>())      w.channel     = in["channel"];
   if (in["max_stations"].is<int>()) w.maxStations = in["max_stations"];
   if (in["hidden"].is<bool>())      w.hidden      = in["hidden"];
+  if (in["sta_ssid"].is<const char*>()) {
+    String s = in["sta_ssid"].as<String>(); s.trim();
+    if (s.length() > 32) { sendError(request, 400, "station ssid must be at most 32 characters"); return; }
+    strlcpy(w.staSsid, s.c_str(), sizeof(w.staSsid));
+    if (s.isEmpty()) w.staPassword[0] = '\0';
+  }
+  if (in["sta_password"].is<const char*>()) {
+    const char* p = in["sta_password"];
+    if (p[0] != '\0') {                    // empty = keep
+      if (strlen(p) > 63) { sendError(request, 400, "station password too long"); return; }
+      strlcpy(w.staPassword, p, sizeof(w.staPassword));
+    }
+  }
 
   if (w.security != ApSecurity::Open && strlen(w.password) < 8) { sendError(request, 400, "a password is required for a secured network"); return; }
   if (w.channel < 1 || w.channel > 13)          { sendError(request, 400, "channel must be 1-13"); return; }
@@ -617,6 +665,7 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   JsonObject w = doc["wifi"].to<JsonObject>();
   w["ssid"] = ws.ssid; w["security"] = Settings::securityName(ws.security); w["password"] = ws.password;
   w["channel"] = ws.channel; w["max_stations"] = ws.maxStations; w["hidden"] = ws.hidden;
+  w["sta_ssid"] = ws.staSsid; w["sta_password"] = ws.staPassword;
   JsonObject t = doc["transport"].to<JsonObject>();
   t["enabled"] = ts.enabled; t["lora_mode"] = ts.loraMode; t["wifi_mode"] = ts.wifiMode;
   t["announce_cap"] = ts.announceCap; t["announce_rate_target"] = ts.announceRateTarget;
@@ -651,6 +700,8 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     if (w["ssid"].is<const char*>()) strlcpy(ws.ssid, w["ssid"], sizeof(ws.ssid));
     if (w["password"].is<const char*>()) strlcpy(ws.password, w["password"], sizeof(ws.password));
     if (w["security"].is<const char*>()) Settings::securityFromName(w["security"], ws.security);
+    if (w["sta_ssid"].is<const char*>()) strlcpy(ws.staSsid, w["sta_ssid"], sizeof(ws.staSsid));
+    if (w["sta_password"].is<const char*>()) strlcpy(ws.staPassword, w["sta_password"], sizeof(ws.staPassword));
     ws.channel = w["channel"] | ws.channel; ws.maxStations = w["max_stations"] | ws.maxStations; ws.hidden = w["hidden"] | ws.hidden;
     if (ws.security != ApSecurity::Open && strlen(ws.password) < 8) ws.security = ApSecurity::Open;
     if (ws.channel < 1 || ws.channel > 13 || ws.maxStations < 1 || ws.maxStations > 10) { sendError(request, 400, "wifi section invalid"); return; }

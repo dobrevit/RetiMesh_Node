@@ -31,6 +31,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "Settings.h"
+#include "WifiManager.h"
 
 namespace {
 
@@ -42,7 +43,9 @@ const uint32_t kAnnounceMs = 1600;
 const uint32_t kPeerTimeoutMs = 22000;
 
 int  sDisc = -1, sData = -1;
-int  sIfIndex = 0;
+int  sIfIndex = 0;                     // AP netif: multicast sends + join
+int  sStaIfIndex = 0;                  // STA netif when station mode is up (joined too)
+bool sStaJoined = false;
 char sLocal[46] = "";
 bool sEnabled = false;
 SemaphoreHandle_t sLock;
@@ -86,7 +89,7 @@ bool localLinkLocal(char* out, size_t cap) {
 }
 
 // Returns the peer id; registers a new peer with Transport.
-uint32_t notePeer(const char* addr, bool data) {
+uint32_t notePeer(const char* addr, bool data, int ifindex = 0) {
   xSemaphoreTake(sLock, portMAX_DELAY);
   AutoInterface::Peer* slot = nullptr;
   for (auto& p : sPeers) if (p.addr[0] && strcmp(p.addr, addr) == 0) { slot = &p; break; }
@@ -97,6 +100,7 @@ uint32_t notePeer(const char* addr, bool data) {
     memset(slot, 0, sizeof(*slot));
     strlcpy(slot->addr, addr, sizeof(slot->addr));
     slot->id = AutoInterface::AUTO_ID_BASE | sNextPeer++;
+    slot->ifindex = ifindex ? ifindex : sIfIndex;
     fresh = true;
   }
   slot->lastSeenMs = millis();
@@ -130,7 +134,7 @@ bool peerAddress(uint32_t id, sockaddr_in6& out) {
     out.sin6_family = AF_INET6; out.sin6_port = htons(kDataPort);
     inet_pton(AF_INET6, p.addr, &out.sin6_addr);
 #if LWIP_IPV6_SCOPES
-    out.sin6_scope_id = sIfIndex;
+    out.sin6_scope_id = p.ifindex ? p.ifindex : sIfIndex;
 #endif
     ok = true; break;
   }
@@ -168,16 +172,48 @@ bool openSockets() {
   return true;
 }
 
-void sendDiscovery() {
-  if (!sLocal[0]) return;
-  uint8_t tok[32]; token(sLocal, tok);
+// Join the group on the station netif once it exists (station mode), so
+// LAN peers are discovered as well as AP clients. Their tokens are checked
+// against our STA link-local address, ours are sent on both interfaces.
+char sStaLocal[46] = "";
+void maybeJoinStation() {
+  if (sStaJoined) return;
+  esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  if (!sta) return;
+  esp_ip6_addr_t ip6;
+  if (esp_netif_get_ip6_linklocal(sta, &ip6) != ESP_OK) return;
+  ip6_addr_t a; memcpy(a.addr, ip6.addr, 16);
+#if LWIP_IPV6_SCOPES
+  a.zone = 0;
+#endif
+  strlcpy(sStaLocal, ip6addr_ntoa(&a), sizeof(sStaLocal)); lowercase(sStaLocal);
+  sStaIfIndex = esp_netif_get_netif_impl_index(sta);
+  ipv6_mreq mreq = {};
+  inet_pton(AF_INET6, kGroupAddr, &mreq.ipv6mr_multiaddr);
+  mreq.ipv6mr_interface = sStaIfIndex;
+  if (setsockopt(sDisc, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) < 0) {
+    log_w("AutoInterface: station IPV6_JOIN_GROUP failed (errno %d)", errno); return;
+  }
+  sStaJoined = true;
+  log_i("AutoInterface: also listening on the station network, link-local %s", sStaLocal);
+}
+
+void sendDiscoveryOn(int ifindex, const char* localText) {
+  if (!localText[0]) return;
+  uint8_t tok[32]; token(localText, tok);
   sockaddr_in6 dst = {}; dst.sin6_family = AF_INET6; dst.sin6_port = htons(kDiscPort);
   inet_pton(AF_INET6, kGroupAddr, &dst.sin6_addr);
 #if LWIP_IPV6_SCOPES
-  dst.sin6_scope_id = sIfIndex;
+  dst.sin6_scope_id = ifindex;
 #endif
+  setsockopt(sDisc, IPPROTO_IPV6, IPV6_MULTICAST_IF, &ifindex, sizeof(ifindex));
   if (sendto(sDisc, tok, sizeof(tok), 0, (sockaddr*)&dst, sizeof(dst)) < 0)
     log_w("AutoInterface: discovery sendto failed (errno %d)", errno);
+}
+
+void sendDiscovery() {
+  sendDiscoveryOn(sIfIndex, sLocal);
+  if (sStaJoined) sendDiscoveryOn(sStaIfIndex, sStaLocal);
 }
 
 void task(void*) {
@@ -195,15 +231,21 @@ void task(void*) {
   for (;;) {
     uint32_t now = millis();
     if (now - lastAnnounce >= kAnnounceMs) { lastAnnounce = now; sendDiscovery(); }
-    if (now - lastExpire >= 1000) { lastExpire = now; expirePeers(); }
+    if (now - lastExpire >= 1000) { lastExpire = now; expirePeers(); if (wifiManager.stationConnected()) maybeJoinStation(); }
 
     sockaddr_in6 src; socklen_t sl = sizeof(src);
     int n = recvfrom(sDisc, buf, sizeof(buf), 0, (sockaddr*)&src, &sl);
     if (n > 0) {
       char addr[46]; inet_ntop(AF_INET6, &src.sin6_addr, addr, sizeof(addr)); lowercase(addr);
-      if (strcmp(addr, sLocal) != 0) {
+      if (strcmp(addr, sLocal) != 0 && strcmp(addr, sStaLocal) != 0) {
         uint8_t expect[32]; token(addr, expect);
-        if (n == 32 && memcmp(expect, buf, 32) == 0) notePeer(addr, false);
+        if (n == 32 && memcmp(expect, buf, 32) == 0) {
+          int ifx = 0;
+#if LWIP_IPV6_SCOPES
+          ifx = src.sin6_scope_id;
+#endif
+          notePeer(addr, false, ifx);
+        }
         else log_w("AutoInterface: discovery datagram (%d bytes) from %s with a non-matching token", n, addr);
       }
     }

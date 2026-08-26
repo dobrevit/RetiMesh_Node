@@ -43,6 +43,7 @@ namespace AutoInterface {
 struct Peer {
   uint32_t id;                    // RnsTransport client id (AUTO_ID_BASE | n)
   char     addr[46];
+  int      ifindex;               // netif the peer was heard on (AP or STA)
   uint32_t lastSeenMs;
   uint32_t datagrams;
 };
