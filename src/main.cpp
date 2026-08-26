@@ -62,6 +62,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "SdCard.h"
+#include "AutoInterface.h"
 
 NodeStats g_stats;
 
@@ -100,6 +101,9 @@ void setup() {
   transportServer.begin(tcpInRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
   g_stats.transportOnline = RnsTransport::begin(txRing, rxRing, tcpInRing);
+  #if HAS_AUTOINTERFACE
+    AutoInterface::begin();                // spike: IPv6 multicast discovery on the AP
+  #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
   xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",

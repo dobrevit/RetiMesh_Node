@@ -90,6 +90,17 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// RNS AutoInterface (IPv6 link-local multicast peering on the SoftAP)
+// ---------------------------------------------------------------------------
+#ifndef HAS_AUTOINTERFACE
+  #define HAS_AUTOINTERFACE 1
+#endif
+#ifndef AUTOIF_GROUP_ID
+  #define AUTOIF_GROUP_ID   "reticulum"     // RNS default group id
+#endif
+#define AUTOIF_MAX_PEERS    8
+
+// ---------------------------------------------------------------------------
 // Reticulum sizes
 // ---------------------------------------------------------------------------
 // RNS.Reticulum.MTU — the largest packet a Reticulum instance emits.
