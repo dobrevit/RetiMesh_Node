@@ -65,6 +65,8 @@ void Settings::load() {
   LOAD(_radio.beaconInterval, "r_bcn", getUShort("r_bcn"));
   LOAD(_radio.announceInterval, "r_ann", getUShort("r_ann"));
   LOAD(_radio.dutyCyclePct,     "r_duty", getUChar ("r_duty"));
+  LOAD(_radio.gpsEnabled,       "r_gps",  getBool  ("r_gps"));
+  LOAD(_radio.gpsSharePosition, "r_gpspub", getBool("r_gpspub"));
   if (_prefs.isKey("r_call")) _prefs.getString("r_call", _radio.callsign, sizeof(_radio.callsign));
 
   if (_prefs.isKey("w_ssid")) _prefs.getString("w_ssid", _wifi.ssid, sizeof(_wifi.ssid));
@@ -108,6 +110,8 @@ bool Settings::saveRadio(const RadioSettings& r) {
          && _prefs.putUShort("r_bcn",  r.beaconInterval) > 0
          && _prefs.putUShort("r_ann",  r.announceInterval) > 0
          && _prefs.putUChar ("r_duty", r.dutyCyclePct) > 0
+         && _prefs.putBool  ("r_gps",  r.gpsEnabled) > 0
+         && _prefs.putBool  ("r_gpspub", r.gpsSharePosition) > 0
          && _prefs.putString("r_call", r.callsign) >= 0;
   if (!ok) log_e("NVS write failed (radio)");
   return ok;

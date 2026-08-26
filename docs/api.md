@@ -40,6 +40,19 @@ require HTTP Basic Auth (user `admin`).
 transmissions are being held until `retry_after_s` seconds from now. The CSMA
 slot and contention-window band come from the same figures.
 
+`gps` appears on boards with a receiver:
+`{"enabled":true,"fix":true,"quality":1,"satellites":7,"sentences":1204,
+"clock_set":true,"utc":"2026-08-26 21:04:11","position_public":false}`.
+Those fields say whether the receiver is working, and `clock_set` says the
+node adopted its UTC for the system clock.
+
+The coordinates (`latitude`, `longitude`, `altitude_m`, `hdop`, `speed_kmh`)
+are **not** public: this endpoint needs no credentials and the access point may
+be open, so they are added only when the caller authenticates as the admin, or
+when the operator has set `gps_share_position` to publish them deliberately.
+`position_public` says which of those applies. `POST /api/settings/radio
+{"gps_enabled":false}` powers the receiver down without a restart.
+
 `storage` reports where the Reticulum store lives: `{"backend":"sd"|"littlefs",
 "path":"/sd/rns","lost":false}`. `lost` is true when the card holding the store
 was removed — the node keeps routing with what it has in memory but learns no
@@ -69,7 +82,7 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 
 ## Settings (auth)
 - `GET /api/settings` → `{ radio, wifi, transport, admin }` (password never returned; `has_password`, `default_password` flags)
-- `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct}` → applied live; `apply_error` in status if the chip rejected it
+- `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct,gps_enabled,gps_share_position}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,sta_ssid,sta_password}` → saves, restarts (`"restart":true`); `sta_ssid` blank = station mode off
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text

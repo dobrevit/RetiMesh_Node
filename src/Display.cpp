@@ -29,6 +29,7 @@
 #include "SdCard.h"
 #include "RnsTransport.h"
 #include "Power.h"
+#include "Gps.h"
 
 Display display;
 
@@ -140,6 +141,9 @@ void Display::paint() {
     case TRANSPORT:  paintTransport(); break;
     case RADIO:      paintRadio();     break;
     case NETWORK:    paintNetwork();   break;
+#if HAS_GPS
+    case GPS:        paintGps();       break;
+#endif
     case QR:         paintQr();        break;
     case PAGE_COUNT: break;                     // not a page
   }
@@ -276,6 +280,36 @@ void Display::paintRadio() {
            (unsigned long)g_stats.beaconsRx, (unsigned long)g_stats.beaconsTx);        _oled.setCursor(0, 52); _oled.print(line);
 #endif
 }
+
+#if HAS_GPS
+// What the receiver can see. Before a fix the satellite count is the useful
+// number — it is what tells you whether the antenna has a view of the sky.
+void Display::paintGps() {
+  Gps::Fix g = Gps::fix();
+  char line[24];
+  header(_oled, g.enabled ? (g.valid ? "GNSS fix" : "GNSS searching") : "GNSS off");
+  if (!g.enabled) {
+    _oled.setCursor(0, 24); _oled.print("Receiver powered down");
+    _oled.setCursor(0, 34); _oled.print("Enable on the settings");
+    _oled.setCursor(0, 44); _oled.print("page.");
+    return;
+  }
+  snprintf(line, sizeof(line), "sats %u  hdop %.1f", g.satellites, (double)g.hdop);
+  _oled.setCursor(0, 12); _oled.print(line);
+  if (g.valid) {
+    snprintf(line, sizeof(line), "%+.5f", g.latitude);   _oled.setCursor(0, 22); _oled.print(line);
+    snprintf(line, sizeof(line), "%+.5f", g.longitude);  _oled.setCursor(0, 32); _oled.print(line);
+    snprintf(line, sizeof(line), "alt %.0fm  %.0fkm/h", (double)g.altitude, (double)g.speedKmh);
+    _oled.setCursor(0, 42); _oled.print(line);
+  } else {
+    snprintf(line, sizeof(line), "%lu sentences", (unsigned long)g.sentences);
+    _oled.setCursor(0, 22); _oled.print(line);
+    _oled.setCursor(0, 32); _oled.print(g.sentences ? "waiting for a fix" : "no data from module");
+  }
+  if (g.timeValid) { _oled.setCursor(0, 52); _oled.print(g.utc + 11); _oled.print(g.clockSet ? " UTC sync" : " UTC"); }
+  else             { _oled.setCursor(0, 52); _oled.print("no time yet"); }
+}
+#endif
 
 // Scan-to-join. The panel is 128x64 and a version-3 code is 29 modules, so
 // the code takes the left 62 px at two pixels per module (with a one-module

@@ -66,6 +66,7 @@
 #include "AutoInterface.h"
 #include "Power.h"
 #include "Pmu.h"
+#include "Gps.h"
 
 NodeStats g_stats;
 
@@ -123,6 +124,9 @@ void setup() {
   #if HAS_SD
     sdCard.begin();                        // optional; hot-plug polled on core 0
   #endif
+  #if HAS_GPS
+    Gps::begin();                          // NMEA reader task; powers the receiver rail
+  #endif
   wifiManager.begin();
   transportServer.begin(tcpInRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
@@ -168,6 +172,16 @@ void loop() {
           (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.announcesRx,
           (unsigned)g_stats.announcesTx, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
           (unsigned)g_stats.heapMinFree, (unsigned)g_stats.psramFree);
+    #if HAS_GPS
+      // The satellite count is the number that tells you whether the antenna
+      // has a view of the sky; the sentence count tells you the receiver is
+      // wired up at all.
+      Gps::Fix g = Gps::fix();
+      if (g.enabled)
+        log_i("gnss: %s, %u sats, %lu sentences%s%s", g.valid ? "fix" : "searching",
+              g.satellites, (unsigned long)g.sentences,
+              g.timeValid ? ", utc " : "", g.timeValid ? g.utc : "");
+    #endif
     // Stack headroom (bytes never used) per task — a value near 0 names the
     // task that is about to trip the stack-canary watchpoint.
     static const char* const kTasks[] = {"dns", "display", "sdcard", "autoif", "rns", "radio", "async_tcp", "loopTask"};

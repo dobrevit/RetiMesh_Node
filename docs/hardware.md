@@ -14,8 +14,24 @@ each hangs off a regulator inside the power-management chip, and they come up
 an AXP192, v1.2 an AXP2101, both at I²C `0x34` and told apart by their chip id,
 so one build covers either revision.
 
-The GPS rail is deliberately left **off**: nothing reads it yet and it costs
-tens of milliamps. Position support will switch it on when it lands.
+The GNSS receiver is powered from that rail and switched on by default
+(*GNSS receiver* on the settings page turns it off to save tens of
+milliamps). It gives the node two things: a position, and — more useful — a
+real clock. A LoRa node has no RTC, so its idea of "now" restarts at zero on
+every reboot; a receiver with a fix carries proper UTC, which the node adopts
+for its system clock and re-checks hourly. Log lines and the SD event log
+become meaningful across restarts.
+
+Sentences are parsed on the device (RMC and GGA, checksum-verified,
+talker-agnostic so GP/GN/GL/GA all work) — about a hundred lines, no library.
+The display gains a **GNSS page** showing fix state, satellite count,
+position, altitude and UTC. `/api/status` reports the receiver's health under
+`gps`, but not where the node is: that endpoint needs no credentials, so
+coordinates are held back unless the caller logs in as the admin or the
+operator publishes them from the settings page.
+Indoors expect `searching, 0 sats` with the sentence counter climbing: that
+tells you the receiver is wired and talking, and only the sky view is
+missing.
 
 Without a card slot the Reticulum store lives in the flash partition (~900 KB
 shared with the web app), so `transport.sd_store` has no effect here.
