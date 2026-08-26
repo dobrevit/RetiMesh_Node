@@ -26,7 +26,7 @@ SdCard sdCard;
 
 static const char* kMount = "/sd";
 static const char* kLogDir = "/retimesh";          // SD paths are relative to the mount point
-static const char* kLogFile = "/retimesh/events.log";
+static const char* kLogFile = SdCard::LOG_PATH;
 
 const char* SdCard::stateName(State s) {
   switch (s) {
@@ -216,8 +216,8 @@ void SdCard::log(const char* line) {
   if (!_mounted || !line) return;
   xSemaphoreTake(_lock, portMAX_DELAY);
   if (_logBytes > SD_LOG_MAX_BYTES) {
-    SD.remove("/retimesh/events.1.log");
-    SD.rename(kLogFile, "/retimesh/events.1.log");
+    SD.remove(SdCard::LOG_PREV_PATH);
+    SD.rename(kLogFile, SdCard::LOG_PREV_PATH);
     _logBytes = 0;
   }
   File f = SD.open(kLogFile, FILE_APPEND);

@@ -56,6 +56,9 @@ public:
   bool mounted();
   bool requestFormat();                  // performed by the task; false if busy
 
+  static constexpr const char* LOG_PATH = "/retimesh/events.log";        // relative to /sd
+  static constexpr const char* LOG_PREV_PATH = "/retimesh/events.1.log";
+
   // Appends a line to /sd/retimesh/events.log (rotated at SD_LOG_MAX_BYTES).
   // Cheap no-op when no card is mounted.
   void log(const char* line);

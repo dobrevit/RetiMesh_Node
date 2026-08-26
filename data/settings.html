@@ -120,7 +120,10 @@
   <h2>SD card</h2>
   <div class="card">
     <div class="note" id="sdInfo">Checking…</div>
-    <button class="danger" id="sdFormat" disabled>Format card (erase everything)</button>
+    <div class="row">
+      <div><button type="button" id="sdLog" disabled>Download event log</button></div>
+      <div><button class="danger" type="button" id="sdFormat" disabled>Format card (erase everything)</button></div>
+    </div>
     <div class="msg" id="sdMsg"></div>
     <div class="note">The node uses a single FAT32 volume across the whole card. Cards with other layouts (e.g. a Raspberry Pi image:
       small boot partition + Linux partitions) mount only partially and can be reformatted here. Formatting erases all data on the card.</div>
@@ -294,8 +297,10 @@ async function refreshSd() {
     if (sd.last_format) text += " Last format: " + sd.last_format + ".";
     $("sdInfo").textContent = text;
     $("sdFormat").disabled = !(sd.state === "mounted" || sd.state === "partial" || sd.state === "unformatted" || sd.state === "error");
+    $("sdLog").disabled = !(sd.state === "mounted" || sd.state === "partial");
   } catch (e) { $("sdInfo").textContent = "Status unavailable."; }
 }
+$("sdLog").addEventListener("click", () => { window.location.href = "/api/sd/log"; });
 $("sdFormat").addEventListener("click", async () => {
   if (prompt("This erases EVERYTHING on the card. Type FORMAT to continue.") !== "FORMAT") return;
   try {

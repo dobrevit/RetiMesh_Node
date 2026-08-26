@@ -14,6 +14,14 @@ Envs: `t3s3` (LilyGO T3-S3, `qio_qspi`, 4 MB, `huge_app.csv`),
 `PLATFORMIO_BUILD_FLAGS='-DFW_VERSION=\"v1.2.3\"'` bakes a version (CI does this
 from the tag).
 
+## Unit tests
+Pure headers are tested on the host, no hardware needed:
+```sh
+pio test -e native
+```
+`test/stubs/` provides the few Arduino/IDF headers those files expect.
+Current suites: `test_hdlc` (RNS TCP framing). CI runs them on every push.
+
 ## Layout
 ```
 src/            firmware (single PlatformIO project, Arduino framework)

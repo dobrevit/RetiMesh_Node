@@ -212,6 +212,17 @@ void WifiManager::setupRoutes() {
                if (body && authed(r)) (this->*fn)(r, body, t);
              });
   }
+  // Event log from the SD card (admin). ?prev=1 serves the rotated file.
+  _http.on("/api/sd/log", HTTP_GET, [this](AsyncWebServerRequest* r) {
+    if (!authed(r)) return;
+    if (!sdCard.mounted()) { sendError(r, 404, "no card mounted"); return; }
+    const char* path = r->hasParam("prev") ? SdCard::LOG_PREV_PATH : SdCard::LOG_PATH;
+    if (!SD.exists(path)) { sendError(r, 404, "no log yet"); return; }
+    AsyncWebServerResponse* res = r->beginResponse(SD, path, "text/plain");
+    res->addHeader("Content-Disposition", "attachment; filename=\"retimesh-events.log\"");
+    r->send(res);
+  });
+
   _http.on("/api/settings/export", HTTP_GET,
            [this](AsyncWebServerRequest* r) { if (authed(r)) handleExport(r); });
   _http.on("/api/settings/reset", HTTP_POST,

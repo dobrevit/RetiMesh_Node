@@ -38,6 +38,7 @@ require HTTP Basic Auth (user `admin`).
 - `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden}` → saves, restarts (`"restart":true`)
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty}` (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
+- `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text
 - `GET /api/settings/export` → downloadable JSON of all settings (no identity keys)
 - `POST /api/settings/import` (a settings export; sections optional) → applies, restarts
 - `POST /api/settings/admin` `{password}`
