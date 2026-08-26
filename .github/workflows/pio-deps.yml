@@ -31,7 +31,7 @@ jobs:
           python-version: '3.12'
       - name: Query the PlatformIO registry
         run: python tools/bump_deps.py ${{ inputs.allow_major && '--allow-major' || '' }} | tee bump.md
-      - uses: peter-evans/create-pull-request@v7
+      - uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.DEPS_PR_TOKEN || secrets.GITHUB_TOKEN }}
           branch: deps/platformio
