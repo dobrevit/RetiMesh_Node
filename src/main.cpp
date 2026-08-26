@@ -57,6 +57,7 @@
 #include "LoRaRadio.h"
 #include "Display.h"
 #include "RnsAnnounce.h"
+#include "RnsTransport.h"
 
 NodeStats g_stats;
 
@@ -84,6 +85,7 @@ void setup() {
   configASSERT(txRing && rxRing && annRing);
 
   nodeIdentity.begin();                    // Reticulum identity + retimesh.node destination
+  RnsTransport::begin();                   // spike: microReticulum transport core
 
   // Bring up services. Radio failure is survivable: the AP + web UI stay
   // up and report "radio offline" so the node can be diagnosed in place.
@@ -104,6 +106,11 @@ void setup() {
 
   xTaskCreatePinnedToCore(Display::displayTask, "display",
                           4096, &display, 1, nullptr, 0);
+
+  // spike: the RNS task owns every call into microReticulum
+  xTaskCreatePinnedToCore([](void*) {
+    for (;;) { RnsTransport::loop(); vTaskDelay(pdMS_TO_TICKS(10)); }
+  }, "rns", 12288, nullptr, 2, nullptr, 1);
 
   log_i("RetiMesh Node up — join \"%s\", portal http://10.42.0.1, RNS TCP :%d",
         wifiManager.ssid(), RNS_TCP_PORT);

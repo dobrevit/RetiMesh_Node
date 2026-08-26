@@ -87,6 +87,8 @@ public:
   bool begin();
 
   const uint8_t* publicKey()  const { return _pub; }        // 64 bytes
+  // RNS private key layout: X25519 private (32) + Ed25519 seed (32).
+  size_t privateKey(uint8_t out[64]) const { memcpy(out, _xPrv, 32); memcpy(out + 32, _edSeed, 32); return 64; }
   const uint8_t* identityHash() const { return _identityHash; }
   const uint8_t* destHash()   const { return _destHash; }
   const char*    destHex()    const { return _destHex; }
