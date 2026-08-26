@@ -33,10 +33,17 @@ require HTTP Basic Auth (user `admin`).
 `kind` is `announce`, `station-id` or `beacon`; `via` is `lora` or `wifi`.
 
 `airtime` reports channel use and the transmit budget:
-`{"short_pct":0.46,"long_pct":0.02,"duty_limit_pct":1,"budget_used":0.015,
-"locked":false,"retry_after_s":0,"csma_slot_ms":25,"csma_band":1}`.
-`long_pct` is the share of the last hour this node spent transmitting,
-`budget_used` the fraction of the configured allowance, and `locked` says
+`{"short_pct":0.46,"long_pct":0.02,"band":"869.4-869.65 (10 %)",
+"band_limit_pct":10,"band_allocated":true,"duty_limit_pct":9.5,
+"duty_manual_pct":0,"budget_used":0.002,"locked":false,"retry_after_s":0,
+"csma_slot_ms":25,"csma_band":1}`. `band` and `band_limit_pct` are what the
+regulator allows for the channel — chosen from the sub-bands the carrier
+actually occupies at the configured bandwidth, taking the stricter one when it
+straddles a boundary. `band_allocated` is false on the ranges between the
+sub-bands, which are not meant for this kind of device and get the strictest
+allowance in the plan. `duty_limit_pct` is what the node enforces (the
+allowance less a safety margin, or a stricter `duty_manual_pct` when set);
+`long_pct` is the share of the last hour spent transmitting and `locked` says
 transmissions are being held until `retry_after_s` seconds from now. The CSMA
 slot and contention-window band come from the same figures.
 

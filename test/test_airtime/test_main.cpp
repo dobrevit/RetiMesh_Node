@@ -53,23 +53,76 @@ void test_long_term_util_over_the_hour() {
 void test_duty_cycle_lock_and_release() {
   Airtime a = make();
   uint32_t now = 0;
-  TEST_ASSERT_FALSE(a.locked(now, 1));
+  TEST_ASSERT_FALSE(a.locked(now, 100));
   // 36 s in one bin is the whole 1 % hourly allowance.
   a.addTx(now, 36000.0f);
-  TEST_ASSERT_TRUE(a.locked(now, 1));
-  TEST_ASSERT_FALSE(a.locked(now, 10));               // still fine in a 10 % band
-  TEST_ASSERT_FALSE(a.locked(now, 0));                // 0 disables the limiter
-  TEST_ASSERT_TRUE(a.retryAfterS(now, 1) > 0);
+  TEST_ASSERT_TRUE(a.locked(now, 100));                // 100 bp = 1 %
+  TEST_ASSERT_FALSE(a.locked(now, 1000));              // still fine in a 10 % band
+  TEST_ASSERT_FALSE(a.locked(now, 0));                 // 0 = no limit
+  TEST_ASSERT_TRUE(a.retryAfterS(now, 100) > 0);
   // An hour later that bin has rolled out of the window.
   uint32_t later = now + (uint32_t)Airtime::BINS * Airtime::BIN_MS;
-  TEST_ASSERT_FALSE(a.locked(later, 1));
-  TEST_ASSERT_EQUAL_UINT32(0, a.retryAfterS(later, 1));
+  TEST_ASSERT_FALSE(a.locked(later, 100));
+  TEST_ASSERT_EQUAL_UINT32(0, a.retryAfterS(later, 100));
 }
 
 void test_budget_used_reports_fraction_of_allowance() {
   Airtime a = make();
   a.addTx(0, 18000.0f);                                // half of the 1 % budget
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5f, a.budgetUsed(0, 1));
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5f, a.budgetUsed(0, 100));
+}
+
+// The allowance belongs to the sub-band, not to the operator's preference.
+void test_band_lookup_covers_the_eu_plan() {
+  // A narrow channel well inside each sub-band gets that sub-band's figure.
+  TEST_ASSERT_EQUAL_UINT16(100,  Airtime::bandFor(868.100f, 125.0f)->basisPoints);   // 1 %
+  TEST_ASSERT_EQUAL_UINT16(1000, Airtime::bandFor(869.500f, 125.0f)->basisPoints);   // 10 %
+  TEST_ASSERT_EQUAL_UINT16(10,   Airtime::bandFor(868.800f, 125.0f)->basisPoints);   // 0.1 %
+  TEST_ASSERT_EQUAL_UINT16(100,  Airtime::bandFor(865.500f, 125.0f)->basisPoints);   // 1 %
+  TEST_ASSERT_EQUAL_UINT16(10,   Airtime::bandFor(864.000f, 125.0f)->basisPoints);   // 0.1 %
+  TEST_ASSERT_EQUAL_UINT16(100,  Airtime::bandFor(869.850f, 125.0f)->basisPoints);   // 1 %
+
+  // The ranges between the sub-bands are not allocated to this kind of device.
+  // They are still in the table, carrying the strictest allowance, so that a
+  // channel there is throttled rather than handed a free hand.
+  const Airtime::Band* gap = Airtime::bandFor(868.650f, 125.0f);
+  TEST_ASSERT_NOT_NULL(gap);
+  TEST_ASSERT_FALSE(gap->allocated);
+  TEST_ASSERT_EQUAL_UINT16(10, gap->basisPoints);
+
+  // Outside the plan there is nothing to look up.
+  TEST_ASSERT_NULL(Airtime::bandFor(915.000f, 125.0f));
+  TEST_ASSERT_NULL(Airtime::bandFor(433.000f, 125.0f));
+}
+
+// A channel is not a point: 125 kHz centred on a boundary lands in both
+// neighbours, and the stricter of the two is the one that applies.
+void test_channel_straddling_a_boundary_takes_the_stricter_band() {
+  // 868.6 is the top of the 1 % sub-band and the bottom of an unallocated gap.
+  TEST_ASSERT_EQUAL_UINT16(10, Airtime::bandFor(868.600f, 125.0f)->basisPoints);
+  // Far enough below it that the whole channel fits in the 1 % sub-band.
+  TEST_ASSERT_EQUAL_UINT16(100, Airtime::bandFor(868.500f, 125.0f)->basisPoints);
+  // The top of the 10 % sub-band spills into the gap above it.
+  TEST_ASSERT_EQUAL_UINT16(10, Airtime::bandFor(869.650f, 125.0f)->basisPoints);
+  // Narrower channel, same centre: now it fits, and keeps the 10 %.
+  TEST_ASSERT_EQUAL_UINT16(1000, Airtime::bandFor(869.600f, 62.5f)->basisPoints);
+}
+
+void test_effective_limit_follows_the_band() {
+  // No manual cap: the band decides, less the 5 % safety margin. Basis points
+  // express that exactly for every figure in the plan except 0.1 %.
+  TEST_ASSERT_EQUAL_UINT16(95,  Airtime::effectiveBasisPoints(868.100f, 125.0f, 0));  // 1 %  -> 0.95 %
+  TEST_ASSERT_EQUAL_UINT16(950, Airtime::effectiveBasisPoints(869.500f, 125.0f, 0));  // 10 % -> 9.5 %
+  TEST_ASSERT_EQUAL_UINT16(9,   Airtime::effectiveBasisPoints(868.800f, 125.0f, 0));  // 0.1 % -> 0.09 %
+
+  // A manual cap only ever tightens things.
+  TEST_ASSERT_EQUAL_UINT16(100, Airtime::effectiveBasisPoints(869.500f, 125.0f, 1));  // 1 % cap in a 10 % band
+  TEST_ASSERT_EQUAL_UINT16(95,  Airtime::effectiveBasisPoints(868.100f, 125.0f, 5));  // 5 % cap cannot loosen 1 %
+
+  // Outside the plan we cannot know the rule: the operator's setting stands,
+  // and 0 there means no limiter at all.
+  TEST_ASSERT_EQUAL_UINT16(200, Airtime::effectiveBasisPoints(915.000f, 125.0f, 2));
+  TEST_ASSERT_EQUAL_UINT16(0,   Airtime::effectiveBasisPoints(915.000f, 125.0f, 0));
 }
 
 void test_bins_expire_rather_than_accumulate() {
@@ -112,6 +165,9 @@ int main() {
   RUN_TEST(test_long_term_util_over_the_hour);
   RUN_TEST(test_duty_cycle_lock_and_release);
   RUN_TEST(test_budget_used_reports_fraction_of_allowance);
+  RUN_TEST(test_band_lookup_covers_the_eu_plan);
+  RUN_TEST(test_channel_straddling_a_boundary_takes_the_stricter_band);
+  RUN_TEST(test_effective_limit_follows_the_band);
   RUN_TEST(test_bins_expire_rather_than_accumulate);
   RUN_TEST(test_contention_window_widens_with_channel_use);
   RUN_TEST(test_short_term_util_uses_recent_bins_only);

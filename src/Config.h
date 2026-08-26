@@ -318,12 +318,13 @@
 #define DISPLAY_SLEEP_BATTERY_MS 20000
 
 // ---------------------------------------------------------------------------
-// Hourly transmit budget as a percentage of wall-clock time. ETSI gives the
-// EU 868 MHz sub-bands 1 % (868.0-868.6, where the default channel sits) and
-// 10 % (869.4-869.65); other regions differ, and 0 disables the limiter
-// entirely. Enforced over a rolling hour — see Airtime.h.
+// Optional manual cap on the hourly transmit budget, in whole percent. The
+// allowance normally comes from the sub-band the channel sits in (Airtime.h
+// carries the EU 863-870 plan), and this only ever tightens it further; 0
+// means "whatever the band allows". It is the operator's own limit for a
+// channel outside that plan, where the local rules are theirs to know.
 #ifndef RF_DUTY_CYCLE_PCT
-  #define RF_DUTY_CYCLE_PCT 1
+  #define RF_DUTY_CYCLE_PCT 0
 #endif
 
 // CSMA: DIFS + a contention window sized from recent channel use, as in
@@ -381,6 +382,7 @@ struct NodeStats {
   volatile float    dutyBudget    = 0.0f;   // 0..1+ of the hourly allowance
   volatile bool     dutyLocked    = false;  // transmissions held back
   volatile uint32_t dutyRetryS    = 0;      // seconds until the budget frees up
+  volatile uint16_t dutyLimitBp   = 0;      // enforced allowance in basis points, 100 = 1 %
   volatile uint16_t csmaSlotMs    = 0;
   volatile uint8_t  csmaBand      = 1;      // contention window band, 1..4
   volatile uint32_t loraRxDropped = 0;      // ring-full / oversize drops
