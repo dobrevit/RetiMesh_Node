@@ -59,11 +59,6 @@ public:
   // Called from the RNS task: frames and writes one packet to one client.
   bool sendTo(uint32_t clientId, const uint8_t* packet, size_t len);
 
-  // Verifies an announce (hash chain + Ed25519) and records the sender in
-  // the neighbour table. Called by the RNS interfaces for metadata only;
-  // Transport does its own validation.
-  static void noteAnnounce(const uint8_t* raw, size_t len, bool viaWifi);
-
 private:
   struct ClientCtx {
     uint32_t       id;

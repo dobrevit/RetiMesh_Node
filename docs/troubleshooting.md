@@ -19,7 +19,7 @@ monitor` or any terminal). Boot lines to expect: identity, `SSD1306 found`,
 | Settings page asks for a password | admin auth | `admin` / `retimesh` by default; factory reset restores it |
 | Wi-Fi security `wpa3` greyed out | ESP-IDF 4.4 core has no SoftAP SAE | use WPA2; WPA3 arrives with the core-3 migration |
 | Node reboots after saving Wi-Fi/transport settings | by design — those need re-registration | reconnect to the (possibly new) SSID |
-| `esp_littlefs: Failed to unlink … Has open FD` | microStore rotates a file it holds open | harmless; tracked upstream |
+| `esp_littlefs: Failed to unlink … Has open FD` | microStore compaction deleting a segment it still holds open (fixed in our fork, upstream PR attermann/microStore#6) | update the firmware; harmless on older builds |
 | SD card shows `partial` | the FAT volume covers only part of the card (Raspberry Pi image, phone card) | *Format card* on the settings page (erases it) |
 | SD card shows `unformatted` | ext4/exFAT/other filesystem, or a blank card | same — format from the settings page |
 | Heap keeps dropping | possible leak | report with the heartbeat lines (`up … heap …`) and the version |

@@ -292,10 +292,6 @@
 // Allocations above this threshold prefer PSRAM instead (ISR code never
 // allocates, so it is safe); ring buffer storage goes there explicitly.
 // ---------------------------------------------------------------------------
-#ifndef RETIMESH_UPSTREAM_FIXES
-  #define RETIMESH_UPSTREAM_FIXES 0        // 1 when built against our microReticulum/microStore fix branches
-#endif
-
 #ifndef PSRAM_MALLOC_THRESHOLD
   #define PSRAM_MALLOC_THRESHOLD 128      // measured: 512 B -> +28 KB internal, 128 B -> +42 KB
 #endif

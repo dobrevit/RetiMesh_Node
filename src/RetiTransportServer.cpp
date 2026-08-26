@@ -20,10 +20,7 @@
 //  RetiTransportServer.cpp — see RetiTransportServer.h for the data flow.
 // ============================================================================
 #include "RetiTransportServer.h"
-#include "RnsAnnounce.h"
 #include "RnsTransport.h"
-#include "Neighbors.h"
-#include "SdCard.h"
 
 RetiTransportServer transportServer;
 
@@ -150,38 +147,3 @@ bool RetiTransportServer::sendTo(uint32_t clientId, const uint8_t* packet, size_
   return ok;
 }
 
-// ---------------------------------------------------------------------------
-// Neighbour bookkeeping from announces (any interface). Our own announces
-// coming back are ignored.
-// ---------------------------------------------------------------------------
-void RetiTransportServer::noteAnnounce(const uint8_t* raw, size_t len, bool viaWifi) {
-  Rns::Announce a;
-  if (!Rns::parseAnnounce(raw, len, a)) {
-    log_w("announce from %s failed validation (%u bytes)", viaWifi ? "wifi" : "lora", (unsigned)len);
-    return;
-  }
-  if (memcmp(a.destHash, nodeIdentity.destHash(), Rns::HASH_LEN) == 0) return;
-
-  Neighbor n = {};
-  Rns::toHex(a.destHash, Rns::HASH_LEN, n.hash);
-  const char* aspect = Rns::aspectName(a.nameHash);
-  strlcpy(n.aspect, aspect ? aspect : "", sizeof(n.aspect));
-  Rns::displayName(a, n.name, sizeof(n.name));
-  if (aspect && strcmp(aspect, "retimesh.node") == 0) {
-    char* sp = strchr(n.name, ' ');        // app_data is "<callsign> <version>"
-    if (sp) { strlcpy(n.version, sp + 1, sizeof(n.version)); *sp = '\0'; }
-  }
-  n.kind = NeighborKind::Announce;
-  n.hops = a.hops;
-  n.viaWifi = viaWifi;
-  n.rssi = viaWifi ? 0 : g_stats.lastRssi;
-  n.snr  = viaWifi ? 0 : g_stats.lastSnr;
-  neighbors.seen(n);
-  g_stats.announcesRx++;
-  log_i("announce via %s: %s <%s> \"%s\" hops %u", viaWifi ? "wifi" : "lora",
-        aspect ? aspect : "unknown-aspect", n.hash, n.name, a.hops);
-  char line[160];
-  snprintf(line, sizeof(line), "announce %s %s <%s> \"%s\" hops=%u rssi=%.0f", viaWifi ? "wifi" : "lora",
-           aspect ? aspect : "?", n.hash, n.name, a.hops, (double)n.rssi);
-  sdCard.log(line);
-}
