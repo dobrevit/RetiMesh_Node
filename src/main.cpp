@@ -102,7 +102,7 @@ void setup() {
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
   g_stats.transportOnline = RnsTransport::begin(txRing, rxRing, tcpInRing);
   #if HAS_AUTOINTERFACE
-    AutoInterface::begin();                // spike: IPv6 multicast discovery on the AP
+    AutoInterface::begin(tcpInRing);       // zero-config peering on the AP (RNS AutoInterface)
   #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
@@ -132,8 +132,8 @@ void loop() {
   g_stats.heapMinFree = ESP.getMinFreeHeap();
   if (millis() - lastBeat >= 30000) {
     lastBeat = millis();
-    log_i("up %lus | rns peers %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u | heap %u (min %u)",
-          millis() / 1000, (unsigned)g_stats.tcpClients,
+    log_i("up %lus | peers tcp %u auto %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u | heap %u (min %u)",
+          millis() / 1000, (unsigned)g_stats.tcpClients, (unsigned)AutoInterface::peerCount(),
           (unsigned)g_stats.loraRxPackets, (unsigned)g_stats.loraTxPackets,
           (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.announcesRx,
           (unsigned)g_stats.announcesTx, (unsigned)ESP.getFreeHeap(), (unsigned)g_stats.heapMinFree);

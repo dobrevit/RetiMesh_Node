@@ -116,7 +116,8 @@ async function refreshStatus() {
     if (s.transport) {
       const d = document.createElement("div"); d.className = "post";
       const a = document.createElement("div"); a.className = "a";
-      a.textContent = s.transport.enabled ? (s.transport.online ? "Transport node · " + s.transport.path_count + " known path" + (s.transport.path_count === 1 ? "" : "s") : "Transport enabled but not running") : "Transport disabled (bridge only)";
+      a.textContent = (s.transport.enabled ? (s.transport.online ? "Transport node · " + s.transport.path_count + " known path" + (s.transport.path_count === 1 ? "" : "s") : "Transport enabled but not running") : "Transport disabled (bridge only)")
+        + (s.transport.autointerface && s.transport.autointerface.online ? " · zero-config peers: " + s.transport.autointerface.peers : "");
       const t = document.createElement("div"); t.className = "t";
       t.textContent = (s.transport.interfaces || []).map(i => i.name + " [" + i.mode + "] ↓" + i.rx_bytes + " ↑" + i.tx_bytes + " B").join("\n") || "no interfaces";
       d.append(a, t); tr.append(d);

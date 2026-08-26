@@ -31,6 +31,7 @@
 #include "LoRaRadio.h"
 #include "RetiTransportServer.h"
 #include "WifiManager.h"
+#include "AutoInterface.h"
 
 using RNS::Bytes;
 
@@ -128,6 +129,7 @@ public:
     _bitrate = 10000000;                    // Wi-Fi; only used for airtime maths
   }
   bool send_outgoing(const Bytes& data) override {
+    if (_id & AutoInterface::AUTO_ID_BASE) return AutoInterface::sendTo(_id, data.data(), data.size());
     return transportServer.sendTo(_id, data.data(), data.size());
   }
   void incoming(const uint8_t* p, size_t len) {
@@ -156,7 +158,7 @@ static RNS::Interface loraIface({RNS::Type::NONE});
 struct TcpIface { RNS::Interface handle; TcpClientRnsInterface* impl; };
 static std::map<uint32_t, TcpIface> tcpIfaces;
 
-struct Event { bool connect; uint32_t id; char remote[24]; };
+struct Event { bool connect; uint32_t id; char remote[46]; };
 
 // ---------------------------------------------------------------------------
 namespace RnsTransport {
@@ -208,7 +210,7 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
 
 void clientConnected(uint32_t id, const char* remote) {
   Event e{ true, id, {0} };
-  strlcpy(e.remote, remote, sizeof(e.remote));
+  strlcpy(e.remote, remote, sizeof(e.remote));       // IPv4 text, or the IPv6 tail for Auto peers
   xQueueSend(sEvents, &e, 0);
 }
 
@@ -222,7 +224,12 @@ static void processEvents() {
   while (xQueueReceive(sEvents, &e, 0) == pdTRUE) {
     if (e.connect) {
       char name[32];
-      snprintf(name, sizeof(name), "WiFi/%s", e.remote);
+      if (e.id & AutoInterface::AUTO_ID_BASE) {
+        const char* tail = strrchr(e.remote, ':');            // last hextet keeps it readable
+        snprintf(name, sizeof(name), "Auto/%s", tail ? tail + 1 : e.remote);
+      } else {
+        snprintf(name, sizeof(name), "WiFi/%s", e.remote);
+      }
       auto* impl = new TcpClientRnsInterface(e.id, name);
       RNS::Interface iface(impl);
       iface.mode(toMode(settings.transport().wifiMode));

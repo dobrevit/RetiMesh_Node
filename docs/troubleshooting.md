@@ -14,6 +14,7 @@ monitor` or any terminal). Boot lines to expect: identity, `SSD1306 found`,
 | Neighbour list empty although an RNode is nearby | an RNode only transmits its station ID after real traffic; plain `rnsd` never announces | give it traffic or run NomadNet; set `id_interval`/`id_callsign` |
 | rnsd counts "protocol violations" | raw station-ID callsigns from RNodes are not valid packets (RNS design) | harmless; disable IDs on the RNode if it bothers you; RetiMesh beacons/announces do not count |
 | A remote announce never reaches the phone | phone connected after the announce (RNS does not replay), or client mode `access_point` | reconnect and wait for the next announce, or use path requests (message by address) |
+| Sideband does not find the node via Local/LAN | AutoInterface disabled on either side, different group id, or the phone's Wi-Fi blocks multicast (some Android power-saving modes) | check *Connect via Local/LAN* in Sideband and *Zero-config peering* on the node; group ids must match; fall back to TCP `10.42.0.1:4242` |
 | Settings page asks for a password | admin auth | `admin` / `retimesh` by default; factory reset restores it |
 | Wi-Fi security `wpa3` greyed out | ESP-IDF 4.4 core has no SoftAP SAE | use WPA2; WPA3 arrives with the core-3 migration |
 | Node reboots after saving Wi-Fi/transport settings | by design — those need re-registration | reconnect to the (possibly new) SSID |

@@ -27,12 +27,15 @@
 #include <lwip/inet.h>
 #include <esp_netif.h>
 #include <freertos/semphr.h>
+#include <freertos/ringbuf.h>
 #include "RnsAnnounce.h"
+#include "RnsTransport.h"
+#include "Settings.h"
 
 namespace {
 
-const char* kGroupId     = AUTOIF_GROUP_ID;
-const char* kGroupAddr   = "ff12:0:d70b:fb1c:16e4:5e39:485e:31e1";   // temporary-type, link scope, for "reticulum"
+char kGroupId[33]        = AUTOIF_GROUP_ID;
+char kGroupAddr[48]      = "";                 // derived from the group id at start
 const uint16_t kDiscPort = 29716;
 const uint16_t kDataPort = 42671;
 const uint32_t kAnnounceMs = 1600;
@@ -41,8 +44,21 @@ const uint32_t kPeerTimeoutMs = 22000;
 int  sDisc = -1, sData = -1;
 int  sIfIndex = 0;
 char sLocal[46] = "";
+bool sEnabled = false;
 SemaphoreHandle_t sLock;
+RingbufHandle_t sInRing = nullptr;
 AutoInterface::Peer sPeers[AUTOIF_MAX_PEERS];
+uint32_t sNextPeer = 1;
+
+// ff + type '1' (temporary) + scope '2' (link) + ":0:" + six 16-bit words
+// from bytes 2..13 of sha256(group id) — RNS.Interfaces.AutoInterface.
+void deriveGroupAddress() {
+  uint8_t g[32];
+  Rns::sha256((const uint8_t*)kGroupId, strlen(kGroupId), g);
+  snprintf(kGroupAddr, sizeof(kGroupAddr), "ff12:0:%x:%x:%x:%x:%x:%x",
+           g[3] + (g[2] << 8), g[5] + (g[4] << 8), g[7] + (g[6] << 8),
+           g[9] + (g[8] << 8), g[11] + (g[10] << 8), g[13] + (g[12] << 8));
+}
 
 // RNS hashes the RFC 5952 text of the address: lowercase, compressed, no
 // scope suffix. lwIP prints uppercase, so normalise before hashing/logging.
@@ -69,27 +85,57 @@ bool localLinkLocal(char* out, size_t cap) {
   return out[0] != '\0';
 }
 
-void notePeer(const char* addr, bool data) {
+// Returns the peer id; registers a new peer with Transport.
+uint32_t notePeer(const char* addr, bool data) {
   xSemaphoreTake(sLock, portMAX_DELAY);
   AutoInterface::Peer* slot = nullptr;
   for (auto& p : sPeers) if (p.addr[0] && strcmp(p.addr, addr) == 0) { slot = &p; break; }
+  bool fresh = false;
   if (!slot) {
     for (auto& p : sPeers) if (!p.addr[0]) { slot = &p; break; }
-    if (!slot) { slot = &sPeers[0]; for (auto& p : sPeers) if (p.lastSeenMs < slot->lastSeenMs) slot = &p; }
+    if (!slot) { xSemaphoreGive(sLock); return 0; }         // table full: ignore until one expires
     memset(slot, 0, sizeof(*slot));
     strlcpy(slot->addr, addr, sizeof(slot->addr));
-    log_i("AutoInterface: new peer %s", addr);
+    slot->id = AutoInterface::AUTO_ID_BASE | sNextPeer++;
+    fresh = true;
   }
   slot->lastSeenMs = millis();
   if (data) slot->datagrams++;
+  uint32_t id = slot->id;
   xSemaphoreGive(sLock);
+  if (fresh) {
+    log_i("AutoInterface: new peer %s (#%lu)", addr, (unsigned long)(id & 0xFFFF));
+    RnsTransport::clientConnected(id, addr);
+  }
+  return id;
 }
 
 void expirePeers() {
+  uint32_t expired[AUTOIF_MAX_PEERS]; size_t n = 0;
   xSemaphoreTake(sLock, portMAX_DELAY);
   for (auto& p : sPeers)
-    if (p.addr[0] && millis() - p.lastSeenMs > kPeerTimeoutMs) { log_i("AutoInterface: peer %s timed out", p.addr); p.addr[0] = '\0'; }
+    if (p.addr[0] && millis() - p.lastSeenMs > kPeerTimeoutMs) {
+      log_i("AutoInterface: peer %s timed out", p.addr);
+      expired[n++] = p.id; p.addr[0] = '\0';
+    }
   xSemaphoreGive(sLock);
+  for (size_t i = 0; i < n; i++) RnsTransport::clientDisconnected(expired[i]);
+}
+
+bool peerAddress(uint32_t id, sockaddr_in6& out) {
+  bool ok = false;
+  xSemaphoreTake(sLock, portMAX_DELAY);
+  for (auto& p : sPeers) if (p.addr[0] && p.id == id) {
+    memset(&out, 0, sizeof(out));
+    out.sin6_family = AF_INET6; out.sin6_port = htons(kDataPort);
+    inet_pton(AF_INET6, p.addr, &out.sin6_addr);
+#if LWIP_IPV6_SCOPES
+    out.sin6_scope_id = sIfIndex;
+#endif
+    ok = true; break;
+  }
+  xSemaphoreGive(sLock);
+  return ok;
 }
 
 bool openSockets() {
@@ -135,12 +181,14 @@ void sendDiscovery() {
 }
 
 void task(void*) {
+  deriveGroupAddress();
   // IPv6 on the AP comes up asynchronously; wait for a link-local address.
   WiFi.softAPenableIpV6();
   for (int i = 0; i < 100 && !localLinkLocal(sLocal, sizeof(sLocal)); i++) vTaskDelay(pdMS_TO_TICKS(100));
   if (!sLocal[0]) { log_w("AutoInterface: no link-local IPv6 on the AP, giving up"); vTaskDelete(nullptr); return; }
   log_i("AutoInterface: AP link-local %s", sLocal);
   if (!openSockets()) { vTaskDelete(nullptr); return; }
+  sEnabled = true;
 
   uint32_t lastAnnounce = 0, lastExpire = 0;
   uint8_t buf[1500];
@@ -161,10 +209,18 @@ void task(void*) {
     }
     sl = sizeof(src);
     n = recvfrom(sData, buf, sizeof(buf), 0, (sockaddr*)&src, &sl);
-    if (n > 0) {
+    if (n > 0 && n <= RNS_MTU) {
       char addr[46]; inet_ntop(AF_INET6, &src.sin6_addr, addr, sizeof(addr)); lowercase(addr);
-      notePeer(addr, true);
-      log_i("AutoInterface: %d-byte datagram from %s (RNS packet%s)", n, addr, Rns::isAnnounce(buf, n) ? ", announce" : "");
+      uint32_t id = notePeer(addr, true);
+      if (id) {
+        // Same ring and layout as the TCP clients: [client id | packet]
+        uint8_t item[sizeof(RnsTransport::TcpItemHeader) + RNS_MTU];
+        RnsTransport::TcpItemHeader h{ id };
+        memcpy(item, &h, sizeof(h));
+        memcpy(item + sizeof(h), buf, n);
+        if (xRingbufferSend(sInRing, item, sizeof(h) + n, pdMS_TO_TICKS(20)) != pdTRUE)
+          log_w("AutoInterface: inbound ring full, dropping %d bytes", n);
+      }
     }
   }
 }
@@ -173,10 +229,32 @@ void task(void*) {
 
 namespace AutoInterface {
 
-void begin() {
+void begin(RingbufHandle_t inRing) {
   sLock = xSemaphoreCreateMutex();
+  sInRing = inRing;
   memset(sPeers, 0, sizeof(sPeers));
+  strlcpy(kGroupId, settings.transport().autoGroupId[0] ? settings.transport().autoGroupId : AUTOIF_GROUP_ID, sizeof(kGroupId));
+  if (!settings.transport().autoEnabled) { log_i("AutoInterface disabled in settings"); return; }
   xTaskCreatePinnedToCore(task, "autoif", 6144, nullptr, 2, nullptr, 0);
+}
+
+bool enabled() { return sEnabled; }
+
+size_t peerCount() {
+  size_t k = 0;
+  xSemaphoreTake(sLock, portMAX_DELAY);
+  for (auto& p : sPeers) if (p.addr[0]) k++;
+  xSemaphoreGive(sLock);
+  return k;
+}
+
+bool sendTo(uint32_t peerId, const uint8_t* packet, size_t len) {
+  if (sData < 0) return false;
+  sockaddr_in6 dst;
+  if (!peerAddress(peerId, dst)) return false;
+  int n = sendto(sData, packet, len, 0, (sockaddr*)&dst, sizeof(dst));
+  if (n < 0) { log_w("AutoInterface: sendto failed (errno %d)", errno); return false; }
+  return true;
 }
 
 size_t peers(Peer* out, size_t max) {

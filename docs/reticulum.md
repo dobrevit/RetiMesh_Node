@@ -5,7 +5,7 @@
 |---|---|---|---|
 | **LoRa** | radio | RNode-compatible: 1 header byte (random nibble + split flag), ≤255-byte frames, two-fragment packets up to the 500-byte RNS MTU | byte-compatible with RNode firmware — real RNodes on the same channel parameters interoperate |
 | **TCP :4242** | Wi-Fi | RNS TCPInterface HDLC (`0x7E` flags, `0x7D` escapes) | one RNS interface per connected client, like `rnsd`'s TCPServerInterface |
-| AutoInterface (IPv6 link-local multicast) | Wi-Fi | UDP | **planned** — zero-config Sideband "Local/LAN" |
+| **AutoInterface** | Wi-Fi | RNS AutoInterface: IPv6 link-local multicast discovery (UDP 29716), packets as UDP datagrams (42671) | zero-config — Sideband's *Local/LAN* finds the node by itself; one RNS interface per peer, sharing the *Wi-Fi clients mode* |
 
 ## Identity and announces
 The node has a persistent Reticulum identity (X25519 + Ed25519, NVS) used

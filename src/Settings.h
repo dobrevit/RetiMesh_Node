@@ -73,6 +73,8 @@ struct TransportSettings {
   uint16_t announceRateTarget = 0;      // s between announces from one destination (0 = off)
   uint8_t  announceRateGrace  = 0;      // violations tolerated before blocking
   uint16_t announceRatePenalty = 0;     // s added to the block
+  bool     autoEnabled = true;          // RNS AutoInterface peering on the AP
+  char     autoGroupId[33] = "";        // "" = RNS default "reticulum"
 };
 
 struct AdminSettings {

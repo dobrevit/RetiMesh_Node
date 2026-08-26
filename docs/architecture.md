@@ -31,6 +31,9 @@ flowchart LR
 
 - **AsyncTCP task** only moves bytes: HDLC-deframes client streams into
   `tcpInRing` (tagged with the client id) and writes framed packets back.
+- **autoif task** (core 0) speaks RNS AutoInterface: multicast discovery
+  tokens, peer table with the 22 s timeout, UDP datagrams into the same
+  ring tagged with the peer id; each peer is an RNS interface.
 - **radioTask** owns the transceiver: interrupt-driven RX, split-packet
   reassembly, CSMA and fragmentation on TX, live reconfiguration between
   packets, beacon/station-ID recognition.

@@ -26,25 +26,36 @@
 //  receiver recomputes it for the sender's address; on a match the sender
 //  is a peer for 22 s, and RNS packets flow as UDP unicast to port 42671.
 //
-//  This spike proves the transport path on the ESP32 SoftAP: the node
-//  joins the group, validates incoming tokens, sends its own, and counts
-//  data datagrams. The per-peer RNS interfaces come next.
+//  Every peer becomes its own RNS interface on the Transport (registered
+//  and removed through RnsTransport's event queue, exactly like TCP
+//  clients); inbound datagrams go through tcpInRing tagged with the peer
+//  id, outbound packets are UDP unicast from the RNS task.
 // ============================================================================
 #pragma once
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/ringbuf.h>
 #include "Config.h"
 
 namespace AutoInterface {
 
 struct Peer {
+  uint32_t id;                    // RnsTransport client id (AUTO_ID_BASE | n)
   char     addr[46];
   uint32_t lastSeenMs;
   uint32_t datagrams;
 };
 
-void begin();                     // starts the discovery/data task (core 0)
+constexpr uint32_t AUTO_ID_BASE = 0x80000000UL;   // ids above this are AutoInterface peers
+
+void begin(RingbufHandle_t inRing);   // starts the discovery/data task (core 0)
 size_t peers(Peer* out, size_t max);
-const char* localAddress();       // our link-local address text, "" until assigned
+size_t peerCount();
+const char* localAddress();           // our link-local address text, "" until assigned
+bool enabled();
+
+// Called from the RNS task: one RNS packet as a UDP datagram to one peer.
+bool sendTo(uint32_t peerId, const uint8_t* packet, size_t len);
 
 } // namespace AutoInterface

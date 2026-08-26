@@ -28,6 +28,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "SdCard.h"
+#include "AutoInterface.h"
 
 WifiManager wifiManager;
 
@@ -311,6 +312,12 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   tr["online"]  = g_stats.transportOnline;
   tr["lora_mode"] = RnsTransport::modeName(settings.transport().loraMode);
   tr["wifi_mode"] = RnsTransport::modeName(settings.transport().wifiMode);
+  JsonObject ai = tr["autointerface"].to<JsonObject>();
+  ai["enabled"] = settings.transport().autoEnabled;
+  ai["online"]  = AutoInterface::enabled();
+  ai["address"] = AutoInterface::localAddress();
+  ai["peers"]   = AutoInterface::peerCount();
+  ai["group_id"] = settings.transport().autoGroupId[0] ? settings.transport().autoGroupId : AUTOIF_GROUP_ID;
   {
     RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
     size_t k = RnsTransport::interfaces(ifs, RNS_MAX_CLIENTS + 1);
@@ -448,6 +455,8 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   tr["announce_rate_target"] = settings.transport().announceRateTarget;
   tr["announce_rate_grace"] = settings.transport().announceRateGrace;
   tr["announce_rate_penalty"] = settings.transport().announceRatePenalty;
+  tr["auto_enabled"] = settings.transport().autoEnabled;
+  tr["auto_group_id"] = settings.transport().autoGroupId;
   tr["online"]    = g_stats.transportOnline;
 
   doc["admin"]["user"] = ADMIN_USER;
@@ -560,6 +569,12 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   if (in["announce_rate_target"].is<int>())  t.announceRateTarget  = in["announce_rate_target"];
   if (in["announce_rate_grace"].is<int>())   t.announceRateGrace   = in["announce_rate_grace"];
   if (in["announce_rate_penalty"].is<int>()) t.announceRatePenalty = in["announce_rate_penalty"];
+  if (in["auto_enabled"].is<bool>()) t.autoEnabled = in["auto_enabled"];
+  if (in["auto_group_id"].is<const char*>()) {
+    String g = in["auto_group_id"].as<String>(); g.trim();
+    if (g.length() > 32) { sendError(request, 400, "group id must be at most 32 characters"); return; }
+    strlcpy(t.autoGroupId, g.c_str(), sizeof(t.autoGroupId));
+  }
   if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5) { sendError(request, 400, "mode must be 1-5"); return; }
   if (t.announceCap < 1 || t.announceCap > 100) { sendError(request, 400, "announce cap must be 1-100 %"); return; }
   if (!settings.saveTransport(t)) { sendError(request, 500, "nvs"); return; }

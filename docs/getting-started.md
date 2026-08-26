@@ -28,7 +28,12 @@ bulletin board.
 
 ## 3. Connect Sideband (or any Reticulum client)
 
-In Sideband: *Connectivity → Connect via TCP* → host `10.42.0.1`, port `4242`.
+**Zero-config:** with Sideband's *Connectivity → Connect via Local/LAN* enabled
+(its default), the phone finds the node within a few seconds of joining the
+Wi-Fi — nothing to type. Every Reticulum client with an AutoInterface (rnsd,
+NomadNet, MeshChat on a laptop) does the same.
+
+**Manual:** *Connect via TCP* → host `10.42.0.1`, port `4242`.
 For `rnsd`/NomadNet on a laptop on the same Wi-Fi, add to `~/.reticulum/config`:
 
 ```ini
