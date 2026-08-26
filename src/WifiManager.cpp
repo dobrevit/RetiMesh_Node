@@ -391,10 +391,11 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     JsonObject at = doc["airtime"].to<JsonObject>();
     at["short_pct"]     = roundf(g_stats.airtimeShort * 10000.0f) / 100.0f;
     at["long_pct"]      = roundf(g_stats.airtimeLong * 10000.0f) / 100.0f;
-    const Airtime::Band* band = Airtime::bandFor(settings.radio().freqMhz);
+    const Airtime::Band* band = Airtime::bandFor(settings.radio().freqMhz, settings.radio().bwKhz);
     at["band"]           = band ? band->name : "outside the EU 863-870 plan";
-    at["band_limit_pct"] = band ? band->permille / 10.0f : 0.0f;
-    at["duty_limit_pct"] = g_stats.dutyLimitPermille / 10.0f;   // what is enforced
+    at["band_limit_pct"] = band ? band->basisPoints / 100.0f : 0.0f;
+    at["band_allocated"] = band ? band->allocated : false;
+    at["duty_limit_pct"] = g_stats.dutyLimitBp / 100.0f;        // what is enforced
     at["duty_manual_pct"] = settings.radio().dutyCyclePct;      // 0 = follow the band
     at["budget_used"]   = roundf(g_stats.dutyBudget * 1000.0f) / 1000.0f;
     at["locked"]        = g_stats.dutyLocked;

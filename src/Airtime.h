@@ -64,6 +64,8 @@ public:
   static const uint8_t  CW_PER_BAND    = 15;
   // Stop a little short of the legal ceiling: airtime is accounted per frame
   // after the fact, and a node that aims exactly at the limit will cross it.
+  // In basis points 95 % of an allowance is exact for every figure in the EU
+  // plan except 0.1 %, which rounds down to 0.09 %.
   static const uint16_t DUTY_MARGIN_PCT = 5;   // hold to 95 % of the allowance
 
   static const uint8_t  BAND_1_MAX_PCT = 7;    // <= 7 % channel use stays in band 1
@@ -81,34 +83,43 @@ public:
   // ---- Regulatory bands ---------------------------------------------------
   // The transmit budget is not ours to choose: it belongs to the sub-band the
   // channel sits in. In the EU 863-870 MHz SRD plan (ERC 70-03 / EN 300 220)
-  // the allowance ranges from 0.1 % to 10 % depending on where you are, which
-  // is why the limit is carried in per-mille rather than whole percent.
+  // the allowance ranges from 0.1 % to 10 %, so limits are carried in basis
+  // points — hundredths of a percent — which expresses every figure in the
+  // plan exactly and leaves room for the safety margin to mean what it says.
   struct Band {
     float       lowMhz;
     float       highMhz;
-    uint16_t    permille;     // 1 = 0.1 %, 10 = 1 %, 100 = 10 %
+    uint16_t    basisPoints;  // 10 = 0.1 %, 100 = 1 %, 1000 = 10 %
     const char* name;
+    bool        allocated;    // false for the ranges between the sub-bands
   };
 
-  // The band containing this frequency, or nullptr when it falls outside the
-  // plan we know — in which case the local rules are the operator's to apply.
-  static const Band* bandFor(float freqMhz);
+  // The band a channel of `bwKhz` centred on `freqMhz` must obey. A channel
+  // that fits inside one sub-band gets that sub-band's allowance; one that
+  // straddles a boundary gets the strictest of the bands it touches, because
+  // energy lands in all of them. nullptr means the channel is outside the plan
+  // entirely, where the local rules are the operator's to apply.
+  static const Band* bandFor(float freqMhz, float bwKhz = 0.0f);
+
+  // The most permissive sub-band the channel touches. Paired with bandFor()
+  // it answers "what is this channel losing by straddling a boundary?".
+  static const Band* mostGenerousOverlapping(float freqMhz, float bwKhz);
 
   // What the node will actually hold itself to: the band's allowance less a
   // safety margin, tightened further by a manual cap when one is set.
   // manualPct 0 means "whatever the band allows". Returns 0 for "no limit",
   // which happens only outside the known plan with no manual cap.
-  static uint16_t effectivePermille(float freqMhz, uint8_t manualPct);
+  static uint16_t effectiveBasisPoints(float freqMhz, float bwKhz, uint8_t manualPct);
 
   void  addTx(uint32_t nowMs, float airMs);   // record a transmission
   float shortTermUtil(uint32_t nowMs);        // 0..1 over the last two bins
   float longTermUtil(uint32_t nowMs);         // 0..1 over the hour
-  // All three take the limit in per-mille (0 = no limit), as returned by
-  // effectivePermille().
-  float budgetUsed(uint32_t nowMs, uint16_t limitPermille);   // 0..1+ of the allowance
-  bool  locked(uint32_t nowMs, uint16_t limitPermille);
+  // All three take the limit in basis points (0 = no limit), as returned by
+  // effectiveBasisPoints().
+  float budgetUsed(uint32_t nowMs, uint16_t limitBp);         // 0..1+ of the allowance
+  bool  locked(uint32_t nowMs, uint16_t limitBp);
   // Seconds until the hourly figure falls back under the limit, 0 when free.
-  uint32_t retryAfterS(uint32_t nowMs, uint16_t limitPermille);
+  uint32_t retryAfterS(uint32_t nowMs, uint16_t limitBp);
 
   uint32_t slotMs() const;
   uint32_t difsMs() const { return 2 * slotMs(); }

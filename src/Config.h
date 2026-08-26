@@ -382,7 +382,7 @@ struct NodeStats {
   volatile float    dutyBudget    = 0.0f;   // 0..1+ of the hourly allowance
   volatile bool     dutyLocked    = false;  // transmissions held back
   volatile uint32_t dutyRetryS    = 0;      // seconds until the budget frees up
-  volatile uint16_t dutyLimitPermille = 0;  // enforced allowance, 1 = 0.1 %
+  volatile uint16_t dutyLimitBp   = 0;      // enforced allowance in basis points, 100 = 1 %
   volatile uint16_t csmaSlotMs    = 0;
   volatile uint8_t  csmaBand      = 1;      // contention window band, 1..4
   volatile uint32_t loraRxDropped = 0;      // ring-full / oversize drops

@@ -82,22 +82,36 @@ hour, in one-minute bins, and uses it for two things.
 decided by the sub-band its channel falls in, so the node looks it up rather
 than asking. The EU 863–870 MHz SRD plan (ERC 70-03) is built in:
 
-| Sub-band | Allowance |
-|---|---|
-| 863–865 MHz | 0.1 % |
-| 865–868 MHz | 1 % |
-| 868–868.6 MHz | 1 % |
-| 868.7–869.2 MHz | 0.1 % |
-| 869.4–869.65 MHz | 10 % |
-| 869.7–870 MHz | 1 % |
+| Sub-band | Allowance | Enforced |
+|---|---|---|
+| 863–865 MHz | 0.1 % | 0.09 % |
+| 865–868 MHz | 1 % | 0.95 % |
+| 868–868.6 MHz | 1 % | 0.95 % |
+| 868.7–869.2 MHz | 0.1 % | 0.09 % |
+| 869.4–869.65 MHz | 10 % | 9.5 % |
+| 869.7–870 MHz | 1 % | 0.95 % |
 
 The node holds itself to 95 % of the allowance — airtime is accounted after
-each frame, so aiming exactly at the ceiling would cross it. `duty_cycle_pct`
-on the settings page is an optional stricter cap and never a looser one; leave
-it at `0` to follow the band. The frequencies between those rows are not
-allocated to this class of device, and a channel outside the plan entirely
-(another region) has nothing to look up — there the cap becomes your own limit,
-and `0` means no limiter at all, which the status page flags.
+each frame, so aiming exactly at the ceiling would cross it. Limits are carried
+in hundredths of a percent, which expresses every figure in the plan exactly
+apart from the 0.1 % bands, where the margin rounds down to 0.09 %.
+
+**A channel is not a point.** The bandwidth is taken into account: a 125 kHz
+carrier centred on 868.6 MHz puts half its energy above that boundary, so it is
+held to the stricter of the sub-bands it touches rather than the one its centre
+happens to fall in. Move it down to 868.5 and the whole channel fits inside the
+1 % sub-band, which is then what applies.
+
+The ranges *between* the sub-bands (868.6–868.7, 869.2–869.4, 869.65–869.7) are
+not allocated to this class of device. They are still in the table, carrying
+the strictest allowance in the plan, because answering "no band, therefore no
+limit" would hand an unlimited budget to exactly the channel that deserves the
+least; the log and `/api/status` say `not allocated` when you land on one.
+
+`duty_cycle_pct` on the settings page is an optional stricter cap and never a
+looser one; leave it at `0` to follow the band. A channel outside the plan
+entirely (another region) has nothing to look up — there the cap becomes your
+own limit, and `0` means no limiter at all, which the status page flags.
 
 When the budget is spent the radio stops taking packets off the queue: nothing
 is dropped, senders simply see back-pressure until the window slides.

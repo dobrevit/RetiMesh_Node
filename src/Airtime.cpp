@@ -71,50 +71,79 @@ float Airtime::longTermUtil(uint32_t nowMs) {
   return sum / (float)((uint32_t)BINS * BIN_MS);
 }
 
-// EU 863-870 MHz SRD sub-bands (ERC 70-03 annex 1, EN 300 220-2). The gaps
-// between entries are not allocated to this class of device, so a channel
-// landing in one gets no band and therefore no automatic allowance.
+// EU 863-870 MHz SRD sub-bands (ERC 70-03 annex 1, EN 300 220-2), and the
+// ranges between them. The gaps are listed rather than left out: a channel
+// there is not allocated to this class of device at all, and answering "no
+// band, therefore no limit" would hand an unlimited budget to the one case
+// that deserves the least. They carry the strictest allowance in the plan.
 static const Airtime::Band kEuBands[] = {
-  { 863.0f,  865.0f,    1, "863-865 (0.1 %)"      },
-  { 865.0f,  868.0f,   10, "865-868 (1 %)"        },
-  { 868.0f,  868.6f,   10, "868-868.6 (1 %)"      },
-  { 868.7f,  869.2f,    1, "868.7-869.2 (0.1 %)"  },
-  { 869.4f,  869.65f, 100, "869.4-869.65 (10 %)"  },
-  { 869.7f,  870.0f,   10, "869.7-870 (1 %)"      },
+  { 863.00f, 865.00f,  10, "863-865 (0.1 %)",         true  },
+  { 865.00f, 868.00f, 100, "865-868 (1 %)",           true  },
+  { 868.00f, 868.60f, 100, "868-868.6 (1 %)",         true  },
+  { 868.60f, 868.70f,  10, "868.6-868.7 (not allocated)", false },
+  { 868.70f, 869.20f,  10, "868.7-869.2 (0.1 %)",     true  },
+  { 869.20f, 869.40f,  10, "869.2-869.4 (not allocated)", false },
+  { 869.40f, 869.65f, 1000, "869.4-869.65 (10 %)",    true  },
+  { 869.65f, 869.70f,  10, "869.65-869.7 (not allocated)", false },
+  { 869.70f, 870.00f, 100, "869.7-870 (1 %)",         true  },
 };
 
-/*static*/ const Airtime::Band* Airtime::bandFor(float freqMhz) {
-  for (const Band& b : kEuBands)
-    if (freqMhz >= b.lowMhz && freqMhz < b.highMhz) return &b;
-  return nullptr;
+/*static*/ const Airtime::Band* Airtime::bandFor(float freqMhz, float bwKhz) {
+  // A channel is not a point. Work out what it actually occupies and take the
+  // strictest allowance among the sub-bands it lands in, so a carrier sitting
+  // on a boundary cannot claim the more generous side of it.
+  const float half = (bwKhz > 0.0f ? bwKhz : 0.0f) / 2000.0f;   // kHz -> MHz, halved
+  const float lo = freqMhz - half, hi = freqMhz + half;
+
+  const Band* strictest = nullptr;
+  for (const Band& b : kEuBands) {
+    const bool overlaps = (hi > b.lowMhz && lo < b.highMhz) ||
+                          (half == 0.0f && freqMhz >= b.lowMhz && freqMhz <= b.highMhz);
+    if (!overlaps) continue;
+    if (!strictest || b.basisPoints < strictest->basisPoints) strictest = &b;
+  }
+  return strictest;
 }
 
-/*static*/ uint16_t Airtime::effectivePermille(float freqMhz, uint8_t manualPct) {
-  const Band* band = bandFor(freqMhz);
-  const uint16_t manual = (uint16_t)manualPct * 10;         // percent -> per-mille
+/*static*/ const Airtime::Band* Airtime::mostGenerousOverlapping(float freqMhz, float bwKhz) {
+  const float half = (bwKhz > 0.0f ? bwKhz : 0.0f) / 2000.0f;
+  const float lo = freqMhz - half, hi = freqMhz + half;
+  const Band* best = nullptr;
+  for (const Band& b : kEuBands) {
+    const bool overlaps = (hi > b.lowMhz && lo < b.highMhz) ||
+                          (half == 0.0f && freqMhz >= b.lowMhz && freqMhz <= b.highMhz);
+    if (!overlaps) continue;
+    if (!best || b.basisPoints > best->basisPoints) best = &b;
+  }
+  return best;
+}
+
+/*static*/ uint16_t Airtime::effectiveBasisPoints(float freqMhz, float bwKhz, uint8_t manualPct) {
+  const Band* band = bandFor(freqMhz, bwKhz);
+  const uint16_t manual = (uint16_t)manualPct * 100;         // percent -> basis points
   if (!band) return manual;                                 // unknown plan: operator's call
   // Keep a little back from the legal ceiling, then honour a stricter manual cap.
-  uint16_t allowed = (uint16_t)((uint32_t)band->permille * (100 - DUTY_MARGIN_PCT) / 100);
-  if (allowed == 0) allowed = 1;                            // never round 0.1 % away entirely
+  uint16_t allowed = (uint16_t)((uint32_t)band->basisPoints * (100 - DUTY_MARGIN_PCT) / 100);
+  if (allowed == 0) allowed = 1;                            // never round an allowance away
   if (manual > 0 && manual < allowed) return manual;
   return allowed;
 }
 
-float Airtime::budgetUsed(uint32_t nowMs, uint16_t limitPermille) {
-  if (limitPermille == 0) return 0.0f;
-  return longTermUtil(nowMs) / ((float)limitPermille / 1000.0f);
+float Airtime::budgetUsed(uint32_t nowMs, uint16_t limitBp) {
+  if (limitBp == 0) return 0.0f;
+  return longTermUtil(nowMs) / ((float)limitBp / 10000.0f);
 }
 
-bool Airtime::locked(uint32_t nowMs, uint16_t limitPermille) {
-  if (limitPermille == 0) return false;
-  return longTermUtil(nowMs) >= (float)limitPermille / 1000.0f;
+bool Airtime::locked(uint32_t nowMs, uint16_t limitBp) {
+  if (limitBp == 0) return false;
+  return longTermUtil(nowMs) >= (float)limitBp / 10000.0f;
 }
 
-uint32_t Airtime::retryAfterS(uint32_t nowMs, uint16_t limitPermille) {
-  if (!locked(nowMs, limitPermille)) return 0;
+uint32_t Airtime::retryAfterS(uint32_t nowMs, uint16_t limitBp) {
+  if (!locked(nowMs, limitBp)) return 0;
   // Bins expire oldest first; find how many must roll off before the total
   // drops under the allowance.
-  const float allowance = ((float)limitPermille / 1000.0f) * (float)((uint32_t)BINS * BIN_MS);
+  const float allowance = ((float)limitBp / 10000.0f) * (float)((uint32_t)BINS * BIN_MS);
   float total = 0.0f;
   for (uint16_t i = 0; i < BINS; i++) total += _bins[i];
   const uint16_t cur = binOf(nowMs);
