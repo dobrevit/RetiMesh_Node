@@ -26,6 +26,7 @@
 #include <map>
 #include <vector>
 #include "RnsFileSystem.h"
+#include "Neighbors.h"
 #include "RnsAnnounce.h"
 #include "Settings.h"
 #include "LoRaRadio.h"
@@ -110,7 +111,9 @@ public:
       RNS::Interface self(sp);
       self.r_stat_rssi(g_stats.lastRssi);
       self.r_stat_snr(g_stats.lastSnr);
+#if !RETIMESH_UPSTREAM_FIXES
       if (Rns::isAnnounce(item, sz)) RetiTransportServer::noteAnnounce(item, sz, false);
+#endif
       handle_incoming(Bytes(item, sz));
       vRingbufferReturnItem(sRxRing, item);
     }
@@ -133,7 +136,9 @@ public:
     return transportServer.sendTo(_id, data.data(), data.size());
   }
   void incoming(const uint8_t* p, size_t len) {
+#if !RETIMESH_UPSTREAM_FIXES
     if (Rns::isAnnounce(p, len)) RetiTransportServer::noteAnnounce(p, len, true);
+#endif
     handle_incoming(Bytes(p, len));
   }
 private:
@@ -153,6 +158,40 @@ struct LimitsView : RNS::InterfaceImpl {
 static void applyAnnounceLimits(RNS::InterfaceImpl& impl) {
   static_cast<LimitsView&>(impl).apply(settings.transport());
 }
+
+#if RETIMESH_UPSTREAM_FIXES
+// With the upstream packet-carrying callback, Transport hands us verified
+// announces with interface, hops and signal stats — no second parse.
+class NeighborAnnounceHandler : public RNS::AnnounceHandler {
+public:
+  void received_announce(const Bytes&, const RNS::Identity&, const Bytes&) override {}
+  void received_announce(const Bytes& destHash, const RNS::Identity& identity, const Bytes& appData, const RNS::Packet& packet) override {
+    (void)identity;
+    if (memcmp(destHash.data(), nodeIdentity.destHash(), Rns::HASH_LEN) == 0) return;
+    Neighbor n = {};
+    Rns::toHex(destHash.data(), Rns::HASH_LEN, n.hash);
+    const uint8_t* d = packet.data().data();               // pub(64) + name_hash(10) + ...
+    const char* aspect = packet.data().size() >= 74 ? Rns::aspectName(d + 64) : nullptr;
+    strlcpy(n.aspect, aspect ? aspect : "", sizeof(n.aspect));
+    Rns::Announce a = {};
+    a.appData = appData.data(); a.appDataLen = appData.size();
+    Rns::displayName(a, n.name, sizeof(n.name));
+    if (aspect && strcmp(aspect, "retimesh.node") == 0) {
+      char* sp = strchr(n.name, ' ');
+      if (sp) { strlcpy(n.version, sp + 1, sizeof(n.version)); *sp = '\0'; }
+    }
+    n.kind = NeighborKind::Announce;
+    n.hops = packet.hops();
+    std::string iface = packet.receiving_interface() ? packet.receiving_interface().name() : std::string();
+    n.viaWifi = iface.rfind("LoRa", 0) != 0;
+    n.rssi = n.viaWifi ? 0 : packet.rssi();
+    n.snr  = n.viaWifi ? 0 : packet.snr();
+    neighbors.seen(n);
+    g_stats.announcesRx++;
+    log_i("announce via %s: %s <%s> \"%s\" hops %u", iface.c_str(), aspect ? aspect : "unknown-aspect", n.hash, n.name, n.hops);
+  }
+};
+#endif
 
 static RNS::Interface loraIface({RNS::Type::NONE});
 struct TcpIface { RNS::Interface handle; TcpClientRnsInterface* impl; };
@@ -178,6 +217,10 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
     reticulum = RNS::Reticulum();          // ctor resets the storage path, so set it after
     RNS::Reticulum::storagepath(RNS_FS_ROOT);
     reticulum.transport_enabled(true);
+#if RETIMESH_UPSTREAM_FIXES
+    RNS::Reticulum::jobs_interval(1.0f);   // upstream fix: housekeeping cadence is configurable
+    RNS::Transport::register_announce_handler(std::make_shared<NeighborAnnounceHandler>());
+#endif
 
     // One identity for everything: transport signs with the same keys that
     // announce retimesh.node, so Transport::identity() == nodeIdentity.
@@ -324,11 +367,13 @@ void loop() {
     drainTcp();
     reticulum.loop();                      // interface loops + housekeeping (its jobs run every 60 s)
 
-    // microReticulum only runs Transport::jobs() every JOB_INTERVAL (60 s);
+#if !RETIMESH_UPSTREAM_FIXES
+    // Stock microReticulum runs Transport::jobs() every JOB_INTERVAL (60 s);
     // RNS does it 4x per second. Announce rebroadcasts, path-request and
     // link timeouts all live there, so drive it ourselves once a second.
     static uint32_t lastJobs = 0;
     if (millis() - lastJobs >= 1000) { lastJobs = millis(); RNS::Transport::jobs(); }
+#endif
 
     uint16_t interval = settings.radio().announceInterval;
     if (interval && sNextAnnounceMs && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
