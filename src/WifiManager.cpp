@@ -21,6 +21,7 @@
 // ============================================================================
 #include "WifiManager.h"
 #include <sys/stat.h>
+#include "QrCode.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
@@ -214,6 +215,18 @@ void WifiManager::setupRoutes() {
 
   _http.on("/api/board", HTTP_GET,
            [this](AsyncWebServerRequest* r) { handleBoardGet(r); });
+
+  // QR codes as SVG. "wifi" embeds the AP password, so it needs the admin
+  // credentials like every other place that reveals it; the portal URL and
+  // the node address are public.
+  _http.on("/api/qr", HTTP_GET, [this](AsyncWebServerRequest* r) {
+    Qr::Payload what;
+    if (!Qr::parsePayload(r->hasParam("what") ? r->getParam("what")->value().c_str() : "wifi", what)) {
+      sendError(r, 400, "what must be wifi, portal or address"); return;
+    }
+    if (what == Qr::Payload::Wifi && settings.wifi().security != ApSecurity::Open && !authed(r)) return;
+    handleQrFor(r, what);
+  });
   _http.on("/api/board", HTTP_POST,
            [](AsyncWebServerRequest* r) {
              if (r->contentLength() == 0) sendError(r, 400, "empty");
@@ -437,6 +450,18 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
 static bool littleFsHas(const char* path) {
   struct stat st;
   return stat((String("/littlefs") + path).c_str(), &st) == 0;
+}
+
+// GET /api/qr?what=wifi|portal|address -> image/svg+xml
+void WifiManager::handleQrFor(AsyncWebServerRequest* request, Qr::Payload what) {
+  char text[192];
+  if (!Qr::payloadText(what, text, sizeof(text))) { sendError(request, 500, "payload too long"); return; }
+  QRCode qr;
+  uint8_t buffer[Qr::MAX_BUFFER];
+  if (!Qr::encode(text, qr, buffer)) { sendError(request, 500, "does not fit in a QR code"); return; }
+  AsyncWebServerResponse* res = request->beginResponse(200, "image/svg+xml", Qr::toSvg(qr));
+  res->addHeader("Cache-Control", "no-store");
+  request->send(res);
 }
 
 void WifiManager::handleBoardGet(AsyncWebServerRequest* request) {

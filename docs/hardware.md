@@ -39,6 +39,9 @@ count) → radio → network (dots bottom-right). Short press:
 next page (wakes the panel first if asleep); long press (1.5 s): blank/wake.
 Panel sleeps after 60 s without a press; page returns to status after 30 s.
 
+Pages: status, neighbours, transport, radio, network, QR. The QR page shows a
+scan-to-join code for the access point.
+
 ## Adding a board
 1. `platformio.ini`: a new `[env:<name>]` (memory type, flash size,
    partitions, `PIN_*` overrides).

@@ -53,10 +53,11 @@ private:
   void paintNeighbors();
   void paintRadio();
   void paintNetwork();
+  void paintQr();
   void paintTransport();
   void pollButton();
 
-  enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, PAGE_COUNT };
+  enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, QR, PAGE_COUNT };
   uint8_t  _page = STATUS;
   bool     _blank = false;
   uint32_t _pageChangedMs = 0;

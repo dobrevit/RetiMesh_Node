@@ -44,6 +44,7 @@
 #include <ESPAsyncWebServer.h>
 #include "Config.h"
 #include "Settings.h"
+#include "QrCode.h"
 
 class WifiManager {
 public:
@@ -73,6 +74,7 @@ private:
 
   void handleStatus(AsyncWebServerRequest* request);
   void handleBoardGet(AsyncWebServerRequest* request);
+  void handleQrFor(AsyncWebServerRequest* request, Qr::Payload what);
   void handleBoardPost(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleSettingsGet(AsyncWebServerRequest* request);
   void handleRadioPost(AsyncWebServerRequest* request, const char* body, size_t len);

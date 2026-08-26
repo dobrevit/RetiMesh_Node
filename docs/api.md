@@ -32,15 +32,38 @@ require HTTP Basic Auth (user `admin`).
 ```
 `kind` is `announce`, `station-id` or `beacon`; `via` is `lora` or `wifi`.
 
+`storage` reports where the Reticulum store lives: `{"backend":"sd"|"littlefs",
+"path":"/sd/rns","lost":false}`. `lost` is true when the card holding the store
+was removed — the node keeps routing with what it has in memory but learns no
+new paths until it restarts. `sd.reserved` says the store is on the card, which
+also blocks formatting it.
+
 ## Bulletin board (public)
 - `GET /api/board` → `[{"id":1,"author":"…","text":"…"}]` (ordered, no timestamps — no RTC)
 - `POST /api/board` `{"author":"…","text":"…"}` → `{"ok":true}`; 50 posts kept
+
+## QR codes (public, except the Wi-Fi one)
+`GET /api/qr?what=wifi|portal|address` → `image/svg+xml`, generated on the node.
+
+| `what` | Encodes | Auth |
+|---|---|---|
+| `wifi` (default) | `WIFI:T:…;S:<ssid>;P:<password>;;` — scan to join the access point | admin, unless the AP is open |
+| `portal` | `http://<ip>/` — the LAN address when the node joined a network, else the AP address | none |
+| `address` | the node's Reticulum destination hash | none |
+
+The smallest QR version that fits is used, at error-correction level L, with the
+standard four-module quiet zone. The display's QR page shows the same Wi-Fi code.
+
+```sh
+curl -s "http://10.42.0.1/api/qr?what=portal" -o node.svg
+curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
+```
 
 ## Settings (auth)
 - `GET /api/settings` → `{ radio, wifi, transport, admin }` (password never returned; `has_password`, `default_password` flags)
 - `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,sta_ssid,sta_password}` → saves, restarts (`"restart":true`); `sta_ssid` blank = station mode off
-- `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
+- `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text
 - `GET /api/settings/export` → downloadable JSON of all settings (no identity keys)
 - `POST /api/settings/import` (a settings export; sections optional) → applies, restarts

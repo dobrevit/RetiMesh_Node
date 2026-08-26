@@ -20,6 +20,7 @@
 //  Display.cpp — see Display.h
 // ============================================================================
 #include "Display.h"
+#include "QrCode.h"
 #include <WiFi.h>
 #include "WifiManager.h"
 #include "Settings.h"
@@ -263,6 +264,49 @@ void Display::paintRadio() {
   snprintf(line, sizeof(line), "ann %us bcn %us", r.announceInterval, r.beaconInterval); _oled.setCursor(0, 42); _oled.print(line);
   snprintf(line, sizeof(line), "an %lu/%lu bc %lu/%lu", (unsigned long)g_stats.announcesRx, (unsigned long)g_stats.announcesTx,
            (unsigned long)g_stats.beaconsRx, (unsigned long)g_stats.beaconsTx);        _oled.setCursor(0, 52); _oled.print(line);
+#endif
+}
+
+// Scan-to-join. The panel is 128x64 and a version-3 code is 29 modules, so
+// the code takes the left 62 px at two pixels per module (with a one-module
+// quiet zone) and the text goes beside it. Lit pixels are the light modules:
+// a phone camera reads the OLED like ink on paper.
+void Display::paintQr() {
+#if HAS_DISPLAY
+  char text[192];
+  bool open = settings.wifi().security == ApSecurity::Open;
+  if (!Qr::payloadText(Qr::Payload::Wifi, text, sizeof(text))) { _oled.setCursor(0, 24); _oled.print("QR: payload too long"); return; }
+
+  // Rebuilding costs a few milliseconds, so only do it when it changed.
+  static char builtFor[192] = "";
+  static uint8_t buffer[Qr::MAX_BUFFER];
+  static QRCode qr;
+  static bool ok = false;
+  if (strcmp(builtFor, text) != 0) {
+    ok = Qr::encode(text, qr, buffer);
+    strlcpy(builtFor, text, sizeof(builtFor));
+  }
+  if (!ok) { _oled.setCursor(0, 24); _oled.print("QR encode failed"); return; }
+
+  const uint8_t scale = (uint8_t)max(1, min(2, 62 / (qr.size + 2)));
+  const uint8_t span  = (uint8_t)((qr.size + 2) * scale);     // + 1 module quiet zone
+  const uint8_t x0 = 0, y0 = (uint8_t)((64 - span) / 2);
+  _oled.fillRect(x0, y0, span, span, SSD1306_WHITE);
+  for (uint8_t y = 0; y < qr.size; y++)
+    for (uint8_t x = 0; x < qr.size; x++)
+      if (qrcode_getModule(&qr, x, y))
+        _oled.fillRect(x0 + (x + 1) * scale, y0 + (y + 1) * scale, scale, scale, SSD1306_BLACK);
+
+  const uint8_t tx = (uint8_t)(span + 3);
+  _oled.setCursor(tx, 4);  _oled.print("Scan to");
+  _oled.setCursor(tx, 13); _oled.print("join wifi");
+  const char* ssid = wifiManager.ssid();
+  size_t len = strlen(ssid);
+  char line[12];
+  strlcpy(line, ssid, sizeof(line));
+  _oled.setCursor(tx, 26); _oled.print(line);
+  if (len >= sizeof(line)) { _oled.setCursor(tx, 35); _oled.print(ssid + sizeof(line) - 1); }
+  _oled.setCursor(tx, 48); _oled.print(open ? "open" : "WPA2");
 #endif
 }
 

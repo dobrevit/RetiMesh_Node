@@ -42,6 +42,8 @@
   button { background: var(--accent); color: #04140a; font-weight: 600; cursor: pointer; border: 0; }
   button:disabled { opacity: .5; cursor: default; }
   .note { color: var(--dim); font-size: .75rem; margin-top: 6px; }
+  .qrrow { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .qr { background: #fff; border-radius: 6px; padding: 6px; flex: none; }
   a { color: var(--accent); text-decoration: none; }
   footer { color: var(--dim); font-size: .72rem; margin: 24px 0 8px; text-align: center; }
 </style>
@@ -52,6 +54,17 @@
     &middot; <a href="/settings.html">&#9881; settings</a></div>
 
   <div class="grid" id="stats"></div>
+
+  <h2>Share this node</h2>
+  <div class="post qrrow">
+    <img id="qrimg" class="qr" alt="QR code for this page" width="180" height="180">
+    <div>
+      <div class="t">Point a camera at the code to open this portal on another device.</div>
+      <div class="note">Codes are generated on the node: <a href="/api/qr?what=portal">portal link</a> &middot;
+        <a href="/api/qr?what=address">node address</a> &middot;
+        <a href="/api/qr?what=wifi">Wi-Fi join</a> (asks for the admin password when the access point is protected).</div>
+    </div>
+  </div>
 
   <h2>Reticulum transport</h2>
   <div id="transport"><div class="post"><span class="t">Loading&hellip;</span></div></div>
@@ -121,6 +134,8 @@ async function refreshStatus() {
         : (s.storage.backend === "sd" ? "SD card" : "internal flash") + " · " + s.storage.path,
         s.storage && s.storage.lost ? "offline" : "")
     );
+    const qr = $("qrimg");
+    if (qr && !qr.dataset.loaded) { qr.dataset.loaded = "1"; qr.src = "/api/qr?what=portal"; }
     const tr = $("transport"); tr.replaceChildren();
     if (s.transport) {
       const d = document.createElement("div"); d.className = "post";
