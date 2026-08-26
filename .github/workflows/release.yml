@@ -52,7 +52,7 @@ jobs:
         run: python tools/make_manifest.py index --dist dist --version "${{ github.ref_name }}" --repo "${{ github.repository }}"
 
       - name: Ensure the draft release exists for this tag
-        uses: release-drafter/release-drafter@v6
+        uses: release-drafter/release-drafter@v7
         with:
           tag: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
