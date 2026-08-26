@@ -330,8 +330,11 @@ void Display::paintTransport() {
   char line[24];
   RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
   size_t n = RnsTransport::interfaces(ifs, RNS_MAX_CLIENTS + 1);
-  snprintf(line, sizeof(line), "Transport %s %up",
-           g_stats.transportOnline ? "up" : "OFF", (unsigned)RnsTransport::pathCount());
+  // "Transport 2 paths" is 17 of the 18 columns the battery leaves, and says
+  // what it means without a legend.
+  const unsigned paths = (unsigned)RnsTransport::pathCount();
+  if (g_stats.transportOnline) snprintf(line, sizeof(line), "Transport %u path%s", paths, paths == 1 ? "" : "s");
+  else                         snprintf(line, sizeof(line), "Transport OFF");
   header(line);
   uint8_t row = 0;
   for (size_t i = 0; i < n && row < 4; i++, row++) {

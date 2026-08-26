@@ -69,10 +69,11 @@ bool begin() {
   sPmu->enableBattVoltageMeasure();
 
   // Charging. The chip does it, but the terms are ours to set: a 4.2 V target
-  // (the standard for the 18650 these boards carry) and a conservative 500 mA,
-  // which is under 0.25 C for a typical cell and inside what a USB port will
-  // give. Left at the chip's power-on defaults the current can be low enough
-  // that a flat cell barely gains on a running node.
+  // (the standard for the 18650 these boards carry) and a conservative current
+  // — 500 mA on an AXP2101, 450 mA on an AXP192, which is the nearest step it
+  // offers. Both are under 0.25 C for a typical cell and inside what a USB
+  // port will give. Left at the chip's power-on defaults the current can be
+  // low enough that a flat cell barely gains on a running node.
   if (strcmp(sModel, "AXP192") == 0) {
     sPmu->setChargeTargetVoltage(XPOWERS_AXP192_CHG_VOL_4V2);
     sPmu->setChargerConstantCurr(XPOWERS_AXP192_CHG_CUR_450MA);
