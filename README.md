@@ -213,7 +213,9 @@ under the **GNU General Public License v3.0 or later** — see
 GPLv3: provide the corresponding source, keep copyright and license notices,
 and inform users of their rights.
 
-Third-party components keep their own licenses: RadioLib (MIT), ArduinoJson
-(MIT), ESPAsyncWebServer and AsyncTCP (LGPL-3.0). The LoRa wire format is
+Third-party components keep their own licenses: microReticulum, microStore
+and their Crypto fork (Apache-2.0 / MIT), RadioLib (MIT), ArduinoJson (MIT),
+MsgPack (MIT), Adafruit GFX/SSD1306/BusIO (BSD/MIT), ESPAsyncWebServer and
+AsyncTCP (LGPL-3.0). The LoRa wire format is
 implemented for interoperability with [RNode_Firmware](https://github.com/markqvist/RNode_Firmware)
 (GPLv3, © Mark Qvist); no RNode source code is included.
