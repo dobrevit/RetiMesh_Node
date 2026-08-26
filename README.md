@@ -4,9 +4,13 @@
 [![Release](https://img.shields.io/github/v/release/dobrevit/RetiMesh_Node?include_prereleases)](https://github.com/dobrevit/RetiMesh_Node/releases)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 
-Standalone **Reticulum LoRa gateway** firmware for ESP32-S3 boards with an
+Standalone **Reticulum transport node** firmware for ESP32-S3 boards with an
 SX1262 or SX1276/78 LoRa transceiver (LilyGO T3-S3 and friends — the chip
-is detected at boot, one build covers both variants). The node runs a Wi-Fi access point with a
+is detected at boot, one build covers both variants).
+
+📖 **Documentation:** [docs/](docs/README.md) — getting started, architecture,
+configuration, Reticulum integration, hardware, HTTP API, examples,
+troubleshooting, development. The node runs a Wi-Fi access point with a
 captive-portal status page and bridges stock Reticulum clients (Sideband,
 `rnsd`, MeshChat) onto a LoRa channel — no host computer, no internet.
 
