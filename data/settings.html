@@ -61,11 +61,16 @@
       <div><label>Announce interval (s, 0 = off)</label><input name="announce_interval" type="number" min="0" max="43200" required></div>
       <div><label>Beacon interval (s, 0 = off)</label><input name="beacon_interval" type="number" min="0" max="3600" required></div>
       <div><label>Callsign / beacon name (blank = SSID)</label><input name="callsign" maxlength="32" pattern="[\x21-\x7E]*"></div>
+      <div><label>Duty cycle (% of the hour, 0 = off)</label><input name="duty_cycle_pct" type="number" min="0" max="100" required></div>
     </div>
     <button type="submit">Apply radio settings</button>
     <div class="msg" id="radioMsg"></div>
     <div class="note"><b>Announces</b> make this node a visible Reticulum destination (<code>retimesh.node</code>) to every RNS peer &mdash; the normal way to be discovered.
       <b>Beacons</b> are a RetiMesh-only quick probe (hello on boot, replies within seconds); off by default.<br>
+      <b>Duty cycle</b> caps how much of each hour this node may transmit for. ETSI allows 1 % on 868.0&ndash;868.6 MHz (where the default
+      channel sits) and 10 % on 869.4&ndash;869.65 MHz; set it to your region's limit, or 0 to turn the limiter off &mdash; staying legal
+      is then your responsibility. When the budget is spent, packets wait in the queue instead of being dropped; the status page shows how
+      much is left and when it frees up.<br>
       Applied live, no reboot. Every node on the channel &mdash; including real RNodes &mdash; must use the same values.
       Matching <code>rnsd</code> interface config:</div>
     <pre id="rnsSnippet"></pre>
@@ -236,7 +241,8 @@ $("radioForm").addEventListener("submit", async ev => {
   const f = ev.target.elements;
   const body = { freq_mhz: +f.freq_mhz.value, bw_khz: +f.bw_khz.value, sf: +f.sf.value, cr: +f.cr.value,
     tx_dbm: +f.tx_dbm.value, sync_word: parseInt(f.sync_word.value, 16), preamble: +f.preamble.value,
-    beacon_interval: +f.beacon_interval.value, announce_interval: +f.announce_interval.value, callsign: f.callsign.value };
+    beacon_interval: +f.beacon_interval.value, announce_interval: +f.announce_interval.value, callsign: f.callsign.value,
+    duty_cycle_pct: +f.duty_cycle_pct.value };
   try {
     const res = await api("/api/settings/radio", body);
     setMsg("radioMsg", res.applied ? "Applied." : "Saved (radio offline).", "ok");

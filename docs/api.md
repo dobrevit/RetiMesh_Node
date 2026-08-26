@@ -32,6 +32,14 @@ require HTTP Basic Auth (user `admin`).
 ```
 `kind` is `announce`, `station-id` or `beacon`; `via` is `lora` or `wifi`.
 
+`airtime` reports channel use and the transmit budget:
+`{"short_pct":0.46,"long_pct":0.02,"duty_limit_pct":1,"budget_used":0.015,
+"locked":false,"retry_after_s":0,"csma_slot_ms":25,"csma_band":1}`.
+`long_pct` is the share of the last hour this node spent transmitting,
+`budget_used` the fraction of the configured allowance, and `locked` says
+transmissions are being held until `retry_after_s` seconds from now. The CSMA
+slot and contention-window band come from the same figures.
+
 `storage` reports where the Reticulum store lives: `{"backend":"sd"|"littlefs",
 "path":"/sd/rns","lost":false}`. `lost` is true when the card holding the store
 was removed — the node keeps routing with what it has in memory but learns no
@@ -61,7 +69,7 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 
 ## Settings (auth)
 - `GET /api/settings` → `{ radio, wifi, transport, admin }` (password never returned; `has_password`, `default_password` flags)
-- `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign}` → applied live; `apply_error` in status if the chip rejected it
+- `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,sta_ssid,sta_password}` → saves, restarts (`"restart":true`); `sta_ssid` blank = station mode off
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text

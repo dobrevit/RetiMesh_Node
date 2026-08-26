@@ -380,6 +380,19 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   }
 
   {
+    // Channel use and the hourly transmit budget (see Airtime.h)
+    JsonObject at = doc["airtime"].to<JsonObject>();
+    at["short_pct"]     = roundf(g_stats.airtimeShort * 10000.0f) / 100.0f;
+    at["long_pct"]      = roundf(g_stats.airtimeLong * 10000.0f) / 100.0f;
+    at["duty_limit_pct"] = settings.radio().dutyCyclePct;
+    at["budget_used"]   = roundf(g_stats.dutyBudget * 1000.0f) / 1000.0f;
+    at["locked"]        = g_stats.dutyLocked;
+    at["retry_after_s"] = g_stats.dutyRetryS;
+    at["csma_slot_ms"]  = g_stats.csmaSlotMs;
+    at["csma_band"]     = g_stats.csmaBand;
+  }
+
+  {
     JsonObject st = doc["storage"].to<JsonObject>();
     st["backend"] = RnsTransport::storageBackend();     // "sd" | "littlefs"
     st["path"]    = RnsTransport::storagePath();
@@ -533,6 +546,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["beacon_interval"] = rs.beaconInterval;
   radio["announce_interval"] = rs.announceInterval;
   radio["callsign"]  = rs.callsign;              // "" = SSID
+  radio["duty_cycle_pct"] = rs.dutyCyclePct;     // 0 = limiter off
   radio["callsign_active"] = loraRadio.callsign();
   radio["model"]     = g_stats.radioModel;
   radio["online"]    = g_stats.radioOnline;
@@ -586,6 +600,7 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (in["preamble"].is<int>())    r.preamble = in["preamble"];
   if (in["beacon_interval"].is<int>()) r.beaconInterval = in["beacon_interval"];
   if (in["announce_interval"].is<int>()) r.announceInterval = in["announce_interval"];
+  if (in["duty_cycle_pct"].is<int>()) r.dutyCyclePct = in["duty_cycle_pct"];
   if (in["callsign"].is<const char*>()) {
     String c = in["callsign"].as<String>(); c.trim();
     for (size_t i = 0; i < c.length(); i++)
@@ -603,6 +618,7 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (r.preamble < 6 || r.preamble > 1000)         { sendError(request, 400, "preamble must be 6-1000 symbols"); return; }
   if (r.beaconInterval != 0 && (r.beaconInterval < 10 || r.beaconInterval > 3600)) { sendError(request, 400, "beacon interval must be 0 (off) or 10-3600 s"); return; }
   if (r.announceInterval != 0 && (r.announceInterval < 60 || r.announceInterval > 43200)) { sendError(request, 400, "announce interval must be 0 (off) or 60-43200 s"); return; }
+  if (r.dutyCyclePct > 100)                        { sendError(request, 400, "duty cycle must be 0 (off) or 1-100 %"); return; }
 
   if (!settings.saveRadio(r)) { sendError(request, 500, "nvs"); return; }
   if (loraRadio.online()) loraRadio.requestReconfigure(r);
@@ -728,6 +744,7 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   r["freq_mhz"] = rs.freqMhz; r["bw_khz"] = rs.bwKhz; r["sf"] = rs.sf; r["cr"] = rs.cr; r["tx_dbm"] = rs.txDbm;
   r["sync_word"] = rs.syncWord; r["preamble"] = rs.preamble; r["announce_interval"] = rs.announceInterval;
   r["beacon_interval"] = rs.beaconInterval; r["callsign"] = rs.callsign;
+  r["duty_cycle_pct"] = rs.dutyCyclePct;
   JsonObject w = doc["wifi"].to<JsonObject>();
   w["ssid"] = ws.ssid; w["security"] = Settings::securityName(ws.security); w["password"] = ws.password;
   w["channel"] = ws.channel; w["max_stations"] = ws.maxStations; w["hidden"] = ws.hidden;

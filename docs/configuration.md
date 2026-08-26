@@ -72,3 +72,31 @@ a file (sections optional) — clone a configuration onto other nodes.
 | `PSRAM_MALLOC_THRESHOLD` | 128 | allocations above this size prefer PSRAM |
 | `FW_VERSION` | `dev` | set by CI from the tag |
 | `CORE_DEBUG_LEVEL`, `RNS_LOG_LEVEL` | 3 / DEBUG compiled | console verbosity (runtime RNS level is INFO) |
+
+## Duty cycle and channel access
+
+The node keeps a rolling record of how long it has transmitted in the last
+hour, in one-minute bins, and uses it for two things.
+
+**The duty-cycle limiter.** ETSI gives the EU 868 MHz sub-bands an hourly
+transmit budget — 1 % on 868.0–868.6 MHz, where the default 868.1 MHz channel
+sits, and 10 % on 869.4–869.65 MHz. Set `duty_cycle_pct` on the settings page
+to your region's limit (default 1, `0` turns the limiter off and makes staying
+legal your problem). When the budget is spent the radio stops taking packets
+off the queue: nothing is dropped, senders simply see back-pressure until the
+window slides. `/api/status` reports `airtime.locked` and
+`airtime.retry_after_s`, and the display's radio page shows `duty FULL <n>s`.
+
+At the default SF8/BW125/CR4-5, a full 255-byte frame takes about 0.73 s on
+air, so a 1 % budget is worth roughly 49 frames an hour. Announces and beacons
+count against it like anything else — if the node is mostly idle this is
+invisible, but a busy gateway on a slow spreading factor will notice.
+
+**Channel access (CSMA).** Before transmitting, the node waits for the channel
+to fall quiet, holds it quiet for a DIFS (two slots), then counts down a random
+contention window, restarting if anything is heard. A slot is 12 symbol times
+clamped to 24–100 ms — 25 ms at SF8/BW125. The window is drawn from one of four
+bands selected by recent channel use, so as the channel fills, nodes spread
+their transmissions further apart instead of all retrying after the same fixed
+delay. This matches RNode's behaviour, which matters because RNodes and RetiMesh
+nodes share the channel.

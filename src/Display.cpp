@@ -261,7 +261,13 @@ void Display::paintRadio() {
   snprintf(line, sizeof(line), "%.3f MHz %+d dBm", (double)r.freqMhz, r.txDbm);       _oled.setCursor(0, 12); _oled.print(line);
   snprintf(line, sizeof(line), "BW %.1fk SF%d CR4/%d", (double)r.bwKhz, r.sf, r.cr); _oled.setCursor(0, 22); _oled.print(line);
   snprintf(line, sizeof(line), "sync %02X pre %u", r.syncWord, r.preamble);            _oled.setCursor(0, 32); _oled.print(line);
-  snprintf(line, sizeof(line), "ann %us bcn %us", r.announceInterval, r.beaconInterval); _oled.setCursor(0, 42); _oled.print(line);
+  if (g_stats.dutyLocked)
+    snprintf(line, sizeof(line), "duty FULL %us", (unsigned)g_stats.dutyRetryS);
+  else if (r.dutyCyclePct)
+    snprintf(line, sizeof(line), "duty %.2f/%u%% cw%u", (double)(g_stats.airtimeLong * 100.0f), r.dutyCyclePct, g_stats.csmaBand);
+  else
+    snprintf(line, sizeof(line), "air %.2f%% cw%u", (double)(g_stats.airtimeLong * 100.0f), g_stats.csmaBand);
+  _oled.setCursor(0, 42); _oled.print(line);
   snprintf(line, sizeof(line), "an %lu/%lu bc %lu/%lu", (unsigned long)g_stats.announcesRx, (unsigned long)g_stats.announcesTx,
            (unsigned long)g_stats.beaconsRx, (unsigned long)g_stats.beaconsTx);        _oled.setCursor(0, 52); _oled.print(line);
 #endif

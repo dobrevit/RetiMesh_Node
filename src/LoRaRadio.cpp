@@ -65,8 +65,20 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   _radio->setPacketReceivedAction(onRadioIrq);   // DIO1 / DIO0 as appropriate
   _online = true;
   g_stats.radioModel = _modelName;
+  configureAirtime(s);                           // the probes bypass applySettings()
   logActive();
   return true;
+}
+
+// Airtime maths follows the channel: symbol time drives both the duty-cycle
+// accounting and the CSMA slot length. RadioLib leaves CRC and the explicit
+// header on, which is what RNode-compatible framing expects.
+void LoRaRadio::configureAirtime(const RadioSettings& s) {
+  Airtime::Params ap;
+  ap.sf = s.sf; ap.bwKhz = s.bwKhz; ap.cr = s.cr;
+  ap.preambleSyms = s.preamble; ap.crcOn = true; ap.implicitHeader = false;
+  _airtime.configure(ap);
+  g_stats.csmaSlotMs = (uint16_t)_airtime.slotMs();
 }
 
 bool LoRaRadio::probeSX1262(const RadioSettings& s) {
@@ -150,6 +162,8 @@ bool LoRaRadio::applySettings(const RadioSettings& s) {
       return false;
     }
   }
+
+  configureAirtime(s);
   return true;
 }
 
@@ -196,11 +210,14 @@ void LoRaRadio::taskLoop() {
       handleRadioIrq();
     }
 
+    // (1a) Channel-use figures, and the duty-cycle verdict they feed.
+    refreshAirtimeStats();
+
     // (1b) Beacons: boot hello, pending reply, periodic id when idle.
     //      At most one beacon per loop pass, and the idle check reads the
     //      clock fresh — a transmission above would otherwise make the
     //      stale `now` minus _lastTxMs wrap and fire immediately.
-    if (_active.beaconInterval > 0) {
+    if (_active.beaconInterval > 0 && !g_stats.dutyLocked) {
       uint32_t now = millis();
       if (_helloAtMs && (int32_t)(now - _helloAtMs) >= 0)      { _helloAtMs = 0; sendBeacon('H'); }
       else if (_replyAtMs && (int32_t)(now - _replyAtMs) >= 0) { _replyAtMs = 0; sendBeacon('R'); }
@@ -210,11 +227,16 @@ void LoRaRadio::taskLoop() {
     // (2) TCP -> LoRa: pull one complete RNS packet from the ring buffer
     //     (queued there by RetiTransportServer's HDLC deframer) and
     //     transmit it. Non-blocking take; RX keeps priority.
-    size_t itemSize = 0;
-    uint8_t* item = (uint8_t*)xRingbufferReceive(_txRing, &itemSize, 0);
-    if (item != nullptr) {
-      transmitPacket(item, itemSize);
-      vRingbufferReturnItem(_txRing, item);
+    //     While the hourly transmit budget is spent, leave packets in the
+    //     ring: they go out when the window slides rather than being dropped,
+    //     and the sender sees back-pressure instead of silence.
+    if (!g_stats.dutyLocked) {
+      size_t itemSize = 0;
+      uint8_t* item = (uint8_t*)xRingbufferReceive(_txRing, &itemSize, 0);
+      if (item != nullptr) {
+        transmitPacket(item, itemSize);
+        vRingbufferReturnItem(_txRing, item);
+      }
     }
   }
 }
@@ -224,7 +246,7 @@ void LoRaRadio::taskLoop() {
 // ---------------------------------------------------------------------------
 void LoRaRadio::handleRadioIrq() {
   // Only RxDone is expected here: TxDone notifications are consumed
-  // synchronously inside sendFrame(), and CAD inside waitClearChannel().
+  // synchronously inside sendFrame(), and CAD inside csmaWait().
   size_t len = _radio->getPacketLength();
   if (len < 1 || len > LORA_FRAME_MAX) { _radio->startReceive(); return; }
 
@@ -378,7 +400,7 @@ void LoRaRadio::deliverPacket(size_t len) {
 void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
   if (len == 0 || len > sizeof(_rxBuf)) return;
 
-  waitClearChannel();
+  csmaWait();
 
   // RNode framing: one random sequence nibble for all fragments of this
   // packet, FLAG_SPLIT set when the payload spans more than one frame.
@@ -412,35 +434,82 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
   // radio wedged, in which case finishTransmit() cleans up.
   ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(8000));
   _radio->finishTransmit();
+  _airtime.addTx(millis(), _airtime.timeOnAirMs(len));
   return true;
 }
 
-// Simplified CSMA: random slotted backoff while listening, then a CAD
-// (channel activity detection) probe. Not RNode's full DIFS/contention-
-// window machine, but enough to avoid stomping on active transmissions.
-void LoRaRadio::waitClearChannel() {
-  uint32_t started = millis();
+// One channel-activity-detection probe. scanChannel() blocks for roughly a
+// symbol and drives the IRQ line itself; sendFrame() flushes any stray
+// notification it leaves behind.
+bool LoRaRadio::mediumFree() {
+  int16_t cad = _radio->scanChannel();
+  if (cad == RADIOLIB_CHANNEL_FREE) return true;
+  _radio->startReceive();                // busy — go back to listening
+  return false;
+}
+
+// CSMA as RNode does it: wait for the medium to be free, hold it free for a
+// DIFS, then count down a randomly chosen contention window. Any traffic
+// during either wait restarts the whole thing, so a node that has just heard
+// a packet defers to whoever is mid-exchange. The window is drawn from a band
+// selected by recent channel use, which spreads nodes out as the channel
+// fills instead of having them all pile in after the same fixed backoff.
+void LoRaRadio::csmaWait() {
+  const uint32_t slot = _airtime.slotMs();
+  const uint32_t difs = _airtime.difsMs();
+  uint8_t cwMin = 0, cwMax = Airtime::CW_PER_BAND - 1;
+  const float shortTerm = _airtime.shortTermUtil(millis());
+  _airtime.contentionWindow(shortTerm, cwMin, cwMax);
+
+  const uint32_t target = (uint32_t)(cwMin + (esp_random() % (uint32_t)(cwMax - cwMin + 1))) * slot;
+  const uint32_t started = millis();
+  uint32_t waited = 0;                   // contention time accumulated so far
 
   while (millis() - started < CSMA_MAX_WAIT_MS) {
-    // Backoff in RX mode. If a frame lands mid-backoff, service it and
-    // restart the backoff — the channel clearly is not free.
-    uint32_t slots = 1 + (esp_random() % CSMA_MAX_SLOTS);
-    bool sawTraffic = false;
-    for (uint32_t i = 0; i < slots; i++) {
-      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CSMA_SLOT_MS)) > 0) {
-        handleRadioIrq();
-        sawTraffic = true;
-        break;
-      }
+    if (!mediumFree()) {                 // someone is transmitting: start over
+      waited = 0;
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CSMA_CAD_RETRY_MS)) > 0) handleRadioIrq();
+      continue;
     }
-    if (sawTraffic) continue;
 
-    // scanChannel() is blocking and drives the IRQ line itself; any stray
-    // notification it produces is flushed by sendFrame() afterwards.
-    int16_t cad = _radio->scanChannel();
-    if (cad == RADIOLIB_CHANNEL_FREE) return;
+    // DIFS: the channel must stay quiet for two slots before we even start
+    // counting down. A frame arriving here means it was not really idle.
+    const uint32_t difsStart = millis();
+    bool disturbed = false;
+    while (millis() - difsStart < difs) {
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(slot)) > 0) { handleRadioIrq(); disturbed = true; break; }
+    }
+    if (disturbed) { waited = 0; continue; }
 
-    _radio->startReceive();              // busy — listen and try again
+    // Contention window, one slot at a time so an incoming frame can pause it.
+    while (waited < target) {
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(slot)) > 0) { handleRadioIrq(); disturbed = true; break; }
+      waited += slot;
+      if (millis() - started >= CSMA_MAX_WAIT_MS) break;
+    }
+    if (disturbed) { waited = 0; continue; }
+    return;                              // channel held quiet: transmit
   }
-  // Timed out deferring: transmit anyway rather than dropping the packet.
+  // Deferred for the whole window without a clear run. Transmit anyway rather
+  // than dropping the packet — the queue would only grow behind it.
+  log_d("CSMA gave up deferring after %u ms", (unsigned)(millis() - started));
+}
+
+// Publishes channel use for the web UI and display. Cheap, but there is no
+// point recomputing it more than once a second.
+void LoRaRadio::refreshAirtimeStats() {
+  const uint32_t now = millis();
+  if (now - _statsAtMs < 1000) return;
+  _statsAtMs = now;
+  g_stats.airtimeShort = _airtime.shortTermUtil(now);
+  g_stats.csmaBand     = _airtime.cwBand(g_stats.airtimeShort);
+  g_stats.airtimeLong  = _airtime.longTermUtil(now);
+  g_stats.dutyBudget   = _airtime.budgetUsed(now, _active.dutyCyclePct);
+  const bool locked    = _airtime.locked(now, _active.dutyCyclePct);
+  if (locked != g_stats.dutyLocked)
+    log_w("duty cycle %s: %.2f %% of the hour used, limit %u %%",
+          locked ? "reached, holding transmissions" : "back under the limit",
+          g_stats.airtimeLong * 100.0f, (unsigned)_active.dutyCyclePct);
+  g_stats.dutyLocked = locked;
+  g_stats.dutyRetryS = _airtime.retryAfterS(now, _active.dutyCyclePct);
 }

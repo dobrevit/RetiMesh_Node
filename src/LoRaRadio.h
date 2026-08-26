@@ -72,6 +72,7 @@
 #include <freertos/task.h>
 #include <freertos/ringbuf.h>
 #include "Config.h"
+#include "Airtime.h"
 #include "Settings.h"
 
 class LoRaRadio {
@@ -98,7 +99,9 @@ private:
   void handleRadioIrq();                 // RxDone path: read + reassemble
   void deliverPacket(size_t len);        // completed RNS packet -> RX ring
   void transmitPacket(const uint8_t* data, size_t len);
-  void waitClearChannel();               // simplified CSMA (CAD + backoff)
+  void csmaWait();                       // DIFS + contention window before TX
+  bool mediumFree();                     // one CAD probe
+  void refreshAirtimeStats();            // publish channel use into g_stats
   bool sendFrame(const uint8_t* frame, size_t len);
 
   bool isRetiMeshBeacon(const uint8_t* p, size_t len) const;
@@ -109,6 +112,7 @@ private:
   bool probeSX1262(const RadioSettings& s);
   bool probeSX127x(const RadioSettings& s);
   bool applySettings(const RadioSettings& s);   // radio task context only
+  void configureAirtime(const RadioSettings& s);  // symbol time -> duty cycle + CSMA
   void logActive() const;
 
   static void IRAM_ATTR onRadioIrq();    // just notifies radioTask
@@ -134,6 +138,9 @@ private:
   uint8_t  _rxSeq  = LORA_SEQ_UNSET;
 
   uint8_t  _txFrame[LORA_FRAME_MAX];
+
+  Airtime  _airtime;                     // time on air, duty cycle, CSMA sizing
+  uint32_t _statsAtMs = 0;               // last publish into g_stats
 
   uint32_t _lastTxMs  = 0;               // any transmission (packet or beacon)
   uint32_t _helloAtMs = 0;               // boot probe due time (0 = done)

@@ -129,6 +129,11 @@ async function refreshStatus() {
         : s.sd.state === "mounted" ? (s.sd.used_bytes/1e9).toFixed(2) + " / " + (s.sd.volume_bytes/1e9).toFixed(1) + " GB"
         : s.sd.state + " (" + (s.sd.card_bytes/1e9).toFixed(1) + " GB)",
         s.sd && (s.sd.state === "partial" || s.sd.state === "unformatted" || s.sd.state === "error") ? "offline" : ""),
+      card("Channel use", !s.airtime ? "" :
+        s.airtime.long_pct.toFixed(2) + " % of the hour" +
+        (s.airtime.duty_limit_pct ? " (limit " + s.airtime.duty_limit_pct + " %)" : " (no limit)") +
+        (s.airtime.locked ? " — holding TX, frees in " + s.airtime.retry_after_s + " s" : ""),
+        s.airtime && s.airtime.locked ? "offline" : ""),
       card("Reticulum store", !s.storage ? "" :
         s.storage.lost ? "lost — card removed, reboot to use flash"
         : (s.storage.backend === "sd" ? "SD card" : "internal flash") + " · " + s.storage.path,

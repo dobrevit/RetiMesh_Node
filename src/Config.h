@@ -152,7 +152,7 @@
 // editable from the settings page. They MUST match every other node on
 // the channel (including real RNodes — configure the RNode side alike).
 #ifndef RF_FREQ_MHZ
-  #define RF_FREQ_MHZ       868.100         // EU868 SRD band
+  #define RF_FREQ_MHZ       869.410         // EU868 SRD band
 #endif
 #ifndef RF_BW_KHZ
   #define RF_BW_KHZ         125.0
@@ -287,11 +287,19 @@
 #define DISPLAY_SLEEP_BATTERY_MS 20000
 
 // ---------------------------------------------------------------------------
-// CSMA (simplified: CAD check + random slotted backoff — see LoRaRadio.cpp)
+// Hourly transmit budget as a percentage of wall-clock time. ETSI gives the
+// EU 868 MHz sub-bands 1 % (868.0-868.6, where the default channel sits) and
+// 10 % (869.4-869.65); other regions differ, and 0 disables the limiter
+// entirely. Enforced over a rolling hour — see Airtime.h.
+#ifndef RF_DUTY_CYCLE_PCT
+  #define RF_DUTY_CYCLE_PCT 1
+#endif
+
+// CSMA: DIFS + a contention window sized from recent channel use, as in
+// RNode. The slot length and window bands come from Airtime.h.
 // ---------------------------------------------------------------------------
-#define CSMA_SLOT_MS        10
-#define CSMA_MAX_SLOTS      8
-#define CSMA_MAX_WAIT_MS    2000            // give up deferring after this
+#define CSMA_MAX_WAIT_MS    5000            // give up deferring after this
+#define CSMA_CAD_RETRY_MS   50              // pause between channel probes
 
 // ---------------------------------------------------------------------------
 // PSRAM. The core routes only malloc() > 4 KB to PSRAM by default; almost
@@ -336,6 +344,14 @@ struct NodeStats {
   volatile float    lastSnr       = 0.0f;   // dB,  last LoRa RX
   volatile uint32_t loraRxPackets = 0;      // reassembled RNS packets
   volatile uint32_t loraTxPackets = 0;
+  // Channel use, maintained by the radio task (see Airtime.h)
+  volatile float    airtimeShort  = 0.0f;   // 0..1 over the last two minutes
+  volatile float    airtimeLong   = 0.0f;   // 0..1 over the rolling hour
+  volatile float    dutyBudget    = 0.0f;   // 0..1+ of the hourly allowance
+  volatile bool     dutyLocked    = false;  // transmissions held back
+  volatile uint32_t dutyRetryS    = 0;      // seconds until the budget frees up
+  volatile uint16_t csmaSlotMs    = 0;
+  volatile uint8_t  csmaBand      = 1;      // contention window band, 1..4
   volatile uint32_t loraRxDropped = 0;      // ring-full / oversize drops
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
