@@ -158,6 +158,16 @@ void loop() {
           (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.announcesRx,
           (unsigned)g_stats.announcesTx, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
           (unsigned)g_stats.heapMinFree, (unsigned)g_stats.psramFree);
+    // Stack headroom (bytes never used) per task — a value near 0 names the
+    // task that is about to trip the stack-canary watchpoint.
+    static const char* const kTasks[] = {"dns", "display", "sdcard", "autoif", "rns", "radio", "async_tcp", "loopTask"};
+    char stacks[160]; size_t off = 0;
+    for (const char* name : kTasks) {
+      TaskHandle_t h = xTaskGetHandle(name);
+      if (h && off < sizeof(stacks))
+        off += snprintf(stacks + off, sizeof(stacks) - off, " %s %u", name, (unsigned)uxTaskGetStackHighWaterMark(h));
+    }
+    log_i("stack headroom:%s", stacks);
   }
   vTaskDelay(pdMS_TO_TICKS(200));
 }

@@ -23,6 +23,7 @@ monitor` or any terminal). Boot lines to expect: identity, `SSD1306 found`,
 | SD card shows `partial` | the FAT volume covers only part of the card (Raspberry Pi image, phone card) | *Format card* on the settings page (erases it) |
 | SD card shows `unformatted` | ext4/exFAT/other filesystem, or a blank card | same — format from the settings page |
 | Heap keeps dropping | possible leak | report with the heartbeat lines (`up … heap …`) and the version |
+| `Guru Meditation Error … Unhandled debug exception` with a `0xa5a5a5a5` frame | a task overflowed its stack (stack-canary watchpoint) | the heartbeat's `stack headroom:` line names each task's spare bytes; report it with the panic text |
 
 Still stuck? Open an issue with: board and revision, firmware version (`/api/status`),
 the boot log, and what the peers are running (RNS/Sideband/NomadNet versions).

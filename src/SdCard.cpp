@@ -42,7 +42,9 @@ const char* SdCard::stateName(State s) {
 void SdCard::begin() {
   _lock = xSemaphoreCreateMutex();
   _spi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-  xTaskCreatePinnedToCore(task, "sdcard", 4096, this, 1, nullptr, 0);
+  // 8 KB: the FAT layer (mount probes, rename on log rotation) left under
+  // 1 KB of a 4 KB stack at idle and tripped the stack canary on core 0.
+  xTaskCreatePinnedToCore(task, "sdcard", 8192, this, 1, nullptr, 0);
 }
 
 SdCard::Info SdCard::info() {
