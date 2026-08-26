@@ -2,23 +2,44 @@ name: Web flasher (GitHub Pages)
 
 # Rebuilds https://<owner>.github.io/<repo>/ from published releases.
 # Repo settings -> Pages -> Source must be "GitHub Actions".
+#
+# Deployment runs only from `main`: the github-pages environment rejects
+# deployments from tag refs, and `release` events run on the tag. So a
+# published release just re-dispatches this workflow on main
+# (workflow_dispatch is one of the two events GITHUB_TOKEN may trigger).
 
 on:
   release:
     types: [published]
+  push:
+    branches: [main]
+    paths:
+      - web/**
+      - tools/build_site.py
+      - .github/workflows/pages.yml
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
+  redispatch:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run pages.yml --ref main --repo "${{ github.repository }}"
+
   build:
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -35,8 +56,12 @@ jobs:
           path: _site
 
   deploy:
+    if: github.event_name != 'release'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
