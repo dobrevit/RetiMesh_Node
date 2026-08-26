@@ -58,12 +58,15 @@
       <div><label>TX power (dBm) <span id="pmax"></span></label><input name="tx_dbm" type="number" min="2" max="22" required></div>
       <div><label>Sync word (hex)</label><input name="sync_word" pattern="[0-9a-fA-F]{1,2}" required></div>
       <div><label>Preamble (symbols)</label><input name="preamble" type="number" min="6" max="1000" required></div>
+      <div><label>Announce interval (s, 0 = off)</label><input name="announce_interval" type="number" min="0" max="43200" required></div>
       <div><label>Beacon interval (s, 0 = off)</label><input name="beacon_interval" type="number" min="0" max="3600" required></div>
       <div><label>Callsign / beacon name (blank = SSID)</label><input name="callsign" maxlength="32" pattern="[\x21-\x7E]*"></div>
     </div>
     <button type="submit">Apply radio settings</button>
     <div class="msg" id="radioMsg"></div>
-    <div class="note">Applied live, no reboot. Every node on the channel &mdash; including real RNodes &mdash; must use the same values.
+    <div class="note"><b>Announces</b> make this node a visible Reticulum destination (<code>retimesh.node</code>) to every RNS peer &mdash; the normal way to be discovered.
+      <b>Beacons</b> are a RetiMesh-only quick probe (hello on boot, replies within seconds); off by default.<br>
+      Applied live, no reboot. Every node on the channel &mdash; including real RNodes &mdash; must use the same values.
       Matching <code>rnsd</code> interface config:</div>
     <pre id="rnsSnippet"></pre>
   </form>
@@ -165,7 +168,7 @@ $("radioForm").addEventListener("submit", async ev => {
   const f = ev.target.elements;
   const body = { freq_mhz: +f.freq_mhz.value, bw_khz: +f.bw_khz.value, sf: +f.sf.value, cr: +f.cr.value,
     tx_dbm: +f.tx_dbm.value, sync_word: parseInt(f.sync_word.value, 16), preamble: +f.preamble.value,
-    beacon_interval: +f.beacon_interval.value, callsign: f.callsign.value };
+    beacon_interval: +f.beacon_interval.value, announce_interval: +f.announce_interval.value, callsign: f.callsign.value };
   try {
     const res = await api("/api/settings/radio", body);
     setMsg("radioMsg", res.applied ? "Applied." : "Saved (radio offline).", "ok");

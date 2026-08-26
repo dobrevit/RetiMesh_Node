@@ -62,8 +62,9 @@
 
 class RetiTransportServer {
 public:
-  // Starts listening on 0.0.0.0:RNS_TCP_PORT.
-  void begin(RingbufHandle_t txRing, RingbufHandle_t rxRing);
+  // Starts listening on 0.0.0.0:RNS_TCP_PORT. annRing receives copies of
+  // announces sent by Wi-Fi clients, parsed by the bridge task.
+  void begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t annRing);
 
   size_t clientCount();
 
@@ -81,14 +82,18 @@ private:
   void onData(ClientCtx* ctx, const uint8_t* data, size_t len);
   void onDisconnect(ClientCtx* ctx);
 
+  static void noteAnnounce(const uint8_t* raw, size_t len, bool viaWifi);
+
+public:
   // HDLC-frames `packet` and writes it to every connected client except
-  // `exclude`. Serialized by _lock (called from both the AsyncTCP task
-  // and the bridge task).
+  // `exclude` (nullptr = all). Serialized by _lock; safe from any task.
   void broadcast(const uint8_t* packet, size_t len, ClientCtx* exclude);
+private:
 
   AsyncServer*            _server = nullptr;
   RingbufHandle_t         _txRing = nullptr;   // TCP  -> LoRa
   RingbufHandle_t         _rxRing = nullptr;   // LoRa -> TCP
+  RingbufHandle_t         _annRing = nullptr;  // TCP announces -> bridge task (parse only)
   std::vector<ClientCtx*> _clients;
   SemaphoreHandle_t       _lock   = nullptr;   // guards _clients + _frameBuf
 

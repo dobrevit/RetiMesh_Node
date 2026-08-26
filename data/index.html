@@ -109,15 +109,19 @@ async function refreshStatus() {
     nb.replaceChildren();
     if (!s.neighbors || !s.neighbors.length) {
       const d = document.createElement("div"); d.className = "post";
-      d.textContent = "Nothing heard yet — beacons every " + s.radio.beacon_interval + " s as " + s.radio.callsign;
+      d.textContent = "Nothing heard yet — this node announces every " + Math.round(s.radio.announce_interval/60) + " min as " + s.radio.callsign + " <" + (s.destination||"").slice(0,8) + "…>";
       nb.append(d);
     }
     for (const n of (s.neighbors || [])) {
       const d = document.createElement("div"); d.className = "post";
       const a = document.createElement("div"); a.className = "a";
-      a.textContent = n.name + (n.version ? "  " + n.version : "") + (n.kind === "station-id" ? "  (RNode station ID)" : "");
+      const label = n.kind === "announce" ? (n.aspect || "announce") + (n.hash ? " <" + n.hash.slice(0, 10) + "…>" : "")
+                  : n.kind === "station-id" ? "RNode station ID" : "RetiMesh beacon";
+      a.textContent = (n.name || "(unnamed)") + (n.version ? "  " + n.version : "") + "  ·  " + label;
       const t = document.createElement("div"); t.className = "t";
-      t.textContent = n.rssi.toFixed(0) + " dBm / " + n.snr.toFixed(1) + " dB · heard " + fmtAge(n.age_s) + " ago · " + n.beacons + " beacon" + (n.beacons === 1 ? "" : "s");
+      const sig = n.via === "wifi" ? "via Wi-Fi" : n.rssi.toFixed(0) + " dBm / " + n.snr.toFixed(1) + " dB";
+      t.textContent = sig + (n.kind === "announce" ? " · " + n.hops + " hop" + (n.hops === 1 ? "" : "s") : "") +
+        " · heard " + fmtAge(n.age_s) + " ago · " + n.count + "×";
       d.append(a, t); nb.append(d);
     }
   } catch (e) { /* node rebooting — keep last values */ }

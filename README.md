@@ -94,13 +94,25 @@ are 868.100 MHz, BW 125 kHz, SF8, CR 4/5, 7 dBm; change them at runtime on
 the settings page (the page prints the matching `rnsd` `RNodeInterface`
 block). Check your local regulations before changing frequency or power.
 
-## Neighbour discovery (beacons)
+## Discovery: announces, beacons, station IDs
 
-Every `beacon_interval` seconds of TX silence (default 45; 0 = off) the node
-transmits a beacon `RM1 I <callsign> <version>`; on boot it sends a hello
-(`RM1 H …`) and other RetiMesh nodes answer with a reply (`RM1 R …`) after a
-random delay, so a new node learns its neighbours within seconds. Everything
-heard is listed on the status page and counted on the OLED (`NB`).
+The node has a persistent **Reticulum identity** (X25519 + Ed25519 keys in
+NVS, kept across settings resets) and a `retimesh.node` destination. It
+**announces** it on boot and every `announce_interval` seconds (default 10
+min; 0 = off) — on LoRa and to connected Wi-Fi clients — so every RNS peer
+learns a path to it (`rnpath -t` lists it, `rnstatus` counts it). Announces
+heard from either side are parsed, **signature-verified** and listed as
+neighbours with aspect (`lxmf.delivery` = Sideband/LXMF peers,
+`nomadnetwork.node`, `retimesh.node`, …), hop count, display name and signal.
+That is the normal Reticulum way to see who is on the mesh, and it costs no
+protocol violations anywhere. `/api/status` exposes the node's `identity`
+and `destination` hashes.
+
+**Beacons** (`beacon_interval`, default 0 = off) are a RetiMesh-only quick
+probe: `RM1 I <callsign> <version>` after that many seconds of TX silence,
+a hello (`RM1 H …`) on boot answered by other RetiMesh nodes (`RM1 R …`)
+within seconds. Everything heard is on the status page and counted on the
+OLED (`NB`).
 
 Beacons are **valid Reticulum packets**: a broadcast to the PLAIN destination
 `retimesh.beacon`. RNS peers parse and silently drop them (no protocol
@@ -125,8 +137,6 @@ The node also lists RNode **station IDs** — the raw callsign an RNS
 
 (note: `beacon`/`beacon_interval` are not RNS config keys — `id_*` are)
 appears in the neighbour list too. The callsign defaults to the SSID.
-This is RetiMesh-local presence, not Reticulum discovery: RNS-level
-announces come with the Transport-node milestone.
 
 ## Architecture
 

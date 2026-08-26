@@ -23,29 +23,28 @@
 
 Neighbors neighbors;
 
-void Neighbors::seen(const char* name, const char* version, NeighborKind kind, float rssi, float snr) {
+void Neighbors::seen(const Neighbor& info) {
   uint32_t now = millis();
+  bool byHash = info.hash[0] != '\0';
   portENTER_CRITICAL(&_mux);
   Neighbor* slot = nullptr;
   for (Neighbor& n : _n) {
-    if (n.used && strcmp(n.name, name) == 0) { slot = &n; break; }
+    if (!n.used) continue;
+    if (byHash ? strcmp(n.hash, info.hash) == 0 : (n.hash[0] == '\0' && strcmp(n.name, info.name) == 0)) { slot = &n; break; }
   }
-  if (!slot) {                            // new: take a free slot, else the oldest
+  uint32_t prevCount = 0;
+  if (slot) prevCount = slot->count;
+  else {                                  // new: free slot, else the oldest
     for (Neighbor& n : _n) if (!n.used) { slot = &n; break; }
     if (!slot) {
       slot = &_n[0];
       for (Neighbor& n : _n) if ((int32_t)(n.lastSeen - slot->lastSeen) < 0) slot = &n;
     }
-    memset(slot, 0, sizeof(*slot));
-    strlcpy(slot->name, name, sizeof(slot->name));
-    slot->used = true;
   }
-  strlcpy(slot->version, version ? version : "", sizeof(slot->version));
-  slot->kind     = kind;
-  slot->rssi     = rssi;
-  slot->snr      = snr;
+  *slot = info;
+  slot->used = true;
   slot->lastSeen = now;
-  slot->beacons++;
+  slot->count = prevCount + 1;
   portEXIT_CRITICAL(&_mux);
 }
 
@@ -54,8 +53,7 @@ size_t Neighbors::snapshot(Neighbor* out, size_t max) {
   portENTER_CRITICAL(&_mux);
   for (const Neighbor& n : _n) if (n.used && k < max) out[k++] = n;
   portEXIT_CRITICAL(&_mux);
-  // newest first (tiny array — insertion sort is fine)
-  for (size_t i = 1; i < k; i++) {
+  for (size_t i = 1; i < k; i++) {        // newest first
     Neighbor t = out[i]; size_t j = i;
     while (j > 0 && (int32_t)(out[j - 1].lastSeen - t.lastSeen) < 0) { out[j] = out[j - 1]; j--; }
     out[j] = t;

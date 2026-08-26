@@ -56,6 +56,7 @@
 #include "RetiTransportServer.h"
 #include "LoRaRadio.h"
 #include "Display.h"
+#include "RnsAnnounce.h"
 
 NodeStats g_stats;
 
@@ -63,6 +64,7 @@ NodeStats g_stats;
 // packet) contiguous, so consumers get a plain pointer + length.
 static RingbufHandle_t txRing = nullptr;   // TCP  -> LoRa
 static RingbufHandle_t rxRing = nullptr;   // LoRa -> TCP
+static RingbufHandle_t annRing = nullptr;  // announces from TCP clients -> bridge task
 
 void setup() {
   Serial.begin(115200);
@@ -78,13 +80,16 @@ void setup() {
 
   txRing = xRingbufferCreate(TX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
   rxRing = xRingbufferCreate(RX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
-  configASSERT(txRing && rxRing);
+  annRing = xRingbufferCreate(ANN_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
+  configASSERT(txRing && rxRing && annRing);
+
+  nodeIdentity.begin();                    // Reticulum identity + retimesh.node destination
 
   // Bring up services. Radio failure is survivable: the AP + web UI stay
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   wifiManager.begin();
-  transportServer.begin(txRing, rxRing);
+  transportServer.begin(txRing, rxRing, annRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
 
   // ---- Task layout (see the diagram above) -------------------------------

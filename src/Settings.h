@@ -46,6 +46,7 @@ struct RadioSettings {
   uint8_t  syncWord = RF_SYNCWORD;
   uint16_t preamble = RF_PREAMBLE_SYMS;
   uint16_t beaconInterval = BEACON_INTERVAL_S;   // s, 0 = off
+  uint16_t announceInterval = ANNOUNCE_INTERVAL_S; // s, 0 = off
   char     callsign[33]   = "";                  // "" = use the SSID
 };
 

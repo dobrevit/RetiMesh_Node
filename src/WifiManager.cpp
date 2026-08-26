@@ -25,6 +25,7 @@
 #include <esp_wifi.h>
 #include "LoRaRadio.h"
 #include "Neighbors.h"
+#include "RnsAnnounce.h"
 
 WifiManager wifiManager;
 
@@ -209,9 +210,6 @@ void WifiManager::setupRoutes() {
   _http.on("/api/settings/reset", HTTP_POST,
            [this](AsyncWebServerRequest* r) { if (authed(r)) handleReset(r); });
 
-  // The single-page app lives in LittleFS (data/ -> `pio run -t uploadfs`).
-  _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
-
   // OS connectivity probes — a redirect (any non-204/200 answer) is what
   // makes the client OS open its captive-portal browser.
   for (const char* probe : { "/generate_204", "/gen_204",
@@ -220,6 +218,9 @@ void WifiManager::setupRoutes() {
     _http.on(probe, HTTP_GET,
              [](AsyncWebServerRequest* r) { r->redirect(PORTAL_URL); });
   }
+
+  // The single-page app lives in LittleFS (data/ -> `pio run -t uploadfs`).
+  _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
   // Everything else (arbitrary hostnames typed by the user, probe paths
   // not listed above) also lands on the portal.
@@ -238,6 +239,8 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["ssid"]         = _ssid;
   doc["security"]     = _securityName;
   doc["display"]      = g_stats.displayPresent;
+  doc["identity"]     = nodeIdentity.identityHex();
+  doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
   doc["uptime_s"]     = millis() / 1000;
   doc["heap_free"]    = ESP.getFreeHeap();
   doc["psram_free"]   = ESP.getFreePsram();
@@ -263,6 +266,9 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   radio["callsign"]   = loraRadio.callsign();
   radio["beacons_tx"] = g_stats.beaconsTx;
   radio["beacons_rx"] = g_stats.beaconsRx;
+  radio["announce_interval"] = rs.announceInterval;
+  radio["announces_tx"] = g_stats.announcesTx;
+  radio["announces_rx"] = g_stats.announcesRx;
 
   JsonObject peers    = doc["peers"].to<JsonObject>();
   peers["rns_tcp"]    = g_stats.tcpClients;      // Reticulum clients on :4242
@@ -278,11 +284,16 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     JsonObject o = nb.add<JsonObject>();
     o["name"]    = snap[i].name;
     o["version"] = snap[i].version;
-    o["kind"]    = snap[i].kind == NeighborKind::RetiMesh ? "retimesh" : "station-id";
+    o["kind"]    = snap[i].kind == NeighborKind::Announce ? "announce"
+                 : snap[i].kind == NeighborKind::Beacon   ? "beacon" : "station-id";
+    o["hash"]    = snap[i].hash;
+    o["aspect"]  = snap[i].aspect;
+    o["hops"]    = snap[i].hops;
+    o["via"]     = snap[i].viaWifi ? "wifi" : "lora";
     o["rssi"]    = snap[i].rssi;
     o["snr"]     = snap[i].snr;
     o["age_s"]   = (now - snap[i].lastSeen) / 1000;
-    o["beacons"] = snap[i].beacons;
+    o["count"]   = snap[i].count;
   }
 
   sendJson(request, 200, doc);
@@ -357,6 +368,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["sync_word"] = rs.syncWord;
   radio["preamble"]  = rs.preamble;
   radio["beacon_interval"] = rs.beaconInterval;
+  radio["announce_interval"] = rs.announceInterval;
   radio["callsign"]  = rs.callsign;              // "" = SSID
   radio["callsign_active"] = loraRadio.callsign();
   radio["model"]     = g_stats.radioModel;
@@ -393,6 +405,7 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (in["sync_word"].is<int>())   r.syncWord = in["sync_word"];
   if (in["preamble"].is<int>())    r.preamble = in["preamble"];
   if (in["beacon_interval"].is<int>()) r.beaconInterval = in["beacon_interval"];
+  if (in["announce_interval"].is<int>()) r.announceInterval = in["announce_interval"];
   if (in["callsign"].is<const char*>()) {
     String c = in["callsign"].as<String>(); c.trim();
     for (size_t i = 0; i < c.length(); i++)
@@ -409,6 +422,7 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (r.txDbm < 2 || r.txDbm > maxDbm)             { sendError(request, 400, "tx power out of range for this transceiver"); return; }
   if (r.preamble < 6 || r.preamble > 1000)         { sendError(request, 400, "preamble must be 6-1000 symbols"); return; }
   if (r.beaconInterval != 0 && (r.beaconInterval < 10 || r.beaconInterval > 3600)) { sendError(request, 400, "beacon interval must be 0 (off) or 10-3600 s"); return; }
+  if (r.announceInterval != 0 && (r.announceInterval < 60 || r.announceInterval > 43200)) { sendError(request, 400, "announce interval must be 0 (off) or 60-43200 s"); return; }
 
   if (!settings.saveRadio(r)) { sendError(request, 500, "nvs"); return; }
   if (loraRadio.online()) loraRadio.requestReconfigure(r);

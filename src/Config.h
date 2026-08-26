@@ -195,8 +195,16 @@
 // enough that an RNode's `id_callsign` shows up in our neighbour table.
 // ---------------------------------------------------------------------------
 #ifndef BEACON_INTERVAL_S
-  #define BEACON_INTERVAL_S 45
+  #define BEACON_INTERVAL_S 0             // off by default: announces do this job
 #endif
+// Reticulum announces of this node's retimesh.node destination, in
+// seconds (0 = off). Sent on LoRa and to Wi-Fi clients; on boot as well.
+#ifndef ANNOUNCE_INTERVAL_S
+  #define ANNOUNCE_INTERVAL_S 600
+#endif
+#define ANNOUNCE_BOOT_DELAY_MS 6000
+#define ANNOUNCE_MAX_LEN    256
+#define ANN_RING_BYTES      4096          // announces from TCP clients -> bridge task
 #define BEACON_MAX_LEN      64            // printable payload bytes
 // RetiMesh beacons are valid Reticulum packets: a broadcast to the PLAIN
 // destination "retimesh.beacon" (hash = RNS.Destination.hash(None,
@@ -243,6 +251,8 @@ struct NodeStats {
   volatile int16_t  radioApplyError = 0;   // last RadioLib error applying settings
   volatile uint32_t beaconsTx     = 0;
   volatile uint32_t beaconsRx     = 0;
+  volatile uint32_t announcesTx   = 0;
+  volatile uint32_t announcesRx   = 0;    // verified announces heard (any side)
   volatile float    lastRssi      = 0.0f;   // dBm, last LoRa RX
   volatile float    lastSnr       = 0.0f;   // dB,  last LoRa RX
   volatile uint32_t loraRxPackets = 0;      // reassembled RNS packets

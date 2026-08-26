@@ -20,13 +20,16 @@
 //  RetiTransportServer.cpp — see RetiTransportServer.h for the data flow.
 // ============================================================================
 #include "RetiTransportServer.h"
+#include "RnsAnnounce.h"
+#include "Neighbors.h"
 
 RetiTransportServer transportServer;
 
 // ---------------------------------------------------------------------------
-void RetiTransportServer::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing) {
+void RetiTransportServer::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t annRing) {
   _txRing = txRing;
   _rxRing = rxRing;
+  _annRing = annRing;
   _lock   = xSemaphoreCreateMutex();
 
   _server = new AsyncServer(RNS_TCP_PORT);
@@ -120,6 +123,10 @@ void RetiTransportServer::onData(ClientCtx* ctx, const uint8_t* data, size_t len
       //     this AP can reach each other without a round-trip over RF.
       //     Never echoed to the sender.
       broadcast(pkt, pktLen, ctx);
+
+      // (c) Announces from Wi-Fi peers feed the neighbour list; signature
+      //     checks are slow, so the bridge task does them, not this one.
+      if (Rns::isAnnounce(pkt, pktLen)) xRingbufferSend(_annRing, pkt, pktLen, 0);
     });
   }
 }
@@ -159,10 +166,48 @@ void RetiTransportServer::bridgeTask(void* selfPtr) {
   for (;;) {
     size_t itemSize = 0;
     uint8_t* item = (uint8_t*)xRingbufferReceive(self->_rxRing, &itemSize,
-                                                 portMAX_DELAY);
+                                                 pdMS_TO_TICKS(50));
     if (item != nullptr) {
-      self->broadcast(item, itemSize, nullptr);
+      self->broadcast(item, itemSize, nullptr);       // forward first, parse after
+      if (Rns::isAnnounce(item, itemSize)) noteAnnounce(item, itemSize, false);
       vRingbufferReturnItem(self->_rxRing, item);
     }
+
+    uint8_t* ann = (uint8_t*)xRingbufferReceive(self->_annRing, &itemSize, 0);
+    if (ann != nullptr) {
+      noteAnnounce(ann, itemSize, true);
+      vRingbufferReturnItem(self->_annRing, ann);
+    }
   }
+}
+
+// Verifies an announce (hash chain + Ed25519 signature) and records the
+// sender as a neighbour. Our own announces coming back are ignored.
+void RetiTransportServer::noteAnnounce(const uint8_t* raw, size_t len, bool viaWifi) {
+  Rns::Announce a;
+  if (!Rns::parseAnnounce(raw, len, a)) {
+    log_w("announce from %s failed validation (%u bytes)", viaWifi ? "wifi" : "lora", (unsigned)len);
+    return;
+  }
+  if (memcmp(a.destHash, nodeIdentity.destHash(), Rns::HASH_LEN) == 0) return;
+
+  Neighbor n = {};
+  Rns::toHex(a.destHash, Rns::HASH_LEN, n.hash);
+  const char* aspect = Rns::aspectName(a.nameHash);
+  strlcpy(n.aspect, aspect ? aspect : "", sizeof(n.aspect));
+  Rns::displayName(a, n.name, sizeof(n.name));
+  if (aspect && strcmp(aspect, "retimesh.node") == 0) {
+    // app_data is "<callsign> <version>"
+    char* sp = strchr(n.name, ' ');
+    if (sp) { strlcpy(n.version, sp + 1, sizeof(n.version)); *sp = '\0'; }
+  }
+  n.kind = NeighborKind::Announce;
+  n.hops = a.hops;
+  n.viaWifi = viaWifi;
+  n.rssi = viaWifi ? 0 : g_stats.lastRssi;
+  n.snr  = viaWifi ? 0 : g_stats.lastSnr;
+  neighbors.seen(n);
+  g_stats.announcesRx++;
+  log_i("announce via %s: %s <%s> \"%s\" hops %u", viaWifi ? "wifi" : "lora",
+        aspect ? aspect : "unknown-aspect", n.hash, n.name, a.hops);
 }

@@ -17,11 +17,14 @@
 // with RetiMesh Node. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================================
-//  Neighbors.h — table of stations heard on the LoRa channel
+//  Neighbors.h — table of stations heard on the mesh
 //
-//  Fed by the radio task from beacon frames (see LoRaRadio.h: RetiMesh
-//  "RM1" beacons and plain RNode station-ID callsigns), read by the web
-//  status page and the OLED. Small fixed table, oldest entry evicted.
+//  Fed from three sources (see LoRaRadio.h / RnsAnnounce.h):
+//    * Reticulum announces (LoRa or Wi-Fi clients) — verified, with
+//      destination hash, aspect, hops and a best-effort display name
+//    * RetiMesh beacons (retimesh.beacon PLAIN broadcasts)
+//    * RNode station IDs (raw callsigns)
+//  Read by the web status page and the OLED. Fixed table, oldest evicted.
 // ============================================================================
 #pragma once
 
@@ -29,22 +32,27 @@
 #include <freertos/FreeRTOS.h>
 #include "Config.h"
 
-enum class NeighborKind : uint8_t { StationId = 0, RetiMesh = 1 };
+enum class NeighborKind : uint8_t { StationId = 0, Beacon = 1, Announce = 2 };
 
 struct Neighbor {
-  char         name[33];
+  char         name[33];                 // display name / callsign (may be empty)
   char         version[16];
+  char         hash[33];                 // hex destination hash (announces)
+  char         aspect[24];               // "lxmf.delivery", ... or "" if unknown
   float        rssi;
   float        snr;
   uint32_t     lastSeen;                 // millis()
-  uint32_t     beacons;                  // how many heard
+  uint32_t     count;                    // how many times heard
+  uint8_t      hops;
+  bool         viaWifi;                  // heard from a TCP client, not RF
   NeighborKind kind;
   bool         used;
 };
 
 class Neighbors {
 public:
-  void   seen(const char* name, const char* version, NeighborKind kind, float rssi, float snr);
+  // Records a sighting. Keyed by hash when set, else by name.
+  void   seen(const Neighbor& info);
   // Copies up to `max` entries into `out`, newest first. Returns the count.
   size_t snapshot(Neighbor* out, size_t max);
   size_t count(uint32_t maxAgeMs);       // heard within maxAgeMs
