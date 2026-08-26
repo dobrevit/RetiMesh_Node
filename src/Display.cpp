@@ -25,15 +25,36 @@
 
 Display display;
 
+bool Display::ack(uint8_t addr) {
+#if HAS_DISPLAY
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;    // 0 = ACK received
+#else
+  return false;
+#endif
+}
+
 bool Display::begin() {
 #if HAS_DISPLAY
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-  // periphBegin=false: Wire is already up on the board-specific pins.
-  if (!_oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, true, false)) {
-    log_w("No SSD1306 at 0x%02X (SDA %d / SCL %d) — display disabled",
-          OLED_ADDR, PIN_OLED_SDA, PIN_OLED_SCL);
+  Wire.setTimeOut(50);                   // a missing panel must not stall boot
+
+  const uint8_t candidates[] = { OLED_ADDR, (uint8_t)(OLED_ADDR == 0x3C ? 0x3D : 0x3C) };
+  for (uint8_t a : candidates) {
+    if (ack(a)) { _addr = a; break; }
+  }
+  if (_addr == 0) {
+    log_w("No I2C device at 0x%02X/0x%02X (SDA %d / SCL %d) — display disabled",
+          candidates[0], candidates[1], PIN_OLED_SDA, PIN_OLED_SCL);
     return false;
   }
+
+  // periphBegin=false: Wire is already up on the board-specific pins.
+  if (!_oled.begin(SSD1306_SWITCHCAPVCC, _addr, true, false)) {
+    log_w("SSD1306 at 0x%02X did not initialise — display disabled", _addr);
+    return false;
+  }
+  log_i("SSD1306 found at 0x%02X (SDA %d / SCL %d)", _addr, PIN_OLED_SDA, PIN_OLED_SCL);
   _oled.setRotation(OLED_ROTATION);
   _oled.clearDisplay();
   _oled.setTextColor(SSD1306_WHITE);

@@ -122,6 +122,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["firmware"]     = FW_NAME;
   doc["version"]      = FW_VERSION;
   doc["ssid"]         = _ssid;
+  doc["display"]      = g_stats.displayPresent;
   doc["uptime_s"]     = millis() / 1000;
   doc["heap_free"]    = ESP.getFreeHeap();
   doc["psram_free"]   = ESP.getFreePsram();

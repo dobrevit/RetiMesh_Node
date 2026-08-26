@@ -36,9 +36,13 @@
 
 class Display {
 public:
-  // Returns false (and disables itself) when no panel answers on I2C.
+  // Probes the I2C bus for a panel (ACK at OLED_ADDR, then the alternate
+  // address) before touching the driver. Returns false, and the module
+  // stays inert, when nothing answers — Adafruit's begin() alone would
+  // happily "succeed" against an empty bus.
   bool begin();
   bool present() const { return _ok; }
+  uint8_t address() const { return _addr; }
 
   // FreeRTOS entry point — created pinned to core 0 from main.cpp.
   static void displayTask(void* self);
@@ -49,7 +53,9 @@ private:
 #if HAS_DISPLAY
   Adafruit_SSD1306 _oled{128, 64, &Wire, -1};
 #endif
-  bool _ok = false;
+  static bool ack(uint8_t addr);         // true if a device ACKs at addr
+  bool    _ok   = false;
+  uint8_t _addr = 0;
 };
 
 extern Display display;

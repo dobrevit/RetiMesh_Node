@@ -79,7 +79,7 @@ void setup() {
 
   // Bring up services. Radio failure is survivable: the AP + web UI stay
   // up and report "radio offline" so the node can be diagnosed in place.
-  display.begin();                         // clears whatever the OLED still shows
+  g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   wifiManager.begin();
   transportServer.begin(txRing, rxRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing);

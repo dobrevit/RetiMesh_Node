@@ -197,6 +197,7 @@
 struct NodeStats {
   volatile bool     radioOnline   = false;
   const char*       radioModel    = "none"; // "SX1262" / "SX1276" once probed
+  volatile bool     displayPresent = false;
   volatile float    lastRssi      = 0.0f;   // dBm, last LoRa RX
   volatile float    lastSnr       = 0.0f;   // dB,  last LoRa RX
   volatile uint32_t loraRxPackets = 0;      // reassembled RNS packets
