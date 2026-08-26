@@ -58,7 +58,9 @@ private:
   void pollButton();
 
   enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, QR, PAGE_COUNT };
-  uint8_t  _page = STATUS;
+  // Typed, so paint()'s switch can list every page and let the compiler
+  // object when one is added without being drawn (-Werror=switch).
+  Page     _page = STATUS;
   bool     _blank = false;
   uint32_t _pageChangedMs = 0;
   uint32_t _lastActivityMs = 0;          // last button press (boot counts)
