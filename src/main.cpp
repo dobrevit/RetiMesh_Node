@@ -26,6 +26,7 @@
 //  │  Wi-Fi / LwIP stack (ESP-IDF system tasks)                 │
 //  │  AsyncTCP event task    socket I/O for ports 80 and 4242   │
 //  │  dnsTask                captive-portal DNS polling         │
+//  │  displayTask            OLED status page, 2 Hz             │
 //  └────────────────────────────────────────────────────────────┘
 //  ┌────────────────────────── CORE 1 ──────────────────────────┐
 //  │  radioTask   (prio 5)   SX1262 IRQs, CSMA, fragmentation   │
@@ -53,6 +54,7 @@
 #include "WifiManager.h"
 #include "RetiTransportServer.h"
 #include "LoRaRadio.h"
+#include "Display.h"
 
 NodeStats g_stats;
 
@@ -77,6 +79,7 @@ void setup() {
 
   // Bring up services. Radio failure is survivable: the AP + web UI stay
   // up and report "radio offline" so the node can be diagnosed in place.
+  display.begin();                         // clears whatever the OLED still shows
   wifiManager.begin();
   transportServer.begin(txRing, rxRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing);
@@ -90,6 +93,9 @@ void setup() {
 
   xTaskCreatePinnedToCore(RetiTransportServer::bridgeTask, "bridge",
                           8192, &transportServer, 3, nullptr, 1);
+
+  xTaskCreatePinnedToCore(Display::displayTask, "display",
+                          4096, &display, 1, nullptr, 0);
 
   log_i("RetiMesh Node up — join \"%s\", portal http://10.42.0.1, RNS TCP :%d",
         wifiManager.ssid(), RNS_TCP_PORT);

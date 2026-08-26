@@ -75,9 +75,8 @@ void WifiManager::dnsTask(void* self) {
 
 // ---------------------------------------------------------------------------
 void WifiManager::setupRoutes() {
-  // The single-page app lives in LittleFS (data/ -> `pio run -t uploadfs`).
-  _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
-
+  // Handlers are matched in registration order: API first, so the static
+  // handler never probes LittleFS for /api/* paths.
   _http.on("/api/status", HTTP_GET,
            [this](AsyncWebServerRequest* r) { handleStatus(r); });
 
@@ -96,6 +95,9 @@ void WifiManager::setupRoutes() {
                   size_t index, size_t total) {
              handleBoardPost(r, data, len, index, total);
            });
+
+  // The single-page app lives in LittleFS (data/ -> `pio run -t uploadfs`).
+  _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
   // OS connectivity probes — a redirect (any non-204/200 answer) is what
   // makes the client OS open its captive-portal browser.

@@ -43,10 +43,11 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing) {
 
   _spi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
 
-  // Probe order matters: the SX1262 check waits on BUSY (GPIO 34), which
-  // on an SX127x board is DIO2 — it just times out, harmlessly. The SX127x
-  // probe reads the silicon version register and is unambiguous.
-  if (!probeSX1262() && !probeSX127x()) {
+  // Probe order matters for boot time: the SX127x check is a version-
+  // register read that fails within ~100 ms on an SX1262, whereas the
+  // SX1262 check waits on BUSY (GPIO 34 = DIO2 on an SX127x board) and
+  // needs ~27 s to give up. Both are harmless to the other chip.
+  if (!probeSX127x() && !probeSX1262()) {
     log_e("No LoRa transceiver found (tried SX1262 on DIO1=%d/BUSY=%d and "
           "SX127x on DIO0=%d) — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY,
           PIN_LORA_DIO0);

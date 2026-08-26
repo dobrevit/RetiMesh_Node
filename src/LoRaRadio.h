@@ -20,8 +20,8 @@
 //  LoRaRadio.h — LoRa driver (RadioLib) + RNode-compatible RF framing
 //
 //  The LilyGO T3-S3 ships with either an SX1262 or an SX1276/SX1278, on
-//  partly different pins. begin() probes for the SX1262 first (DIO1 33,
-//  BUSY 34) and then for the SX127x (DIO0 9), so one build fits every
+//  partly different pins. begin() probes for the SX127x first (DIO0 9)
+//  and then for the SX1262 (DIO1 33, BUSY 34), so one build fits every
 //  variant. After that everything runs through RadioLib's PhysicalLayer
 //  interface — RxDone/TxDone both arrive on the chip's primary IRQ line
 //  (DIO1 on SX126x, DIO0 on SX127x), which is what the task waits on.

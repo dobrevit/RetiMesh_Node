@@ -151,6 +151,26 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// OLED — SSD1306 128x64 on I2C (T3-S3: SDA 18 / SCL 17, address 0x3C)
+// ---------------------------------------------------------------------------
+#ifndef HAS_DISPLAY
+  #define HAS_DISPLAY       1
+#endif
+#ifndef PIN_OLED_SDA
+  #define PIN_OLED_SDA      18
+#endif
+#ifndef PIN_OLED_SCL
+  #define PIN_OLED_SCL      17
+#endif
+#ifndef OLED_ADDR
+  #define OLED_ADDR         0x3C
+#endif
+#ifndef OLED_ROTATION
+  #define OLED_ROTATION     0               // 0..3, quarter turns
+#endif
+#define DISPLAY_REFRESH_MS  500
+
+// ---------------------------------------------------------------------------
 // CSMA (simplified: CAD check + random slotted backoff — see LoRaRadio.cpp)
 // ---------------------------------------------------------------------------
 #define CSMA_SLOT_MS        10
