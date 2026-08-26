@@ -147,6 +147,8 @@ void Display::paint() {
     case QR:         paintQr();        break;
     case PAGE_COUNT: break;                     // not a page
   }
+  _chargeSweep = (uint8_t)((_chargeSweep + 6) % 101);   // ~8 s per sweep at 2 fps
+
   // page indicator, bottom-right
   for (uint8_t i = 0; i < PAGE_COUNT; i++)
     _oled.fillRect(128 - 4 * PAGE_COUNT + 4 * i, 61, 3, 3, i == _page ? SSD1306_WHITE : SSD1306_BLACK),
@@ -156,12 +158,91 @@ void Display::paint() {
 }
 
 #if HAS_DISPLAY
-static void header(Adafruit_SSD1306& o, const char* text) {
-  o.fillRect(0, 0, 128, 9, SSD1306_WHITE);
-  o.setTextColor(SSD1306_BLACK);
-  o.setCursor(1, 1);
-  o.print(text);
-  o.setTextColor(SSD1306_WHITE);
+// --- status strip -----------------------------------------------------------
+// Seven ascending bars in 13x7: the shape everyone already reads as signal
+// strength, so nobody has to learn what -104 dBm means.
+static void drawBars(Adafruit_SSD1306& o, int x, int y, uint8_t pct, uint16_t color) {
+  for (uint8_t i = 0; i < 7; i++) {
+    const uint8_t threshold = i * 15;                 // 0, 15, 30 ... 90
+    if (pct > threshold) o.drawLine(x + i * 2, y + 7, x + i * 2, y + 6 - i, color);
+  }
+}
+
+// A battery outline with a nub, filled in seven steps. While charging the fill
+// sweeps upward from the real level instead of sitting still, which is the
+// difference between "there is a cell" and "it is filling".
+static void drawBattery(Adafruit_SSD1306& o, int x, int y, uint8_t pct, bool charging,
+                        uint8_t sweep, uint16_t color) {
+  o.drawRect(x, y, 15, 7, color);
+  o.drawLine(x + 15, y + 2, x + 15, y + 4, color);    // the nub
+  uint8_t level = pct;
+  if (charging) {
+    // Start the sweep at the real level so the animation still tells the truth
+    // about how full the cell is, and let it run to the top.
+    level = pct + sweep;
+    if (level > 100) level = pct + (level - 100) % (101 - pct > 0 ? 101 - pct : 1);
+    if (level > 100) level = 100;
+  }
+  for (uint8_t i = 0; i < 6; i++)
+    if (level > 7 + i * 15) o.drawLine(x + 2 + i * 2, y + 2, x + 2 + i * 2, y + 4, color);
+}
+
+// RSSI in dBm to something a bar chart can show. The window is the usable
+// range of an SX127x on this band: below the floor a packet is luck, above the
+// ceiling the sender is on the desk next to you.
+static uint8_t signalPercent(float rssi) {
+  const float lo = -135.0f, hi = -75.0f;
+  if (rssi <= lo) return 0;
+  if (rssi >= hi) return 100;
+  return (uint8_t)((rssi - lo) * 100.0f / (hi - lo));
+}
+
+// Link quality from SNR, against a floor that moves with the spreading factor:
+// SF12 decodes far below the noise where SF7 cannot, so the same SNR means
+// something different on each.
+static uint8_t qualityPercent(float snr, uint8_t sf) {
+  const float lo = -9.0f - (float)sf * 2.0f, hi = 6.0f;
+  if (snr <= lo) return 0;
+  if (snr >= hi) return 100;
+  return (uint8_t)((snr - lo) * 100.0f / (hi - lo));
+}
+
+// The header carries the page name and, on the right, the cell — the one
+// reading that means the same thing on every page. Signal strength does not
+// belong here: a bar chart with no label and no number is decoration, so the
+// radio and network pages draw theirs next to the figure they represent.
+//
+// The title is clipped to whatever space the battery leaves, so a long page
+// name can never run into it.
+void Display::header(const char* title) {
+  _oled.fillRect(0, 0, 128, 9, SSD1306_WHITE);
+
+  uint8_t reserved = 0;
+  Power::Battery bat = Power::battery();
+  if (bat.present) {
+    drawBattery(_oled, 128 - 17, 1, bat.percent, bat.charging, _chargeSweep, SSD1306_BLACK);
+    reserved = 19;                                     // icon plus a space
+  }
+
+  const uint8_t columns = (uint8_t)((128 - reserved) / 6);
+  char clipped[22];
+  strlcpy(clipped, title, columns + 1 < sizeof(clipped) ? columns + 1 : sizeof(clipped));
+
+  _oled.setTextColor(SSD1306_BLACK);
+  _oled.setCursor(1, 1);
+  _oled.print(clipped);
+  _oled.setTextColor(SSD1306_WHITE);
+}
+
+// A labelled meter: the text says what is being measured and how much of it
+// there is, the bars give the shape at a glance.
+void Display::meter(uint8_t row, const char* label, const char* value, uint8_t pct) {
+  const int y = 12 + row * 10;
+  char text[16];
+  snprintf(text, sizeof(text), "%-4s%9s", label, value);
+  _oled.setCursor(0, y);
+  _oled.print(text);
+  drawBars(_oled, 128 - 14, y, pct, SSD1306_WHITE);
 }
 #endif
 
@@ -171,7 +252,7 @@ void Display::paintStatus() {
   char line[24];
   uint32_t up = millis() / 1000;
 
-  header(_oled, wifiManager.ssid());
+  header(wifiManager.ssid());
 
   // Row 1 — portal address / version
   _oled.setCursor(0, 12);
@@ -223,8 +304,8 @@ void Display::paintNeighbors() {
   Neighbor snap[MAX_NEIGHBORS];
   size_t n = neighbors.snapshot(snap, MAX_NEIGHBORS);
   char line[24];
-  snprintf(line, sizeof(line), "Neighbours: %u", (unsigned)n);
-  header(_oled, line);
+  snprintf(line, sizeof(line), "Neighbours %u", (unsigned)n);
+  header(line);
   if (n == 0) { _oled.setCursor(0, 14); _oled.print("nothing heard yet"); return; }
   uint32_t now = millis();
   for (size_t i = 0; i < n && i < 5; i++) {          // 5 rows fit under the header
@@ -249,18 +330,20 @@ void Display::paintTransport() {
   char line[24];
   RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
   size_t n = RnsTransport::interfaces(ifs, RNS_MAX_CLIENTS + 1);
-  snprintf(line, sizeof(line), "Transport %s %u path%s",
-           g_stats.transportOnline ? "up" : "OFF", (unsigned)RnsTransport::pathCount(),
-           RnsTransport::pathCount() == 1 ? "" : "s");
-  header(_oled, line);
+  snprintf(line, sizeof(line), "Transport %s %up",
+           g_stats.transportOnline ? "up" : "OFF", (unsigned)RnsTransport::pathCount());
+  header(line);
   uint8_t row = 0;
-  for (size_t i = 0; i < n && row < 5; i++, row++) {
+  for (size_t i = 0; i < n && row < 4; i++, row++) {
     char name[12]; strlcpy(name, ifs[i].name, sizeof(name));
     if (strncmp(name, "WiFi/", 5) == 0) memmove(name, name + 5, strlen(name + 5) + 1);   // just the IP
     snprintf(line, sizeof(line), "%-9s %-6.6s %3luk", name, ifs[i].mode, (unsigned long)((ifs[i].rxb + ifs[i].txb) / 1024));
     _oled.setCursor(0, 12 + row * 10); _oled.print(line);
   }
   if (n == 0) { _oled.setCursor(0, 14); _oled.print("no interfaces"); }
+  snprintf(line, sizeof(line), "announce %lu in %lu out", (unsigned long)g_stats.announcesRx,
+           (unsigned long)g_stats.announcesTx);
+  _oled.setCursor(0, 52); _oled.print(line);
 #endif
 }
 
@@ -268,20 +351,31 @@ void Display::paintRadio() {
 #if HAS_DISPLAY
   const RadioSettings& r = settings.radio();
   char line[24];
-  header(_oled, g_stats.radioOnline ? g_stats.radioModel : "Radio OFFLINE");
-  snprintf(line, sizeof(line), "%.3f MHz %+d dBm", (double)r.freqMhz, r.txDbm);       _oled.setCursor(0, 12); _oled.print(line);
-  snprintf(line, sizeof(line), "BW %.1fk SF%d CR4/%d", (double)r.bwKhz, r.sf, r.cr); _oled.setCursor(0, 22); _oled.print(line);
-  snprintf(line, sizeof(line), "sync %02X pre %u", r.syncWord, r.preamble);            _oled.setCursor(0, 32); _oled.print(line);
+  header(g_stats.radioOnline ? g_stats.radioModel : "Radio OFFLINE");
+  snprintf(line, sizeof(line), "%.3fMHz %+ddBm", (double)r.freqMhz, r.txDbm);
+  _oled.setCursor(0, 12); _oled.print(line);
+  snprintf(line, sizeof(line), "BW%.0f SF%d CR4/%d", (double)r.bwKhz, r.sf, r.cr);
+  _oled.setCursor(0, 22); _oled.print(line);
+
+  // The last packet heard, as a number and as a shape. Nothing received yet
+  // means there is nothing to measure, and saying so beats an empty chart.
+  if (g_stats.loraRxPackets > 0) {
+    snprintf(line, sizeof(line), "%.0fdBm", (double)g_stats.lastRssi);
+    meter(2, "sig", line, signalPercent(g_stats.lastRssi));
+    snprintf(line, sizeof(line), "%.1fdB", (double)g_stats.lastSnr);
+    meter(3, "snr", line, qualityPercent(g_stats.lastSnr, r.sf));
+  } else {
+    _oled.setCursor(0, 32); _oled.print("sig  no RX yet");
+  }
+
   if (g_stats.dutyLocked)
     snprintf(line, sizeof(line), "duty FULL %us", (unsigned)g_stats.dutyRetryS);
   else if (g_stats.dutyLimitBp)
     snprintf(line, sizeof(line), "duty %.2f/%.2f%% cw%u", (double)(g_stats.airtimeLong * 100.0f),
              g_stats.dutyLimitBp / 100.0f, g_stats.csmaBand);
   else
-    snprintf(line, sizeof(line), "air %.2f%% cw%u", (double)(g_stats.airtimeLong * 100.0f), g_stats.csmaBand);
-  _oled.setCursor(0, 42); _oled.print(line);
-  snprintf(line, sizeof(line), "an %lu/%lu bc %lu/%lu", (unsigned long)g_stats.announcesRx, (unsigned long)g_stats.announcesTx,
-           (unsigned long)g_stats.beaconsRx, (unsigned long)g_stats.beaconsTx);        _oled.setCursor(0, 52); _oled.print(line);
+    snprintf(line, sizeof(line), "air %.2f%% no limit", (double)(g_stats.airtimeLong * 100.0f));
+  _oled.setCursor(0, 52); _oled.print(line);
 #endif
 }
 
@@ -291,7 +385,7 @@ void Display::paintRadio() {
 void Display::paintGps() {
   Gps::Fix g = Gps::fix();
   char line[24];
-  header(_oled, g.enabled ? (g.valid ? "GNSS fix" : "GNSS searching") : "GNSS off");
+  header(g.enabled ? (g.valid ? "GNSS fix" : "GNSS search") : "GNSS off");
   if (!g.enabled) {
     _oled.setCursor(0, 24); _oled.print("Receiver powered down");
     _oled.setCursor(0, 34); _oled.print("Enable on the settings");
@@ -361,12 +455,20 @@ void Display::paintQr() {
 void Display::paintNetwork() {
 #if HAS_DISPLAY
   char line[24];
-  header(_oled, "Network");
+  header("Network");
   snprintf(line, sizeof(line), "%s", wifiManager.ssid());                                  _oled.setCursor(0, 12); _oled.print(line);
   snprintf(line, sizeof(line), "%s  ch%u  %s", WiFi.softAPIP().toString().c_str(),
            settings.wifi().channel, wifiManager.securityName());                           _oled.setCursor(0, 22); _oled.print(line);
-  snprintf(line, sizeof(line), "wifi %u  rns tcp %u", (unsigned)WiFi.softAPgetStationNum(),
-           (unsigned)g_stats.tcpClients);                                                  _oled.setCursor(0, 32); _oled.print(line);
+  // Joined a network? Then there is one link worth measuring, and it gets a
+  // label and a number like everything else. Otherwise just say who is here.
+  if (wifiManager.stationConnected()) {
+    snprintf(line, sizeof(line), "%ddBm", (int)WiFi.RSSI());
+    meter(2, "up", line, signalPercent((float)WiFi.RSSI()));
+  } else {
+    snprintf(line, sizeof(line), "clients %u  rns %u", (unsigned)WiFi.softAPgetStationNum(),
+             (unsigned)g_stats.tcpClients);
+    _oled.setCursor(0, 32); _oled.print(line);
+  }
   _oled.setCursor(0, 42); _oled.print("dest ");
   _oled.print(String(nodeIdentity.destHex()).substring(0, 16));
 #if HAS_SD

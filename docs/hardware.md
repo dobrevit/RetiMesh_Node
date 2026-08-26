@@ -88,8 +88,19 @@ count) → radio → network (dots bottom-right). Short press:
 next page (wakes the panel first if asleep); long press (1.5 s): blank/wake.
 Panel sleeps after 60 s without a press; page returns to status after 30 s.
 
-Pages: status, neighbours, transport, radio, network, QR. The QR page shows a
-scan-to-join code for the access point.
+Pages: status, neighbours, transport, radio, network, GNSS (where fitted) and
+QR. The QR page shows a scan-to-join code for the access point and uses the
+whole panel; every other page has a header carrying the page name on the left
+and, where a cell is fitted, a battery icon on the right — filling in steps
+while charging so a glance tells you whether the node is gaining or draining.
+
+Signal strength is deliberately *not* in that header. A bar chart with no
+label and no number says nothing, so the meters live on the pages that can
+explain them: the radio page shows `sig -87dBm` and `snr 8.5dB` with bars
+beside each figure, and the network page shows the Wi-Fi uplink the same way
+when the node has joined a network. Quality is scaled against a floor that
+moves with the spreading factor, because the same SNR means something
+different at SF7 and SF12.
 
 ## Adding a board
 1. `src/boards/<name>.h`: the pin map and the capability flags (`HAS_SD`,

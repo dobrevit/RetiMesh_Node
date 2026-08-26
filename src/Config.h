@@ -250,6 +250,13 @@
 #ifndef OLED_ROTATION
   #define OLED_ROTATION     0               // 0..3, quarter turns
 #endif
+// Show the Wi-Fi uplink's signal alongside LoRa's when the node has joined a
+// network. Off by default: on an access-point-only node there is no single
+// link to report, and the clients are already counted on the status page.
+#ifndef HAS_WIFI_STATION_BARS
+  #define HAS_WIFI_STATION_BARS 1
+#endif
+
 #define DISPLAY_REFRESH_MS  500
 // BOOT button (GPIO 0, active low) doubles as the display navigation key:
 // short press = next page, long press = blank/wake the panel.
