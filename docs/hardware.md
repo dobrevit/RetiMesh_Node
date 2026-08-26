@@ -40,6 +40,11 @@ Battery voltage, charge state and percentage come from the PMU rather than an
 ADC divider, which is why this board can say whether a cell is actually
 connected and whether it is charging.
 
+Charging is set up at boot — 4.2 V target, up to 500 mA (450 mA on an AXP192)
+— and the board's indicator LED is left under the charger's control, so it
+blinks while current is going into the cell and settles when it is full. The
+display shows `bat 42%+` while charging and the status page says so in words.
+
 | Function | GPIO |
 |---|---|
 | LoRa SCK / MISO / MOSI / CS / RST | 5 / 19 / 27 / 18 / 23 |

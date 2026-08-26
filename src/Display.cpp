@@ -205,7 +205,10 @@ void Display::paintStatus() {
   _oled.setCursor(0, 52);
   Power::Battery bat = Power::battery();
   if (bat.present)
-    snprintf(line, sizeof(line), "bat %u%% %.2fV  %luh%02lum", bat.percent, (double)bat.volts,
+    // The charge marker earns its two characters: it is how you tell a node
+    // that is filling up from one that is quietly draining.
+    snprintf(line, sizeof(line), "bat %u%%%s %.2fV %luh%02lum", bat.percent,
+             bat.charging ? "+" : "", (double)bat.volts,
              (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
   else
     snprintf(line, sizeof(line), "rns %u wifi %u  %luh%02lum",

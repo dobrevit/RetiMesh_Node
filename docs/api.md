@@ -47,6 +47,13 @@ allowance less a safety margin, or a stricter `duty_manual_pct` when set);
 transmissions are being held until `retry_after_s` seconds from now. The CSMA
 slot and contention-window band come from the same figures.
 
+`power` reports the profile, CPU clock and the cell:
+`{"profile":"performance","cpu_mhz":240,"battery_present":true,
+"battery_charging":true,"battery_v":3.53,"battery_pct":10,"pmu":"AXP2101",
+"board":"LilyGO T-Beam"}`. `battery_charging` and a trustworthy
+`battery_present` need a power-management chip; boards reading an ADC divider
+report `false` and infer presence from the voltage.
+
 `gps` appears on boards with a receiver:
 `{"enabled":true,"fix":true,"quality":1,"satellites":7,"sentences":1204,
 "clock_set":true,"utc":"2026-08-26 21:04:11","position_public":false}`.
