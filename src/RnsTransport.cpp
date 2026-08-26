@@ -152,7 +152,7 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
 
   try {
-    RNS::loglevel(RNS::LOG_INFO);
+    RNS::loglevel(RNS::LOG_INFO);        // DEBUG is compiled in; raise here when tracing
     rnsFs.init(false);
     RNS::Utilities::OS::register_filesystem(rnsFs);
     reticulum = RNS::Reticulum();          // ctor resets the storage path, so set it after
@@ -297,7 +297,13 @@ void loop() {
   try {
     processEvents();
     drainTcp();
-    reticulum.loop();                      // Transport jobs + every interface's loop()
+    reticulum.loop();                      // interface loops + housekeeping (its jobs run every 60 s)
+
+    // microReticulum only runs Transport::jobs() every JOB_INTERVAL (60 s);
+    // RNS does it 4x per second. Announce rebroadcasts, path-request and
+    // link timeouts all live there, so drive it ourselves once a second.
+    static uint32_t lastJobs = 0;
+    if (millis() - lastJobs >= 1000) { lastJobs = millis(); RNS::Transport::jobs(); }
 
     uint16_t interval = settings.radio().announceInterval;
     if (interval && sNextAnnounceMs && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
