@@ -30,16 +30,17 @@
 //  at runtime via requestReconfigure(); the radio task — sole owner of
 //  the chip — applies them between packets, no reboot needed.
 //
-//  Beacons / neighbour discovery. A beacon is a short frame whose payload
-//  is printable ASCII only — the same on-air form as an RNode's station
-//  ID (`id_callsign` in RNS), so those show up as neighbours too. RNS
-//  drops such frames as invalid packets, so they never disturb Reticulum
-//  peers. RetiMesh nodes send a structured variant:
-//
-//      "RM1 <T> <name> <version>"     T = H hello (boot probe)
-//                                        R reply to a hello (random delay)
-//                                        I periodic id while idle
-//
+//  Beacons / neighbour discovery. Two kinds of frame feed the neighbour
+//  table:
+//    * RetiMesh beacons — a valid Reticulum broadcast to the PLAIN
+//      destination "retimesh.beacon" (see RNS_BEACON_* in Config.h) whose
+//      payload is "RM1 <T> <name> <version>", T = H hello (boot probe),
+//      R reply to a hello (random delay), I periodic id while idle.
+//      RNS peers parse and silently drop it (no registered destination),
+//      or receive it if they register that plain destination.
+//    * RNode station IDs — the raw printable callsign an RNS
+//      RNodeInterface transmits (`id_callsign`); RNS itself counts those
+//      as malformed packets, we just list them.
 //  Beacons are never forwarded to TCP clients; they only feed Neighbors.
 //
 //  Packet flow, radio side:
@@ -100,7 +101,8 @@ private:
   void waitClearChannel();               // simplified CSMA (CAD + backoff)
   bool sendFrame(const uint8_t* frame, size_t len);
 
-  bool isBeacon(const uint8_t* p, size_t len) const;
+  bool isRetiMeshBeacon(const uint8_t* p, size_t len) const;
+  bool isStationId(const uint8_t* p, size_t len) const;
   void handleBeacon(const uint8_t* p, size_t len);
   void sendBeacon(char type);
 

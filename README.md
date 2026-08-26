@@ -97,13 +97,26 @@ block). Check your local regulations before changing frequency or power.
 ## Neighbour discovery (beacons)
 
 Every `beacon_interval` seconds of TX silence (default 45; 0 = off) the node
-transmits a short printable beacon `RM1 I <callsign> <version>`; on boot it
-sends a hello (`RM1 H …`) and other RetiMesh nodes answer with a reply
-(`RM1 R …`) after a random delay, so a new node learns its neighbours within
-seconds. Everything heard is listed on the status page and counted on the
-OLED (`NB`). Reticulum peers drop these frames as invalid packets, so they
-never interfere with RNS traffic. The on-air form is the same as an RNode's
-station ID, so an RNode with
+transmits a beacon `RM1 I <callsign> <version>`; on boot it sends a hello
+(`RM1 H …`) and other RetiMesh nodes answer with a reply (`RM1 R …`) after a
+random delay, so a new node learns its neighbours within seconds. Everything
+heard is listed on the status page and counted on the OLED (`NB`).
+
+Beacons are **valid Reticulum packets**: a broadcast to the PLAIN destination
+`retimesh.beacon`. RNS peers parse and silently drop them (no protocol
+violation, never forwarded past one hop), and any RNS program can receive
+them:
+
+```python
+import RNS, time
+RNS.Reticulum()
+d = RNS.Destination(None, RNS.Destination.IN, RNS.Destination.PLAIN, "retimesh", "beacon")
+d.set_packet_callback(lambda data, packet: print(packet.receiving_interface, data.decode()))
+while True: time.sleep(1)
+```
+
+The node also lists RNode **station IDs** — the raw callsign an RNS
+`RNodeInterface` transmits — so an RNode with
 
 ```ini
   id_interval = 45

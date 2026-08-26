@@ -198,6 +198,16 @@
   #define BEACON_INTERVAL_S 45
 #endif
 #define BEACON_MAX_LEN      64            // printable payload bytes
+// RetiMesh beacons are valid Reticulum packets: a broadcast to the PLAIN
+// destination "retimesh.beacon" (hash = RNS.Destination.hash(None,
+// "retimesh", "beacon")). RNS peers accept and silently drop them
+// instead of counting a protocol violation, and any RNS program that
+// registers that destination receives them. Header = flags, hops, hash,
+// context = 19 bytes, followed by the printable beacon text.
+#define RNS_BEACON_FLAGS    0x08          // header type 1, broadcast, PLAIN, DATA
+#define RNS_BEACON_HDR_LEN  19
+#define RNS_BEACON_DEST_HASH { 0xC8, 0x03, 0xD3, 0x5E, 0x39, 0xD0, 0xAA, 0x7A, \
+                               0xCD, 0xE2, 0x21, 0xBB, 0x16, 0x7F, 0x05, 0x3E }
 #define BEACON_HELLO_DELAY_MS 3000        // boot probe
 #define MAX_NEIGHBORS       16
 #define NEIGHBOR_STALE_MS   (3UL * 60UL * 1000UL)

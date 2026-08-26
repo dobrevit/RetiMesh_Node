@@ -277,8 +277,9 @@ void LoRaRadio::handleRadioIrq() {
   }
 
   if (ready && _rxLen > 0) {
-    if (isBeacon(_rxBuf, _rxLen)) { handleBeacon(_rxBuf, _rxLen); _rxLen = 0; }
-    else                          deliverPacket(_rxLen);
+    if (isRetiMeshBeacon(_rxBuf, _rxLen))  { handleBeacon(_rxBuf + RNS_BEACON_HDR_LEN, _rxLen - RNS_BEACON_HDR_LEN); _rxLen = 0; }
+    else if (isStationId(_rxBuf, _rxLen))  { handleBeacon(_rxBuf, _rxLen); _rxLen = 0; }
+    else                                   deliverPacket(_rxLen);
   }
 
   _radio->startReceive();
@@ -291,13 +292,27 @@ const char* LoRaRadio::callsign() const {
   return _active.callsign[0] ? _active.callsign : wifiManager.ssid();
 }
 
-// Printable ASCII only and short: an RNode station ID or a RetiMesh beacon.
-// A real RNS packet is >= 19 bytes with a 16-byte random hash inside, so
-// the chance of one passing this test is ~(95/256)^16 — negligible.
-bool LoRaRadio::isBeacon(const uint8_t* p, size_t len) const {
-  if (len == 0 || len > BEACON_MAX_LEN) return false;
+static const uint8_t kBeaconDest[16] = RNS_BEACON_DEST_HASH;
+
+static bool printableAscii(const uint8_t* p, size_t len) {
   for (size_t i = 0; i < len; i++) if (p[i] < 0x20 || p[i] > 0x7E) return false;
   return true;
+}
+
+// Reticulum broadcast to the retimesh.beacon PLAIN destination, 0 hops,
+// carrying printable text.
+bool LoRaRadio::isRetiMeshBeacon(const uint8_t* p, size_t len) const {
+  if (len <= RNS_BEACON_HDR_LEN || len > RNS_BEACON_HDR_LEN + BEACON_MAX_LEN) return false;
+  if (p[0] != RNS_BEACON_FLAGS || p[1] != 0 || p[18] != 0) return false;
+  if (memcmp(p + 2, kBeaconDest, sizeof(kBeaconDest)) != 0) return false;
+  return printableAscii(p + RNS_BEACON_HDR_LEN, len - RNS_BEACON_HDR_LEN);
+}
+
+// Printable ASCII only and short: an RNode station ID. A real RNS packet
+// is >= 19 bytes with a 16-byte random hash inside, so the chance of one
+// passing this test is ~(95/256)^16 — negligible.
+bool LoRaRadio::isStationId(const uint8_t* p, size_t len) const {
+  return len > 0 && len <= BEACON_MAX_LEN && printableAscii(p, len);
 }
 
 void LoRaRadio::handleBeacon(const uint8_t* p, size_t len) {
@@ -324,14 +339,19 @@ void LoRaRadio::handleBeacon(const uint8_t* p, size_t len) {
 }
 
 void LoRaRadio::sendBeacon(char type) {
-  char text[BEACON_MAX_LEN + 1];
-  int n = snprintf(text, sizeof(text), "RM1 %c %s %s", type, callsign(), FW_VERSION);
+  uint8_t frame[RNS_BEACON_HDR_LEN + BEACON_MAX_LEN];
+  frame[0] = RNS_BEACON_FLAGS;
+  frame[1] = 0;                          // hops
+  memcpy(frame + 2, kBeaconDest, sizeof(kBeaconDest));
+  frame[18] = 0;                         // context: none
+  char* text = (char*)frame + RNS_BEACON_HDR_LEN;
+  int n = snprintf(text, BEACON_MAX_LEN + 1, "RM1 %c %s %s", type, callsign(), FW_VERSION);
   if (n <= 0) return;
   if ((size_t)n > BEACON_MAX_LEN) n = BEACON_MAX_LEN;
-  transmitPacket((const uint8_t*)text, (size_t)n);
+  transmitPacket(frame, RNS_BEACON_HDR_LEN + (size_t)n);
   g_stats.loraTxPackets--;               // transmitPacket counted it as data
   g_stats.beaconsTx++;
-  log_i("beacon %c sent: \"%s\"", type, text);
+  log_i("beacon %c sent: \"%.*s\"", type, n, text);
 }
 
 void LoRaRadio::deliverPacket(size_t len) {
