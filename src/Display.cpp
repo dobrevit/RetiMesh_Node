@@ -109,7 +109,7 @@ void Display::pollButton() {
   if (!down && _pressedAtMs != 0) {
     if (!_longFired && now - _pressedAtMs >= 30) {          // short press
       if (_blank) setBlank(false);                           // wake only
-      else { _page = (_page + 1) % PAGE_COUNT; _pageChangedMs = now; paint(); }
+      else { _page = (Page)((_page + 1) % PAGE_COUNT); _pageChangedMs = now; paint(); }
     }
     _pressedAtMs = 0;
   }
@@ -132,12 +132,16 @@ void Display::paint() {
 #if HAS_DISPLAY
   if (_blank) return;
   _oled.clearDisplay();
+  // No default: every page is listed, so adding one without drawing it is a
+  // build failure rather than a screen that silently shows the status page.
   switch (_page) {
-    case NEIGHBORS: paintNeighbors(); break;
-    case TRANSPORT: paintTransport(); break;
-    case RADIO:     paintRadio();     break;
-    case NETWORK:   paintNetwork();   break;
-    default:        paintStatus();    break;
+    case STATUS:     paintStatus();    break;
+    case NEIGHBORS:  paintNeighbors(); break;
+    case TRANSPORT:  paintTransport(); break;
+    case RADIO:      paintRadio();     break;
+    case NETWORK:    paintNetwork();   break;
+    case QR:         paintQr();        break;
+    case PAGE_COUNT: break;                     // not a page
   }
   // page indicator, bottom-right
   for (uint8_t i = 0; i < PAGE_COUNT; i++)
