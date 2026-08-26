@@ -188,6 +188,14 @@
   #define OLED_ROTATION     0               // 0..3, quarter turns
 #endif
 #define DISPLAY_REFRESH_MS  500
+// BOOT button (GPIO 0, active low) doubles as the display navigation key:
+// short press = next page, long press = blank/wake the panel.
+#ifndef PIN_BUTTON
+  #define PIN_BUTTON        0
+#endif
+#define BUTTON_POLL_MS      20
+#define BUTTON_LONG_MS      1500
+#define DISPLAY_PAGE_TIMEOUT_MS 30000     // back to the status page when idle
 
 // ---------------------------------------------------------------------------
 // Beacons / neighbour discovery (see LoRaRadio.h). Interval in seconds,

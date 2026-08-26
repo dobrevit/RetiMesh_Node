@@ -24,6 +24,7 @@
 #include "WifiManager.h"
 #include "Settings.h"
 #include "Neighbors.h"
+#include "RnsAnnounce.h"
 
 Display display;
 
@@ -74,26 +75,79 @@ bool Display::begin() {
 void Display::displayTask(void* self) {
   auto* d = static_cast<Display*>(self);
   if (!d->_ok) { vTaskDelete(nullptr); return; }
+  pinMode(PIN_BUTTON, INPUT_PULLUP);
+  uint32_t lastPaint = 0;
   for (;;) {
-    d->paint();
-    vTaskDelay(pdMS_TO_TICKS(DISPLAY_REFRESH_MS));
+    d->pollButton();
+    uint32_t now = millis();
+    if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
+      d->_page = STATUS; d->_pageChangedMs = now; lastPaint = 0;
+    }
+    if (now - lastPaint >= DISPLAY_REFRESH_MS) { lastPaint = now; d->paint(); }
+    vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
   }
 }
 
-// 128x64 with the 6x8 built-in font: 21 columns x 8 rows.
+// Debounced by the poll interval: a press is registered on release (short)
+// or once the long threshold passes while still held (long).
+void Display::pollButton() {
+  bool down = digitalRead(PIN_BUTTON) == LOW;
+  uint32_t now = millis();
+  if (down && _pressedAtMs == 0) { _pressedAtMs = now; _longFired = false; return; }
+  if (down && !_longFired && now - _pressedAtMs >= BUTTON_LONG_MS) {
+    _longFired = true;
+    _blank = !_blank;
+#if HAS_DISPLAY
+    if (_blank) { _oled.clearDisplay(); _oled.display(); }
+#endif
+    return;
+  }
+  if (!down && _pressedAtMs != 0) {
+    if (!_longFired && now - _pressedAtMs >= 30) {          // short press
+      if (_blank) _blank = false;
+      else _page = (_page + 1) % PAGE_COUNT;
+      _pageChangedMs = now;
+      paint();
+    }
+    _pressedAtMs = 0;
+  }
+}
+
 void Display::paint() {
+#if HAS_DISPLAY
+  if (_blank) return;
+  _oled.clearDisplay();
+  switch (_page) {
+    case NEIGHBORS: paintNeighbors(); break;
+    case RADIO:     paintRadio();     break;
+    case NETWORK:   paintNetwork();   break;
+    default:        paintStatus();    break;
+  }
+  // page indicator, bottom-right
+  for (uint8_t i = 0; i < PAGE_COUNT; i++)
+    _oled.fillRect(128 - 4 * PAGE_COUNT + 4 * i, 61, 3, 3, i == _page ? SSD1306_WHITE : SSD1306_BLACK),
+    _oled.drawRect(128 - 4 * PAGE_COUNT + 4 * i, 61, 3, 3, SSD1306_WHITE);
+  _oled.display();
+#endif
+}
+
+#if HAS_DISPLAY
+static void header(Adafruit_SSD1306& o, const char* text) {
+  o.fillRect(0, 0, 128, 9, SSD1306_WHITE);
+  o.setTextColor(SSD1306_BLACK);
+  o.setCursor(1, 1);
+  o.print(text);
+  o.setTextColor(SSD1306_WHITE);
+}
+#endif
+
+// 128x64 with the 6x8 built-in font: 21 columns x 8 rows.
+void Display::paintStatus() {
 #if HAS_DISPLAY
   char line[24];
   uint32_t up = millis() / 1000;
 
-  _oled.clearDisplay();
-
-  // Row 0 — SSID, inverted as a header bar
-  _oled.fillRect(0, 0, 128, 9, SSD1306_WHITE);
-  _oled.setTextColor(SSD1306_BLACK);
-  _oled.setCursor(1, 1);
-  _oled.print(wifiManager.ssid());
-  _oled.setTextColor(SSD1306_WHITE);
+  header(_oled, wifiManager.ssid());
 
   // Row 1 — portal address / version
   _oled.setCursor(0, 12);
@@ -129,7 +183,61 @@ void Display::paint() {
            (unsigned)g_stats.tcpClients, (unsigned)WiFi.softAPgetStationNum(),
            (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
   _oled.print(line);
+#endif
+}
 
-  _oled.display();
+void Display::paintNeighbors() {
+#if HAS_DISPLAY
+  Neighbor snap[MAX_NEIGHBORS];
+  size_t n = neighbors.snapshot(snap, MAX_NEIGHBORS);
+  char line[24];
+  snprintf(line, sizeof(line), "Neighbours: %u", (unsigned)n);
+  header(_oled, line);
+  if (n == 0) { _oled.setCursor(0, 14); _oled.print("nothing heard yet"); return; }
+  uint32_t now = millis();
+  for (size_t i = 0; i < n && i < 5; i++) {          // 5 rows fit under the header
+    const Neighbor& nb = snap[i];
+    const char* name = nb.name[0] ? nb.name : nb.hash;
+    char shortName[12]; strlcpy(shortName, name, sizeof(shortName));
+    uint32_t age = (now - nb.lastSeen) / 1000;
+    char ageStr[8];
+    if (age < 60) snprintf(ageStr, sizeof(ageStr), "%lus", (unsigned long)age);
+    else if (age < 3600) snprintf(ageStr, sizeof(ageStr), "%lum", (unsigned long)(age / 60));
+    else snprintf(ageStr, sizeof(ageStr), "%luh", (unsigned long)(age / 3600));
+    if (nb.viaWifi) snprintf(line, sizeof(line), "%-11s wifi %4s", shortName, ageStr);
+    else            snprintf(line, sizeof(line), "%-11s %4.0f %4s", shortName, (double)nb.rssi, ageStr);
+    _oled.setCursor(0, 12 + i * 10);
+    _oled.print(line);
+  }
+#endif
+}
+
+void Display::paintRadio() {
+#if HAS_DISPLAY
+  const RadioSettings& r = settings.radio();
+  char line[24];
+  header(_oled, g_stats.radioOnline ? g_stats.radioModel : "Radio OFFLINE");
+  snprintf(line, sizeof(line), "%.3f MHz %+d dBm", (double)r.freqMhz, r.txDbm);       _oled.setCursor(0, 12); _oled.print(line);
+  snprintf(line, sizeof(line), "BW %.1fk SF%d CR4/%d", (double)r.bwKhz, r.sf, r.cr); _oled.setCursor(0, 22); _oled.print(line);
+  snprintf(line, sizeof(line), "sync %02X pre %u", r.syncWord, r.preamble);            _oled.setCursor(0, 32); _oled.print(line);
+  snprintf(line, sizeof(line), "ann %us bcn %us", r.announceInterval, r.beaconInterval); _oled.setCursor(0, 42); _oled.print(line);
+  snprintf(line, sizeof(line), "an %lu/%lu bc %lu/%lu", (unsigned long)g_stats.announcesRx, (unsigned long)g_stats.announcesTx,
+           (unsigned long)g_stats.beaconsRx, (unsigned long)g_stats.beaconsTx);        _oled.setCursor(0, 52); _oled.print(line);
+#endif
+}
+
+void Display::paintNetwork() {
+#if HAS_DISPLAY
+  char line[24];
+  header(_oled, "Network");
+  snprintf(line, sizeof(line), "%s", wifiManager.ssid());                                  _oled.setCursor(0, 12); _oled.print(line);
+  snprintf(line, sizeof(line), "%s  ch%u  %s", WiFi.softAPIP().toString().c_str(),
+           settings.wifi().channel, wifiManager.securityName());                           _oled.setCursor(0, 22); _oled.print(line);
+  snprintf(line, sizeof(line), "wifi %u  rns tcp %u", (unsigned)WiFi.softAPgetStationNum(),
+           (unsigned)g_stats.tcpClients);                                                  _oled.setCursor(0, 32); _oled.print(line);
+  _oled.setCursor(0, 42); _oled.print("dest ");
+  _oled.print(String(nodeIdentity.destHex()).substring(0, 16));
+  _oled.setCursor(0, 52); _oled.print("  ");
+  _oled.print(String(nodeIdentity.destHex()).substring(16));
 #endif
 }

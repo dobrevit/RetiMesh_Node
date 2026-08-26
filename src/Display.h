@@ -49,6 +49,18 @@ public:
 
 private:
   void paint();
+  void paintStatus();
+  void paintNeighbors();
+  void paintRadio();
+  void paintNetwork();
+  void pollButton();
+
+  enum Page : uint8_t { STATUS = 0, NEIGHBORS, RADIO, NETWORK, PAGE_COUNT };
+  uint8_t  _page = STATUS;
+  bool     _blank = false;
+  uint32_t _pageChangedMs = 0;
+  uint32_t _pressedAtMs = 0;             // 0 = not pressed
+  bool     _longFired = false;
 
 #if HAS_DISPLAY
   Adafruit_SSD1306 _oled{128, 64, &Wire, -1};
