@@ -225,6 +225,27 @@ static void test_the_region_decides_the_budget_not_the_frequency() {
     Airtime::effectiveBasisPoints(Airtime::Regime::None, 869.525f, 125.0f, 5));
 }
 
+// Everything that needs to know which rules apply must get the same answer.
+// Three call sites derived this separately and one was missed, so the API said
+// the EU plan governed a node whose radio had already stopped applying it.
+static void test_the_stored_region_wins_and_the_frequency_is_only_a_fallback() {
+  // Stored region is authoritative even where the frequency says otherwise
+  TEST_ASSERT_EQUAL((int)Airtime::Regime::None,
+                    (int)Airtime::regionFor("custom", 869.525f)->regime);
+  TEST_ASSERT_EQUAL((int)Airtime::Regime::EuSrd868,
+                    (int)Airtime::regionFor("eu868", 869.525f)->regime);
+  // An empty or unknown key is a configuration written before regions existed,
+  // and the frequency is what it has to be recovered from
+  TEST_ASSERT_EQUAL((int)Airtime::Regime::EuSrd868,
+                    (int)Airtime::regionFor("", 869.525f)->regime);
+  TEST_ASSERT_EQUAL((int)Airtime::Regime::UsIsm915,
+                    (int)Airtime::regionFor(nullptr, 915.0f)->regime);
+  TEST_ASSERT_EQUAL((int)Airtime::Regime::Ism2400,
+                    (int)Airtime::regionFor("nonsense", 2445.0f)->regime);
+  // Never null, whatever it is handed
+  TEST_ASSERT_NOT_NULL(Airtime::regionFor(nullptr, 1.0f));
+}
+
 static void test_bandwidth_list_renders_for_an_error_message() {
   char buf[96];
   RadioCaps::bandwidthList(RadioCaps::kSX1280, buf, sizeof(buf));
@@ -251,6 +272,7 @@ int main() {
   RUN_TEST(test_a_sub_ghz_channel_is_recognised_as_unusable_on_a_2400_radio);
   RUN_TEST(test_the_unknown_radio_accepts_any_bandwidth_either_family_offers);
   RUN_TEST(test_the_region_decides_the_budget_not_the_frequency);
+  RUN_TEST(test_the_stored_region_wins_and_the_frequency_is_only_a_fallback);
   RUN_TEST(test_bandwidth_list_renders_for_an_error_message);
   return UNITY_END();
 }

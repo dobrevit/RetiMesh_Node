@@ -133,6 +133,11 @@ static const Airtime::RegionInfo kRegions[] = {
   return regionById(Region::Custom);
 }
 
+/*static*/ const Airtime::RegionInfo* Airtime::regionFor(const char* key, float freqMhz) {
+  const RegionInfo* r = regionByKey(key);
+  return r ? r : regionForFreq(freqMhz);
+}
+
 /*static*/ Airtime::Regime Airtime::regimeFor(float freqMhz) {
   // Derived from the region table rather than restating its edges. The second
   // copy disagreed with the first at exactly 870.000 MHz: the validator took

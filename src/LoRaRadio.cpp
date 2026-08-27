@@ -171,8 +171,7 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   // infer one for a node configured before the setting existed — otherwise
   // choosing "custom" at 868 MHz would tell the operator no plan applied while
   // the European duty cycle went on being enforced underneath.
-  const Airtime::RegionInfo* region = Airtime::regionByKey(s.region);
-  if (!region) region = Airtime::regionForFreq(s.freqMhz);
+  const Airtime::RegionInfo* region = Airtime::regionFor(s.region, s.freqMhz);
   const Airtime::Regime regime = region->regime;
   const uint16_t limit = Airtime::effectiveBasisPoints(regime, s.freqMhz, s.bwKhz, s.dutyCyclePct);
   g_stats.dutyLimitBp = limit;
@@ -768,8 +767,7 @@ void LoRaRadio::refreshAirtimeStats() {
   g_stats.airtimeLong  = _airtime.longTermUtil(now);
   // Same rulebook as configureAirtime() chose, or this would quietly re-apply
   // the European budget to a node the operator had put in another region.
-  const Airtime::RegionInfo* rg = Airtime::regionByKey(_active.region);
-  if (!rg) rg = Airtime::regionForFreq(_active.freqMhz);
+  const Airtime::RegionInfo* rg = Airtime::regionFor(_active.region, _active.freqMhz);
   const uint16_t limit = Airtime::effectiveBasisPoints(rg->regime, _active.freqMhz,
                                                        _active.bwKhz, _active.dutyCyclePct);
   g_stats.dutyLimitBp = limit;

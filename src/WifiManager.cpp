@@ -699,7 +699,11 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
     JsonArray bws = cp["bandwidths_khz"].to<JsonArray>();
     for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++) bws.add(*b);
     // Which rulebook the configured channel falls under, and what it caps
-    const Airtime::Regime rg = Airtime::regimeFor(settings.radio().freqMhz);
+    // What this node will actually enforce, which is decided by its region —
+    // reporting the frequency's regime here told an operator on "custom" that
+    // the EU plan applied while the radio had already stopped applying it.
+    const Airtime::Regime rg =
+      Airtime::regionFor(settings.radio().region, settings.radio().freqMhz)->regime;
     cp["regime"]       = Airtime::regimeName(rg);
     cp["max_dwell_ms"] = Airtime::maxDwellMs(rg);        // 0 = not a dwell regime
 

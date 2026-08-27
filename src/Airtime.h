@@ -142,6 +142,18 @@ public:
   // the setting existed.
   static const RegionInfo* regionForFreq(float freqMhz);
 
+  // The region a node is actually operating under: the one it has stored, and
+  // the frequency only as a fallback for a configuration written before the
+  // setting existed. Never null.
+  //
+  // This exists because three places needed it and derived it separately —
+  // the radio when it configures the budget, the radio again when it refreshes
+  // the figures, and the API when it reports what governs. One of the three was
+  // missed, so the settings page told an operator their "custom" region applied
+  // no plan while the other two had already stopped enforcing one. A fourth
+  // caller should not be able to disagree with the first three.
+  static const RegionInfo* regionFor(const char* key, float freqMhz);
+
   static Regime regimeFor(float freqMhz);
   static const char* regimeName(Regime r);
 
