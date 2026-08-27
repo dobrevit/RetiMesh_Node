@@ -703,7 +703,23 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
 // symbol and drives the IRQ line itself; sendFrame() flushes any stray
 // notification it leaves behind.
 bool LoRaRadio::mediumFree() {
-  int16_t cad = _radio->scanChannel();
+  const int16_t cad = _radio->scanChannel();
+
+  // scanChannel() drives the IRQ line itself, and the notification it leaves
+  // behind is indistinguishable from an incoming frame to the waits in
+  // csmaWait(). So every probe looked like traffic: the contention countdown
+  // saw its own CAD, declared the channel disturbed, reset to zero and probed
+  // again — for as long as CSMA_MAX_WAIT_MS allowed. The node was deferring to
+  // itself, backing off maximally before every transmission and burning about
+  // 1200 pointless task wake-ups doing it.
+  //
+  // Consuming the notification here is what breaks that loop. A frame that
+  // genuinely arrived during the probe still has its RxDone flag set in the
+  // chip, so it is collected rather than hidden by the flush.
+  ulTaskNotifyTake(pdTRUE, 0);
+  const uint32_t rxDone = rxDoneFlag();
+  if (rxDone && (_radio->getIrqFlags() & rxDone)) handleRadioIrq();
+
   if (cad == RADIOLIB_CHANNEL_FREE) return true;
   _radio->startReceive();                // busy — go back to listening
   return false;
