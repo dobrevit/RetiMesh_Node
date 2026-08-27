@@ -405,7 +405,17 @@ struct NodeStats {
   volatile uint16_t dutyLimitBp   = 0;      // enforced allowance in basis points, 100 = 1 %
   volatile uint16_t csmaSlotMs    = 0;
   volatile uint8_t  csmaBand      = 1;      // contention window band, 1..4
-  volatile uint32_t loraRxDropped = 0;      // ring-full / oversize drops
+  // Every frame the radio hands up ends in exactly one of these or in
+  // loraRxPackets, so the totals account for the lot. One counter for all of
+  // them told us a node was losing 94 % of its receptions but not why, and the
+  // causes have nothing to do with each other: a full ring means the consumer
+  // fell behind, a reassembly overflow means the fragments were wrong, a CRC
+  // error means the air was noisy.
+  volatile uint32_t loraRxDropRing    = 0;  // RX ring full: the RNS task fell behind
+  volatile uint32_t loraRxDropReasm   = 0;  // second fragment did not fit the buffer
+  volatile uint32_t loraRxDropPartial = 0;  // half-assembled packet abandoned mid-flight
+  volatile uint32_t loraRxCrcErrors   = 0;  // readData() refused it: bad CRC or spurious IRQ
+  volatile uint32_t loraRxBadLength   = 0;  // frame shorter than a header or longer than the max
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
 };
