@@ -41,10 +41,8 @@ require HTTP Basic Auth (user `admin`).
 ```
 `kind` is `announce`, `station-id` or `beacon`; `via` is `lora` or `wifi`.
 
-Every frame the radio hands up is accounted for by exactly one of
-`rx_packets` or the five loss counters, so they add up to everything heard.
-`rx_dropped` remains the sum of the three that lost a packet the node had
-already accepted, and the breakdown says which:
+`rx_dropped` is the sum of the three counters below that lost a packet the
+node had already accepted, and the breakdown says which:
 
 - `rx_dropped_ring` — the RX ring was full, so the radio dropped rather than
   stalling. This is the Reticulum task failing to keep up, not a radio problem.
@@ -62,6 +60,23 @@ already accepted, and the breakdown says which:
 The distinction matters because the fixes have nothing in common: a full ring
 is a software scheduling problem, a CRC storm is an RF one, and interleaved
 fragments are a channel-contention one.
+
+These counters do **not** total everything heard on their own, and two of them
+count a different unit from the rest. To reconstruct the whole picture:
+
+- `rx_crc_errors` and `rx_bad_length` count **frames** thrown away before
+  anything was decoded.
+- Every frame that does decode is either one fragment of a reassembly still in
+  progress, or it completes a packet.
+- A completed packet lands in exactly one of `rx_packets`, `beacons_rx` (when
+  it turns out to be a RetiMesh beacon or an RNode station ID, which are not
+  forwarded and so never reach `rx_packets`), or `rx_dropped_ring`.
+- `rx_dropped_partial` and `rx_dropped_reassembly` count **reassemblies** that
+  were given up, not frames.
+
+So a node's total received traffic is `rx_packets + beacons_rx` plus whatever
+the loss counters record, and a split packet contributes two frames to the air
+but one to those totals.
 
 `diag` is what a soak run reads off a node it has no console on.
 

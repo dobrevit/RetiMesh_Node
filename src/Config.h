@@ -412,12 +412,20 @@ struct NodeStats {
   volatile uint16_t dutyLimitBp   = 0;      // enforced allowance in basis points, 100 = 1 %
   volatile uint16_t csmaSlotMs    = 0;
   volatile uint8_t  csmaBand      = 1;      // contention window band, 1..4
-  // Every frame the radio hands up ends in exactly one of these or in
-  // loraRxPackets, so the totals account for the lot. One counter for all of
-  // them told us a node was losing 94 % of its receptions but not why, and the
-  // causes have nothing to do with each other: a full ring means the consumer
-  // fell behind, a reassembly overflow means the fragments were wrong, a CRC
-  // error means the air was noisy.
+  // Where receptions go when they do not become a packet. One counter for all
+  // of them told us a node was losing 94 % of its receptions but not why, and
+  // the causes have nothing to do with each other: a full ring means the
+  // consumer fell behind, a reassembly overflow means the fragments were
+  // wrong, a CRC error means the air was noisy.
+  //
+  // These do NOT sum to everything heard on their own. A frame is either
+  // rejected before decoding (loraRxCrcErrors, loraRxBadLength), consumed as
+  // one fragment of a reassembly still in progress, or it completes a packet —
+  // and a completed packet lands in loraRxPackets, in beaconsRx when it turns
+  // out to be a beacon or an RNode station ID, or in loraRxDropRing when the
+  // consumer could not take it. loraRxDropPartial counts reassemblies given up
+  // before they completed. Note the units differ: the first two count frames,
+  // the rest count packets, because a split packet arrives as two frames.
   volatile uint32_t loraRxDropRing    = 0;  // RX ring full: the RNS task fell behind
   volatile uint32_t loraRxDropReasm   = 0;  // second fragment did not fit the buffer
   volatile uint32_t loraRxDropPartial = 0;  // half-assembled packet abandoned mid-flight
