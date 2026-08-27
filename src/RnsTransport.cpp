@@ -357,6 +357,7 @@ static std::vector<PathInfo>  sPaths;
 static std::vector<IfaceInfo> sIfaces;
 static uint32_t sSnapAtMs = 0;
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
+static Tables   sTables = {};            // table sizes, for soak monitoring
 
 static void refreshSnapshots() {
   // Walking the path table reads every record back through microStore
@@ -400,8 +401,22 @@ static void refreshSnapshots() {
     ii.rxb = iface.rxbytes(); ii.txb = iface.txbytes();
     i.push_back(ii);
   }
+  // Sizes only — every one of these is a container the RNS task owns, so they
+  // are read here and published under the same lock as the rest, never touched
+  // from the web task.
+  Tables t = {};
+  t.paths         = (uint32_t)sPathCount;
+  t.links         = (uint32_t)RNS::Transport::link_table().size();
+  t.activeLinks   = (uint32_t)RNS::Transport::active_links().size();
+  t.pendingLinks  = (uint32_t)RNS::Transport::pending_links().size();
+  t.destinations  = (uint32_t)RNS::Transport::destinations().size();
+  t.announces     = (uint32_t)RNS::Transport::announce_table().size();
+  t.heldAnnounces = (uint32_t)RNS::Transport::held_announces().size();
+  t.rates         = (uint32_t)RNS::Transport::announce_rate_table().size();
+
   xSemaphoreTake(sSnapLock, portMAX_DELAY);
   sPaths.swap(p); sIfaces.swap(i);
+  sTables = t;
   xSemaphoreGive(sSnapLock);
 }
 
@@ -426,6 +441,13 @@ size_t pathCount() {
   size_t n = sPathCount;                 // whole table, even when the list is capped
   xSemaphoreGive(sSnapLock);
   return n;
+}
+
+Tables tables() {
+  xSemaphoreTake(sSnapLock, portMAX_DELAY);
+  Tables t = sTables;
+  xSemaphoreGive(sSnapLock);
+  return t;
 }
 
 void loop() {

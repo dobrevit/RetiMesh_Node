@@ -67,6 +67,22 @@ size_t paths(PathInfo* out, size_t max);
 size_t interfaces(IfaceInfo* out, size_t max);
 size_t pathCount();
 
+// Reticulum table sizes, refreshed alongside the snapshots above. These are the
+// structures that grow with traffic, so a soak run watches them as closely as
+// it watches the heap: a table that climbs and never falls is where a week-long
+// run runs out of memory.
+struct Tables {
+  uint32_t paths;          // stored path table (microStore-backed)
+  uint32_t links;          // link table
+  uint32_t activeLinks;
+  uint32_t pendingLinks;
+  uint32_t destinations;   // local destinations registered with Transport
+  uint32_t announces;      // announce table awaiting retransmission
+  uint32_t heldAnnounces;
+  uint32_t rates;          // per-destination announce rate table
+};
+Tables tables();
+
 const char* modeName(uint8_t mode);        // settings value -> "full", ...
 
 // Where the microStore files live: "sd" or "littlefs" (chosen at boot).

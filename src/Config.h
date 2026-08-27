@@ -85,6 +85,14 @@
 #endif
 #define NVS_NAMESPACE       "retimesh"
 
+// ---------------------------------------------------------------------------
+// Diagnostics (see Diag.h). The boot counter lives in its own NVS namespace so
+// a settings reset does not erase the restart history a soak run is built on.
+// ---------------------------------------------------------------------------
+#define DIAG_NVS_NAMESPACE  "retimesh-diag"     // max 15 chars
+#define DIAG_STACK_WARN_B   768                 // headroom below this: name the task
+#define DIAG_HEAP_WARN_B    20480               // internal heap low-water below this
+
 #ifndef MDNS_HOSTNAME
   #define MDNS_HOSTNAME     "retimesh"      // http://retimesh.local/
 #endif

@@ -67,6 +67,7 @@
 #include "Power.h"
 #include "Pmu.h"
 #include "Gps.h"
+#include "Diag.h"
 
 NodeStats g_stats;
 
@@ -94,6 +95,11 @@ void setup() {
   Serial.begin(115200);
   delay(300);                              // let the USB CDC host attach
   log_i("%s %s on %s (IDF %s)", FW_NAME, FW_VERSION, BOARD_NAME, esp_get_idf_version());
+
+  // Before anything else that could itself fail: read why the last run ended.
+  // The reset register survives the reboot but not a second one, so it is only
+  // ever readable here.
+  Diag::begin();
 
   // Filesystem first — the web app and the bulletin board live here.
   if (!LittleFS.begin(true)) {
@@ -162,16 +168,28 @@ void setup() {
 void loop() {
   static uint32_t lastBeat = 0;
   wifiManager.tick();
+  // Every pass, not on the heartbeat: a crash 29 s after the last beat would
+  // otherwise be recorded as having happened 29 s earlier, and a node stuck in
+  // a restart loop would report every run as zero seconds — indistinguishable
+  // from one that never got past setup(). One word into RTC RAM, no flash.
+  Diag::tick(millis() / 1000);
   g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
   g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   if (millis() - lastBeat >= 30000) {
     lastBeat = millis();
-    log_i("up %lus | peers tcp %u auto %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u | internal %u (min %u) psram %u",
-          millis() / 1000, (unsigned)g_stats.tcpClients, (unsigned)AutoInterface::peerCount(),
+    const uint32_t uptimeS = millis() / 1000;
+    log_i("up %lus | peers tcp %u auto %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u",
+          (unsigned long)uptimeS, (unsigned)g_stats.tcpClients, (unsigned)AutoInterface::peerCount(),
           (unsigned)g_stats.loraRxPackets, (unsigned)g_stats.loraTxPackets,
           (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.announcesRx,
-          (unsigned)g_stats.announcesTx, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-          (unsigned)g_stats.heapMinFree, (unsigned)g_stats.psramFree);
+          (unsigned)g_stats.announcesTx);
+    // Reticulum's tables are the other thing that grows with traffic, and the
+    // one a heap figure alone will not explain.
+    RnsTransport::Tables t = RnsTransport::tables();
+    log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu",
+          (unsigned long)t.paths, (unsigned long)t.links, (unsigned long)t.activeLinks,
+          (unsigned long)t.pendingLinks, (unsigned long)t.destinations,
+          (unsigned long)t.announces, (unsigned long)t.heldAnnounces, (unsigned long)t.rates);
     #if HAS_GPS
       // The satellite count is the number that tells you whether the antenna
       // has a view of the sky; the sentence count tells you the receiver is
@@ -182,16 +200,11 @@ void loop() {
               g.satellites, (unsigned long)g.sentences,
               g.timeValid ? ", utc " : "", g.timeValid ? g.utc : "");
     #endif
-    // Stack headroom (bytes never used) per task — a value near 0 names the
-    // task that is about to trip the stack-canary watchpoint.
-    static const char* const kTasks[] = {"dns", "display", "sdcard", "autoif", "rns", "radio", "async_tcp", "loopTask"};
-    char stacks[160]; size_t off = 0;
-    for (const char* name : kTasks) {
-      TaskHandle_t h = xTaskGetHandle(name);
-      if (h && off < sizeof(stacks))
-        off += snprintf(stacks + off, sizeof(stacks) - off, " %s %u", name, (unsigned)uxTaskGetStackHighWaterMark(h));
-    }
-    log_i("stack headroom:%s", stacks);
+    // Heap, per-task stack headroom and the low-water warnings. The task list
+    // lives in Diag.h so this and /api/status can never watch different sets —
+    // the GNSS task, which carries the smallest stack of the lot, was missing
+    // from the copy that used to live here.
+    Diag::report();
   }
   vTaskDelay(pdMS_TO_TICKS(200));
 }

@@ -33,6 +33,7 @@
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
+#include "Diag.h"
 #include "SdCard.h"
 #include "AutoInterface.h"
 #include "Power.h"
@@ -340,6 +341,50 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["heap_free"]    = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);   // internal RAM
   doc["heap_min_free"] = g_stats.heapMinFree;
   doc["psram_free"]   = ESP.getFreePsram();
+
+  // Everything a soak run needs to read off a node it cannot reach a console
+  // on: why it last restarted, how long that run lasted, and what it is
+  // running out of. See Diag.h.
+  {
+    JsonObject dg = doc["diag"].to<JsonObject>();
+    const Diag::Boot& b = Diag::boot();
+    JsonObject bo = dg["boot"].to<JsonObject>();
+    bo["count"]        = b.count;
+    bo["reason"]       = b.reason;
+    bo["reason_name"]  = b.reasonName;
+    bo["clean"]        = b.clean;
+    // Absent rather than zero when a power cut took the RTC domain with it:
+    // "unknown" and "it ran for no time at all" are not the same answer.
+    if (b.prevUptimeKnown) bo["prev_uptime_s"] = b.prevUptimeS;
+
+    Diag::Heap h = Diag::heap();
+    JsonObject hp = dg["heap"].to<JsonObject>();
+    hp["free"]          = h.freeInternal;
+    hp["min_free"]      = h.minFreeInternal;
+    hp["largest_block"] = h.largestBlock;   // free minus this is the fragmentation
+    hp["psram_free"]    = h.freePsram;
+
+    Diag::TaskStack st[16];
+    const size_t n = Diag::stacks(st, sizeof(st) / sizeof(st[0]));
+    JsonObject sk = dg["stacks"].to<JsonObject>();
+    for (size_t i = 0; i < n; i++)
+      if (st[i].present) sk[st[i].name] = st[i].headroom;    // bytes never used
+    const char* lowestName = nullptr;
+    const uint32_t lowest = Diag::lowestHeadroom(&lowestName);
+    dg["stack_lowest"]      = lowest;
+    dg["stack_lowest_task"] = lowestName ? lowestName : "none";
+
+    RnsTransport::Tables t = RnsTransport::tables();
+    JsonObject tb = dg["tables"].to<JsonObject>();
+    tb["paths"]          = t.paths;
+    tb["links"]          = t.links;
+    tb["links_active"]   = t.activeLinks;
+    tb["links_pending"]  = t.pendingLinks;
+    tb["destinations"]   = t.destinations;
+    tb["announces"]      = t.announces;
+    tb["announces_held"] = t.heldAnnounces;
+    tb["rates"]          = t.rates;
+  }
 
   JsonObject radio    = doc["radio"].to<JsonObject>();
   radio["online"]     = g_stats.radioOnline;
