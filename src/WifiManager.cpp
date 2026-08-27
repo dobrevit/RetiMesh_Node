@@ -94,6 +94,29 @@ void WifiManager::begin() {
 
   // http://retimesh.local/ (and http://<ssid>.local/) for clients whose
   // captive-portal detection does not fire.
+  // Compare the stamp baked into this firmware against the one in the image it
+  // is serving. They are produced together by tools/asset_stamp.py, so a
+  // mismatch means only one half was flashed — the portal will be subtly wrong
+  // in ways nothing else reports.
+  {
+    File f = LittleFS.open("/assets.json", "r");
+    if (f) {
+      JsonDocument sd;
+      if (deserializeJson(sd, f) == DeserializationError::Ok) _assetStamp = sd["stamp"] | "";
+      f.close();
+    }
+    if (_assetStamp == ASSET_STAMP) {
+      log_i("web assets match this firmware (build %s)", ASSET_STAMP);
+    } else {
+      log_w("web assets were built from a different firmware: image has \"%s\", firmware "
+            "expects \"%s\". The portal may be missing controls this firmware supports, or "
+            "offer some it does not. Upload the filesystem to match — note that doing so "
+            "erases anything else on it, including the Reticulum store on boards with no "
+            "SD card.",
+            _assetStamp.isEmpty() ? "(none)" : _assetStamp.c_str(), ASSET_STAMP);
+    }
+  }
+
   if (MDNS.begin(MDNS_HOSTNAME)) {
     MDNS.addService("http", "tcp", HTTP_PORT);
     MDNS.addService("rns", "tcp", RNS_TCP_PORT);
@@ -323,6 +346,17 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     st["rssi"]       = stationConnected() ? WiFi.RSSI() : 0;
   }
   doc["display"]      = g_stats.displayPresent;
+  // Firmware and web assets are flashed separately and nothing forces them to
+  // be updated together, so a node can end up serving a portal built against a
+  // different API and look entirely healthy doing it. Both halves carry the
+  // same hash when they are built together; publishing both lets anyone see at
+  // a glance whether this node is one build or two.
+  {
+    JsonObject as = doc["assets"].to<JsonObject>();
+    as["firmware"] = ASSET_STAMP;
+    as["filesystem"] = _assetStamp;
+    as["match"] = (_assetStamp == ASSET_STAMP);
+  }
   doc["identity"]     = nodeIdentity.identityHex();
   doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
   doc["uptime_s"]     = millis() / 1000;
@@ -410,6 +444,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   radio["rx_dropped_partial"]      = g_stats.loraRxDropPartial;
   radio["rx_crc_errors"]           = g_stats.loraRxCrcErrors;
   radio["rx_bad_length"]           = g_stats.loraRxBadLength;
+  radio["rx_spurious_irq"]         = g_stats.loraRxSpuriousIrq;
 
   radio["beacon_interval"] = rs.beaconInterval;
   radio["callsign"]   = loraRadio.callsign();
@@ -476,11 +511,16 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     const bool sharePosition = settings.radio().gpsSharePosition ||
                                request->authenticate(ADMIN_USER, settings.admin().password);
     gps["position_public"] = settings.radio().gpsSharePosition;
+    // HDOP says how well the receiver is solving, not where it is, so it goes
+    // out with the rest of the health readings. It used to be published only
+    // alongside the coordinates, which left it missing on the default private
+    // configuration — and any consumer assuming a fix implies an HDOP broke
+    // there and nowhere else.
+    if (g.valid) gps["hdop"] = g.hdop;
     if (g.valid && sharePosition) {
       gps["latitude"]   = g.latitude;
       gps["longitude"]  = g.longitude;
       gps["altitude_m"] = g.altitude;
-      gps["hdop"]       = g.hdop;
       gps["speed_kmh"]  = g.speedKmh;
     }
   }
@@ -639,6 +679,70 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["cr"]        = rs.cr;
   radio["tx_dbm"]    = rs.txDbm;
   radio["tx_dbm_max"]= loraRadio.online() ? loraRadio.maxTxDbm() : 22;
+  radio["region"]    = rs.region;
+  // What this particular transceiver can be asked for. The settings page used
+  // to offer the sub-GHz bandwidth steps to every board, which on a 2.4 GHz
+  // radio is a list of values it cannot tune to.
+  {
+    const RadioCaps::Caps& c = loraRadio.caps();
+    JsonObject cp = radio["caps"].to<JsonObject>();
+    cp["model"]        = c.name;
+    cp["freq_min_mhz"] = c.freqMinMhz;
+    cp["freq_max_mhz"] = c.freqMaxMhz;
+    cp["sf_min"]       = c.sfMin;
+    cp["sf_max"]       = c.sfMax;
+    cp["tx_min_dbm"]   = c.txMinDbm;
+    cp["tx_max_dbm"]   = c.txMaxDbm;
+    // An amplifier does not change what the chip may be driven at, but it does
+    // change what leaves the antenna, and the operator has to account for it.
+    cp["pa_fitted"]    = LoRaRadio::hasPa();
+    JsonArray bws = cp["bandwidths_khz"].to<JsonArray>();
+    for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++) bws.add(*b);
+    // Which rulebook the configured channel falls under, and what it caps
+    // What this node will actually enforce, which is decided by its region —
+    // reporting the frequency's regime here told an operator on "custom" that
+    // the EU plan applied while the radio had already stopped applying it.
+    const Airtime::Regime rg =
+      Airtime::regionFor(settings.radio().region, settings.radio().freqMhz)->regime;
+    cp["regime"]       = Airtime::regimeName(rg);
+    cp["max_dwell_ms"] = Airtime::maxDwellMs(rg);        // 0 = not a dwell regime
+
+    // Only the regions this radio can actually reach. Offering "Europe
+    // 863-870" on a 2.4 GHz node would be a choice that cannot be honoured,
+    // and the operator would find that out only when the frequency was
+    // rejected. Custom is always offered: it is the escape hatch.
+    JsonArray regs = cp["regions"].to<JsonArray>();
+    size_t n = 0;
+    const Airtime::RegionInfo* all = Airtime::regions(n);
+    for (size_t i = 0; i < n; i++) {
+      const Airtime::RegionInfo& ri = all[i];
+      const bool custom = (ri.id == Airtime::Region::Custom);
+      // Reachable when the region's band and the chip's tuning range overlap
+      const bool reachable = custom ||
+        (ri.highMhz >= c.freqMinMhz && ri.lowMhz <= c.freqMaxMhz);
+      if (!reachable) continue;
+      JsonObject o = regs.add<JsonObject>();
+      o["key"]       = ri.key;
+      o["name"]      = ri.name;
+      o["low_mhz"]   = custom ? c.freqMinMhz : max(ri.lowMhz,  c.freqMinMhz);
+      o["high_mhz"]  = custom ? c.freqMaxMhz : min(ri.highMhz, c.freqMaxMhz);
+      o["regime"]    = Airtime::regimeName(ri.regime);
+      o["dwell_ms"]  = Airtime::maxDwellMs(ri.regime);
+      // Custom carries no channel of its own — it is offered on every radio,
+      // so a fixed sub-GHz suggestion would be untunable on a 2.4 GHz one.
+      // Fall back to the middle of what this chip can reach and its widest
+      // bandwidth, which is at least always a valid starting point.
+      float dfl = ri.defaultMhz, dbw = ri.defaultBwKhz;
+      if (dfl == 0.0f) dfl = (c.freqMinMhz + c.freqMaxMhz) / 2.0f;
+      if (dbw == 0.0f) {
+        dbw = c.bandwidthsKhz[0];
+        for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++) dbw = *b;
+      }
+      o["default_mhz"] = dfl;
+      o["default_bw_khz"] = dbw;
+      o["default_sf"]  = ri.defaultSf;
+    }
+  }
   radio["sync_word"] = rs.syncWord;
   radio["preamble"]  = rs.preamble;
   radio["beacon_interval"] = rs.beaconInterval;
@@ -711,13 +815,50 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
     if (c.length() > 32) { sendError(request, 400, "callsign must be at most 32 characters"); return; }
     strlcpy(r.callsign, c.c_str(), sizeof(r.callsign));
   }
+  if (in["region"].is<const char*>()) {
+    strlcpy(r.region, in["region"].as<const char*>(), sizeof(r.region));
+  }
 
   int8_t maxDbm = loraRadio.online() ? loraRadio.maxTxDbm() : 22;
-  if (r.freqMhz < 137.0f || r.freqMhz > 1020.0f) { sendError(request, 400, "frequency must be 137-1020 MHz"); return; }
-  if (!Settings::validBandwidth(r.bwKhz))          { sendError(request, 400, "unsupported bandwidth"); return; }
-  if (r.sf < 7 || r.sf > 12)                       { sendError(request, 400, "spreading factor must be 7-12"); return; }
+  // Bounds come from the transceiver that is actually fitted, not from a
+  // sub-GHz assumption: an SX1280 tunes 2400-2500 MHz and has four bandwidths,
+  // none of which appear in the SX127x list.
+  const RadioCaps::Caps& caps = loraRadio.caps();
+  char msg[160], bwlist[96];
+
+  // The region bounds the channel, and the chip bounds the region. Both have
+  // to hold, and the message says which one was missed rather than quoting a
+  // range the operator cannot use anyway.
+  const Airtime::RegionInfo* region = Airtime::regionByKey(r.region);
+  if (!region) { sendError(request, 400, "unknown region — pick one the node offers"); return; }
+  const float lowMhz  = max(region->lowMhz,  caps.freqMinMhz);
+  const float highMhz = min(region->highMhz, caps.freqMaxMhz);
+  if (lowMhz > highMhz) {
+    snprintf(msg, sizeof(msg), "the %s cannot tune %s — choose a region this radio reaches",
+             caps.name, region->name);
+    sendError(request, 400, msg); return;
+  }
+  if (r.freqMhz < lowMhz || r.freqMhz > highMhz) {
+    snprintf(msg, sizeof(msg), "frequency must be %g-%g MHz in %s on the %s",
+             (double)lowMhz, (double)highMhz, region->name, caps.name);
+    sendError(request, 400, msg); return;
+  }
+  if (!RadioCaps::bandwidthSupported(caps, r.bwKhz)) {
+    snprintf(msg, sizeof(msg), "the %s supports these bandwidths in kHz: %s",
+             caps.name, RadioCaps::bandwidthList(caps, bwlist, sizeof(bwlist)));
+    sendError(request, 400, msg); return;
+  }
+  if (r.sf < caps.sfMin || r.sf > caps.sfMax) {
+    snprintf(msg, sizeof(msg), "spreading factor must be %u-%u on the %s",
+             (unsigned)caps.sfMin, (unsigned)caps.sfMax, caps.name);
+    sendError(request, 400, msg); return;
+  }
   if (r.cr < 5 || r.cr > 8)                        { sendError(request, 400, "coding rate must be 5-8 (4/5..4/8)"); return; }
-  if (r.txDbm < 2 || r.txDbm > maxDbm)             { sendError(request, 400, "tx power out of range for this transceiver"); return; }
+  if (r.txDbm < caps.txMinDbm || r.txDbm > maxDbm) {
+    snprintf(msg, sizeof(msg), "tx power must be %d to %d dBm on the %s",
+             (int)caps.txMinDbm, (int)maxDbm, caps.name);
+    sendError(request, 400, msg); return;
+  }
   if (r.preamble < 6 || r.preamble > 1000)         { sendError(request, 400, "preamble must be 6-1000 symbols"); return; }
   if (r.beaconInterval != 0 && (r.beaconInterval < 10 || r.beaconInterval > 3600)) { sendError(request, 400, "beacon interval must be 0 (off) or 10-3600 s"); return; }
   if (r.announceInterval != 0 && (r.announceInterval < 60 || r.announceInterval > 43200)) { sendError(request, 400, "announce interval must be 0 (off) or 60-43200 s"); return; }
@@ -850,7 +991,7 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   r["freq_mhz"] = rs.freqMhz; r["bw_khz"] = rs.bwKhz; r["sf"] = rs.sf; r["cr"] = rs.cr; r["tx_dbm"] = rs.txDbm;
   r["sync_word"] = rs.syncWord; r["preamble"] = rs.preamble; r["announce_interval"] = rs.announceInterval;
   r["beacon_interval"] = rs.beaconInterval; r["callsign"] = rs.callsign;
-  r["duty_cycle_pct"] = rs.dutyCyclePct;
+  r["duty_cycle_pct"] = rs.dutyCyclePct; r["region"] = rs.region;
   JsonObject w = doc["wifi"].to<JsonObject>();
   w["ssid"] = ws.ssid; w["security"] = Settings::securityName(ws.security); w["password"] = ws.password;
   w["channel"] = ws.channel; w["max_stations"] = ws.maxStations; w["hidden"] = ws.hidden;
@@ -881,9 +1022,32 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     rs.txDbm = r["tx_dbm"] | rs.txDbm; rs.syncWord = r["sync_word"] | rs.syncWord; rs.preamble = r["preamble"] | rs.preamble;
     rs.announceInterval = r["announce_interval"] | rs.announceInterval; rs.beaconInterval = r["beacon_interval"] | rs.beaconInterval;
     if (r["callsign"].is<const char*>()) strlcpy(rs.callsign, r["callsign"], sizeof(rs.callsign));
-    if (rs.freqMhz < 137 || rs.freqMhz > 1020 || !Settings::validBandwidth(rs.bwKhz) || rs.sf < 7 || rs.sf > 12 || rs.cr < 5 || rs.cr > 8) {
-      sendError(request, 400, "radio section invalid"); return;
+    // Present but unknown is an error, as it is on the POST path. Absent means
+    // a config exported before regions existed, and that is what the frequency
+    // is for. Starting from the node's own region would have made a legacy
+    // import silently inherit it, and a typo silently correct itself.
+    const Airtime::RegionInfo* ireg = nullptr;
+    if (r["region"].is<const char*>()) {
+      ireg = Airtime::regionByKey(r["region"]);
+      if (!ireg) { sendError(request, 400, "radio section names an unknown region"); return; }
+    } else {
+      ireg = Airtime::regionForFreq(rs.freqMhz);
     }
+    // The same bounds the POST path applies, for the same reason: an import
+    // used to be validated against hardcoded sub-GHz limits, so a 2.4 GHz node
+    // could not restore its own export, and a sub-GHz one could import a
+    // configuration the API would have refused — straight into NVS.
+    const RadioCaps::Caps& icaps = loraRadio.caps();
+    const float ilow  = max(ireg->lowMhz,  icaps.freqMinMhz);
+    const float ihigh = min(ireg->highMhz, icaps.freqMaxMhz);
+    if (rs.freqMhz < ilow || rs.freqMhz > ihigh ||
+        !RadioCaps::bandwidthSupported(icaps, rs.bwKhz) ||
+        rs.sf < icaps.sfMin || rs.sf > icaps.sfMax ||
+        rs.cr < 5 || rs.cr > 8 ||
+        rs.txDbm < icaps.txMinDbm || rs.txDbm > loraRadio.maxTxDbm()) {
+      sendError(request, 400, "radio section invalid for the transceiver in this node"); return;
+    }
+    strlcpy(rs.region, ireg->key, sizeof(rs.region));
     settings.saveRadio(rs);
   }
   if (in["wifi"].is<JsonObject>()) {

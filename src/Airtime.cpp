@@ -4,6 +4,8 @@
 //  Airtime.cpp — see Airtime.h
 // ============================================================================
 #include "Airtime.h"
+
+#include <string.h>
 #include <math.h>
 
 void Airtime::configure(const Params& p) {
@@ -88,6 +90,88 @@ static const Airtime::Band kEuBands[] = {
   { 869.70f, 870.00f, 100, "869.7-870 (1 %)",         true  },
 };
 
+// Band edges, and what each one is governed by. The EU sub-band table above
+// is the only one with a duty cycle in it; the other two regimes constrain
+// different things entirely (see the Regime comment in Airtime.h).
+// Band edges are the licence-exempt allocations, not the chip's tuning range.
+// Power ceilings are deliberately absent: they depend on antenna gain and on
+// the exact sub-band, and a number here would read as permission.
+static const Airtime::RegionInfo kRegions[] = {
+  { Airtime::Region::Eu868,   "eu868",   "Europe 863-870 MHz",  863.0f,  870.0f,
+    Airtime::Regime::EuSrd868, 869.525f, 125.0f,  8 },
+  { Airtime::Region::Us915,   "us915",   "US 902-928 MHz",      902.0f,  928.0f,
+    Airtime::Regime::UsIsm915, 906.875f, 500.0f,  8 },
+  { Airtime::Region::Ism2400, "ism2400", "2.4 GHz ISM",        2400.0f, 2483.5f,
+    Airtime::Regime::Ism2400,  2445.0f,  812.5f,  8 },
+  // Everything the firmware has no plan for. The operator gets the chip's full
+  // tuning range and full responsibility with it. Zero defaults because this
+  // entry is offered on every radio: a fixed 869.525 MHz suggestion is
+  // unusable on a 2.4 GHz one, so the channel is derived from the chip.
+  { Airtime::Region::Custom,  "custom",  "Custom / unlisted",     0.0f, 100000.0f,
+    Airtime::Regime::None,     0.0f,     0.0f,    8 },
+};
+
+/*static*/ const Airtime::RegionInfo* Airtime::regions(size_t& count) {
+  count = sizeof(kRegions) / sizeof(kRegions[0]);
+  return kRegions;
+}
+
+/*static*/ const Airtime::RegionInfo* Airtime::regionByKey(const char* key) {
+  if (!key) return nullptr;
+  for (const RegionInfo& r : kRegions) if (strcmp(r.key, key) == 0) return &r;
+  return nullptr;
+}
+
+/*static*/ const Airtime::RegionInfo* Airtime::regionById(Region id) {
+  for (const RegionInfo& r : kRegions) if (r.id == id) return &r;
+  return nullptr;
+}
+
+/*static*/ const Airtime::RegionInfo* Airtime::regionForFreq(float freqMhz) {
+  for (const RegionInfo& r : kRegions)
+    if (r.id != Region::Custom && freqMhz >= r.lowMhz && freqMhz <= r.highMhz) return &r;
+  return regionById(Region::Custom);
+}
+
+/*static*/ const Airtime::RegionInfo* Airtime::regionFor(const char* key, float freqMhz) {
+  const RegionInfo* r = regionByKey(key);
+  return r ? r : regionForFreq(freqMhz);
+}
+
+/*static*/ Airtime::Regime Airtime::regimeFor(float freqMhz) {
+  // Derived from the region table rather than restating its edges. The second
+  // copy disagreed with the first at exactly 870.000 MHz: the validator took
+  // it as a European channel and enforced a duty cycle, while this told the
+  // operator no plan applied and nothing was being limited.
+  const RegionInfo* r = regionForFreq(freqMhz);
+  return r ? r->regime : Regime::None;
+}
+
+/*static*/ const char* Airtime::regimeName(Regime r) {
+  switch (r) {
+    case Regime::EuSrd868: return "EU 863-870 SRD";
+    case Regime::UsIsm915: return "US 902-928 ISM";
+    case Regime::Ism2400:  return "2.4 GHz ISM";
+    default:               return "unregulated by this firmware";
+  }
+}
+
+/*static*/ uint32_t Airtime::maxDwellMs(Regime r) {
+  // FCC 15.247(a)(1)(iii): a frequency-hopping system in this band may not
+  // dwell on one channel for more than 400 ms in a 20 s period. A node that
+  // does not hop has one channel, so the ceiling applies to every packet it
+  // sends. This firmware does not hop, which is exactly why the number is
+  // enforced per transmission rather than assumed away.
+  return r == Regime::UsIsm915 ? 400 : 0;
+}
+
+/*static*/ float Airtime::dtsMinBandwidthKhz(Regime r) {
+  // 15.247(a)(2): a digital transmission system needs at least 500 kHz of
+  // 6 dB bandwidth, and is then not a hopping system, so the dwell ceiling
+  // does not apply to it.
+  return r == Regime::UsIsm915 ? 500.0f : 0.0f;
+}
+
 /*static*/ const Airtime::Band* Airtime::bandFor(float freqMhz, float bwKhz) {
   // A channel is not a point. Work out what it actually occupies and take the
   // strictest allowance among the sub-bands it lands in, so a carrier sitting
@@ -116,6 +200,12 @@ static const Airtime::Band kEuBands[] = {
     if (!best || b.basisPoints > best->basisPoints) best = &b;
   }
   return best;
+}
+
+/*static*/ uint16_t Airtime::effectiveBasisPoints(Regime regime, float freqMhz, float bwKhz,
+                                                 uint8_t manualPct) {
+  if (regime != Regime::EuSrd868) return (uint16_t)manualPct * 100;
+  return effectiveBasisPoints(freqMhz, bwKhz, manualPct);
 }
 
 /*static*/ uint16_t Airtime::effectiveBasisPoints(float freqMhz, float bwKhz, uint8_t manualPct) {

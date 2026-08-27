@@ -112,6 +112,13 @@ async function refreshStatus() {
     if (s.ssid) $("ssid").textContent = s.ssid;
     const g = $("stats");
     g.replaceChildren(
+      // Only when the two halves disagree — there is nothing useful to say when
+      // they match, and a permanent "OK" badge trains people to ignore it.
+      ...(!s.assets || s.assets.match ? [] : [
+        card("Portal out of date", "this page was built from a different firmware ("
+          + (s.assets.filesystem || "unstamped") + " vs " + s.assets.firmware
+          + ") — upload the filesystem to match", "offline"),
+      ]),
       card("Uptime", fmtUptime(s.uptime_s)),
       card("Radio " + (s.radio.model || ""), s.radio.online
         ? s.radio.freq_mhz.toFixed(3) + " MHz SF" + s.radio.sf + " " + s.radio.tx_dbm + "dBm" : "OFFLINE",
@@ -138,6 +145,25 @@ async function refreshStatus() {
         (s.airtime.band ? " · " + s.airtime.band : "") +
         (s.airtime.locked ? " — holding TX, frees in " + s.airtime.retry_after_s + " s" : ""),
         s.airtime && (s.airtime.locked || !s.airtime.duty_limit_pct) ? "offline" : ""),
+      // GNSS. The health readings are always public; the coordinates appear only
+      // when the operator has published them, and the card says which it is —
+      // otherwise the settings toggle has no visible effect anywhere.
+      ...(!s.gps ? [] : [
+        card("GNSS", !s.gps.enabled ? "receiver off"
+          : (s.gps.fix ? "fix" : "searching") + " · " + s.gps.satellites + " sats"
+            + (s.gps.hdop != null ? " · HDOP " + s.gps.hdop.toFixed(1) : "")
+            + (s.gps.clock_set ? " · clock set" : ""),
+          s.gps.enabled && s.gps.fix ? "" : "offline"),
+        card("Position", !s.gps.enabled ? "receiver off"
+          : !s.gps.position_public ? "not published — see the GNSS setting"
+          : !s.gps.fix ? "no fix yet"
+          : s.gps.latitude.toFixed(5) + ", " + s.gps.longitude.toFixed(5)
+            + (s.gps.altitude_m != null ? " · " + s.gps.altitude_m.toFixed(0) + " m" : ""),
+          s.gps.enabled && s.gps.position_public && s.gps.fix ? "" : "offline"),
+        card("Device time (UTC)", !s.gps.enabled ? "no receiver"
+          : s.gps.clock_set ? s.gps.utc : "not set — waiting for a fix",
+          s.gps.clock_set ? "" : "offline"),
+      ]),
       card("Reticulum store", !s.storage ? "" :
         s.storage.lost ? "lost — card removed, restart to use flash"
         : s.storage.sd_available ? "internal flash · restart to move it to the SD card"

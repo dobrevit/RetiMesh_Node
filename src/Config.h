@@ -35,6 +35,10 @@
 // ---------------------------------------------------------------------------
 #if defined(BOARD_TBEAM)
   #include "boards/tbeam.h"
+#elif defined(BOARD_T3S3_SX1280_PA)
+  #include "boards/t3s3_sx1280_pa.h"
+#elif defined(BOARD_T3S3_SX1280)
+  #include "boards/t3s3_sx1280.h"
 #else
   #include "boards/t3s3.h"
 #endif
@@ -201,6 +205,31 @@
 #endif
 // T3-S3 SX1262 modules have a TCXO fed from DIO3. Set to 0.0 for
 // plain-crystal modules (begin() fails with -706/-707 when this is wrong).
+// Set by a board header carrying a 2.4 GHz module; see LoRaRadio::begin().
+#ifndef RF_MODEM_SX1280
+  #define RF_MODEM_SX1280   0
+#endif
+
+// Boards with a transmit/receive switch in front of the antenna name its pins;
+// RadioLib steers them. Without one the radio is wired straight through.
+#ifndef HAS_RF_SWITCH
+  #define HAS_RF_SWITCH     0
+#endif
+
+// True where the board puts a power amplifier after the transceiver. It does
+// not change what the chip may be driven at — the driver's own maximum still
+// applies — but it does change what leaves the antenna, which is the operator's
+// to account for. Reported through the API so the settings page can say so.
+#ifndef HAS_PA
+  #define HAS_PA            0
+#endif
+
+// A single timed transmission at boot, to prove the IRQ line is the one the
+// board actually uses. Off everywhere it is not needed: it costs airtime.
+#ifndef RADIO_SELFTEST_ON_BOOT
+  #define RADIO_SELFTEST_ON_BOOT 0
+#endif
+
 #ifndef RF_TCXO_VOLTAGE
   #define RF_TCXO_VOLTAGE   1.8
 #endif
@@ -424,6 +453,7 @@ struct NodeStats {
   volatile uint32_t loraRxDropPartial = 0;  // half-assembled packet abandoned mid-flight
   volatile uint32_t loraRxCrcErrors   = 0;  // readData() refused it: bad CRC or spurious IRQ
   volatile uint32_t loraRxBadLength   = 0;  // frame shorter than a header or longer than the max
+  volatile uint32_t loraRxSpuriousIrq = 0;  // woken with no completed reception to collect
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
 };

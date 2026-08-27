@@ -145,3 +145,44 @@ Offsets (from the env's partition table): bootloader `0x0`, partitions
 partition (`0x310000` on the 4 MB layout). Each release ships per-partition
 files, a merged image for `0x0`, `manifest.json` (ESP Web Tools) and
 `release.json` with offsets and SHA-256 hashes.
+
+## 2.4 GHz and the US band
+
+The SX1280 build (`t3s3-sx1280`) drives the same T3-S3 carrier board with a
+2.4 GHz module. The radio is chosen at build time, not detected: probing works
+by tuning the chip and seeing whether it answers, and an SX1280 will no more
+accept an 868 MHz channel than an SX1262 will accept 2445 MHz — whichever
+settings the probe carries, one of the two fails for the wrong reason. So the
+two images are not interchangeable, and `boards.json` lists them separately.
+
+Bounds now come from the transceiver that is fitted rather than from a sub-GHz
+assumption. `GET /api/settings` reports them under `radio.caps`: tuning range, the
+bandwidth steps the chip actually has, the spreading-factor and power ranges,
+and which band plan the configured channel falls under. The SX1280 offers four
+bandwidths — 203.125, 406.25, 812.5 and 1625 kHz — and none of them appear in
+the SX127x list, which is why a channel plan copied across from 868 MHz will
+not name one this chip can tune.
+
+Three band plans are recognised, and they constrain different things. Treating
+them as variations on a duty cycle would misdescribe two of the three:
+
+| Band | What is capped | What the node does |
+|---|---|---|
+| EU 863-870 MHz | Hourly duty cycle, 0.1 %-10 % by sub-band | Derives the budget from the sub-band and holds to it |
+| US 902-928 MHz | How long one transmission may hold a channel — 400 ms for a hopping system | Checks the longest frame against that ceiling and says so if it does not fit |
+| 2.4 GHz ISM | Radiated power and listen-before-talk | CSMA, no budget |
+
+The US case is the one worth reading twice. There is no hourly allowance to
+spend, so a node there is not "unlimited" — the binding constraint is
+per-packet. This firmware does not frequency-hop, so it has one channel, and
+the dwell ceiling applies to everything it sends. A full 254-byte fragment at
+SF12/125 kHz is far past 400 ms, which is exactly the configuration you arrive
+at by copying an EU channel plan across. Either widen the channel to 500 kHz or
+more, at which point it qualifies as a digital transmission system and the
+dwell limit stops applying, or use a spreading factor whose longest frame fits.
+The node logs which of those it is in at boot and warns when the configuration
+cannot comply.
+
+None of this is a compliance claim. It is the firmware applying the plan that
+matches the band it has been tuned to; what is legal where the node is standing
+is the operator's to know.

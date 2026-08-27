@@ -94,7 +94,80 @@ public:
     bool        allocated;    // false for the ranges between the sub-bands
   };
 
-  // The band a channel of `bwKhz` centred on `freqMhz` must obey. A channel
+  // Which rulebook a channel falls under. This is a property of the band, not
+  // of the radio: the same SX1262 is a duty-cycle device at 868 MHz and a
+  // dwell-limited one at 915 MHz.
+  //
+  // The three are not variations on one theme — they constrain different
+  // things, which is why one "duty cycle percent" setting cannot express them:
+  //
+  //   EuSrd868  hourly duty cycle, per sub-band, 0.1 % to 10 %. Long
+  //             transmissions are fine; their total over an hour is not.
+  //   UsIsm915  no hourly budget at all. FCC 15.247 instead caps how long a
+  //             single transmission may sit on one channel — 400 ms for a
+  //             hopping system — and a node that does not hop has to keep
+  //             each packet under that or use a wide enough channel to
+  //             qualify as a digital transmission system (>= 500 kHz).
+  //             The binding constraint is per-packet, not per-hour.
+  //   Ism2400   neither. Bounded by radiated power and by listen-before-talk,
+  //             so CSMA carries the load and no budget applies.
+  //
+  // Saying "no limit" for the US would be wrong in the other direction: there
+  // is a limit, it is just not the kind the hourly accounting can express.
+  enum class Regime : uint8_t { None = 0, EuSrd868, UsIsm915, Ism2400 };
+
+  // A region is what the operator picks; the regime is what follows from it.
+  // Choosing the region first is the only honest order: "868.1 MHz" is a legal
+  // channel in Europe and an illegal one in the US, and a form that offers
+  // every frequency the chip can tune invites exactly that mistake. Custom is
+  // kept for people who know what they are doing and are outside these three.
+  enum class Region : uint8_t { Custom = 0, Eu868, Us915, Ism2400 };
+
+  struct RegionInfo {
+    Region      id;
+    const char* key;          // stable identifier for the API and NVS
+    const char* name;         // shown to a human
+    float       lowMhz;       // the band this region may use
+    float       highMhz;
+    Regime      regime;
+    float       defaultMhz;   // a sane channel inside it
+    float       defaultBwKhz;
+    uint8_t     defaultSf;
+  };
+
+  static const RegionInfo* regions(size_t& count);
+  static const RegionInfo* regionByKey(const char* key);
+  static const RegionInfo* regionById(Region id);
+  // The region a frequency falls in, for migrating nodes configured before
+  // the setting existed.
+  static const RegionInfo* regionForFreq(float freqMhz);
+
+  // The region a node is actually operating under: the one it has stored, and
+  // the frequency only as a fallback for a configuration written before the
+  // setting existed. Never null.
+  //
+  // This exists because three places needed it and derived it separately —
+  // the radio when it configures the budget, the radio again when it refreshes
+  // the figures, and the API when it reports what governs. One of the three was
+  // missed, so the settings page told an operator their "custom" region applied
+  // no plan while the other two had already stopped enforcing one. A fourth
+  // caller should not be able to disagree with the first three.
+  static const RegionInfo* regionFor(const char* key, float freqMhz);
+
+  static Regime regimeFor(float freqMhz);
+  static const char* regimeName(Regime r);
+
+  // Longest a single transmission may occupy one channel, in milliseconds.
+  // 0 means the regime does not constrain individual transmissions. Only
+  // UsIsm915 returns non-zero today.
+  static uint32_t maxDwellMs(Regime r);
+
+  // The narrowest channel that qualifies as a digital transmission system
+  // where that distinction exists, in kHz; 0 where it does not apply. A US
+  // channel at or above this is not subject to the dwell limit.
+  static float dtsMinBandwidthKhz(Regime r);
+
+  // EU only: the band a channel of `bwKhz` centred on `freqMhz` must obey. A channel
   // that fits inside one sub-band gets that sub-band's allowance; one that
   // straddles a boundary gets the strictest of the bands it touches, because
   // energy lands in all of them. nullptr means the channel is outside the plan
@@ -110,6 +183,12 @@ public:
   // manualPct 0 means "whatever the band allows". Returns 0 for "no limit",
   // which happens only outside the known plan with no manual cap.
   static uint16_t effectiveBasisPoints(float freqMhz, float bwKhz, uint8_t manualPct);
+  // The same, for a node whose region is known. Only EuSrd868 has a band
+  // allowance to look up; every other regime leaves the manual cap as the only
+  // budget, so a channel at 868 MHz under "custom" is not quietly held to the
+  // European duty cycle the operator was told did not apply.
+  static uint16_t effectiveBasisPoints(Regime regime, float freqMhz, float bwKhz,
+                                       uint8_t manualPct);
 
   void  addTx(uint32_t nowMs, float airMs);   // record a transmission
   float shortTermUtil(uint32_t nowMs);        // 0..1 over the last two bins

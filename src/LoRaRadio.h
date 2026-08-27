@@ -73,6 +73,7 @@
 #include <freertos/ringbuf.h>
 #include "Config.h"
 #include "Airtime.h"
+#include "RadioCaps.h"
 #include "Settings.h"
 
 class LoRaRadio {
@@ -84,7 +85,17 @@ public:
 
   bool online() const { return _online; }
   const char* modelName() const { return _modelName; }
-  int8_t maxTxDbm() const { return _sx1262 ? 22 : 17; }
+  // What the detected chip can do — frequency span, bandwidth steps, SF and
+  // power range, and which regulatory model its band falls under. Callers that
+  // used to hardcode sub-GHz limits ask this instead.
+  const RadioCaps::Caps& caps() const { return *_caps; }
+  // The settable figure is what the chip is driven at, and nothing else: the
+  // driver rejects anything above its own maximum, so raising the ceiling for a
+  // board with an amplifier only produced settings that failed to apply. What
+  // the PA then radiates is a property of the board the operator has to know;
+  // hasPa() says one is fitted so the UI and docs can point that out.
+  int8_t maxTxDbm() const { return _caps->txMaxDbm; }
+  static bool hasPa() { return HAS_PA != 0; }
   const char* callsign() const;          // beacon name: configured, else SSID
 
   // Hand new channel settings to the radio task. Thread-safe; returns
@@ -111,6 +122,9 @@ private:
 
   bool probeSX1262(const RadioSettings& s);
   bool probeSX127x(const RadioSettings& s);
+  bool probeSX1280(const RadioSettings& s);
+  void irqSelfTest();                    // proves the IRQ line, see the .cpp
+  uint32_t rxDoneFlag() const;           // this chip's RxDone bit, raw
   bool applySettings(const RadioSettings& s);   // radio task context only
   void configureAirtime(const RadioSettings& s);  // symbol time -> duty cycle + CSMA
   void logActive() const;
@@ -120,7 +134,9 @@ private:
   PhysicalLayer* _radio  = nullptr;      // common runtime surface
   SX1262*        _sx1262 = nullptr;      // exactly one of these is set
   SX1276*        _sx1276 = nullptr;
+  SX1280*        _sx1280 = nullptr;
   const char*    _modelName = "none";
+  const RadioCaps::Caps* _caps = &RadioCaps::kUnknown;
   SPIClass       _spi{LORA_SPI_BUS};   // bus number differs per MCU, see boards/
   RingbufHandle_t _txRing = nullptr;
   RingbufHandle_t _rxRing = nullptr;
