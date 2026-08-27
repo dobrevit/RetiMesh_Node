@@ -28,6 +28,7 @@
 
 #include <Arduino.h>
 #include "Config.h"
+#include "Power.h"
 
 #if HAS_DISPLAY
   #include <Wire.h>
@@ -73,6 +74,10 @@ private:
   // object when one is added without being drawn (-Werror=switch).
   Page     _page = STATUS;
   uint8_t  _chargeSweep = 0;             // animates the battery fill while charging
+  // Sampled once per frame in paint(). Reading the PMU costs four I2C
+  // transactions on a bus shared with the panel, and two reads in one frame
+  // could disagree — the header icon and the text would then contradict.
+  Power::Battery _bat{};
   bool     _blank = false;
   uint32_t _pageChangedMs = 0;
   uint32_t _lastActivityMs = 0;          // last button press (boot counts)
