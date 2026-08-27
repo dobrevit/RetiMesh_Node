@@ -143,15 +143,19 @@ void LoRaRadio::irqSelfTest() {
   _radio->finishTransmit();
   _radio->startReceive();
 
+  // Which pin is the interrupt depends on the family: DIO1 on an SX126x or
+  // SX128x, DIO0 on an SX127x. Naming the wrong one turns a useful diagnostic
+  // into a misleading one.
+  const int irqPin = _sx1276 ? PIN_LORA_DIO0 : PIN_LORA_DIO1;
   if (got) {
     log_i("radio self-test: TxDone interrupt arrived in %lu ms — the IRQ line on GPIO %d is live",
-          (unsigned long)took, (int)PIN_LORA_DIO1);
+          (unsigned long)took, irqPin);
   } else {
     // Worth being blunt. Everything else about this node will look healthy.
     log_e("radio self-test: NO TxDone interrupt after %lu ms. The chip transmits but nothing "
           "is watching its IRQ, so this node will never receive a packet. GPIO %d is not the "
           "interrupt pin on this board — check the board header against the schematic.",
-          (unsigned long)took, (int)PIN_LORA_DIO1);
+          (unsigned long)took, irqPin);
   }
 }
 

@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        env: [t3s3, t3s3-sx1280, t3s3-sx1280-pa, esp32s3-qspi, tbeam]
+        env: [t3s3, t3s3-sx1280, t3s3-sx1280-pa, esp32s3-qspi, tbeam, heltec-ws]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/build-firmware

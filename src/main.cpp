@@ -101,6 +101,13 @@ void setup() {
   // ever readable here.
   Diag::begin();
 
+  #if PIN_STATUS_LED >= 0
+    // Claimed and held off. No feature drives it yet, but leaving a wired pin
+    // floating invites it to do something the firmware never asked for.
+    pinMode(PIN_STATUS_LED, OUTPUT);
+    digitalWrite(PIN_STATUS_LED, LOW);
+  #endif
+
   // Filesystem first — the web app and the bulletin board live here.
   if (!LittleFS.begin(true)) {
     log_e("LittleFS mount failed even after format");

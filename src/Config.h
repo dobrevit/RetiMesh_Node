@@ -35,6 +35,8 @@
 // ---------------------------------------------------------------------------
 #if defined(BOARD_TBEAM)
   #include "boards/tbeam.h"
+#elif defined(BOARD_HELTEC_WS)
+  #include "boards/heltec_ws.h"
 #elif defined(BOARD_T3S3_SX1280_PA)
   #include "boards/t3s3_sx1280_pa.h"
 #elif defined(BOARD_T3S3_SX1280)
@@ -186,7 +188,13 @@
 // editable from the settings page. They MUST match every other node on
 // the channel (including real RNodes — configure the RNode side alike).
 #ifndef RF_FREQ_MHZ
-  #define RF_FREQ_MHZ       869.410         // EU868 SRD band
+  // 869.525, not 869.410. The 10 % sub-band is 869.4-869.65, and a channel is
+  // not a point: at the default 125 kHz, 869.410 spans 869.3475-869.4725 and
+  // so reaches into the unallocated gap below 869.4. The node's own limiter
+  // then holds it to 0.1 % and says the channel is not allocated to this kind
+  // of device — the firmware was already warning about the default it shipped
+  // with. 869.525 sits centred in the 10 % band with room either side.
+  #define RF_FREQ_MHZ       869.525         // EU868 SRD, centred in the 10 % sub-band
 #endif
 #ifndef RF_BW_KHZ
   #define RF_BW_KHZ         125.0
@@ -286,17 +294,49 @@
 #ifndef PIN_OLED_SCL
   #define PIN_OLED_SCL      17
 #endif
+// Panels on a switched rail need it brought up before they are probed, and it
+// is active low on every board that has one so far.
+#ifndef HAS_DISPLAY_VEXT
+  #define HAS_DISPLAY_VEXT  0
+#endif
+#ifndef PIN_OLED_RST
+  #define PIN_OLED_RST      -1
+#endif
+
 #ifndef OLED_ADDR
   #define OLED_ADDR         0x3C
 #endif
 #ifndef OLED_ROTATION
   #define OLED_ROTATION     0               // 0..3, quarter turns
 #endif
-#define DISPLAY_REFRESH_MS  500
+// Panel geometry. A board with a different panel says so here and everything
+// downstream follows from it — see DisplayLayout.h, which turns these into the
+// text grid, the chrome and the refresh interval each page is drawn against.
+// An SSD1306 reports nothing about its own size, so the board is what knows.
+#ifndef DISPLAY_WIDTH
+  #define DISPLAY_WIDTH     128
+#endif
+#ifndef DISPLAY_HEIGHT
+  #define DISPLAY_HEIGHT    64
+#endif
+// Panels too small for the full page set. A macro as well as the constexpr in
+// DisplayLayout.h because the page enum itself has to change, not only what is
+// drawn — a page that cannot work on this panel should not be in the cycle at
+// all, costing a button press to reach and another to leave.
+#if DISPLAY_WIDTH < 96
+  #define DISPLAY_COMPACT   1
+#else
+  #define DISPLAY_COMPACT   0
+#endif
 // BOOT button (GPIO 0, active low) doubles as the display navigation key:
 // short press = next page, long press = blank/wake the panel.
 #ifndef PIN_BUTTON
   #define PIN_BUTTON        0
+#endif
+// Boards that wire an indicator LED name it here. Nothing drives it yet; it is
+// claimed at boot and held off so the pin is not left floating.
+#ifndef PIN_STATUS_LED
+  #define PIN_STATUS_LED    -1
 #endif
 #define BUTTON_POLL_MS      20
 #define BUTTON_LONG_MS      1500
