@@ -273,7 +273,12 @@ void LoRaRadio::handleRadioIrq() {
   // Only RxDone is expected here: TxDone notifications are consumed
   // synchronously inside sendFrame(), and CAD inside csmaWait().
   size_t len = _radio->getPacketLength();
-  if (len < 1 || len > LORA_FRAME_MAX) {
+  // At least one payload byte behind the header. A header-only frame used to
+  // pass this guard, yield a zero-length payload, and then fall out of the
+  // reassembly below without touching any counter — a frame that simply
+  // vanished. Expressed against LORA_HEADER_LEN so it stays right if the
+  // framing ever grows.
+  if (len <= LORA_HEADER_LEN || len > LORA_FRAME_MAX) {
     g_stats.loraRxBadLength++;
     _radio->startReceive();
     return;
@@ -328,7 +333,11 @@ void LoRaRadio::handleRadioIrq() {
     memcpy(_rxBuf, payload, payloadLen);
     _rxLen = payloadLen;
   } else {
-    // Unsplit packet; discard any half-finished reassembly.
+    // Unsplit packet; discard any half-finished reassembly. This is the same
+    // loss as the mismatched-sequence case above and has to be counted the
+    // same way: under interleaved traffic it is arguably the commoner of the
+    // two, since any ordinary packet arriving between two fragments does it.
+    if (_rxSeq != LORA_SEQ_UNSET && _rxLen > 0) g_stats.loraRxDropPartial++;
     _rxSeq = LORA_SEQ_UNSET;
     memcpy(_rxBuf, payload, payloadLen);
     _rxLen = payloadLen;
