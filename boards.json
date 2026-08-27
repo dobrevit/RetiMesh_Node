@@ -22,6 +22,12 @@
     "name": "LilyGO T3-S3 with SX1280 (2.4 GHz)",
     "chip": "esp32s3",
     "chip_family": "ESP32-S3",
-    "notes": "0.96\" OLED, SD slot, 4 MB flash. The SX1280 is selected at build time rather than detected, so this image is not interchangeable with the sub-GHz t3s3 build. Defaults to 2445 MHz / 812.5 kHz / SF8. Native USB — hold BOOT while pressing RST if the port is not detected."
+    "notes": "0.96\" OLED, SD slot, 4 MB flash. The plain SX1280 module: no power amplifier, so the chip's 13 dBm ceiling applies. The amplified variant is a different image — see t3s3-sx1280-pa. The radio is selected at build time rather than detected, so neither is interchangeable with the sub-GHz t3s3 build. Defaults to 2445 MHz / 812.5 kHz / SF8."
+  },
+  "t3s3-sx1280-pa": {
+    "name": "LilyGO T3-S3 with SX1280 + PA (2.4 GHz)",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "notes": "As t3s3-sx1280, but for the amplified module: the PA sits behind an RX/TX switch on GPIO 21/10 and the ceiling rises to 20 dBm. Flashing this image on a plain board would drive two GPIOs that board uses for something else, so pick by what is actually fitted."
   }
 }

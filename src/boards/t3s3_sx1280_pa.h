@@ -30,14 +30,14 @@
 // regardless, so begin() succeeds and the node reports "SX1280 online" while
 // the IRQ never fires and the PA stays off in both directions. A radio that
 // says it is up and hears nothing is worse than one that admits it is down.
-#define BOARD_NAME          "LilyGO T3-S3 (SX1280)"
+#define BOARD_NAME          "LilyGO T3-S3 (SX1280 + PA)"
 #define PIN_LORA_SCK        5
 #define PIN_LORA_MISO       3
 #define PIN_LORA_MOSI       6
 #define PIN_LORA_CS         7
 #define PIN_LORA_RST        8
-#define PIN_LORA_BUSY       36               // confirmed: rises during TX
-#define PIN_LORA_DIO1       9                // confirmed: TxDone interrupt
+#define PIN_LORA_BUSY       36               // SX1280: not the SX1262's 34
+#define PIN_LORA_DIO1       9                // SX1280 IRQ: not the SX1262's 33
 #define PIN_LORA_DIO0       -1               // no SX127x on this variant
 #define LORA_SPI_BUS        FSPI
 
@@ -45,12 +45,20 @@
 // this cannot be auto-detected alongside the sub-GHz parts.
 #define RF_MODEM_SX1280     1
 
-// This is the PLAIN module: no power amplifier and no transmit/receive switch,
-// so the chip's own 13 dBm ceiling applies and nothing needs steering. The
-// amplified variant is a different board — see t3s3_sx1280_pa.h. Do not add an
-// RF switch here on the strength of the reference firmware: its only SX1280
-// entry is the amplified one, which is why its build target is named
-// firmware-t3s3_sx1280_pa.
+// The amplified variant. The PA sits behind a transmit/receive switch: RXEN
+// high to listen, TXEN high to transmit, never both, and RadioLib drives them
+// once told which pins they are. Pins and the 20 dBm ceiling follow the
+// reference RNode_Firmware, whose only SX1280 entry is this board
+// (Boards.h, BOARD_T3S3 + MODEM == SX1280; build target
+// firmware-t3s3_sx1280_pa).
+#define HAS_RF_SWITCH       1
+#define PIN_LORA_RXEN       21
+#define PIN_LORA_TXEN       10
+
+// With the PA in circuit the figure reaching the antenna is not the one the
+// chip was asked for, so the ceiling belongs to the board and not to
+// RadioCaps, which describes chips rather than what is built around them.
+#define RF_TX_DBM_MAX       20
 
 // One transmission at boot, timed against the TxDone interrupt. On a board
 // whose IRQ pin is guessed wrong the chip still answers over SPI and still
@@ -66,7 +74,7 @@
 #define RF_FREQ_MHZ         2445.0
 #define RF_BW_KHZ           812.5
 #define RF_SF               8
-#define RF_TX_DBM           10
+#define RF_TX_DBM           10   // into the PA
 #define RF_TCXO_VOLTAGE     0.0              // SX128x has no TCXO control here
 #define RF_DIO2_AS_SWITCH   false
 

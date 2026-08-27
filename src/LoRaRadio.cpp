@@ -83,7 +83,58 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   g_stats.radioModel = _modelName;
   configureAirtime(s);                           // the probes bypass applySettings()
   logActive();
+  #if RADIO_SELFTEST_ON_BOOT
+    irqSelfTest();
+  #endif
   return true;
+}
+
+// Does the interrupt line actually reach us?
+//
+// Nothing in an ordinary boot answers that. The transceiver is reached over
+// SPI, so it answers begin(), reports its state and prints itself online
+// whatever pin the IRQ is on — and a board whose IRQ pin was guessed wrong
+// looks identical to one wired correctly right up until the first packet
+// fails to arrive. That is not a theoretical worry: this driver shipped with
+// the SX1262's pins on an SX1280 board and the boot log was byte-identical.
+//
+// A transmission settles it. TxDone raises the same line RxDone does, and
+// sendFrame() waits on it with an 8 s timeout, so a working line answers in
+// tens of milliseconds and a wrong one takes the full timeout. One short
+// frame, once, and the log says which.
+void LoRaRadio::irqSelfTest() {
+  // The ISR notifies s_taskHandle, and radioTask has not started yet — begin()
+  // runs from setup(). Without this the interrupt fires into a null handle and
+  // the test reports a dead line on perfectly good wiring, which is precisely
+  // the false negative it exists to rule out.
+  TaskHandle_t previous = s_taskHandle;
+  s_taskHandle = xTaskGetCurrentTaskHandle();
+
+  const uint8_t probe[] = { 0x00, 'R', 'M', '?' };
+  const uint32_t started = millis();
+  ulTaskNotifyTake(pdTRUE, 0);                   // clear anything stale
+  if (_radio->startTransmit((uint8_t*)probe, sizeof(probe)) != RADIOLIB_ERR_NONE) {
+    log_w("radio self-test: could not start a transmission — skipping the IRQ check");
+    s_taskHandle = previous;
+    _radio->startReceive();
+    return;
+  }
+  const uint32_t got = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(3000));
+  const uint32_t took = millis() - started;
+  s_taskHandle = previous;
+  _radio->finishTransmit();
+  _radio->startReceive();
+
+  if (got) {
+    log_i("radio self-test: TxDone interrupt arrived in %lu ms — the IRQ line on GPIO %d is live",
+          (unsigned long)took, (int)PIN_LORA_DIO1);
+  } else {
+    // Worth being blunt. Everything else about this node will look healthy.
+    log_e("radio self-test: NO TxDone interrupt after %lu ms. The chip transmits but nothing "
+          "is watching its IRQ, so this node will never receive a packet. GPIO %d is not the "
+          "interrupt pin on this board — check the board header against the schematic.",
+          (unsigned long)took, (int)PIN_LORA_DIO1);
+  }
 }
 
 // Airtime maths follows the channel: symbol time drives both the duty-cycle

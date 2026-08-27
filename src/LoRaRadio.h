@@ -122,6 +122,7 @@ private:
   bool probeSX1262(const RadioSettings& s);
   bool probeSX127x(const RadioSettings& s);
   bool probeSX1280(const RadioSettings& s);
+  void irqSelfTest();                    // proves the IRQ line, see the .cpp
   bool applySettings(const RadioSettings& s);   // radio task context only
   void configureAirtime(const RadioSettings& s);  // symbol time -> duty cycle + CSMA
   void logActive() const;

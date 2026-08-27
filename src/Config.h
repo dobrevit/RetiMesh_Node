@@ -35,6 +35,8 @@
 // ---------------------------------------------------------------------------
 #if defined(BOARD_TBEAM)
   #include "boards/tbeam.h"
+#elif defined(BOARD_T3S3_SX1280_PA)
+  #include "boards/t3s3_sx1280_pa.h"
 #elif defined(BOARD_T3S3_SX1280)
   #include "boards/t3s3_sx1280.h"
 #else
@@ -219,6 +221,12 @@
 // Zero means "whatever the transceiver itself allows".
 #ifndef RF_TX_DBM_MAX
   #define RF_TX_DBM_MAX     0
+#endif
+
+// A single timed transmission at boot, to prove the IRQ line is the one the
+// board actually uses. Off everywhere it is not needed: it costs airtime.
+#ifndef RADIO_SELFTEST_ON_BOOT
+  #define RADIO_SELFTEST_ON_BOOT 0
 #endif
 
 #ifndef RF_TCXO_VOLTAGE
