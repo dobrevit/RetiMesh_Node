@@ -12,6 +12,13 @@ require HTTP Basic Auth (user `admin`).
   "power": { "profile": "performance", "cpu_mhz": 240, "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
   "identity": "69dd5082…", "destination": "8836929b…",
   "uptime_s": 1234, "heap_free": 180000, "heap_min_free": 178000, "psram_free": 2000000,
+  "diag": { "boot": { "count": 12, "reason": 3, "reason_name": "panic or unhandled exception",
+                      "clean": false, "prev_uptime_s": 15132 },
+            "heap": { "free": 180000, "min_free": 178000, "largest_block": 110592, "psram_free": 2000000 },
+            "stacks": { "loopTask": 3120, "rns": 6284, "radio": 2960, "gps": 1180 },
+            "stack_lowest": 1180, "stack_lowest_task": "gps",
+            "tables": { "paths": 3, "links": 1, "links_active": 1, "links_pending": 0,
+                        "destinations": 2, "announces": 0, "announces_held": 0, "rates": 4 } },
   "radio": { "online": true, "model": "SX1276", "freq_mhz": 868.1, "bw_khz": 125,
              "sf": 8, "cr": 5, "tx_dbm": 7, "sync_word": 18, "preamble": 18,
              "announce_interval": 600, "beacon_interval": 0, "callsign": "retimesh-8249CC",
@@ -31,6 +38,37 @@ require HTTP Basic Auth (user `admin`).
 }
 ```
 `kind` is `announce`, `station-id` or `beacon`; `via` is `lora` or `wifi`.
+
+`diag` is what a soak run reads off a node it has no console on.
+
+`boot.reason_name` is why the *previous* run ended, taken from the chip's reset
+register at startup — `power-on`, `software restart`, `panic or unhandled
+exception`, `task watchdog`, `brownout` and so on; `clean` is false for
+anything that was not deliberate. `boot.count` is a restart counter in its own
+NVS namespace, so resetting the settings does not erase the history. Together
+they distinguish a node that has been up all week from one that has quietly
+been restarting.
+
+`boot.prev_uptime_s` is how long the run that just ended lasted. It is kept in
+RTC memory, which survives a panic, a watchdog reset and a software restart but
+not a power cut or a brownout — so the field is **absent**, rather than zero,
+when the rail dropped. Its absence next to a `brownout` or `panic` is itself
+the evidence that the node lost power rather than crashed.
+
+`heap.largest_block` is the biggest single allocation still possible. The gap
+between it and `heap.free` is the fragmentation: an allocator reporting 60 KB
+free with a 4 KB largest block will fail an 8 KB request while looking healthy
+on the free figure alone.
+
+`stacks` gives the bytes of stack each task has never used, and
+`stack_lowest_task` names the one closest to its limit — the task that will
+trip the stack canary, and which the resulting panic identifies only on a
+console nobody is watching. Tasks a build never started (no GNSS receiver, no
+SD card) are omitted rather than reported as zero.
+
+`tables` are the Reticulum structures that grow with traffic. A table that
+climbs and never falls is where a week-long run runs out of memory, and it is
+the part a heap figure alone will not explain.
 
 `airtime` reports channel use and the transmit budget:
 `{"short_pct":0.46,"long_pct":0.02,"band":"869.4-869.65 (10 %)",
