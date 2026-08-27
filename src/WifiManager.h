@@ -54,6 +54,10 @@ public:
 
   // The SSID actually in use (derived from the MAC unless configured).
   const char* ssid() const { return _ssid; }
+  // The mDNS name this node answers to, without the ".local" suffix. Derived
+  // from the access-point name so there is one identity per node rather than
+  // two that can disagree.
+  const char* hostname() const { return _hostname; }
   bool stationConfigured() const { return settings.wifi().staSsid[0] != '\0'; }
   bool stationConnected() const { return WiFi.status() == WL_CONNECTED; }
   const char* securityName() const { return _securityName; }
@@ -90,6 +94,8 @@ private:
   AsyncWebServer  _http{HTTP_PORT};
   char            _ssid[33] = {0};       // 32 chars max + NUL
   const char*     _securityName = "open";
+  char            _hostname[33] = "";
+  void            deriveHostname();      // _ssid -> a legal mDNS label
   // Read once from /assets.json at begin(). "" when the file is absent, which
   // means a filesystem written before stamping existed.
   String          _assetStamp;

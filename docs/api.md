@@ -62,7 +62,7 @@ past the checks on the way in.
 ```json
 {
   "firmware": "RetiMesh Node", "version": "v0.0.3",
-  "ssid": "retimesh-8249CC", "security": "open", "display": true,
+  "ssid": "retimesh-8249CC", "hostname": "retimesh-8249cc", "security": "open", "display": true,
   "station": { "configured": true, "ssid": "home", "connected": true, "ip": "192.168.1.42", "rssi": -61 },
   "power": { "profile": "performance", "cpu_mhz": 240, "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
   "identity": "69dd5082…", "destination": "8836929b…",
@@ -95,6 +95,20 @@ past the checks on the way in.
 }
 ```
 `kind` is `announce`, `station-id` or `beacon`; `via` is `lora` or `wifi`.
+
+`hostname` is the mDNS name this node answers to, so it is reachable at
+`<hostname>.local` on any network with multicast DNS. It is derived from the
+access-point name rather than fixed, because every node answering to the same
+`retimesh.local` meant the second one on a network was renamed unpredictably by
+conflict resolution and neither could be addressed by a name you could guess.
+Renaming the access point renames the node.
+
+Both advertised services carry TXT records — `name`, `node` (the Reticulum
+destination), `fw` and `board` — so browsing `_rns._tcp` or `_http._tcp` lists
+every node on the network with enough to tell them apart without opening each
+one:
+
+    avahi-browse -rt _rns._tcp
 
 `rx_dropped` is the sum of the three counters below that lost a packet the
 node had already accepted, and the breakdown says which:
@@ -178,7 +192,13 @@ the part a heap figure alone will not explain.
 `{"short_pct":0.46,"long_pct":0.02,"band":"869.4-869.65 (10 %)",
 "band_limit_pct":10,"band_allocated":true,"duty_limit_pct":9.5,
 "duty_manual_pct":0,"budget_used":0.002,"locked":false,"retry_after_s":0,
-"csma_slot_ms":25,"csma_band":1}`. `band` and `band_limit_pct` are what the
+"csma_slot_ms":25,"csma_band":1}`. `regime` names the rulebook the node's region puts it under, and `band` is the
+sub-band within it where one exists. Only the EU plan has sub-bands to report,
+so at 2.4 GHz or in the US band `band` repeats the region name and
+`band_limit_pct` is 0 — those regimes cap something other than a share of the
+hour, and `duty_limit_pct` is 0 with them for the same reason.
+
+`band` and `band_limit_pct` are what the
 regulator allows for the channel — chosen from the sub-bands the carrier
 actually occupies at the configured bandwidth, taking the stricter one when it
 straddles a boundary. `band_allocated` is false on the ranges between the

@@ -12,6 +12,7 @@
 #include <unity.h>
 #include "Airtime.cpp"
 #include "RadioCaps.cpp"
+#include "Mdns.h"
 
 // --- regions and regimes must agree, at the edges as well as the middle -----
 
@@ -246,6 +247,41 @@ static void test_the_stored_region_wins_and_the_frequency_is_only_a_fallback() {
   TEST_ASSERT_NOT_NULL(Airtime::regionFor(nullptr, 1.0f));
 }
 
+// Every node used to answer to the same "retimesh.local", so a second one on
+// the network was renamed unpredictably by conflict resolution. The name now
+// comes from the access-point name, which means it has to survive whatever an
+// operator has typed there.
+static void test_a_node_name_becomes_a_legal_dns_label() {
+  char out[33];
+
+  Mdns::label("retimesh-D96308", out, sizeof(out), "retimesh");
+  TEST_ASSERT_EQUAL_STRING("retimesh-d96308", out);
+
+  // Spaces and punctuation collapse to single hyphens
+  Mdns::label("Shed roof #2", out, sizeof(out), "retimesh");
+  TEST_ASSERT_EQUAL_STRING("shed-roof-2", out);
+  Mdns::label("a__b  c", out, sizeof(out), "retimesh");
+  TEST_ASSERT_EQUAL_STRING("a-b-c", out);
+
+  // A label may not begin or end with a hyphen
+  Mdns::label("  edge  ", out, sizeof(out), "retimesh");
+  TEST_ASSERT_EQUAL_STRING("edge", out);
+  Mdns::label("---", out, sizeof(out), "retimesh");
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("retimesh", out, "nothing usable survived, so the fallback stands");
+
+  // Nothing usable at all still leaves a registrable name
+  Mdns::label("", out, sizeof(out), "retimesh");
+  TEST_ASSERT_EQUAL_STRING("retimesh", out);
+  Mdns::label(nullptr, out, sizeof(out), "retimesh");
+  TEST_ASSERT_EQUAL_STRING("retimesh", out);
+
+  // And it never runs past the buffer it was given
+  char small[6];
+  Mdns::label("abcdefghij", small, sizeof(small), "x");
+  TEST_ASSERT_EQUAL_STRING("abcde", small);
+  TEST_ASSERT_EQUAL_UINT(5, strlen(small));
+}
+
 static void test_bandwidth_list_renders_for_an_error_message() {
   char buf[96];
   RadioCaps::bandwidthList(RadioCaps::kSX1280, buf, sizeof(buf));
@@ -273,6 +309,7 @@ int main() {
   RUN_TEST(test_the_unknown_radio_accepts_any_bandwidth_either_family_offers);
   RUN_TEST(test_the_region_decides_the_budget_not_the_frequency);
   RUN_TEST(test_the_stored_region_wins_and_the_frequency_is_only_a_fallback);
+  RUN_TEST(test_a_node_name_becomes_a_legal_dns_label);
   RUN_TEST(test_bandwidth_list_renders_for_an_error_message);
   return UNITY_END();
 }

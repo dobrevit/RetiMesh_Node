@@ -119,6 +119,8 @@ async function refreshStatus() {
           + (s.assets.filesystem || "unstamped") + " vs " + s.assets.firmware
           + ") — upload the filesystem to match", "offline"),
       ]),
+      card("Address", (s.hostname ? s.hostname + ".local" : "") +
+        (s.station && s.station.connected ? " · " + s.station.ip : "")),
       card("Uptime", fmtUptime(s.uptime_s)),
       card("Radio " + (s.radio.model || ""), s.radio.online
         ? s.radio.freq_mhz.toFixed(3) + " MHz SF" + s.radio.sf + " " + s.radio.tx_dbm + "dBm" : "OFFLINE",
