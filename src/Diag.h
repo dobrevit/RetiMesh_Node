@@ -62,7 +62,10 @@ void begin();
 const Boot& boot();
 
 // Keeps the current run length in RTC memory so the next boot can report it.
-// Called from the heartbeat; costs one word of RTC RAM and no flash wear.
+// Call this every pass of the main loop, not on the heartbeat: the value is
+// only as accurate as its cadence, and a restart loop has to be visible as
+// runs of a few seconds rather than as a string of zeroes. One word of RTC
+// RAM per call and no flash wear.
 void tick(uint32_t uptimeS);
 
 const char* resetReasonName(uint8_t reason);
@@ -82,11 +85,14 @@ size_t taskCount();
 size_t stacks(TaskStack* out, size_t max);
 
 // The smallest headroom of any running task, and which task it belongs to.
-// A value approaching zero names the task about to trip the stack canary.
+// A value approaching zero names the task about to trip the stack canary, so
+// `name` is set to nullptr — not to a placeholder — when no task was found:
+// zero headroom and no reading at all must not look the same.
 uint32_t lowestHeadroom(const char** name);
 
 // Logs the heartbeat's diagnostic lines and warns when headroom or heap has
 // fallen past the thresholds in Config.h. Returns true if anything warned.
-bool report(uint32_t uptimeS);
+// Logging only — tick() owns the run length.
+bool report();
 
 } // namespace Diag

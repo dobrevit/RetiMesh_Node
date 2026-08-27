@@ -49,11 +49,16 @@ NVS namespace, so resetting the settings does not erase the history. Together
 they distinguish a node that has been up all week from one that has quietly
 been restarting.
 
-`boot.prev_uptime_s` is how long the run that just ended lasted. It is kept in
+`boot.prev_uptime_s` is how long the run that just ended lasted, updated every
+pass of the main loop so it is accurate to well under a second. It is kept in
 RTC memory, which survives a panic, a watchdog reset and a software restart but
 not a power cut or a brownout — so the field is **absent**, rather than zero,
 when the rail dropped. Its absence next to a `brownout` or `panic` is itself
 the evidence that the node lost power rather than crashed.
+
+A *present* `prev_uptime_s` of `0` means something different again: the run
+ended before the main loop ever ran, i.e. it died during startup. Repeated
+zeroes with a rising `boot.count` are a boot loop.
 
 `heap.largest_block` is the biggest single allocation still possible. The gap
 between it and `heap.free` is the fragmentation: an allocator reporting 60 KB

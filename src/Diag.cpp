@@ -148,13 +148,13 @@ uint32_t lowestHeadroom(const char** name) {
     if (!st[i].present) continue;
     if (st[i].headroom < lowest) { lowest = st[i].headroom; who = st[i].name; }
   }
-  if (name) *name = who ? who : "none";
+  // nullptr, not "none": zero headroom is the most urgent reading there is, so
+  // the caller has to be able to tell it apart from having found no task at all.
+  if (name) *name = who;
   return who ? lowest : 0;
 }
 
-bool report(uint32_t uptimeS) {
-  tick(uptimeS);
-
+bool report() {
   const Heap h = heap();
   TaskStack st[16];
   const size_t n = stacks(st, sizeof(st) / sizeof(st[0]));
@@ -171,7 +171,7 @@ bool report(uint32_t uptimeS) {
   log_i("stack headroom:%s", off ? line : " (no tasks)");
 
   // The gap between free and largest-block is the fragmentation: an allocator
-  // with 60 KB free and a 4 KB largest block will fail a 8 KB request while
+  // with 60 KB free and a 4 KB largest block will fail an 8 KB request while
   // looking healthy on the free figure alone.
   log_i("heap: %lu free (min %lu, largest block %lu) psram %lu free",
         (unsigned long)h.freeInternal, (unsigned long)h.minFreeInternal,
@@ -180,13 +180,13 @@ bool report(uint32_t uptimeS) {
   bool warned = false;
   const char* lowest = nullptr;
   const uint32_t headroom = lowestHeadroom(&lowest);
-  if (headroom && headroom < DIAG_STACK_WARN_B) {
+  if (lowest && headroom < DIAG_STACK_WARN_B) {
     log_w("stack headroom on task \"%s\" is down to %lu bytes — it is the one that will "
           "trip the canary, and the reset that follows names it only on the console",
           lowest, (unsigned long)headroom);
     warned = true;
   }
-  if (h.minFreeInternal && h.minFreeInternal < DIAG_HEAP_WARN_B) {
+  if (h.minFreeInternal < DIAG_HEAP_WARN_B) {
     log_w("internal heap fell to %lu bytes at its lowest (warning below %d)",
           (unsigned long)h.minFreeInternal, DIAG_HEAP_WARN_B);
     warned = true;

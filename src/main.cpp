@@ -168,6 +168,11 @@ void setup() {
 void loop() {
   static uint32_t lastBeat = 0;
   wifiManager.tick();
+  // Every pass, not on the heartbeat: a crash 29 s after the last beat would
+  // otherwise be recorded as having happened 29 s earlier, and a node stuck in
+  // a restart loop would report every run as zero seconds — indistinguishable
+  // from one that never got past setup(). One word into RTC RAM, no flash.
+  Diag::tick(millis() / 1000);
   g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
   g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   if (millis() - lastBeat >= 30000) {
@@ -199,7 +204,7 @@ void loop() {
     // lives in Diag.h so this and /api/status can never watch different sets —
     // the GNSS task, which carries the smallest stack of the lot, was missing
     // from the copy that used to live here.
-    Diag::report(uptimeS);
+    Diag::report();
   }
   vTaskDelay(pdMS_TO_TICKS(200));
 }

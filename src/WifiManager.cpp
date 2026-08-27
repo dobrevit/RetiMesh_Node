@@ -372,7 +372,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     const char* lowestName = nullptr;
     const uint32_t lowest = Diag::lowestHeadroom(&lowestName);
     dg["stack_lowest"]      = lowest;
-    dg["stack_lowest_task"] = lowestName;
+    dg["stack_lowest_task"] = lowestName ? lowestName : "none";
 
     RnsTransport::Tables t = RnsTransport::tables();
     JsonObject tb = dg["tables"].to<JsonObject>();
