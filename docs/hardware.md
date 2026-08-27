@@ -83,23 +83,43 @@ persistence and the propagation-node store move to the card in later
 releases.
 
 ## OLED and button
-Pages: status → neighbours → transport (interfaces, modes, traffic, path
-count) → radio → network (dots bottom-right). Short press:
-next page (wakes the panel first if asleep); long press (1.5 s): blank/wake.
-Panel sleeps after 60 s without a press; page returns to status after 30 s.
+Pages, in cycle order: status → neighbours → transport → radio → network →
+GNSS (where a receiver is fitted) → QR, with the current one marked by the
+dots at the bottom right. Short press: next page (wakes the panel first if
+asleep); long press (1.5 s): blank/wake. The panel sleeps after 60 s without a
+press, and the page returns to status after 30 s.
 
-Pages: status, neighbours, transport, radio, network, GNSS (where fitted) and
-QR. The QR page shows a scan-to-join code for the access point and uses the
-whole panel; every other page has a header carrying the page name on the left
-and, where a cell is fitted, a battery icon on the right — filling in steps
-while charging so a glance tells you whether the node is gaining or draining.
+The QR page shows a scan-to-join code for the access point and uses the whole
+panel; every other page has a header carrying the page name on the left and,
+where a cell is fitted, a battery icon on the right. The icon fills in six
+steps and always shows what the cell actually holds; while charging, one
+segment travels up it inverted against the fill, so a cell at 100% still reads
+as charging rather than looking identical to a full idle one.
 
-Signal strength is deliberately *not* in that header. A bar chart with no
-label and no number says nothing, so the meters live on the pages that can
-explain them: the radio page shows `sig -87dBm` and `snr 8.5dB` with bars
-beside each figure, and the network page shows the Wi-Fi uplink the same way
-when the node has joined a network. Quality is scaled against a floor that
-moves with the spreading factor, because the same SNR means something
+Reading the denser rows:
+
+- **transport** has four rows for interfaces, each `name mode traffic`. Four or
+  fewer are listed in full; with more, three are listed and the fourth row
+  reads `+N more`, so a live interface is never dropped without saying so. The
+  bottom row is `an rx/tx bc rx/tx` — announces and beacons, received over
+  sent. Counters past 999 are shown in thousands (`12k`) so the row cannot
+  outgrow the 21 columns the panel has.
+- **radio** carries the preamble length as `p<n>` and the sync word as
+  `sy<hex>` alongside the channel. A node on the wrong sync word hears nothing,
+  and that should be visible without opening the web UI.
+- **network** shows the AP name and security, then `ch<n> cli <n> rns <n>` —
+  the Wi-Fi clients and RNS TCP clients attached. Those stay visible whether or
+  not the node has joined an upstream network. The AP address is not repeated
+  here; it is the fixed `10.42.0.1` shown on the status page.
+
+Signal strength is deliberately *not* in the header. A bar chart with no label
+and no number says nothing, so the meters live on the pages that can explain
+them: the radio page shows `sig -87dBm` and `snr 8.5dB` with bars beside each
+figure, and the network page shows the Wi-Fi uplink the same way when the node
+has joined a network. Each meter is scaled against the window that applies to
+it — LoRa RSSI over -135..-75 dBm, Wi-Fi RSSI over -90..-40 dBm, and SNR
+against the SX127x demodulation floor for the current spreading factor
+(-7.5 dB at SF7 to -20 dB at SF12), because the same SNR means something
 different at SF7 and SF12.
 
 ## Adding a board

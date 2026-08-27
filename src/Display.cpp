@@ -67,6 +67,9 @@ bool Display::begin() {
   _oled.clearDisplay();
   _oled.setTextColor(SSD1306_WHITE);
   _oled.setTextSize(1);
+  // Adafruit_GFX wraps by default, so a row one character too long lands on
+  // the next row and, at the bottom, under the page dots. Clip instead.
+  _oled.setTextWrap(false);
   _oled.setCursor(0, 0);
   _oled.print(FW_NAME);
   _oled.setCursor(0, 12);
@@ -133,6 +136,10 @@ void Display::paint() {
 #if HAS_DISPLAY
   if (_blank) return;
   _oled.clearDisplay();
+  // One PMU read per frame, shared by the header and whichever page is drawn.
+  // The QR page draws neither a header nor battery text, so it skips the four
+  // I2C transactions entirely rather than spending them on the panel's bus.
+  _bat = (_page == QR) ? Power::Battery{} : Power::battery();
   // No default: every page is listed, so adding one without drawing it is a
   // build failure rather than a screen that silently shows the status page.
   switch (_page) {
@@ -168,23 +175,30 @@ static void drawBars(Adafruit_SSD1306& o, int x, int y, uint8_t pct, uint16_t co
   }
 }
 
-// A battery outline with a nub, filled in seven steps. While charging the fill
-// sweeps upward from the real level instead of sitting still, which is the
-// difference between "there is a cell" and "it is filling".
+// A battery outline with a nub, filled in six steps that always show the level
+// the cell actually holds. While charging, one segment travels up the icon
+// inverted against the fill rather than the fill itself moving — which is the
+// difference between "there is a cell" and "it is filling", without the
+// animation ever claiming the cell is fuller than it is.
 static void drawBattery(Adafruit_SSD1306& o, int x, int y, uint8_t pct, bool charging,
                         uint8_t sweep, uint16_t color) {
   o.drawRect(x, y, 15, 7, color);
   o.drawLine(x + 15, y + 2, x + 15, y + 4, color);    // the nub
-  uint8_t level = pct;
-  if (charging) {
-    // Start the sweep at the real level so the animation still tells the truth
-    // about how full the cell is, and let it run to the top.
-    level = pct + sweep;
-    if (level > 100) level = pct + (level - 100) % (101 - pct > 0 ? 101 - pct : 1);
-    if (level > 100) level = 100;
+  // Six segments across the whole range, so the fill always says what the cell
+  // holds. No animation is allowed to overstate it.
+  const uint8_t segments = 6;
+  const uint8_t lit = (uint8_t)((uint32_t)pct * segments / 100);
+  // While charging, one segment travels up the icon inverted against whatever
+  // is under it — lit where the fill has not reached, dark where it has. That
+  // reads as movement at every level, including a cell sitting at 100%, which
+  // a fill that merely ran to the top could not do: above about 82% every
+  // segment is already lit, so a rising sweep was pixel-identical to full.
+  const int8_t cursor = charging ? (int8_t)((uint32_t)sweep * segments / 100 % segments) : -1;
+  for (uint8_t i = 0; i < segments; i++) {
+    bool on = i < lit;
+    if ((int8_t)i == cursor) on = !on;
+    if (on) o.drawLine(x + 2 + i * 2, y + 2, x + 2 + i * 2, y + 4, color);
   }
-  for (uint8_t i = 0; i < 6; i++)
-    if (level > 7 + i * 15) o.drawLine(x + 2 + i * 2, y + 2, x + 2 + i * 2, y + 4, color);
 }
 
 // RSSI in dBm to something a bar chart can show. The window is the usable
@@ -197,11 +211,25 @@ static uint8_t signalPercent(float rssi) {
   return (uint8_t)((rssi - lo) * 100.0f / (hi - lo));
 }
 
+// A Wi-Fi link lives in a completely different window: -90 dBm is the edge of
+// usable, -40 dBm is the same room. Running it through signalPercent()'s LoRa
+// window left every working link pegged at 100%, so the meter could never show
+// the uplink getting worse — the one thing it is there to show.
+static uint8_t wifiPercent(float rssi) {
+  const float lo = -90.0f, hi = -40.0f;
+  if (rssi <= lo) return 0;
+  if (rssi >= hi) return 100;
+  return (uint8_t)((rssi - lo) * 100.0f / (hi - lo));
+}
+
 // Link quality from SNR, against a floor that moves with the spreading factor:
 // SF12 decodes far below the noise where SF7 cannot, so the same SNR means
-// something different on each.
+// something different on each. The floor is the SX127x demodulation limit at
+// each factor — -7.5 dB at SF7 down to -20 dB at SF12, i.e. 10 - 2.5*SF.
+// Below it the chip cannot decode at all, so a dead link now reads empty
+// rather than showing four of seven bars.
 static uint8_t qualityPercent(float snr, uint8_t sf) {
-  const float lo = -9.0f - (float)sf * 2.0f, hi = 6.0f;
+  const float lo = 10.0f - 2.5f * (float)sf, hi = 6.0f;
   if (snr <= lo) return 0;
   if (snr >= hi) return 100;
   return (uint8_t)((snr - lo) * 100.0f / (hi - lo));
@@ -218,9 +246,8 @@ void Display::header(const char* title) {
   _oled.fillRect(0, 0, 128, 9, SSD1306_WHITE);
 
   uint8_t reserved = 0;
-  Power::Battery bat = Power::battery();
-  if (bat.present) {
-    drawBattery(_oled, 128 - 17, 1, bat.percent, bat.charging, _chargeSweep, SSD1306_BLACK);
+  if (_bat.present) {
+    drawBattery(_oled, 128 - 17, 1, _bat.percent, _bat.charging, _chargeSweep, SSD1306_BLACK);
     reserved = 19;                                     // icon plus a space
   }
 
@@ -232,6 +259,15 @@ void Display::header(const char* title) {
   _oled.setCursor(1, 1);
   _oled.print(clipped);
   _oled.setTextColor(SSD1306_WHITE);
+}
+
+// A 21-column row can carry four counters only if each stays within three
+// characters, so anything past 999 is shown in thousands. Saturating at 99k is
+// roughly two years of announces at the default interval.
+static void compactCount(char* out, size_t n, uint32_t v) {
+  if      (v < 1000)   snprintf(out, n, "%lu", (unsigned long)v);
+  else if (v < 100000) snprintf(out, n, "%luk", (unsigned long)(v / 1000));
+  else                 snprintf(out, n, "99k");
 }
 
 // A labelled meter: the text says what is being measured and how much of it
@@ -284,12 +320,11 @@ void Display::paintStatus() {
 
   // Row 5 — peers + uptime
   _oled.setCursor(0, 52);
-  Power::Battery bat = Power::battery();
-  if (bat.present)
+  if (_bat.present)
     // The charge marker earns its two characters: it is how you tell a node
     // that is filling up from one that is quietly draining.
-    snprintf(line, sizeof(line), "bat %u%%%s %.2fV %luh%02lum", bat.percent,
-             bat.charging ? "+" : "", (double)bat.volts,
+    snprintf(line, sizeof(line), "bat %u%%%s %.2fV %luh%02lum", _bat.percent,
+             _bat.charging ? "+" : "", (double)_bat.volts,
              (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
   else
     snprintf(line, sizeof(line), "rns %u wifi %u  %luh%02lum",
@@ -336,16 +371,33 @@ void Display::paintTransport() {
   if (g_stats.transportOnline) snprintf(line, sizeof(line), "Transport %u path%s", paths, paths == 1 ? "" : "s");
   else                         snprintf(line, sizeof(line), "Transport OFF");
   header(line);
+  // Four rows fit under the header. interfaces() can return five (LoRa plus
+  // RNS_MAX_CLIENTS peers), so when there are more than fit, the last row
+  // counts the remainder instead of letting a live interface vanish.
+  const size_t listed = (n > 4) ? 3 : n;
   uint8_t row = 0;
-  for (size_t i = 0; i < n && row < 4; i++, row++) {
+  for (size_t i = 0; i < listed; i++, row++) {
     char name[12]; strlcpy(name, ifs[i].name, sizeof(name));
     if (strncmp(name, "WiFi/", 5) == 0) memmove(name, name + 5, strlen(name + 5) + 1);   // just the IP
     snprintf(line, sizeof(line), "%-9s %-6.6s %3luk", name, ifs[i].mode, (unsigned long)((ifs[i].rxb + ifs[i].txb) / 1024));
     _oled.setCursor(0, 12 + row * 10); _oled.print(line);
   }
+  if (n > listed) {
+    snprintf(line, sizeof(line), "+%u more", (unsigned)(n - listed));
+    _oled.setCursor(0, 12 + row * 10); _oled.print(line);
+  }
   if (n == 0) { _oled.setCursor(0, 14); _oled.print("no interfaces"); }
-  snprintf(line, sizeof(line), "announce %lu in %lu out", (unsigned long)g_stats.announcesRx,
-           (unsigned long)g_stats.announcesTx);
+
+  // Announces and beacons, received/sent. "announce N in N out" ran past the
+  // 21 columns the panel has as soon as either counter reached three digits,
+  // wrapping under the page dots; and the beacon counters, dropped from the
+  // radio page in the redesign, were left with nowhere to live.
+  char aRx[6], aTx[6], bRx[6], bTx[6];
+  compactCount(aRx, sizeof(aRx), g_stats.announcesRx);
+  compactCount(aTx, sizeof(aTx), g_stats.announcesTx);
+  compactCount(bRx, sizeof(bRx), g_stats.beaconsRx);
+  compactCount(bTx, sizeof(bTx), g_stats.beaconsTx);
+  snprintf(line, sizeof(line), "an %s/%s bc %s/%s", aRx, aTx, bRx, bTx);
   _oled.setCursor(0, 52); _oled.print(line);
 #endif
 }
@@ -355,9 +407,16 @@ void Display::paintRadio() {
   const RadioSettings& r = settings.radio();
   char line[24];
   header(g_stats.radioOnline ? g_stats.radioModel : "Radio OFFLINE");
-  snprintf(line, sizeof(line), "%.3fMHz %+ddBm", (double)r.freqMhz, r.txDbm);
+  // Preamble and sync word ride along on the rows that had room for them: a
+  // node on the wrong sync word hears nothing, and finding that out should not
+  // require the web UI on a device whose whole point is a status panel.
+  // No "MHz": the API accepts a preamble up to 1000 symbols and frequencies
+  // into four digits, and with the suffix that row reached 24 characters — past
+  // both the buffer and the 21 columns, so the preamble it exists to show was
+  // the part that got clipped. The unit is on the radio page header's model.
+  snprintf(line, sizeof(line), "%.3f %+ddBm p%u", (double)r.freqMhz, r.txDbm, (unsigned)r.preamble);
   _oled.setCursor(0, 12); _oled.print(line);
-  snprintf(line, sizeof(line), "BW%.0f SF%d CR4/%d", (double)r.bwKhz, r.sf, r.cr);
+  snprintf(line, sizeof(line), "BW%.0f SF%d CR4/%d sy%02X", (double)r.bwKhz, r.sf, r.cr, r.syncWord);
   _oled.setCursor(0, 22); _oled.print(line);
 
   // The last packet heard, as a number and as a shape. Nothing received yet
@@ -377,7 +436,10 @@ void Display::paintRadio() {
     snprintf(line, sizeof(line), "duty %.2f/%.2f%% cw%u", (double)(g_stats.airtimeLong * 100.0f),
              g_stats.dutyLimitBp / 100.0f, g_stats.csmaBand);
   else
-    snprintf(line, sizeof(line), "air %.2f%% no limit", (double)(g_stats.airtimeLong * 100.0f));
+    // The contention band belongs here too: it is set from channel use whether
+    // or not a duty limit is being enforced.
+    snprintf(line, sizeof(line), "air %.2f%% nolim cw%u", (double)(g_stats.airtimeLong * 100.0f),
+             g_stats.csmaBand);
   _oled.setCursor(0, 52); _oled.print(line);
 #endif
 }
@@ -386,6 +448,7 @@ void Display::paintRadio() {
 // What the receiver can see. Before a fix the satellite count is the useful
 // number — it is what tells you whether the antenna has a view of the sky.
 void Display::paintGps() {
+#if HAS_DISPLAY
   Gps::Fix g = Gps::fix();
   char line[24];
   header(g.enabled ? (g.valid ? "GNSS fix" : "GNSS search") : "GNSS off");
@@ -409,6 +472,7 @@ void Display::paintGps() {
   }
   if (g.timeValid) { _oled.setCursor(0, 52); _oled.print(g.utc + 11); _oled.print(g.clockSet ? " UTC sync" : " UTC"); }
   else             { _oled.setCursor(0, 52); _oled.print("no time yet"); }
+#endif
 }
 #endif
 
@@ -459,18 +523,30 @@ void Display::paintNetwork() {
 #if HAS_DISPLAY
   char line[24];
   header("Network");
-  snprintf(line, sizeof(line), "%s", wifiManager.ssid());                                  _oled.setCursor(0, 12); _oled.print(line);
-  snprintf(line, sizeof(line), "%s  ch%u  %s", WiFi.softAPIP().toString().c_str(),
-           settings.wifi().channel, wifiManager.securityName());                           _oled.setCursor(0, 22); _oled.print(line);
+  // The AP address is the fixed 10.42.0.1 and already sits on the status page,
+  // so the row it used to occupy carries the channel and the two counts that
+  // say whether anyone is actually using the node. Those used to be hidden the
+  // moment the node joined a network — which is exactly the deployment where
+  // you would go looking for them.
+  // 12 for the name, not 15: the longest security label is "wpa2wpa3" at eight
+  // characters, and 15 + 1 + 8 overruns the 21 columns — clipping away the
+  // security this row is here to report.
+  snprintf(line, sizeof(line), "%-12.12s %s", wifiManager.ssid(), wifiManager.securityName());
+  _oled.setCursor(0, 12); _oled.print(line);
+  snprintf(line, sizeof(line), "ch%-2u cli %u  rns %u", settings.wifi().channel,
+           (unsigned)WiFi.softAPgetStationNum(), (unsigned)g_stats.tcpClients);
+  _oled.setCursor(0, 22); _oled.print(line);
+
   // Joined a network? Then there is one link worth measuring, and it gets a
-  // label and a number like everything else. Otherwise just say who is here.
+  // label and a number like everything else.
   if (wifiManager.stationConnected()) {
-    snprintf(line, sizeof(line), "%ddBm", (int)WiFi.RSSI());
-    meter(2, "up", line, signalPercent((float)WiFi.RSSI()));
+    // One sample for both the figure and the bars: the driver re-reads RSSI on
+    // every call and it moves several dB, so two reads disagree on one row.
+    const int rssi = WiFi.RSSI();
+    snprintf(line, sizeof(line), "%ddBm", rssi);
+    meter(2, "up", line, wifiPercent((float)rssi));
   } else {
-    snprintf(line, sizeof(line), "clients %u  rns %u", (unsigned)WiFi.softAPgetStationNum(),
-             (unsigned)g_stats.tcpClients);
-    _oled.setCursor(0, 32); _oled.print(line);
+    _oled.setCursor(0, 32); _oled.print("up   not joined");
   }
   _oled.setCursor(0, 42); _oled.print("dest ");
   _oled.print(String(nodeIdentity.destHex()).substring(0, 16));
@@ -479,9 +555,8 @@ void Display::paintNetwork() {
   if (si.state == SdCard::State::Absent) snprintf(line, sizeof(line), "SD: none");
   else snprintf(line, sizeof(line), "SD: %.0fG %s", si.cardBytes / 1e9, SdCard::stateName(si.state));
 #else
-  Power::Battery bat = Power::battery();
-  if (bat.present) snprintf(line, sizeof(line), "batt %.2fV %u%%%s", (double)bat.volts, bat.percent, bat.charging ? " chg" : "");
-  else             snprintf(line, sizeof(line), "USB power");
+  if (_bat.present) snprintf(line, sizeof(line), "batt %.2fV %u%%%s", (double)_bat.volts, _bat.percent, _bat.charging ? " chg" : "");
+  else              snprintf(line, sizeof(line), "USB power");
 #endif
   _oled.setCursor(0, 52); _oled.print(line);
 #endif
