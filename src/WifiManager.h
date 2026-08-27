@@ -90,6 +90,9 @@ private:
   AsyncWebServer  _http{HTTP_PORT};
   char            _ssid[33] = {0};       // 32 chars max + NUL
   const char*     _securityName = "open";
+  // Read once from /assets.json at begin(). "" when the file is absent, which
+  // means a filesystem written before stamping existed.
+  String          _assetStamp;
   uint32_t        _restartAt = 0;
   uint32_t        _staRetryAt = 0;
 };

@@ -94,6 +94,29 @@ void WifiManager::begin() {
 
   // http://retimesh.local/ (and http://<ssid>.local/) for clients whose
   // captive-portal detection does not fire.
+  // Compare the stamp baked into this firmware against the one in the image it
+  // is serving. They are produced together by tools/asset_stamp.py, so a
+  // mismatch means only one half was flashed — the portal will be subtly wrong
+  // in ways nothing else reports.
+  {
+    File f = LittleFS.open("/assets.json", "r");
+    if (f) {
+      JsonDocument sd;
+      if (deserializeJson(sd, f) == DeserializationError::Ok) _assetStamp = sd["stamp"] | "";
+      f.close();
+    }
+    if (_assetStamp == ASSET_STAMP) {
+      log_i("web assets match this firmware (build %s)", ASSET_STAMP);
+    } else {
+      log_w("web assets were built from a different firmware: image has \"%s\", firmware "
+            "expects \"%s\". The portal may be missing controls this firmware supports, or "
+            "offer some it does not. Upload the filesystem to match — note that doing so "
+            "erases anything else on it, including the Reticulum store on boards with no "
+            "SD card.",
+            _assetStamp.isEmpty() ? "(none)" : _assetStamp.c_str(), ASSET_STAMP);
+    }
+  }
+
   if (MDNS.begin(MDNS_HOSTNAME)) {
     MDNS.addService("http", "tcp", HTTP_PORT);
     MDNS.addService("rns", "tcp", RNS_TCP_PORT);
@@ -323,6 +346,17 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     st["rssi"]       = stationConnected() ? WiFi.RSSI() : 0;
   }
   doc["display"]      = g_stats.displayPresent;
+  // Firmware and web assets are flashed separately and nothing forces them to
+  // be updated together, so a node can end up serving a portal built against a
+  // different API and look entirely healthy doing it. Both halves carry the
+  // same hash when they are built together; publishing both lets anyone see at
+  // a glance whether this node is one build or two.
+  {
+    JsonObject as = doc["assets"].to<JsonObject>();
+    as["firmware"] = ASSET_STAMP;
+    as["filesystem"] = _assetStamp;
+    as["match"] = (_assetStamp == ASSET_STAMP);
+  }
   doc["identity"]     = nodeIdentity.identityHex();
   doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
   doc["uptime_s"]     = millis() / 1000;
