@@ -181,8 +181,20 @@ void loop() {
     log_i("up %lus | peers tcp %u auto %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u",
           (unsigned long)uptimeS, (unsigned)g_stats.tcpClients, (unsigned)AutoInterface::peerCount(),
           (unsigned)g_stats.loraRxPackets, (unsigned)g_stats.loraTxPackets,
-          (unsigned)g_stats.loraRxDropped, (unsigned)g_stats.announcesRx,
+          (unsigned)(g_stats.loraRxDropRing + g_stats.loraRxDropReasm +
+                     g_stats.loraRxDropPartial), (unsigned)g_stats.announcesRx,
           (unsigned)g_stats.announcesTx);
+    // Where the losses went. Silent unless there are some: on a quiet channel
+    // this line never appears, and when it does the five figures say which of
+    // the five causes is responsible rather than leaving one number to guess at.
+    const uint32_t lost = g_stats.loraRxDropRing + g_stats.loraRxDropReasm +
+                          g_stats.loraRxDropPartial + g_stats.loraRxCrcErrors +
+                          g_stats.loraRxBadLength;
+    if (lost)
+      log_i("lora rx losses: ring %u, reassembly %u, partial %u, crc %u, length %u (kept %u)",
+            (unsigned)g_stats.loraRxDropRing, (unsigned)g_stats.loraRxDropReasm,
+            (unsigned)g_stats.loraRxDropPartial, (unsigned)g_stats.loraRxCrcErrors,
+            (unsigned)g_stats.loraRxBadLength, (unsigned)g_stats.loraRxPackets);
     // Reticulum's tables are the other thing that grows with traffic, and the
     // one a heap figure alone will not explain.
     RnsTransport::Tables t = RnsTransport::tables();

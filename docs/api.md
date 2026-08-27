@@ -23,6 +23,8 @@ require HTTP Basic Auth (user `admin`).
              "sf": 8, "cr": 5, "tx_dbm": 7, "sync_word": 18, "preamble": 18,
              "announce_interval": 600, "beacon_interval": 0, "callsign": "retimesh-8249CC",
              "rssi": -68, "snr": 11.5, "rx_packets": 27, "tx_packets": 9, "rx_dropped": 0,
+             "rx_dropped_ring": 0, "rx_dropped_reassembly": 0, "rx_dropped_partial": 0,
+             "rx_crc_errors": 4, "rx_bad_length": 0,
              "announces_tx": 3, "announces_rx": 5, "beacons_tx": 0, "beacons_rx": 2, "apply_error": 0 },
   "peers": { "rns_tcp": 1, "wifi_sta": 1, "tcp_rx_packets": 12 },
   "sd": { "state": "partial", "type": "SDHC", "card_bytes": 15931539456, "volume_bytes": 268435456,
@@ -38,6 +40,43 @@ require HTTP Basic Auth (user `admin`).
 }
 ```
 `kind` is `announce`, `station-id` or `beacon`; `via` is `lora` or `wifi`.
+
+`rx_dropped` is the sum of the three counters below that lost a packet the
+node had already accepted, and the breakdown says which:
+
+- `rx_dropped_ring` — the RX ring was full, so the radio dropped rather than
+  stalling. This is the Reticulum task failing to keep up, not a radio problem.
+- `rx_dropped_reassembly` — the second fragment of a split packet did not fit
+  the reassembly buffer.
+- `rx_dropped_partial` — a half-assembled packet was abandoned because a
+  fragment with a different sequence arrived first. Two senders interleaving
+  fragments destroy each other's packets this way.
+- `rx_crc_errors` — the frame failed its CRC, or the interrupt was spurious.
+  Nothing was ever decoded. Hundreds an hour means interference, which looks
+  nothing like a slow consumer and used to be indistinguishable from one.
+- `rx_bad_length` — the frame was shorter than a header or longer than the
+  maximum, and was discarded before decoding.
+
+The distinction matters because the fixes have nothing in common: a full ring
+is a software scheduling problem, a CRC storm is an RF one, and interleaved
+fragments are a channel-contention one.
+
+These counters do **not** total everything heard on their own, and two of them
+count a different unit from the rest. To reconstruct the whole picture:
+
+- `rx_crc_errors` and `rx_bad_length` count **frames** thrown away before
+  anything was decoded.
+- Every frame that does decode is either one fragment of a reassembly still in
+  progress, or it completes a packet.
+- A completed packet lands in exactly one of `rx_packets`, `beacons_rx` (when
+  it turns out to be a RetiMesh beacon or an RNode station ID, which are not
+  forwarded and so never reach `rx_packets`), or `rx_dropped_ring`.
+- `rx_dropped_partial` and `rx_dropped_reassembly` count **reassemblies** that
+  were given up, not frames.
+
+So a node's total received traffic is `rx_packets + beacons_rx` plus whatever
+the loss counters record, and a split packet contributes two frames to the air
+but one to those totals.
 
 `diag` is what a soak run reads off a node it has no console on.
 

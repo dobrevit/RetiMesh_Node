@@ -401,7 +401,15 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   radio["snr"]        = g_stats.lastSnr;
   radio["rx_packets"] = g_stats.loraRxPackets;
   radio["tx_packets"] = g_stats.loraTxPackets;
-  radio["rx_dropped"] = g_stats.loraRxDropped;
+  // The total stays, so anything already reading it keeps working; the
+  // breakdown beside it is what says which of five different things happened.
+  radio["rx_dropped"]              = g_stats.loraRxDropRing + g_stats.loraRxDropReasm +
+                                     g_stats.loraRxDropPartial;
+  radio["rx_dropped_ring"]         = g_stats.loraRxDropRing;
+  radio["rx_dropped_reassembly"]   = g_stats.loraRxDropReasm;
+  radio["rx_dropped_partial"]      = g_stats.loraRxDropPartial;
+  radio["rx_crc_errors"]           = g_stats.loraRxCrcErrors;
+  radio["rx_bad_length"]           = g_stats.loraRxBadLength;
 
   radio["beacon_interval"] = rs.beaconInterval;
   radio["callsign"]   = loraRadio.callsign();
