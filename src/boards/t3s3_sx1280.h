@@ -20,16 +20,15 @@
 // LilyGO T3-S3 carrying the SX1280 (2.4 GHz) module.
 //
 // Same carrier board as the sub-GHz T3-S3 for SPI, SD, OLED and the button —
-// and NOT the same for the radio, which is the trap. The SX1280 variant hangs
-// BUSY on 36 and its IRQ on 9, where the SX1262 uses 34 and 33, and it carries
-// an external PA behind an RF switch that has to be steered per direction.
-// Pin numbers and the switch follow the reference RNode_Firmware, which
-// supports this exact board (Boards.h, BOARD_T3S3 with MODEM == SX1280).
+// and NOT the same for the radio, which is the trap. The SX1280 hangs BUSY on
+// 36 and its IRQ on 9, where the SX1262 uses 34 and 33. Both were confirmed on
+// the bench by watching every free GPIO across a transmission.
 //
 // Copying the SX1262 pins here does not fail loudly: the chip answers over SPI
 // regardless, so begin() succeeds and the node reports "SX1280 online" while
-// the IRQ never fires and the PA stays off in both directions. A radio that
-// says it is up and hears nothing is worse than one that admits it is down.
+// the IRQ never fires. A radio that says it is up and hears nothing is worse
+// than one that admits it is down, which is why RADIO_SELFTEST_ON_BOOT is set
+// below.
 #define BOARD_NAME          "LilyGO T3-S3 (SX1280)"
 #define PIN_LORA_SCK        5
 #define PIN_LORA_MISO       3

@@ -49,7 +49,9 @@ and warns at boot when it does not fit. `bandwidths_khz` are matched to within
 one the radio will take.
 
 A rejected channel says which bound it missed and names the transceiver, e.g.
-`frequency must be 2400-2500 MHz in 2.4 GHz ISM on the SX1280`.
+`frequency must be 2400-2483.5 MHz in 2.4 GHz ISM on the SX1280` — the bound is
+the region's allocation intersected with what the chip can tune, which is why it
+stops at the top of the ISM band rather than at the SX1280's own 2500 MHz.
 
 `GET /api/export` includes `region`, and `POST /api/import` validates the radio
 section against the same region and capability bounds as the POST above — so an

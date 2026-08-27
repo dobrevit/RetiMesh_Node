@@ -179,6 +179,52 @@ static void test_radio_ranges_and_region_bands_only_overlap_where_they_should() 
   TEST_ASSERT_FALSE(reaches(RadioCaps::kSX1280, us));
 }
 
+// Flashing a 2.4 GHz image over a board that ran a sub-GHz one leaves NVS
+// holding a channel none of which this chip accepts. Every part of it has to be
+// recognised as unusable, not just the frequency: the two bandwidth lists share
+// no value at all, so a frequency-only check still hands begin() a bandwidth it
+// rejects, and the probe then reports a wiring fault for a settings problem.
+static void test_a_sub_ghz_channel_is_recognised_as_unusable_on_a_2400_radio() {
+  TEST_ASSERT_FALSE(RadioCaps::channelUsable(RadioCaps::kSX1280, 869.525f, 125.0f, 8));
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::channelUsable(RadioCaps::kSX1280, 2445.0f, 125.0f, 8),
+                            "right band, but 125 kHz is not a bandwidth this chip has");
+  TEST_ASSERT_FALSE(RadioCaps::channelUsable(RadioCaps::kSX1280, 869.525f, 812.5f, 8));
+  TEST_ASSERT_TRUE (RadioCaps::channelUsable(RadioCaps::kSX1280, 2445.0f, 812.5f, 8));
+  // ... and the reverse, for an image flashed the other way round
+  TEST_ASSERT_FALSE(RadioCaps::channelUsable(RadioCaps::kSX1276, 2445.0f, 812.5f, 8));
+  TEST_ASSERT_TRUE (RadioCaps::channelUsable(RadioCaps::kSX1276, 869.525f, 125.0f, 8));
+  // A spreading factor outside the range counts too
+  TEST_ASSERT_FALSE(RadioCaps::channelUsable(RadioCaps::kSX1276, 869.525f, 125.0f, 6));
+}
+
+// With no radio detected the validator has nothing to protect, so it must not
+// reject the settings an operator is entering while they fix the wiring —
+// including 2.4 GHz ones, which a sub-GHz-only list would have refused.
+static void test_the_unknown_radio_accepts_any_bandwidth_either_family_offers() {
+  for (const float* b = RadioCaps::kBwSubGhz; *b != 0.0f; b++)
+    TEST_ASSERT_TRUE(RadioCaps::bandwidthSupported(RadioCaps::kUnknown, *b));
+  for (const float* b = RadioCaps::kBwSx128x; *b != 0.0f; b++)
+    TEST_ASSERT_TRUE_MESSAGE(RadioCaps::bandwidthSupported(RadioCaps::kUnknown, *b),
+                             "a failed SX1280 probe must not lock the operator out of 2.4 GHz");
+  TEST_ASSERT_FALSE(RadioCaps::bandwidthSupported(RadioCaps::kUnknown, 300.0f));
+}
+
+// The region the operator chose decides the rules. A channel at 868 MHz under
+// "custom" was being told no plan applied while the European duty cycle went on
+// being enforced underneath it.
+static void test_the_region_decides_the_budget_not_the_frequency() {
+  const uint16_t eu = Airtime::effectiveBasisPoints(Airtime::Regime::EuSrd868, 869.525f, 125.0f, 0);
+  TEST_ASSERT_TRUE_MESSAGE(eu > 0, "the EU plan still supplies a budget of its own");
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(0,
+    Airtime::effectiveBasisPoints(Airtime::Regime::None, 869.525f, 125.0f, 0),
+    "custom at a European frequency must not inherit the European allowance");
+  TEST_ASSERT_EQUAL_UINT16(0,
+    Airtime::effectiveBasisPoints(Airtime::Regime::UsIsm915, 869.525f, 125.0f, 0));
+  // A manual cap is the only budget outside the EU plan, and still applies
+  TEST_ASSERT_EQUAL_UINT16(500,
+    Airtime::effectiveBasisPoints(Airtime::Regime::None, 869.525f, 125.0f, 5));
+}
+
 static void test_bandwidth_list_renders_for_an_error_message() {
   char buf[96];
   RadioCaps::bandwidthList(RadioCaps::kSX1280, buf, sizeof(buf));
@@ -202,6 +248,9 @@ int main() {
   RUN_TEST(test_no_radio_offers_a_spreading_factor_that_breaks_the_framing);
   RUN_TEST(test_bandwidths_are_matched_as_tightly_as_the_driver_does);
   RUN_TEST(test_radio_ranges_and_region_bands_only_overlap_where_they_should);
+  RUN_TEST(test_a_sub_ghz_channel_is_recognised_as_unusable_on_a_2400_radio);
+  RUN_TEST(test_the_unknown_radio_accepts_any_bandwidth_either_family_offers);
+  RUN_TEST(test_the_region_decides_the_budget_not_the_frequency);
   RUN_TEST(test_bandwidth_list_renders_for_an_error_message);
   return UNITY_END();
 }

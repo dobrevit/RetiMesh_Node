@@ -151,14 +151,14 @@ async function refreshStatus() {
       ...(!s.gps ? [] : [
         card("GNSS", !s.gps.enabled ? "receiver off"
           : (s.gps.fix ? "fix" : "searching") + " · " + s.gps.satellites + " sats"
-            + (s.gps.fix ? " · HDOP " + s.gps.hdop.toFixed(1) : "")
+            + (s.gps.hdop != null ? " · HDOP " + s.gps.hdop.toFixed(1) : "")
             + (s.gps.clock_set ? " · clock set" : ""),
           s.gps.enabled && s.gps.fix ? "" : "offline"),
         card("Position", !s.gps.enabled ? "receiver off"
           : !s.gps.position_public ? "not published — see the GNSS setting"
           : !s.gps.fix ? "no fix yet"
           : s.gps.latitude.toFixed(5) + ", " + s.gps.longitude.toFixed(5)
-            + " · " + s.gps.altitude_m.toFixed(0) + " m",
+            + (s.gps.altitude_m != null ? " · " + s.gps.altitude_m.toFixed(0) + " m" : ""),
           s.gps.enabled && s.gps.position_public && s.gps.fix ? "" : "offline"),
         card("Device time (UTC)", !s.gps.enabled ? "no receiver"
           : s.gps.clock_set ? s.gps.utc : "not set — waiting for a fix",

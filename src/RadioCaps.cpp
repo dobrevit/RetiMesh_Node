@@ -39,6 +39,14 @@ const float kBwSx128x[] = { 203.125f, 406.25f, 812.5f, 1625.0f, 0.0f };
 // computing time-on-air for a header it is no longer sending. SF5 and SF6 on
 // the SX126x and SX128x keep the explicit header but are not interoperable
 // with RNode's channel set, which is the point of matching it.
+// Everything either family offers, for the no-radio state. A validator that
+// only knew the sub-GHz steps there would reject every valid 2.4 GHz setting
+// while the operator was trying to configure their way out of a failed probe.
+const float kBwAny[] = {
+  7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 203.125f, 250.0f,
+  406.25f, 500.0f, 812.5f, 1625.0f, 0.0f
+};
+
 const Caps kSX1276 = {
   "SX1276", 137.0f, 1020.0f, kBwSubGhz, 7, 12, 2, 17
 };
@@ -55,8 +63,14 @@ const Caps kSX1280 = {
 // to protect and stays out of the way rather than rejecting a setting the
 // operator is entering ahead of fixing the wiring.
 const Caps kUnknown = {
-  "none", 100.0f, 2600.0f, kBwSubGhz, 7, 12, -18, 22
+  "none", 100.0f, 2600.0f, kBwAny, 7, 12, -18, 22
 };
+
+bool channelUsable(const Caps& c, float freqMhz, float bwKhz, uint8_t sf) {
+  return freqMhz >= c.freqMinMhz && freqMhz <= c.freqMaxMhz &&
+         bandwidthSupported(c, bwKhz) &&
+         sf >= c.sfMin && sf <= c.sfMax;
+}
 
 bool bandwidthSupported(const Caps& c, float khz) {
   // RadioLib matches to within 0.001 kHz and refuses anything else. A looser

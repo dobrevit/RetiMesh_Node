@@ -59,6 +59,7 @@ struct Caps {
 // Airtime's business, not the chip's.
 extern const float kBwSubGhz[];   // SX127x / SX126x: 7.8 .. 500 kHz
 extern const float kBwSx128x[];   // SX128x: 203.125 .. 1625 kHz, four steps only
+extern const float kBwAny[];      // both, for the state where no radio answered
 
 extern const Caps kSX1276;
 extern const Caps kSX1262;
@@ -72,5 +73,13 @@ bool bandwidthSupported(const Caps& c, float khz);
 // Renders the supported bandwidths as "7.8, 10.4, ... 500" for an error
 // message. Returns `out` for convenience.
 const char* bandwidthList(const Caps& c, char* out, size_t len);
+
+// Can this radio be set to this channel at all? Used to decide whether a
+// stored configuration survives a change of transceiver: flashing a 2.4 GHz
+// image over a board that was running a sub-GHz one leaves NVS holding a
+// frequency AND a bandwidth the new chip rejects, and passing either to
+// begin() fails the probe — which then reports a wiring fault for what is a
+// settings problem.
+bool channelUsable(const Caps& c, float freqMhz, float bwKhz, uint8_t sf);
 
 } // namespace RadioCaps

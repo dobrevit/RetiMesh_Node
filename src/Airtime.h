@@ -171,6 +171,12 @@ public:
   // manualPct 0 means "whatever the band allows". Returns 0 for "no limit",
   // which happens only outside the known plan with no manual cap.
   static uint16_t effectiveBasisPoints(float freqMhz, float bwKhz, uint8_t manualPct);
+  // The same, for a node whose region is known. Only EuSrd868 has a band
+  // allowance to look up; every other regime leaves the manual cap as the only
+  // budget, so a channel at 868 MHz under "custom" is not quietly held to the
+  // European duty cycle the operator was told did not apply.
+  static uint16_t effectiveBasisPoints(Regime regime, float freqMhz, float bwKhz,
+                                       uint8_t manualPct);
 
   void  addTx(uint32_t nowMs, float airMs);   // record a transmission
   float shortTermUtil(uint32_t nowMs);        // 0..1 over the last two bins

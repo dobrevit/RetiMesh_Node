@@ -511,11 +511,16 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     const bool sharePosition = settings.radio().gpsSharePosition ||
                                request->authenticate(ADMIN_USER, settings.admin().password);
     gps["position_public"] = settings.radio().gpsSharePosition;
+    // HDOP says how well the receiver is solving, not where it is, so it goes
+    // out with the rest of the health readings. It used to be published only
+    // alongside the coordinates, which left it missing on the default private
+    // configuration — and any consumer assuming a fix implies an HDOP broke
+    // there and nowhere else.
+    if (g.valid) gps["hdop"] = g.hdop;
     if (g.valid && sharePosition) {
       gps["latitude"]   = g.latitude;
       gps["longitude"]  = g.longitude;
       gps["altitude_m"] = g.altitude;
-      gps["hdop"]       = g.hdop;
       gps["speed_kmh"]  = g.speedKmh;
     }
   }
@@ -688,6 +693,9 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
     cp["sf_max"]       = c.sfMax;
     cp["tx_min_dbm"]   = c.txMinDbm;
     cp["tx_max_dbm"]   = c.txMaxDbm;
+    // An amplifier does not change what the chip may be driven at, but it does
+    // change what leaves the antenna, and the operator has to account for it.
+    cp["pa_fitted"]    = LoRaRadio::hasPa();
     JsonArray bws = cp["bandwidths_khz"].to<JsonArray>();
     for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++) bws.add(*b);
     // Which rulebook the configured channel falls under, and what it caps
@@ -1010,14 +1018,22 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     rs.txDbm = r["tx_dbm"] | rs.txDbm; rs.syncWord = r["sync_word"] | rs.syncWord; rs.preamble = r["preamble"] | rs.preamble;
     rs.announceInterval = r["announce_interval"] | rs.announceInterval; rs.beaconInterval = r["beacon_interval"] | rs.beaconInterval;
     if (r["callsign"].is<const char*>()) strlcpy(rs.callsign, r["callsign"], sizeof(rs.callsign));
-    if (r["region"].is<const char*>()) strlcpy(rs.region, r["region"], sizeof(rs.region));
+    // Present but unknown is an error, as it is on the POST path. Absent means
+    // a config exported before regions existed, and that is what the frequency
+    // is for. Starting from the node's own region would have made a legacy
+    // import silently inherit it, and a typo silently correct itself.
+    const Airtime::RegionInfo* ireg = nullptr;
+    if (r["region"].is<const char*>()) {
+      ireg = Airtime::regionByKey(r["region"]);
+      if (!ireg) { sendError(request, 400, "radio section names an unknown region"); return; }
+    } else {
+      ireg = Airtime::regionForFreq(rs.freqMhz);
+    }
     // The same bounds the POST path applies, for the same reason: an import
     // used to be validated against hardcoded sub-GHz limits, so a 2.4 GHz node
     // could not restore its own export, and a sub-GHz one could import a
     // configuration the API would have refused — straight into NVS.
     const RadioCaps::Caps& icaps = loraRadio.caps();
-    const Airtime::RegionInfo* ireg = Airtime::regionByKey(rs.region);
-    if (!ireg) ireg = Airtime::regionForFreq(rs.freqMhz);
     const float ilow  = max(ireg->lowMhz,  icaps.freqMinMhz);
     const float ihigh = min(ireg->highMhz, icaps.freqMaxMhz);
     if (rs.freqMhz < ilow || rs.freqMhz > ihigh ||

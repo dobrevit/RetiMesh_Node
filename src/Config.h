@@ -216,11 +216,12 @@
   #define HAS_RF_SWITCH     0
 #endif
 
-// A board with an external PA radiates more than the chip is asked for, so the
-// ceiling belongs to the board rather than to RadioCaps, which describes chips.
-// Zero means "whatever the transceiver itself allows".
-#ifndef RF_TX_DBM_MAX
-  #define RF_TX_DBM_MAX     0
+// True where the board puts a power amplifier after the transceiver. It does
+// not change what the chip may be driven at — the driver's own maximum still
+// applies — but it does change what leaves the antenna, which is the operator's
+// to account for. Reported through the API so the settings page can say so.
+#ifndef HAS_PA
+  #define HAS_PA            0
 #endif
 
 // A single timed transmission at boot, to prove the IRQ line is the one the

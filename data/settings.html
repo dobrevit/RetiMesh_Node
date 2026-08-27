@@ -287,7 +287,8 @@ function applyRadioCaps(r) {
 
   f.tx_dbm.min = c.tx_min_dbm;
   f.tx_dbm.max = r.tx_dbm_max;
-  $("pmax").textContent = c.tx_min_dbm + " to " + r.tx_dbm_max;
+  $("pmax").textContent = c.tx_min_dbm + " to " + r.tx_dbm_max
+    + (c.pa_fitted ? " into the amplifier — more than this leaves the antenna" : "");
 
   $("regionSel").onchange = e => applyRegion(e.target.value);
   $("regionDefaults").onclick = () => {

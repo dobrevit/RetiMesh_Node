@@ -197,6 +197,12 @@ static const Airtime::RegionInfo kRegions[] = {
   return best;
 }
 
+/*static*/ uint16_t Airtime::effectiveBasisPoints(Regime regime, float freqMhz, float bwKhz,
+                                                 uint8_t manualPct) {
+  if (regime != Regime::EuSrd868) return (uint16_t)manualPct * 100;
+  return effectiveBasisPoints(freqMhz, bwKhz, manualPct);
+}
+
 /*static*/ uint16_t Airtime::effectiveBasisPoints(float freqMhz, float bwKhz, uint8_t manualPct) {
   const Band* band = bandFor(freqMhz, bwKhz);
   const uint16_t manual = (uint16_t)manualPct * 100;         // percent -> basis points

@@ -156,7 +156,7 @@ settings the probe carries, one of the two fails for the wrong reason. So the
 two images are not interchangeable, and `boards.json` lists them separately.
 
 Bounds now come from the transceiver that is fitted rather than from a sub-GHz
-assumption. `/api/status` reports them under `radio.caps`: tuning range, the
+assumption. `GET /api/settings` reports them under `radio.caps`: tuning range, the
 bandwidth steps the chip actually has, the spreading-factor and power ranges,
 and which band plan the configured channel falls under. The SX1280 offers four
 bandwidths — 203.125, 406.25, 812.5 and 1625 kHz — and none of them appear in

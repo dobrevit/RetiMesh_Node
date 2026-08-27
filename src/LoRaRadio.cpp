@@ -56,13 +56,27 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   _spi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
 
 #if RF_MODEM_SX1280
+  // A board reflashed from a sub-GHz image still holds that channel in NVS, and
+  // none of it is usable here: the frequency is out of range and the bandwidth
+  // is from a list this chip does not share a single value with. Correct the
+  // whole channel once, before the probe, so begin(), _active, the airtime
+  // budget and the status API all describe the same radio.
+  if (!RadioCaps::channelUsable(RadioCaps::kSX1280, _active.freqMhz, _active.bwKhz, _active.sf)) {
+    log_w("stored channel %.3f MHz / %.1f kHz / SF%u cannot be tuned by an SX1280 — starting on "
+          "%.3f MHz / %.1f kHz / SF%u instead; set a 2.4 GHz channel in the settings",
+          (double)_active.freqMhz, (double)_active.bwKhz, (unsigned)_active.sf,
+          (double)RF_FREQ_MHZ, (double)RF_BW_KHZ, (unsigned)RF_SF);
+    _active.freqMhz = RF_FREQ_MHZ;
+    _active.bwKhz   = RF_BW_KHZ;
+    _active.sf      = RF_SF;
+  }
   // The 2.4 GHz part is selected at build time rather than probed. Detection
   // works by tuning the chip and seeing whether it answers, and an SX1280 will
   // not accept an 868 MHz channel any more than an SX1262 will accept 2.4 GHz:
   // whichever settings the probe carries, one of the two is guaranteed to fail
   // for the wrong reason. A board either has this radio or it does not, and the
   // board header says which.
-  if (!probeSX1280(s)) {
+  if (!probeSX1280(_active)) {
     log_e("No SX1280 found on DIO1=%d/BUSY=%d — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY);
     return false;
   }
@@ -81,7 +95,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   _radio->setPacketReceivedAction(onRadioIrq);   // DIO1 / DIO0 as appropriate
   _online = true;
   g_stats.radioModel = _modelName;
-  configureAirtime(s);                           // the probes bypass applySettings()
+  configureAirtime(_active);                     // the probes bypass applySettings()
   logActive();
   #if RADIO_SELFTEST_ON_BOOT
     irqSelfTest();
@@ -153,8 +167,14 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
 
   // What the channel is governed by depends on the band it sits in, and the
   // three regimes constrain different things — see Airtime::Regime.
-  const Airtime::Regime regime = Airtime::regimeFor(s.freqMhz);
-  const uint16_t limit = Airtime::effectiveBasisPoints(s.freqMhz, s.bwKhz, s.dutyCyclePct);
+  // The stored region decides which rulebook applies. Frequency is only used to
+  // infer one for a node configured before the setting existed — otherwise
+  // choosing "custom" at 868 MHz would tell the operator no plan applied while
+  // the European duty cycle went on being enforced underneath.
+  const Airtime::RegionInfo* region = Airtime::regionByKey(s.region);
+  if (!region) region = Airtime::regionForFreq(s.freqMhz);
+  const Airtime::Regime regime = region->regime;
+  const uint16_t limit = Airtime::effectiveBasisPoints(regime, s.freqMhz, s.bwKhz, s.dutyCyclePct);
   g_stats.dutyLimitBp = limit;
 
   switch (regime) {
@@ -260,21 +280,9 @@ bool LoRaRadio::probeSX1280(const RadioSettings& s) {
     // direction and the radio is deaf and mute while reporting itself up.
     sx->setRfSwitchPins(PIN_LORA_RXEN, PIN_LORA_TXEN);
   #endif
-  // A frequency left in NVS by a sub-GHz build is outside what this chip can
-  // tune, and begin() would reject it — reporting a wiring fault for what is a
-  // settings problem, on a path with no second chip to fall back to. Start from
-  // the board's own default instead and let the operator retune.
-  float freq = s.freqMhz;
-  if (freq < RadioCaps::kSX1280.freqMinMhz || freq > RadioCaps::kSX1280.freqMaxMhz) {
-    log_w("stored channel %.3f MHz is outside the SX1280's %g-%g MHz range — starting on "
-          "%.3f MHz instead; set a 2.4 GHz channel in the settings",
-          (double)freq, (double)RadioCaps::kSX1280.freqMinMhz,
-          (double)RadioCaps::kSX1280.freqMaxMhz, (double)RF_FREQ_MHZ);
-    freq = RF_FREQ_MHZ;
-  }
-  int16_t state = sx->begin(freq, s.bwKhz, s.sf, s.cr, s.syncWord,
+  int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
                             clampPower(s.txDbm, RadioCaps::kSX1280.txMinDbm,
-                                       maxBoardTxDbm(RadioCaps::kSX1280.txMaxDbm)),
+                                       RadioCaps::kSX1280.txMaxDbm),
                             s.preamble);
   if (state != RADIOLIB_ERR_NONE) {
     log_w("SX1280 not found (code %d)", state);
@@ -758,7 +766,12 @@ void LoRaRadio::refreshAirtimeStats() {
   g_stats.airtimeShort = _airtime.shortTermUtil(now);
   g_stats.csmaBand     = _airtime.cwBand(g_stats.airtimeShort);
   g_stats.airtimeLong  = _airtime.longTermUtil(now);
-  const uint16_t limit = Airtime::effectiveBasisPoints(_active.freqMhz, _active.bwKhz, _active.dutyCyclePct);
+  // Same rulebook as configureAirtime() chose, or this would quietly re-apply
+  // the European budget to a node the operator had put in another region.
+  const Airtime::RegionInfo* rg = Airtime::regionByKey(_active.region);
+  if (!rg) rg = Airtime::regionForFreq(_active.freqMhz);
+  const uint16_t limit = Airtime::effectiveBasisPoints(rg->regime, _active.freqMhz,
+                                                       _active.bwKhz, _active.dutyCyclePct);
   g_stats.dutyLimitBp = limit;
   g_stats.dutyBudget   = _airtime.budgetUsed(now, limit);
   const bool locked    = _airtime.locked(now, limit);

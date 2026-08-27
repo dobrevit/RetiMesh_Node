@@ -55,10 +55,11 @@
 #define PIN_LORA_RXEN       21
 #define PIN_LORA_TXEN       10
 
-// With the PA in circuit the figure reaching the antenna is not the one the
-// chip was asked for, so the ceiling belongs to the board and not to
-// RadioCaps, which describes chips rather than what is built around them.
-#define RF_TX_DBM_MAX       20
+// The amplifier does not raise what the chip may be driven at — the SX1280
+// driver still refuses anything over 13 dBm — but it does raise what leaves the
+// antenna. The operator has to account for the difference; the node only says
+// an amplifier is fitted.
+#define HAS_PA              1
 
 // One transmission at boot, timed against the TxDone interrupt. On a board
 // whose IRQ pin is guessed wrong the chip still answers over SPI and still
