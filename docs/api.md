@@ -109,6 +109,11 @@ node had already accepted, and the breakdown says which:
   nothing like a slow consumer and used to be indistinguishable from one.
 - `rx_bad_length` — the frame was shorter than a header or longer than the
   maximum, and was discarded before decoding.
+- `rx_spurious_irq` — the radio raised its interrupt with no completed
+  reception to collect. TxDone and channel-activity results share that line, so
+  a small number is normal. A large and growing one means receptions are not
+  being acknowledged to the chip and the same packet is being presented over
+  and over, which shows up as `rx_dropped_ring` climbing on an idle channel.
 
 The distinction matters because the fixes have nothing in common: a full ring
 is a software scheduling problem, a CRC storm is an RF one, and interleaved

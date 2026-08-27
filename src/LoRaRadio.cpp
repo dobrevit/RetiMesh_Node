@@ -110,7 +110,11 @@ void LoRaRadio::irqSelfTest() {
   TaskHandle_t previous = s_taskHandle;
   s_taskHandle = xTaskGetCurrentTaskHandle();
 
-  const uint8_t probe[] = { 0x00, 'R', 'M', '?' };
+  // Non-printable payload on purpose: isStationId() treats any short printable
+  // frame as an RNode station ID, so a readable probe turns up in every
+  // neighbouring node's table as a station called "RM?". These bytes cannot be
+  // mistaken for one, and the split flag is clear so no reassembly starts.
+  const uint8_t probe[] = { 0x00, 0x01, 0x02, 0x03 };
   const uint32_t started = millis();
   ulTaskNotifyTake(pdTRUE, 0);                   // clear anything stale
   if (_radio->startTransmit((uint8_t*)probe, sizeof(probe)) != RADIOLIB_ERR_NONE) {
@@ -435,8 +439,25 @@ void LoRaRadio::taskLoop() {
 // RX path
 // ---------------------------------------------------------------------------
 void LoRaRadio::handleRadioIrq() {
-  // Only RxDone is expected here: TxDone notifications are consumed
-  // synchronously inside sendFrame(), and CAD inside csmaWait().
+  // Ask the radio what it actually wants, rather than assuming a notification
+  // means a packet arrived.
+  //
+  // It very often does not. The interrupt line carries TxDone and
+  // channel-activity results as well as RxDone, and — the expensive one — a
+  // reception whose flags have not been cleared re-raises the line the moment
+  // receive mode is re-entered. That turned a single frame into 391 deliveries
+  // at a steady 13 ms apart, each one a fresh copy of the same bytes read back
+  // out of the chip, until the RX ring overflowed. On a channel measured at
+  // 0.67 % occupancy the node was reporting several packets a second and
+  // discarding 93 % of them; none of that traffic existed.
+  const uint32_t irq = _radio->getIrqFlags();
+  if ((irq & (1UL << RADIOLIB_IRQ_RX_DONE)) == 0) {
+    g_stats.loraRxSpuriousIrq++;
+    _radio->clearIrqFlags(RADIOLIB_IRQ_RX_DEFAULT_FLAGS);
+    _radio->startReceive();
+    return;
+  }
+
   size_t len = _radio->getPacketLength();
   // At least one payload byte behind the header. A header-only frame used to
   // pass this guard, yield a zero-length payload, and then fall out of the
@@ -445,6 +466,7 @@ void LoRaRadio::handleRadioIrq() {
   // framing ever grows.
   if (len <= LORA_HEADER_LEN || len > LORA_FRAME_MAX) {
     g_stats.loraRxBadLength++;
+    _radio->clearIrqFlags(RADIOLIB_IRQ_RX_DEFAULT_FLAGS);
     _radio->startReceive();
     return;
   }
@@ -455,6 +477,7 @@ void LoRaRadio::handleRadioIrq() {
     // interference — which looks nothing like a node whose consumer is slow,
     // and used to be indistinguishable from it.
     g_stats.loraRxCrcErrors++;
+    _radio->clearIrqFlags(RADIOLIB_IRQ_RX_DEFAULT_FLAGS);
     _radio->startReceive();
     return;
   }
@@ -515,6 +538,9 @@ void LoRaRadio::handleRadioIrq() {
     else                                   deliverPacket(_rxLen);
   }
 
+  // The reception is collected; drop its flags so re-entering receive mode
+  // cannot present the same packet again.
+  _radio->clearIrqFlags(RADIOLIB_IRQ_RX_DEFAULT_FLAGS);
   _radio->startReceive();
 }
 
