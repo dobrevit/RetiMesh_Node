@@ -32,28 +32,39 @@ const float kBwSubGhz[] = {
 // plan copied across from 868 MHz will not name a bandwidth this chip has.
 const float kBwSx128x[] = { 203.125f, 406.25f, 812.5f, 1625.0f, 0.0f };
 
+// Spreading factors stop at 7 on every part, and not for want of silicon. SF6
+// switches an SX127x into implicit-header mode, where getPacketLength() returns
+// a fixed configured length instead of the real one — which breaks the
+// variable-length framing this firmware is built on, and would leave Airtime
+// computing time-on-air for a header it is no longer sending. SF5 and SF6 on
+// the SX126x and SX128x keep the explicit header but are not interoperable
+// with RNode's channel set, which is the point of matching it.
 const Caps kSX1276 = {
-  "SX1276", 137.0f, 1020.0f, kBwSubGhz, 6, 12, 2, 17
+  "SX1276", 137.0f, 1020.0f, kBwSubGhz, 7, 12, 2, 17
 };
 const Caps kSX1262 = {
-  "SX1262", 150.0f, 960.0f,  kBwSubGhz, 5, 12, 2, 22
+  "SX1262", 150.0f, 960.0f,  kBwSubGhz, 7, 12, 2, 22
 };
 // -18 to +12.5 dBm on the datasheet; RadioLib takes whole dBm and accepts 13
-// as its top step. SF5 and SF6 exist here but are not interoperable with the
-// sub-GHz framing, so the range is stated as the chip's, not as advice.
+// as its top step. A board carrying an external PA raises the ceiling; see
+// RF_TX_DBM_MAX in the board header.
 const Caps kSX1280 = {
-  "SX1280", 2400.0f, 2500.0f, kBwSx128x, 5, 12, -18, 13
+  "SX1280", 2400.0f, 2500.0f, kBwSx128x, 7, 12, -18, 13
 };
 // No radio answered. Nothing can be transmitted, so the validator has nothing
 // to protect and stays out of the way rather than rejecting a setting the
 // operator is entering ahead of fixing the wiring.
 const Caps kUnknown = {
-  "none", 100.0f, 2600.0f, kBwSubGhz, 5, 12, -18, 22
+  "none", 100.0f, 2600.0f, kBwSubGhz, 7, 12, -18, 22
 };
 
 bool bandwidthSupported(const Caps& c, float khz) {
+  // RadioLib matches to within 0.001 kHz and refuses anything else. A looser
+  // tolerance here lets a near-miss through validation and into NVS, where it
+  // fails to apply — and then fails again at the next boot, leaving the node
+  // with its radio offline for a value the API said was fine.
   for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++)
-    if (fabsf(*b - khz) < 0.05f) return true;
+    if (fabsf(*b - khz) <= 0.001f) return true;
   return false;
 }
 

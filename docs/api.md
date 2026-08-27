@@ -3,6 +3,59 @@
 Base URL `http://10.42.0.1`. JSON everywhere. Endpoints under `/api/settings`
 require HTTP Basic Auth (user `admin`).
 
+## Radio region and capabilities
+
+`GET /api/settings` carries `radio.region` and a `radio.caps` object describing
+what the transceiver in this node can be asked for. `POST /api/settings/radio`
+accepts `region` alongside the channel fields and validates the channel against
+both the region and the chip.
+
+```json
+"radio": {
+  "region": "eu868", "model": "SX1276", "tx_dbm_max": 17,
+  "caps": {
+    "model": "SX1276", "freq_min_mhz": 137, "freq_max_mhz": 1020,
+    "bandwidths_khz": [7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125, 250, 500],
+    "sf_min": 7, "sf_max": 12, "tx_min_dbm": 2, "tx_max_dbm": 17,
+    "regime": "EU 863-870 SRD", "max_dwell_ms": 0,
+    "regions": [
+      { "key": "eu868", "name": "Europe 863-870 MHz", "low_mhz": 863, "high_mhz": 870,
+        "regime": "EU 863-870 SRD", "dwell_ms": 0,
+        "default_mhz": 869.525, "default_bw_khz": 125, "default_sf": 8 }
+    ]
+  }
+}
+```
+
+`region` is a stored setting, not something inferred from the frequency. The
+inference runs the wrong way round: the band a node may use is a fact about
+where it is standing, and the channel is chosen inside it — 868.1 MHz is a
+legal channel in Europe and an illegal one in the US. Keys are `eu868`,
+`us915`, `ism2400` and `custom`. A node configured before the field existed is
+migrated from its frequency at load, so one already obeying an EU duty cycle
+keeps obeying it rather than landing in `custom` where nothing is enforced.
+
+`caps.regions` lists **only the regions this transceiver can reach** — an
+SX1280 node does not offer `eu868`, because choosing it could not be honoured.
+`custom` is always listed, and is the one entry whose `low_mhz`/`high_mhz` and
+`default_mhz` are taken from the chip's own tuning range rather than from a
+band plan.
+
+Each region says what governs there. `dwell_ms` is non-zero only for `us915`,
+where FCC 15.247 caps how long one transmission may hold a channel rather than
+how much of an hour may be used; the node checks its longest frame against that
+and warns at boot when it does not fit. `bandwidths_khz` are matched to within
+0.001 kHz, the same tolerance the driver uses, so a value the API accepts is
+one the radio will take.
+
+A rejected channel says which bound it missed and names the transceiver, e.g.
+`frequency must be 2400-2500 MHz in 2.4 GHz ISM on the SX1280`.
+
+`GET /api/export` includes `region`, and `POST /api/import` validates the radio
+section against the same region and capability bounds as the POST above — so an
+export always restores onto the node it came from, and never carries a channel
+past the checks on the way in.
+
 ## `GET /api/status` (public)
 ```json
 {

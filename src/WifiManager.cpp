@@ -681,8 +681,18 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
       o["high_mhz"]  = custom ? c.freqMaxMhz : min(ri.highMhz, c.freqMaxMhz);
       o["regime"]    = Airtime::regimeName(ri.regime);
       o["dwell_ms"]  = Airtime::maxDwellMs(ri.regime);
-      o["default_mhz"] = ri.defaultMhz;
-      o["default_bw_khz"] = ri.defaultBwKhz;
+      // Custom carries no channel of its own — it is offered on every radio,
+      // so a fixed sub-GHz suggestion would be untunable on a 2.4 GHz one.
+      // Fall back to the middle of what this chip can reach and its widest
+      // bandwidth, which is at least always a valid starting point.
+      float dfl = ri.defaultMhz, dbw = ri.defaultBwKhz;
+      if (dfl == 0.0f) dfl = (c.freqMinMhz + c.freqMaxMhz) / 2.0f;
+      if (dbw == 0.0f) {
+        dbw = c.bandwidthsKhz[0];
+        for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++) dbw = *b;
+      }
+      o["default_mhz"] = dfl;
+      o["default_bw_khz"] = dbw;
       o["default_sf"]  = ri.defaultSf;
     }
   }
@@ -934,7 +944,7 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   r["freq_mhz"] = rs.freqMhz; r["bw_khz"] = rs.bwKhz; r["sf"] = rs.sf; r["cr"] = rs.cr; r["tx_dbm"] = rs.txDbm;
   r["sync_word"] = rs.syncWord; r["preamble"] = rs.preamble; r["announce_interval"] = rs.announceInterval;
   r["beacon_interval"] = rs.beaconInterval; r["callsign"] = rs.callsign;
-  r["duty_cycle_pct"] = rs.dutyCyclePct;
+  r["duty_cycle_pct"] = rs.dutyCyclePct; r["region"] = rs.region;
   JsonObject w = doc["wifi"].to<JsonObject>();
   w["ssid"] = ws.ssid; w["security"] = Settings::securityName(ws.security); w["password"] = ws.password;
   w["channel"] = ws.channel; w["max_stations"] = ws.maxStations; w["hidden"] = ws.hidden;
@@ -965,9 +975,24 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     rs.txDbm = r["tx_dbm"] | rs.txDbm; rs.syncWord = r["sync_word"] | rs.syncWord; rs.preamble = r["preamble"] | rs.preamble;
     rs.announceInterval = r["announce_interval"] | rs.announceInterval; rs.beaconInterval = r["beacon_interval"] | rs.beaconInterval;
     if (r["callsign"].is<const char*>()) strlcpy(rs.callsign, r["callsign"], sizeof(rs.callsign));
-    if (rs.freqMhz < 137 || rs.freqMhz > 1020 || !Settings::validBandwidth(rs.bwKhz) || rs.sf < 7 || rs.sf > 12 || rs.cr < 5 || rs.cr > 8) {
-      sendError(request, 400, "radio section invalid"); return;
+    if (r["region"].is<const char*>()) strlcpy(rs.region, r["region"], sizeof(rs.region));
+    // The same bounds the POST path applies, for the same reason: an import
+    // used to be validated against hardcoded sub-GHz limits, so a 2.4 GHz node
+    // could not restore its own export, and a sub-GHz one could import a
+    // configuration the API would have refused — straight into NVS.
+    const RadioCaps::Caps& icaps = loraRadio.caps();
+    const Airtime::RegionInfo* ireg = Airtime::regionByKey(rs.region);
+    if (!ireg) ireg = Airtime::regionForFreq(rs.freqMhz);
+    const float ilow  = max(ireg->lowMhz,  icaps.freqMinMhz);
+    const float ihigh = min(ireg->highMhz, icaps.freqMaxMhz);
+    if (rs.freqMhz < ilow || rs.freqMhz > ihigh ||
+        !RadioCaps::bandwidthSupported(icaps, rs.bwKhz) ||
+        rs.sf < icaps.sfMin || rs.sf > icaps.sfMax ||
+        rs.cr < 5 || rs.cr > 8 ||
+        rs.txDbm < icaps.txMinDbm || rs.txDbm > loraRadio.maxTxDbm()) {
+      sendError(request, 400, "radio section invalid for the transceiver in this node"); return;
     }
+    strlcpy(rs.region, ireg->key, sizeof(rs.region));
     settings.saveRadio(rs);
   }
   if (in["wifi"].is<JsonObject>()) {

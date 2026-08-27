@@ -208,6 +208,19 @@
   #define RF_MODEM_SX1280   0
 #endif
 
+// Boards with a transmit/receive switch in front of the antenna name its pins;
+// RadioLib steers them. Without one the radio is wired straight through.
+#ifndef HAS_RF_SWITCH
+  #define HAS_RF_SWITCH     0
+#endif
+
+// A board with an external PA radiates more than the chip is asked for, so the
+// ceiling belongs to the board rather than to RadioCaps, which describes chips.
+// Zero means "whatever the transceiver itself allows".
+#ifndef RF_TX_DBM_MAX
+  #define RF_TX_DBM_MAX     0
+#endif
+
 #ifndef RF_TCXO_VOLTAGE
   #define RF_TCXO_VOLTAGE   1.8
 #endif

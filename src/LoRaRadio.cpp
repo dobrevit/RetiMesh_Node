@@ -27,9 +27,12 @@
 LoRaRadio loraRadio;
 TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
 
-static int8_t clampPower(int8_t dbm, int8_t maxDbm) {
+// Both bounds come from the caller. The floor used to be a hardcoded 2 dBm,
+// which quietly rewrote anything lower — so an SX1280 asked for -10 dBm, a
+// figure the API accepted and kept reporting, transmitted at 2 dBm instead.
+static int8_t clampPower(int8_t dbm, int8_t minDbm, int8_t maxDbm) {
   if (dbm > maxDbm) return maxDbm;
-  if (dbm < 2) return 2;
+  if (dbm < minDbm) return minDbm;
   return dbm;
 }
 
@@ -174,7 +177,9 @@ bool LoRaRadio::probeSX1262(const RadioSettings& s) {
   Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
   SX1262* sx  = new SX1262(mod);
   int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
-                            clampPower(s.txDbm, 22), s.preamble, RF_TCXO_VOLTAGE, false);
+                            clampPower(s.txDbm, RadioCaps::kSX1262.txMinDbm,
+                                       RadioCaps::kSX1262.txMaxDbm),
+                            s.preamble, RF_TCXO_VOLTAGE, false);
   if (state != RADIOLIB_ERR_NONE) {
     log_w("SX1262 not found (code %d)", state);
     delete sx; delete mod;
@@ -192,11 +197,30 @@ bool LoRaRadio::probeSX1262(const RadioSettings& s) {
 }
 
 bool LoRaRadio::probeSX1280(const RadioSettings& s) {
-  // Same wiring as the SX1262: BUSY plus DIO1 as the primary IRQ.
   Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
   SX1280* sx  = new SX1280(mod);
-  int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
-                            clampPower(s.txDbm, RadioCaps::kSX1280.txMaxDbm), s.preamble);
+  #if HAS_RF_SWITCH
+    // The PA sits behind a transmit/receive switch. RadioLib drives it once it
+    // knows the pins; without this the antenna is connected in neither
+    // direction and the radio is deaf and mute while reporting itself up.
+    sx->setRfSwitchPins(PIN_LORA_RXEN, PIN_LORA_TXEN);
+  #endif
+  // A frequency left in NVS by a sub-GHz build is outside what this chip can
+  // tune, and begin() would reject it — reporting a wiring fault for what is a
+  // settings problem, on a path with no second chip to fall back to. Start from
+  // the board's own default instead and let the operator retune.
+  float freq = s.freqMhz;
+  if (freq < RadioCaps::kSX1280.freqMinMhz || freq > RadioCaps::kSX1280.freqMaxMhz) {
+    log_w("stored channel %.3f MHz is outside the SX1280's %g-%g MHz range — starting on "
+          "%.3f MHz instead; set a 2.4 GHz channel in the settings",
+          (double)freq, (double)RadioCaps::kSX1280.freqMinMhz,
+          (double)RadioCaps::kSX1280.freqMaxMhz, (double)RF_FREQ_MHZ);
+    freq = RF_FREQ_MHZ;
+  }
+  int16_t state = sx->begin(freq, s.bwKhz, s.sf, s.cr, s.syncWord,
+                            clampPower(s.txDbm, RadioCaps::kSX1280.txMinDbm,
+                                       maxBoardTxDbm(RadioCaps::kSX1280.txMaxDbm)),
+                            s.preamble);
   if (state != RADIOLIB_ERR_NONE) {
     log_w("SX1280 not found (code %d)", state);
     delete sx; delete mod;
@@ -219,7 +243,9 @@ bool LoRaRadio::probeSX127x(const RadioSettings& s) {
   Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO0, PIN_LORA_RST, PIN_LORA_DIO1, _spi);
   SX1276* sx  = new SX1276(mod);
   int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
-                            clampPower(s.txDbm, 17), s.preamble, 0);
+                            clampPower(s.txDbm, RadioCaps::kSX1276.txMinDbm,
+                                       RadioCaps::kSX1276.txMaxDbm),
+                            s.preamble, 0);
   if (state != RADIOLIB_ERR_NONE) {
     log_w("SX127x not found (code %d)", state);
     delete sx; delete mod;
@@ -236,7 +262,7 @@ bool LoRaRadio::probeSX127x(const RadioSettings& s) {
 void LoRaRadio::logActive() const {
   log_i("%s online: %.3f MHz, BW %.1f kHz, SF%d, CR 4/%d, %d dBm, sync 0x%02X, preamble %u",
         _modelName, _active.freqMhz, _active.bwKhz, _active.sf, _active.cr,
-        clampPower(_active.txDbm, maxTxDbm()), _active.syncWord, _active.preamble);
+        clampPower(_active.txDbm, _caps->txMinDbm, maxTxDbm()), _active.syncWord, _active.preamble);
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +289,7 @@ bool LoRaRadio::applySettings(const RadioSettings& s) {
     { "bandwidth",        CHIP(setBandwidth(s.bwKhz)) },
     { "spreading factor", CHIP(setSpreadingFactor(s.sf)) },
     { "coding rate",      CHIP(setCodingRate(s.cr)) },
-    { "tx power",         CHIP(setOutputPower(clampPower(s.txDbm, maxTxDbm()))) },
+    { "tx power",         CHIP(setOutputPower(clampPower(s.txDbm, _caps->txMinDbm, maxTxDbm()))) },
     { "preamble",         CHIP(setPreambleLength(s.preamble)) },
     { "sync word",        CHIP(setSyncWord(s.syncWord)) },
   };

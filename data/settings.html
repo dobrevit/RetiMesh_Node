@@ -82,12 +82,15 @@
     <div class="msg" id="radioMsg"></div>
     <div class="note"><b>Announces</b> make this node a visible Reticulum destination (<code>retimesh.node</code>) to every RNS peer &mdash; the normal way to be discovered.
       <b>Beacons</b> are a RetiMesh-only quick probe (hello on boot, replies within seconds); off by default.<br>
-      <b>Duty cycle.</b> How much of each hour the node may transmit for is set by the sub-band the frequency falls in, not by preference:
-      the EU 863&ndash;870 MHz plan allows 0.1 %, 1 % or 10 % depending on where you land (868.0&ndash;868.6 is 1 %, 869.4&ndash;869.65 is 10 %).
-      The node reads the frequency, applies that allowance less a small safety margin, and shows the result on the status page. The field above
-      is an optional stricter cap &mdash; leave it at 0 to follow the band. On a channel outside that plan there is nothing to look up, so the
-      cap becomes your own limit and the local rules are yours to know. When the budget is spent, packets wait in the queue instead of being
-      dropped.<br>
+      <b>Duty cycle.</b> What this field means depends on the region above, because the three do not cap the same thing &mdash; the note
+      beside the region selector says which one you are in.<br>
+      In <b>Europe</b> the sub-band decides how much of each hour the node may transmit for, not preference: 0.1 %, 1 % or 10 % depending on
+      where you land (868.0&ndash;868.6 is 1 %, 869.4&ndash;869.65 is 10 %). The node applies that allowance less a small safety margin and shows
+      the result on the status page, so leaving this at 0 is usually right; a value here is an optional stricter cap.<br>
+      In the <b>US band</b> there is no hourly allowance at all. What is capped is how long a single transmission may hold the channel, and the
+      node checks that per packet and warns at boot when the longest frame does not fit. At <b>2.4 GHz</b> neither applies; power and
+      listen-before-talk govern, and the node already does the latter. In both, this field is a budget of your own choosing rather than one
+      being followed, and the local rules remain yours to know. When a budget is spent, packets wait in the queue instead of being dropped.<br>
       <b>GNSS.</b> The receiver gives the node a real clock, which it has no other way to get: without one its idea of time restarts at zero
       on every reboot. Its health (fix, satellites, UTC) is public on the status API; the coordinates are not, unless you publish them
       &mdash; the status page is reachable by anyone who can join this access point.<br>
@@ -316,7 +319,18 @@ async function load() {
     gps_share_position: r.gps_share_position ? "1" : "0" });
   $("gpsField").hidden = !r.has_gps;
   $("gpsShareField").hidden = !r.has_gps;
-  applyRegion(r.region);
+  // A node reflashed from a sub-GHz image onto a 2.4 GHz one still has the old
+  // region in NVS, and it is not in the list this radio offers — which left the
+  // select blank, the frequency box unbounded, and every save rejected with no
+  // hint that re-picking the region was the fix.
+  const sel = $("regionSel");
+  if (!regionInfo(r.region) && sel.options.length) {
+    sel.value = sel.options[0].value;
+    setMsg("radioMsg", "This node's stored region (" + (r.region || "none") + ") is not one the "
+      + (r.caps ? r.caps.model : "fitted radio") + " can tune. Showing "
+      + sel.options[0].textContent + " — check the channel before saving.", "warn");
+  }
+  applyRegion(sel.value);
   $("radioModel").textContent = r.online ? "Transceiver: " + r.model : "Transceiver: OFFLINE — settings are saved but not applied";
   if (r.apply_error) setMsg("radioMsg", "Last apply failed (RadioLib code " + r.apply_error + "); previous values restored.", "bad");
   $("rnsSnippet").textContent = rnsSnippet(r);

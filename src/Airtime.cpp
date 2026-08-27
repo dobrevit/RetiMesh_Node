@@ -104,9 +104,11 @@ static const Airtime::RegionInfo kRegions[] = {
   { Airtime::Region::Ism2400, "ism2400", "2.4 GHz ISM",        2400.0f, 2483.5f,
     Airtime::Regime::Ism2400,  2445.0f,  812.5f,  8 },
   // Everything the firmware has no plan for. The operator gets the chip's full
-  // tuning range and full responsibility with it.
+  // tuning range and full responsibility with it. Zero defaults because this
+  // entry is offered on every radio: a fixed 869.525 MHz suggestion is
+  // unusable on a 2.4 GHz one, so the channel is derived from the chip.
   { Airtime::Region::Custom,  "custom",  "Custom / unlisted",     0.0f, 100000.0f,
-    Airtime::Regime::None,     869.525f, 125.0f,  8 },
+    Airtime::Regime::None,     0.0f,     0.0f,    8 },
 };
 
 /*static*/ const Airtime::RegionInfo* Airtime::regions(size_t& count) {
@@ -132,10 +134,12 @@ static const Airtime::RegionInfo kRegions[] = {
 }
 
 /*static*/ Airtime::Regime Airtime::regimeFor(float freqMhz) {
-  if (freqMhz >= 863.0f  && freqMhz <  870.0f)  return Regime::EuSrd868;
-  if (freqMhz >= 902.0f  && freqMhz <= 928.0f)  return Regime::UsIsm915;
-  if (freqMhz >= 2400.0f && freqMhz <= 2483.5f) return Regime::Ism2400;
-  return Regime::None;
+  // Derived from the region table rather than restating its edges. The second
+  // copy disagreed with the first at exactly 870.000 MHz: the validator took
+  // it as a European channel and enforced a duty cycle, while this told the
+  // operator no plan applied and nothing was being limited.
+  const RegionInfo* r = regionForFreq(freqMhz);
+  return r ? r->regime : Regime::None;
 }
 
 /*static*/ const char* Airtime::regimeName(Regime r) {

@@ -89,7 +89,12 @@ public:
   // power range, and which regulatory model its band falls under. Callers that
   // used to hardcode sub-GHz limits ask this instead.
   const RadioCaps::Caps& caps() const { return *_caps; }
-  int8_t maxTxDbm() const { return _caps->txMaxDbm; }
+  // A board with an external PA radiates more than the chip is asked for, so
+  // where the board header declares a ceiling it is the one that applies.
+  static int8_t maxBoardTxDbm(int8_t chipMax) {
+    return RF_TX_DBM_MAX > 0 ? (int8_t)RF_TX_DBM_MAX : chipMax;
+  }
+  int8_t maxTxDbm() const { return maxBoardTxDbm(_caps->txMaxDbm); }
   const char* callsign() const;          // beacon name: configured, else SSID
 
   // Hand new channel settings to the radio task. Thread-safe; returns
