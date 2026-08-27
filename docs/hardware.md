@@ -98,9 +98,10 @@ as charging rather than looking identical to a full idle one.
 
 Reading the denser rows:
 
-- **transport** lists up to four interfaces as `name mode traffic`; with more
-  than four, the last row reads `+N more` rather than dropping one silently.
-  The bottom row is `an rx/tx bc rx/tx` — announces and beacons, received over
+- **transport** has four rows for interfaces, each `name mode traffic`. Four or
+  fewer are listed in full; with more, three are listed and the fourth row
+  reads `+N more`, so a live interface is never dropped without saying so. The
+  bottom row is `an rx/tx bc rx/tx` — announces and beacons, received over
   sent. Counters past 999 are shown in thousands (`12k`) so the row cannot
   outgrow the 21 columns the panel has.
 - **radio** carries the preamble length as `p<n>` and the sync word as

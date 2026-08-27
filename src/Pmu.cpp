@@ -75,33 +75,52 @@ bool begin() {
   // port will give. Left at the chip's power-on defaults the current can be
   // low enough that a flat cell barely gains on a running node.
   //
-  // The input limit matters as much as the charge current. VBUS feeds the whole
+  // The input limit matters as much as the charge current: VBUS feeds the whole
   // board, and a running node takes 120-250 mA of it — more while transmitting
-  // — before the charger sees anything. Left at the 500 mA power-on default
-  // there is not enough left to deliver the current we just asked for, so a
-  // flat cell still barely gains: the very symptom this is meant to cure. An
-  // AXP2101 is raised to its next step, 900 mA, which any charger or powered
-  // hub supplies; an AXP192 offers 500 mA as its maximum and stays there.
+  // — before the charger sees anything, so this ceiling is what actually
+  // decides whether a flat cell gains. It is set explicitly rather than
+  // inherited, but it is NOT raised on spec: 500 mA is all an unknown USB
+  // source is obliged to give, and a laptop port asked for more can current-
+  // limit, disconnect or brown out. PMU_VBUS_LIMIT_MA (Config.h) raises it
+  // where the supply is known.
+  //
+  // The input voltage limit goes in alongside it. If the source cannot hold
+  // VBUS above that floor the chip reduces its own draw instead of pulling the
+  // rail down, which is what makes any ceiling survivable on a supply that
+  // turns out to be weaker than expected.
   const bool axp192      = strcmp(sModel, "AXP192") == 0;
   const uint8_t wantVolt = axp192 ? (uint8_t)XPOWERS_AXP192_CHG_VOL_4V2
                                   : (uint8_t)XPOWERS_AXP2101_CHG_VOL_4V2;
   const uint8_t wantCurr = axp192 ? (uint8_t)XPOWERS_AXP192_CHG_CUR_450MA
                                   : (uint8_t)XPOWERS_AXP2101_CHG_CUR_500MA;
-  const uint8_t wantLim  = axp192 ? (uint8_t)XPOWERS_AXP192_VBUS_CUR_LIM_500MA
-                                  : (uint8_t)XPOWERS_AXP2101_VBUS_CUR_LIM_900MA;
+  // Largest step the chip offers that does not exceed what we were asked for
+  unsigned limMa = 500;
+  uint8_t  wantLim = (uint8_t)XPOWERS_AXP2101_VBUS_CUR_LIM_500MA;
+  if (axp192) {
+    wantLim = (uint8_t)XPOWERS_AXP192_VBUS_CUR_LIM_500MA;    // its maximum
+  } else if (PMU_VBUS_LIMIT_MA >= 2000) { wantLim = (uint8_t)XPOWERS_AXP2101_VBUS_CUR_LIM_2000MA; limMa = 2000; }
+  else if   (PMU_VBUS_LIMIT_MA >= 1500) { wantLim = (uint8_t)XPOWERS_AXP2101_VBUS_CUR_LIM_1500MA; limMa = 1500; }
+  else if   (PMU_VBUS_LIMIT_MA >= 1000) { wantLim = (uint8_t)XPOWERS_AXP2101_VBUS_CUR_LIM_1000MA; limMa = 1000; }
+  else if   (PMU_VBUS_LIMIT_MA >=  900) { wantLim = (uint8_t)XPOWERS_AXP2101_VBUS_CUR_LIM_900MA;  limMa =  900; }
+  const uint8_t wantVin  = axp192 ? (uint8_t)XPOWERS_AXP192_VBUS_VOL_LIM_4V4
+                                  : (uint8_t)XPOWERS_AXP2101_VBUS_VOL_LIM_4V36;
   const unsigned currMa  = axp192 ? 450 : 500;
-  const unsigned limMa   = axp192 ? 500 : 900;
 
   // Each of these is an I2C write that can be refused — the PMU shares the bus
-  // with the OLED — so the results are kept and read back. Announcing terms the
-  // chip never accepted would hide exactly the fault worth knowing about.
-  bool chargeOk = sPmu->setChargeTargetVoltage(wantVolt);
-  chargeOk      = sPmu->setChargerConstantCurr(wantCurr) && chargeOk;
-  chargeOk      = sPmu->setVbusCurrentLimit(wantLim)     && chargeOk;
-  chargeOk      = chargeOk
-                  && sPmu->getChargeTargetVoltage() == wantVolt
-                  && sPmu->getChargerConstantCurr() == wantCurr
-                  && sPmu->getVbusCurrentLimit()    == wantLim;
+  // with the OLED. Every setter runs, and then every register is read back
+  // unconditionally: short-circuiting on the first failure would leave us
+  // unable to say which of the three actually took, which is the whole point
+  // of checking. Announcing terms the chip never accepted would hide exactly
+  // the fault worth knowing about.
+  const bool setVolt = sPmu->setChargeTargetVoltage(wantVolt);
+  const bool setCurr = sPmu->setChargerConstantCurr(wantCurr);
+  const bool setLim  = sPmu->setVbusCurrentLimit(wantLim);
+  sPmu->setVbusVoltageLimit(wantVin);                   // returns void
+
+  const bool okVolt = setVolt && sPmu->getChargeTargetVoltage() == wantVolt;
+  const bool okCurr = setCurr && sPmu->getChargerConstantCurr() == wantCurr;
+  const bool okLim  = setLim  && sPmu->getVbusCurrentLimit()    == wantLim;
+  const bool chargeOk = okVolt && okCurr && okLim;
 
   // Hand the indicator LED back to the charger, which blinks it while current
   // is going into the cell and settles when it is full. It is the only signal
@@ -117,9 +136,11 @@ bool begin() {
         sPmu->isCharging() ? " (charging)" : (sPmu->isBatteryConnect() ? "" : ", no cell"),
         charge);
   if (!chargeOk)
-    log_w("%s: charge target, current or input limit did not read back as set — the chip is on "
-          "its power-on defaults and a flat cell may not gain. A NAK on the I2C bus it shares "
-          "with the display is the usual cause.", sModel);
+    log_w("%s: these charge terms did not read back as set:%s%s%s — the chip keeps whatever it "
+          "held before, and a flat cell may not gain. A NAK on the I2C bus it shares with the "
+          "display is the usual cause.", sModel,
+          okVolt ? "" : " target voltage", okCurr ? "" : " charge current",
+          okLim  ? "" : " input limit");
   delay(50);                                            // let the rails settle
   return true;
 }

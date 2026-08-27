@@ -311,6 +311,18 @@
 #ifndef PIN_BATTERY_ADC
   #define PIN_BATTERY_ADC   1
 #endif
+// How much current the PMU may draw from VBUS. This caps what is left for the
+// cell once the running node has taken its 120-250 mA, so a low ceiling is why
+// a flat cell gains slowly. It stays at 500 mA because that is all an unknown
+// USB source is obliged to supply, and drawing more can brown out a laptop
+// port. A board or build that knows its supply can raise it — AXP2101 steps
+// are 500, 900, 1000, 1500 and 2000 mA; an AXP192 tops out at 500. The input
+// *voltage* limit is set alongside it either way, so the chip throttles itself
+// if the supply turns out to be weaker than the ceiling allows.
+#ifndef PMU_VBUS_LIMIT_MA
+  #define PMU_VBUS_LIMIT_MA 500
+#endif
+
 #define BATTERY_DIVIDER_RATIO 2.0f
 #define BATTERY_MIN_V       3.0f            // below: no cell attached (USB bench)
 #define BATTERY_MAX_V       4.35f

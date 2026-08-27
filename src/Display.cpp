@@ -136,8 +136,10 @@ void Display::paint() {
 #if HAS_DISPLAY
   if (_blank) return;
   _oled.clearDisplay();
-  // One PMU read per frame, shared by the header and whichever page is drawn
-  _bat = Power::battery();
+  // One PMU read per frame, shared by the header and whichever page is drawn.
+  // The QR page draws neither a header nor battery text, so it skips the four
+  // I2C transactions entirely rather than spending them on the panel's bus.
+  _bat = (_page == QR) ? Power::Battery{} : Power::battery();
   // No default: every page is listed, so adding one without drawing it is a
   // build failure rather than a screen that silently shows the status page.
   switch (_page) {
@@ -173,9 +175,11 @@ static void drawBars(Adafruit_SSD1306& o, int x, int y, uint8_t pct, uint16_t co
   }
 }
 
-// A battery outline with a nub, filled in seven steps. While charging the fill
-// sweeps upward from the real level instead of sitting still, which is the
-// difference between "there is a cell" and "it is filling".
+// A battery outline with a nub, filled in six steps that always show the level
+// the cell actually holds. While charging, one segment travels up the icon
+// inverted against the fill rather than the fill itself moving — which is the
+// difference between "there is a cell" and "it is filling", without the
+// animation ever claiming the cell is fuller than it is.
 static void drawBattery(Adafruit_SSD1306& o, int x, int y, uint8_t pct, bool charging,
                         uint8_t sweep, uint16_t color) {
   o.drawRect(x, y, 15, 7, color);
@@ -406,7 +410,11 @@ void Display::paintRadio() {
   // Preamble and sync word ride along on the rows that had room for them: a
   // node on the wrong sync word hears nothing, and finding that out should not
   // require the web UI on a device whose whole point is a status panel.
-  snprintf(line, sizeof(line), "%.3fMHz %+ddBm p%u", (double)r.freqMhz, r.txDbm, (unsigned)r.preamble);
+  // No "MHz": the API accepts a preamble up to 1000 symbols and frequencies
+  // into four digits, and with the suffix that row reached 24 characters — past
+  // both the buffer and the 21 columns, so the preamble it exists to show was
+  // the part that got clipped. The unit is on the radio page header's model.
+  snprintf(line, sizeof(line), "%.3f %+ddBm p%u", (double)r.freqMhz, r.txDbm, (unsigned)r.preamble);
   _oled.setCursor(0, 12); _oled.print(line);
   snprintf(line, sizeof(line), "BW%.0f SF%d CR4/%d sy%02X", (double)r.bwKhz, r.sf, r.cr, r.syncWord);
   _oled.setCursor(0, 22); _oled.print(line);
@@ -520,7 +528,10 @@ void Display::paintNetwork() {
   // say whether anyone is actually using the node. Those used to be hidden the
   // moment the node joined a network — which is exactly the deployment where
   // you would go looking for them.
-  snprintf(line, sizeof(line), "%-15.15s %s", wifiManager.ssid(), wifiManager.securityName());
+  // 12 for the name, not 15: the longest security label is "wpa2wpa3" at eight
+  // characters, and 15 + 1 + 8 overruns the 21 columns — clipping away the
+  // security this row is here to report.
+  snprintf(line, sizeof(line), "%-12.12s %s", wifiManager.ssid(), wifiManager.securityName());
   _oled.setCursor(0, 12); _oled.print(line);
   snprintf(line, sizeof(line), "ch%-2u cli %u  rns %u", settings.wifi().channel,
            (unsigned)WiFi.softAPgetStationNum(), (unsigned)g_stats.tcpClients);
