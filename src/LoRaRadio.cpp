@@ -438,6 +438,22 @@ void LoRaRadio::taskLoop() {
 // ---------------------------------------------------------------------------
 // RX path
 // ---------------------------------------------------------------------------
+// Which bit means "a packet arrived", in the chip's own register.
+//
+// PhysicalLayer::getIrqFlags() looks generic and is not: every driver returns
+// its raw hardware register, and the bits do not line up. RxDone is bit 6 on an
+// SX127x and bit 1 on an SX126x or SX128x, so a single generic constant tested
+// against all three is right for two of them by coincidence and silently wrong
+// for the other — which is exactly what happened here. The 2.4 GHz boards kept
+// working while both sub-GHz boards stopped receiving altogether, because on
+// those bit 1 is FhssChangeChannel and never set.
+uint32_t LoRaRadio::rxDoneFlag() const {
+  if (_sx1276) return RADIOLIB_SX127X_CLEAR_IRQ_FLAG_RX_DONE;   // 0b01000000
+  if (_sx1262) return RADIOLIB_SX126X_IRQ_RX_DONE;              // 0b10
+  if (_sx1280) return RADIOLIB_SX128X_IRQ_RX_DONE;              // 0x0002
+  return 0;
+}
+
 void LoRaRadio::handleRadioIrq() {
   // Ask the radio what it actually wants, rather than assuming a notification
   // means a packet arrived.
@@ -450,10 +466,11 @@ void LoRaRadio::handleRadioIrq() {
   // out of the chip, until the RX ring overflowed. On a channel measured at
   // 0.67 % occupancy the node was reporting several packets a second and
   // discarding 93 % of them; none of that traffic existed.
+  const uint32_t rxDone = rxDoneFlag();
   const uint32_t irq = _radio->getIrqFlags();
-  if ((irq & (1UL << RADIOLIB_IRQ_RX_DONE)) == 0) {
+  if (rxDone && (irq & rxDone) == 0) {
     g_stats.loraRxSpuriousIrq++;
-    _radio->clearIrqFlags(RADIOLIB_IRQ_RX_DEFAULT_FLAGS);
+    _radio->clearIrqFlags(0xFFFFFFFF);           // everything; nothing here is ours
     _radio->startReceive();
     return;
   }
@@ -466,7 +483,7 @@ void LoRaRadio::handleRadioIrq() {
   // framing ever grows.
   if (len <= LORA_HEADER_LEN || len > LORA_FRAME_MAX) {
     g_stats.loraRxBadLength++;
-    _radio->clearIrqFlags(RADIOLIB_IRQ_RX_DEFAULT_FLAGS);
+    _radio->clearIrqFlags(0xFFFFFFFF);
     _radio->startReceive();
     return;
   }
@@ -477,7 +494,7 @@ void LoRaRadio::handleRadioIrq() {
     // interference — which looks nothing like a node whose consumer is slow,
     // and used to be indistinguishable from it.
     g_stats.loraRxCrcErrors++;
-    _radio->clearIrqFlags(RADIOLIB_IRQ_RX_DEFAULT_FLAGS);
+    _radio->clearIrqFlags(0xFFFFFFFF);
     _radio->startReceive();
     return;
   }
@@ -540,7 +557,7 @@ void LoRaRadio::handleRadioIrq() {
 
   // The reception is collected; drop its flags so re-entering receive mode
   // cannot present the same packet again.
-  _radio->clearIrqFlags(RADIOLIB_IRQ_RX_DEFAULT_FLAGS);
+  _radio->clearIrqFlags(0xFFFFFFFF);
   _radio->startReceive();
 }
 

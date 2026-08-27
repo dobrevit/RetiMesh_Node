@@ -123,6 +123,7 @@ private:
   bool probeSX127x(const RadioSettings& s);
   bool probeSX1280(const RadioSettings& s);
   void irqSelfTest();                    // proves the IRQ line, see the .cpp
+  uint32_t rxDoneFlag() const;           // this chip's RxDone bit, raw
   bool applySettings(const RadioSettings& s);   // radio task context only
   void configureAirtime(const RadioSettings& s);  // symbol time -> duty cycle + CSMA
   void logActive() const;
