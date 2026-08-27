@@ -38,6 +38,11 @@
 enum class ApSecurity : uint8_t { Open = 0, WPA2 = 1, WPA2_WPA3 = 2, WPA3 = 3 };
 
 struct RadioSettings {
+  // Where this node is being operated. It comes first because it decides what
+  // the rest may be: 868.1 MHz is a legal channel in Europe and an illegal one
+  // in the US, so the band has to be chosen before the channel inside it.
+  // Empty means "not chosen yet" and is migrated from the frequency at load.
+  char     region[10] = "";
   float    freqMhz  = RF_FREQ_MHZ;
   float    bwKhz    = RF_BW_KHZ;
   uint8_t  sf       = RF_SF;

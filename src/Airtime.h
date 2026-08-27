@@ -116,6 +116,32 @@ public:
   // is a limit, it is just not the kind the hourly accounting can express.
   enum class Regime : uint8_t { None = 0, EuSrd868, UsIsm915, Ism2400 };
 
+  // A region is what the operator picks; the regime is what follows from it.
+  // Choosing the region first is the only honest order: "868.1 MHz" is a legal
+  // channel in Europe and an illegal one in the US, and a form that offers
+  // every frequency the chip can tune invites exactly that mistake. Custom is
+  // kept for people who know what they are doing and are outside these three.
+  enum class Region : uint8_t { Custom = 0, Eu868, Us915, Ism2400 };
+
+  struct RegionInfo {
+    Region      id;
+    const char* key;          // stable identifier for the API and NVS
+    const char* name;         // shown to a human
+    float       lowMhz;       // the band this region may use
+    float       highMhz;
+    Regime      regime;
+    float       defaultMhz;   // a sane channel inside it
+    float       defaultBwKhz;
+    uint8_t     defaultSf;
+  };
+
+  static const RegionInfo* regions(size_t& count);
+  static const RegionInfo* regionByKey(const char* key);
+  static const RegionInfo* regionById(Region id);
+  // The region a frequency falls in, for migrating nodes configured before
+  // the setting existed.
+  static const RegionInfo* regionForFreq(float freqMhz);
+
   static Regime regimeFor(float freqMhz);
   static const char* regimeName(Regime r);
 

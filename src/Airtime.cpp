@@ -4,6 +4,8 @@
 //  Airtime.cpp — see Airtime.h
 // ============================================================================
 #include "Airtime.h"
+
+#include <string.h>
 #include <math.h>
 
 void Airtime::configure(const Params& p) {
@@ -91,6 +93,44 @@ static const Airtime::Band kEuBands[] = {
 // Band edges, and what each one is governed by. The EU sub-band table above
 // is the only one with a duty cycle in it; the other two regimes constrain
 // different things entirely (see the Regime comment in Airtime.h).
+// Band edges are the licence-exempt allocations, not the chip's tuning range.
+// Power ceilings are deliberately absent: they depend on antenna gain and on
+// the exact sub-band, and a number here would read as permission.
+static const Airtime::RegionInfo kRegions[] = {
+  { Airtime::Region::Eu868,   "eu868",   "Europe 863-870 MHz",  863.0f,  870.0f,
+    Airtime::Regime::EuSrd868, 869.525f, 125.0f,  8 },
+  { Airtime::Region::Us915,   "us915",   "US 902-928 MHz",      902.0f,  928.0f,
+    Airtime::Regime::UsIsm915, 906.875f, 500.0f,  8 },
+  { Airtime::Region::Ism2400, "ism2400", "2.4 GHz ISM",        2400.0f, 2483.5f,
+    Airtime::Regime::Ism2400,  2445.0f,  812.5f,  8 },
+  // Everything the firmware has no plan for. The operator gets the chip's full
+  // tuning range and full responsibility with it.
+  { Airtime::Region::Custom,  "custom",  "Custom / unlisted",     0.0f, 100000.0f,
+    Airtime::Regime::None,     869.525f, 125.0f,  8 },
+};
+
+/*static*/ const Airtime::RegionInfo* Airtime::regions(size_t& count) {
+  count = sizeof(kRegions) / sizeof(kRegions[0]);
+  return kRegions;
+}
+
+/*static*/ const Airtime::RegionInfo* Airtime::regionByKey(const char* key) {
+  if (!key) return nullptr;
+  for (const RegionInfo& r : kRegions) if (strcmp(r.key, key) == 0) return &r;
+  return nullptr;
+}
+
+/*static*/ const Airtime::RegionInfo* Airtime::regionById(Region id) {
+  for (const RegionInfo& r : kRegions) if (r.id == id) return &r;
+  return nullptr;
+}
+
+/*static*/ const Airtime::RegionInfo* Airtime::regionForFreq(float freqMhz) {
+  for (const RegionInfo& r : kRegions)
+    if (r.id != Region::Custom && freqMhz >= r.lowMhz && freqMhz <= r.highMhz) return &r;
+  return regionById(Region::Custom);
+}
+
 /*static*/ Airtime::Regime Airtime::regimeFor(float freqMhz) {
   if (freqMhz >= 863.0f  && freqMhz <  870.0f)  return Regime::EuSrd868;
   if (freqMhz >= 902.0f  && freqMhz <= 928.0f)  return Regime::UsIsm915;

@@ -639,6 +639,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["cr"]        = rs.cr;
   radio["tx_dbm"]    = rs.txDbm;
   radio["tx_dbm_max"]= loraRadio.online() ? loraRadio.maxTxDbm() : 22;
+  radio["region"]    = rs.region;
   // What this particular transceiver can be asked for. The settings page used
   // to offer the sub-GHz bandwidth steps to every board, which on a 2.4 GHz
   // radio is a list of values it cannot tune to.
@@ -658,6 +659,32 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
     const Airtime::Regime rg = Airtime::regimeFor(settings.radio().freqMhz);
     cp["regime"]       = Airtime::regimeName(rg);
     cp["max_dwell_ms"] = Airtime::maxDwellMs(rg);        // 0 = not a dwell regime
+
+    // Only the regions this radio can actually reach. Offering "Europe
+    // 863-870" on a 2.4 GHz node would be a choice that cannot be honoured,
+    // and the operator would find that out only when the frequency was
+    // rejected. Custom is always offered: it is the escape hatch.
+    JsonArray regs = cp["regions"].to<JsonArray>();
+    size_t n = 0;
+    const Airtime::RegionInfo* all = Airtime::regions(n);
+    for (size_t i = 0; i < n; i++) {
+      const Airtime::RegionInfo& ri = all[i];
+      const bool custom = (ri.id == Airtime::Region::Custom);
+      // Reachable when the region's band and the chip's tuning range overlap
+      const bool reachable = custom ||
+        (ri.highMhz >= c.freqMinMhz && ri.lowMhz <= c.freqMaxMhz);
+      if (!reachable) continue;
+      JsonObject o = regs.add<JsonObject>();
+      o["key"]       = ri.key;
+      o["name"]      = ri.name;
+      o["low_mhz"]   = custom ? c.freqMinMhz : max(ri.lowMhz,  c.freqMinMhz);
+      o["high_mhz"]  = custom ? c.freqMaxMhz : min(ri.highMhz, c.freqMaxMhz);
+      o["regime"]    = Airtime::regimeName(ri.regime);
+      o["dwell_ms"]  = Airtime::maxDwellMs(ri.regime);
+      o["default_mhz"] = ri.defaultMhz;
+      o["default_bw_khz"] = ri.defaultBwKhz;
+      o["default_sf"]  = ri.defaultSf;
+    }
   }
   radio["sync_word"] = rs.syncWord;
   radio["preamble"]  = rs.preamble;
@@ -731,16 +758,32 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
     if (c.length() > 32) { sendError(request, 400, "callsign must be at most 32 characters"); return; }
     strlcpy(r.callsign, c.c_str(), sizeof(r.callsign));
   }
+  if (in["region"].is<const char*>()) {
+    strlcpy(r.region, in["region"].as<const char*>(), sizeof(r.region));
+  }
 
   int8_t maxDbm = loraRadio.online() ? loraRadio.maxTxDbm() : 22;
   // Bounds come from the transceiver that is actually fitted, not from a
   // sub-GHz assumption: an SX1280 tunes 2400-2500 MHz and has four bandwidths,
   // none of which appear in the SX127x list.
   const RadioCaps::Caps& caps = loraRadio.caps();
-  char msg[128], bwlist[96];
-  if (r.freqMhz < caps.freqMinMhz || r.freqMhz > caps.freqMaxMhz) {
-    snprintf(msg, sizeof(msg), "frequency must be %g-%g MHz for the %s fitted to this node",
-             (double)caps.freqMinMhz, (double)caps.freqMaxMhz, caps.name);
+  char msg[160], bwlist[96];
+
+  // The region bounds the channel, and the chip bounds the region. Both have
+  // to hold, and the message says which one was missed rather than quoting a
+  // range the operator cannot use anyway.
+  const Airtime::RegionInfo* region = Airtime::regionByKey(r.region);
+  if (!region) { sendError(request, 400, "unknown region — pick one the node offers"); return; }
+  const float lowMhz  = max(region->lowMhz,  caps.freqMinMhz);
+  const float highMhz = min(region->highMhz, caps.freqMaxMhz);
+  if (lowMhz > highMhz) {
+    snprintf(msg, sizeof(msg), "the %s cannot tune %s — choose a region this radio reaches",
+             caps.name, region->name);
+    sendError(request, 400, msg); return;
+  }
+  if (r.freqMhz < lowMhz || r.freqMhz > highMhz) {
+    snprintf(msg, sizeof(msg), "frequency must be %g-%g MHz in %s on the %s",
+             (double)lowMhz, (double)highMhz, region->name, caps.name);
     sendError(request, 400, msg); return;
   }
   if (!RadioCaps::bandwidthSupported(caps, r.bwKhz)) {

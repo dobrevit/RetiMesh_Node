@@ -21,6 +21,8 @@
 // ============================================================================
 #include "Settings.h"
 
+#include "Airtime.h"
+
 Settings settings;
 
 static const float kBandwidths[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f };
@@ -68,6 +70,15 @@ void Settings::load() {
   LOAD(_radio.gpsEnabled,       "r_gps",  getBool  ("r_gps"));
   LOAD(_radio.gpsSharePosition, "r_gpspub", getBool("r_gpspub"));
   if (_prefs.isKey("r_call")) _prefs.getString("r_call", _radio.callsign, sizeof(_radio.callsign));
+  if (_prefs.isKey("r_rgn"))  _prefs.getString("r_rgn",  _radio.region,   sizeof(_radio.region));
+  // A node configured before the region setting existed still has a frequency,
+  // and that is enough to say which band it was already using. Migrate rather
+  // than dropping it into "custom", which would quietly stop enforcing the
+  // duty cycle it had been obeying.
+  if (_radio.region[0] == '\0') {
+    const Airtime::RegionInfo* ri = Airtime::regionForFreq(_radio.freqMhz);
+    if (ri) strlcpy(_radio.region, ri->key, sizeof(_radio.region));
+  }
 
   if (_prefs.isKey("w_ssid")) _prefs.getString("w_ssid", _wifi.ssid, sizeof(_wifi.ssid));
   if (_prefs.isKey("w_pass")) _prefs.getString("w_pass", _wifi.password, sizeof(_wifi.password));
@@ -106,6 +117,7 @@ bool Settings::saveRadio(const RadioSettings& r) {
          && _prefs.putUChar ("r_cr",   r.cr)       > 0
          && _prefs.putChar  ("r_pwr",  r.txDbm)    > 0
          && _prefs.putUChar ("r_sync", r.syncWord) > 0
+         && _prefs.putString("r_rgn",  r.region) > 0
          && _prefs.putUShort("r_pre",  r.preamble) > 0
          && _prefs.putUShort("r_bcn",  r.beaconInterval) > 0
          && _prefs.putUShort("r_ann",  r.announceInterval) > 0
