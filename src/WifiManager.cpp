@@ -33,6 +33,7 @@
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
+#include "Mdns.h"
 #include "Diag.h"
 #include "SdCard.h"
 #include "AutoInterface.h"
@@ -117,9 +118,20 @@ void WifiManager::begin() {
     }
   }
 
-  if (MDNS.begin(MDNS_HOSTNAME)) {
+  deriveHostname();
+  if (MDNS.begin(_hostname)) {
     MDNS.addService("http", "tcp", HTTP_PORT);
     MDNS.addService("rns", "tcp", RNS_TCP_PORT);
+    // So a browser or a script can tell the nodes apart without opening each
+    // one: the same identity the portal and the announce carry.
+    for (const char* svc : { "http", "rns" }) {
+      MDNS.addServiceTxt(svc, "tcp", "name",  _ssid);
+      MDNS.addServiceTxt(svc, "tcp", "node",  nodeIdentity.destHex());
+      MDNS.addServiceTxt(svc, "tcp", "fw",    FW_VERSION);
+      MDNS.addServiceTxt(svc, "tcp", "board", BOARD_NAME);
+    }
+    log_i("mDNS: http://%s.local (rns on :%d) — browse _rns._tcp to find every node",
+          _hostname, RNS_TCP_PORT);
   } else {
     log_w("mDNS start failed");
   }
@@ -145,6 +157,17 @@ void WifiManager::startAccessPoint() {
                (uint8_t)(mac >> 24), (uint8_t)(mac >> 32), (uint8_t)(mac >> 40));
     }
   #endif
+
+  // Every node used to answer to the same "retimesh.local", so the second one
+  // on a network either lost the race or was silently renamed by conflict
+  // resolution to something nobody could predict — which made more than one
+  // node on one LAN unusable. The access-point name is already unique per node
+  // and already what the display and the portal show, so the mDNS name is that
+  // name rather than a second derivation from the MAC that could drift from it.
+  //
+  // mDNS labels are letters, digits and hyphens, compared without regard to
+  // case, so an SSID someone has renamed to "Shed roof" still yields a legal
+  // "shed-roof.local".
 
   // WPA needs 8..63 characters; anything else means an open network.
   bool secured = w.security != ApSecurity::Open && strlen(w.password) >= 8;
@@ -336,6 +359,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["firmware"]     = FW_NAME;
   doc["version"]      = FW_VERSION;
   doc["ssid"]         = _ssid;
+  doc["hostname"]     = _hostname;      // reachable as <hostname>.local
   doc["security"]     = _securityName;
   {
     JsonObject st = doc["station"].to<JsonObject>();
@@ -480,7 +504,17 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     at["short_pct"]     = roundf(g_stats.airtimeShort * 10000.0f) / 100.0f;
     at["long_pct"]      = roundf(g_stats.airtimeLong * 10000.0f) / 100.0f;
     const Airtime::Band* band = Airtime::bandFor(settings.radio().freqMhz, settings.radio().bwKhz);
-    at["band"]           = band ? band->name : "outside the EU 863-870 plan";
+    // A node in the US band or at 2.4 GHz is not an exception to the European
+    // plan, it is under a different one — reporting it as "outside the EU
+    // 863-870 plan" described the only regime this field knows rather than the
+    // regime the node is in. The sub-band figures below stay EU-specific
+    // because only that plan has sub-bands to report.
+    const Airtime::RegionInfo* areg =
+      Airtime::regionFor(settings.radio().region, settings.radio().freqMhz);
+    at["band"]           = band ? band->name
+                          : (areg->regime == Airtime::Regime::EuSrd868
+                             ? "outside the EU 863-870 plan" : areg->name);
+    at["regime"]         = Airtime::regimeName(areg->regime);
     at["band_limit_pct"] = band ? band->basisPoints / 100.0f : 0.0f;
     at["band_allocated"] = band ? band->allocated : false;
     at["duty_limit_pct"] = g_stats.dutyLimitBp / 100.0f;        // what is enforced
@@ -598,6 +632,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
 // LittleFS.exists() and open() log a VFS error line for a file that is not
 // there, and the board is empty until someone posts — so every status poll
 // printed an error. stat() answers the same question silently.
+void WifiManager::deriveHostname() {
+  Mdns::label(_ssid, _hostname, sizeof(_hostname), MDNS_HOSTNAME);
+}
+
 static bool littleFsHas(const char* path) {
   struct stat st;
   return stat((String("/littlefs") + path).c_str(), &st) == 0;

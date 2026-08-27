@@ -98,7 +98,12 @@
 #define DIAG_HEAP_WARN_B    20480               // internal heap low-water below this
 
 #ifndef MDNS_HOSTNAME
-  #define MDNS_HOSTNAME     "retimesh"      // http://retimesh.local/
+  // Fallback only. The name a node actually answers to is derived from its
+  // access-point name — see WifiManager::deriveHostname() — so that two nodes
+  // on one network do not both claim the same one. This is what is used when
+  // an operator has renamed the AP to something with no usable characters in
+  // it at all.
+  #define MDNS_HOSTNAME     "retimesh"
 #endif
 
 // AP address 10.42.0.1 — "42" as a nod to the transport port.
