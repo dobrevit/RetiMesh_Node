@@ -88,6 +88,41 @@ static const Airtime::Band kEuBands[] = {
   { 869.70f, 870.00f, 100, "869.7-870 (1 %)",         true  },
 };
 
+// Band edges, and what each one is governed by. The EU sub-band table above
+// is the only one with a duty cycle in it; the other two regimes constrain
+// different things entirely (see the Regime comment in Airtime.h).
+/*static*/ Airtime::Regime Airtime::regimeFor(float freqMhz) {
+  if (freqMhz >= 863.0f  && freqMhz <  870.0f)  return Regime::EuSrd868;
+  if (freqMhz >= 902.0f  && freqMhz <= 928.0f)  return Regime::UsIsm915;
+  if (freqMhz >= 2400.0f && freqMhz <= 2483.5f) return Regime::Ism2400;
+  return Regime::None;
+}
+
+/*static*/ const char* Airtime::regimeName(Regime r) {
+  switch (r) {
+    case Regime::EuSrd868: return "EU 863-870 SRD";
+    case Regime::UsIsm915: return "US 902-928 ISM";
+    case Regime::Ism2400:  return "2.4 GHz ISM";
+    default:               return "unregulated by this firmware";
+  }
+}
+
+/*static*/ uint32_t Airtime::maxDwellMs(Regime r) {
+  // FCC 15.247(a)(1)(iii): a frequency-hopping system in this band may not
+  // dwell on one channel for more than 400 ms in a 20 s period. A node that
+  // does not hop has one channel, so the ceiling applies to every packet it
+  // sends. This firmware does not hop, which is exactly why the number is
+  // enforced per transmission rather than assumed away.
+  return r == Regime::UsIsm915 ? 400 : 0;
+}
+
+/*static*/ float Airtime::dtsMinBandwidthKhz(Regime r) {
+  // 15.247(a)(2): a digital transmission system needs at least 500 kHz of
+  // 6 dB bandwidth, and is then not a hopping system, so the dwell ceiling
+  // does not apply to it.
+  return r == Regime::UsIsm915 ? 500.0f : 0.0f;
+}
+
 /*static*/ const Airtime::Band* Airtime::bandFor(float freqMhz, float bwKhz) {
   // A channel is not a point. Work out what it actually occupies and take the
   // strictest allowance among the sub-bands it lands in, so a carrier sitting

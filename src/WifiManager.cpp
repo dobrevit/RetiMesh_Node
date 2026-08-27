@@ -639,6 +639,26 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["cr"]        = rs.cr;
   radio["tx_dbm"]    = rs.txDbm;
   radio["tx_dbm_max"]= loraRadio.online() ? loraRadio.maxTxDbm() : 22;
+  // What this particular transceiver can be asked for. The settings page used
+  // to offer the sub-GHz bandwidth steps to every board, which on a 2.4 GHz
+  // radio is a list of values it cannot tune to.
+  {
+    const RadioCaps::Caps& c = loraRadio.caps();
+    JsonObject cp = radio["caps"].to<JsonObject>();
+    cp["model"]        = c.name;
+    cp["freq_min_mhz"] = c.freqMinMhz;
+    cp["freq_max_mhz"] = c.freqMaxMhz;
+    cp["sf_min"]       = c.sfMin;
+    cp["sf_max"]       = c.sfMax;
+    cp["tx_min_dbm"]   = c.txMinDbm;
+    cp["tx_max_dbm"]   = c.txMaxDbm;
+    JsonArray bws = cp["bandwidths_khz"].to<JsonArray>();
+    for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++) bws.add(*b);
+    // Which rulebook the configured channel falls under, and what it caps
+    const Airtime::Regime rg = Airtime::regimeFor(settings.radio().freqMhz);
+    cp["regime"]       = Airtime::regimeName(rg);
+    cp["max_dwell_ms"] = Airtime::maxDwellMs(rg);        // 0 = not a dwell regime
+  }
   radio["sync_word"] = rs.syncWord;
   radio["preamble"]  = rs.preamble;
   radio["beacon_interval"] = rs.beaconInterval;
@@ -713,11 +733,32 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   }
 
   int8_t maxDbm = loraRadio.online() ? loraRadio.maxTxDbm() : 22;
-  if (r.freqMhz < 137.0f || r.freqMhz > 1020.0f) { sendError(request, 400, "frequency must be 137-1020 MHz"); return; }
-  if (!Settings::validBandwidth(r.bwKhz))          { sendError(request, 400, "unsupported bandwidth"); return; }
-  if (r.sf < 7 || r.sf > 12)                       { sendError(request, 400, "spreading factor must be 7-12"); return; }
+  // Bounds come from the transceiver that is actually fitted, not from a
+  // sub-GHz assumption: an SX1280 tunes 2400-2500 MHz and has four bandwidths,
+  // none of which appear in the SX127x list.
+  const RadioCaps::Caps& caps = loraRadio.caps();
+  char msg[128], bwlist[96];
+  if (r.freqMhz < caps.freqMinMhz || r.freqMhz > caps.freqMaxMhz) {
+    snprintf(msg, sizeof(msg), "frequency must be %g-%g MHz for the %s fitted to this node",
+             (double)caps.freqMinMhz, (double)caps.freqMaxMhz, caps.name);
+    sendError(request, 400, msg); return;
+  }
+  if (!RadioCaps::bandwidthSupported(caps, r.bwKhz)) {
+    snprintf(msg, sizeof(msg), "the %s supports these bandwidths in kHz: %s",
+             caps.name, RadioCaps::bandwidthList(caps, bwlist, sizeof(bwlist)));
+    sendError(request, 400, msg); return;
+  }
+  if (r.sf < caps.sfMin || r.sf > caps.sfMax) {
+    snprintf(msg, sizeof(msg), "spreading factor must be %u-%u on the %s",
+             (unsigned)caps.sfMin, (unsigned)caps.sfMax, caps.name);
+    sendError(request, 400, msg); return;
+  }
   if (r.cr < 5 || r.cr > 8)                        { sendError(request, 400, "coding rate must be 5-8 (4/5..4/8)"); return; }
-  if (r.txDbm < 2 || r.txDbm > maxDbm)             { sendError(request, 400, "tx power out of range for this transceiver"); return; }
+  if (r.txDbm < caps.txMinDbm || r.txDbm > maxDbm) {
+    snprintf(msg, sizeof(msg), "tx power must be %d to %d dBm on the %s",
+             (int)caps.txMinDbm, (int)maxDbm, caps.name);
+    sendError(request, 400, msg); return;
+  }
   if (r.preamble < 6 || r.preamble > 1000)         { sendError(request, 400, "preamble must be 6-1000 symbols"); return; }
   if (r.beaconInterval != 0 && (r.beaconInterval < 10 || r.beaconInterval > 3600)) { sendError(request, 400, "beacon interval must be 0 (off) or 10-3600 s"); return; }
   if (r.announceInterval != 0 && (r.announceInterval < 60 || r.announceInterval > 43200)) { sendError(request, 400, "announce interval must be 0 (off) or 60-43200 s"); return; }

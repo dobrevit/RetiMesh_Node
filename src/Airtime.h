@@ -94,7 +94,42 @@ public:
     bool        allocated;    // false for the ranges between the sub-bands
   };
 
-  // The band a channel of `bwKhz` centred on `freqMhz` must obey. A channel
+  // Which rulebook a channel falls under. This is a property of the band, not
+  // of the radio: the same SX1262 is a duty-cycle device at 868 MHz and a
+  // dwell-limited one at 915 MHz.
+  //
+  // The three are not variations on one theme — they constrain different
+  // things, which is why one "duty cycle percent" setting cannot express them:
+  //
+  //   EuSrd868  hourly duty cycle, per sub-band, 0.1 % to 10 %. Long
+  //             transmissions are fine; their total over an hour is not.
+  //   UsIsm915  no hourly budget at all. FCC 15.247 instead caps how long a
+  //             single transmission may sit on one channel — 400 ms for a
+  //             hopping system — and a node that does not hop has to keep
+  //             each packet under that or use a wide enough channel to
+  //             qualify as a digital transmission system (>= 500 kHz).
+  //             The binding constraint is per-packet, not per-hour.
+  //   Ism2400   neither. Bounded by radiated power and by listen-before-talk,
+  //             so CSMA carries the load and no budget applies.
+  //
+  // Saying "no limit" for the US would be wrong in the other direction: there
+  // is a limit, it is just not the kind the hourly accounting can express.
+  enum class Regime : uint8_t { None = 0, EuSrd868, UsIsm915, Ism2400 };
+
+  static Regime regimeFor(float freqMhz);
+  static const char* regimeName(Regime r);
+
+  // Longest a single transmission may occupy one channel, in milliseconds.
+  // 0 means the regime does not constrain individual transmissions. Only
+  // UsIsm915 returns non-zero today.
+  static uint32_t maxDwellMs(Regime r);
+
+  // The narrowest channel that qualifies as a digital transmission system
+  // where that distinction exists, in kHz; 0 where it does not apply. A US
+  // channel at or above this is not subject to the dwell limit.
+  static float dtsMinBandwidthKhz(Regime r);
+
+  // EU only: the band a channel of `bwKhz` centred on `freqMhz` must obey. A channel
   // that fits inside one sub-band gets that sub-band's allowance; one that
   // straddles a boundary gets the strictest of the bands it touches, because
   // energy lands in all of them. nullptr means the channel is outside the plan

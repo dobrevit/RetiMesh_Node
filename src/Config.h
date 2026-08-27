@@ -35,6 +35,8 @@
 // ---------------------------------------------------------------------------
 #if defined(BOARD_TBEAM)
   #include "boards/tbeam.h"
+#elif defined(BOARD_T3S3_SX1280)
+  #include "boards/t3s3_sx1280.h"
 #else
   #include "boards/t3s3.h"
 #endif
@@ -201,6 +203,11 @@
 #endif
 // T3-S3 SX1262 modules have a TCXO fed from DIO3. Set to 0.0 for
 // plain-crystal modules (begin() fails with -706/-707 when this is wrong).
+// Set by a board header carrying a 2.4 GHz module; see LoRaRadio::begin().
+#ifndef RF_MODEM_SX1280
+  #define RF_MODEM_SX1280   0
+#endif
+
 #ifndef RF_TCXO_VOLTAGE
   #define RF_TCXO_VOLTAGE   1.8
 #endif

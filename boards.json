@@ -17,5 +17,11 @@
     "chip": "esp32",
     "chip_family": "ESP32",
     "notes": "18650 holder, AXP192/AXP2101 power management, u-blox GPS, 0.96\" OLED, no SD card slot. The transceiver and the PMU revision are both detected at boot. Serial is a CH9102 bridge — hold the middle button while pressing RST if flashing does not start."
+  },
+  "t3s3-sx1280": {
+    "name": "LilyGO T3-S3 with SX1280 (2.4 GHz)",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "notes": "0.96\" OLED, SD slot, 4 MB flash. The SX1280 is selected at build time rather than detected, so this image is not interchangeable with the sub-GHz t3s3 build. Defaults to 2445 MHz / 812.5 kHz / SF8. Native USB — hold BOOT while pressing RST if the port is not detected."
   }
 }

@@ -73,6 +73,7 @@
 #include <freertos/ringbuf.h>
 #include "Config.h"
 #include "Airtime.h"
+#include "RadioCaps.h"
 #include "Settings.h"
 
 class LoRaRadio {
@@ -84,7 +85,11 @@ public:
 
   bool online() const { return _online; }
   const char* modelName() const { return _modelName; }
-  int8_t maxTxDbm() const { return _sx1262 ? 22 : 17; }
+  // What the detected chip can do — frequency span, bandwidth steps, SF and
+  // power range, and which regulatory model its band falls under. Callers that
+  // used to hardcode sub-GHz limits ask this instead.
+  const RadioCaps::Caps& caps() const { return *_caps; }
+  int8_t maxTxDbm() const { return _caps->txMaxDbm; }
   const char* callsign() const;          // beacon name: configured, else SSID
 
   // Hand new channel settings to the radio task. Thread-safe; returns
@@ -111,6 +116,7 @@ private:
 
   bool probeSX1262(const RadioSettings& s);
   bool probeSX127x(const RadioSettings& s);
+  bool probeSX1280(const RadioSettings& s);
   bool applySettings(const RadioSettings& s);   // radio task context only
   void configureAirtime(const RadioSettings& s);  // symbol time -> duty cycle + CSMA
   void logActive() const;
@@ -120,7 +126,9 @@ private:
   PhysicalLayer* _radio  = nullptr;      // common runtime surface
   SX1262*        _sx1262 = nullptr;      // exactly one of these is set
   SX1276*        _sx1276 = nullptr;
+  SX1280*        _sx1280 = nullptr;
   const char*    _modelName = "none";
+  const RadioCaps::Caps* _caps = &RadioCaps::kUnknown;
   SPIClass       _spi{LORA_SPI_BUS};   // bus number differs per MCU, see boards/
   RingbufHandle_t _txRing = nullptr;
   RingbufHandle_t _rxRing = nullptr;

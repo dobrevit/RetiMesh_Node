@@ -52,6 +52,18 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
 
   _spi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
 
+#if RF_MODEM_SX1280
+  // The 2.4 GHz part is selected at build time rather than probed. Detection
+  // works by tuning the chip and seeing whether it answers, and an SX1280 will
+  // not accept an 868 MHz channel any more than an SX1262 will accept 2.4 GHz:
+  // whichever settings the probe carries, one of the two is guaranteed to fail
+  // for the wrong reason. A board either has this radio or it does not, and the
+  // board header says which.
+  if (!probeSX1280(s)) {
+    log_e("No SX1280 found on DIO1=%d/BUSY=%d — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY);
+    return false;
+  }
+#else
   // Probe order matters for boot time: the SX127x check is a version-
   // register read that fails within ~100 ms on an SX1262, whereas the
   // SX1262 check waits on BUSY (GPIO 34 = DIO2 on an SX127x board) and
@@ -61,6 +73,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
           "DIO1=%d/BUSY=%d) — check wiring", PIN_LORA_DIO0, PIN_LORA_DIO1, PIN_LORA_BUSY);
     return false;
   }
+#endif
 
   _radio->setPacketReceivedAction(onRadioIrq);   // DIO1 / DIO0 as appropriate
   _online = true;
@@ -80,30 +93,81 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   _airtime.configure(ap);
   g_stats.csmaSlotMs = (uint16_t)_airtime.slotMs();
 
-  // The transmit budget belongs to the sub-band, so it is re-derived whenever
-  // the channel moves.
-  const Airtime::Band* band = Airtime::bandFor(s.freqMhz, s.bwKhz);
+  // What the channel is governed by depends on the band it sits in, and the
+  // three regimes constrain different things — see Airtime::Regime.
+  const Airtime::Regime regime = Airtime::regimeFor(s.freqMhz);
   const uint16_t limit = Airtime::effectiveBasisPoints(s.freqMhz, s.bwKhz, s.dutyCyclePct);
   g_stats.dutyLimitBp = limit;
-  if (band && !band->allocated) {
-    log_w("channel overlaps EU SRD %s — this range is not allocated to this kind of device; "
-          "holding to %.2f %% of the hour", band->name, limit / 100.0f);
-    // Landing here is usually a near miss rather than a deliberate choice: the
-    // centre sits in a generous sub-band but the channel's skirt reaches into
-    // the gap beside it. Say what centre would fit, so the fix is obvious.
-    const Airtime::Band* best = Airtime::mostGenerousOverlapping(s.freqMhz, s.bwKhz);
-    if (best && best->basisPoints > band->basisPoints)
-      log_w("  a %.0f kHz channel needs its centre at %.4f MHz or above to sit inside %s "
-            "(%.1f %%); at %.4f MHz it reaches below %.3f MHz",
-            (double)s.bwKhz, (double)(best->lowMhz + s.bwKhz / 2000.0f), best->name,
-            best->basisPoints / 100.0f, (double)s.freqMhz, (double)best->lowMhz);
+
+  switch (regime) {
+
+  case Airtime::Regime::EuSrd868: {
+    // The transmit budget belongs to the sub-band, so it is re-derived
+    // whenever the channel moves.
+    const Airtime::Band* band = Airtime::bandFor(s.freqMhz, s.bwKhz);
+    if (band && !band->allocated) {
+      log_w("channel overlaps EU SRD %s — this range is not allocated to this kind of device; "
+            "holding to %.2f %% of the hour", band->name, limit / 100.0f);
+      // Landing here is usually a near miss rather than a deliberate choice: the
+      // centre sits in a generous sub-band but the channel's skirt reaches into
+      // the gap beside it. Say what centre would fit, so the fix is obvious.
+      const Airtime::Band* best = Airtime::mostGenerousOverlapping(s.freqMhz, s.bwKhz);
+      if (best && best->basisPoints > band->basisPoints)
+        log_w("  a %.0f kHz channel needs its centre at %.4f MHz or above to sit inside %s "
+              "(%.1f %%); at %.4f MHz it reaches below %.3f MHz",
+              (double)s.bwKhz, (double)(best->lowMhz + s.bwKhz / 2000.0f), best->name,
+              best->basisPoints / 100.0f, (double)s.freqMhz, (double)best->lowMhz);
+    } else if (band) {
+      log_i("channel is in EU SRD %s — holding to %.2f %% of the hour", band->name, limit / 100.0f);
+    }
+    break;
   }
-  else if (band)
-    log_i("channel is in EU SRD %s — holding to %.2f %% of the hour", band->name, limit / 100.0f);
-  else if (limit) log_w("%.3f MHz is outside the EU 863-870 plan: applying the configured %u %% limit, "
-                        "check your local rules", (double)s.freqMhz, (unsigned)s.dutyCyclePct);
-  else log_w("%.3f MHz is outside the EU 863-870 plan and no duty cycle is set — transmitting unlimited, "
-             "which is unlikely to be legal anywhere", (double)s.freqMhz);
+
+  case Airtime::Regime::UsIsm915: {
+    // No hourly budget here. What FCC 15.247 caps is how long one transmission
+    // may hold the channel, so the check that matters is per packet: the
+    // longest frame this firmware will send is a full fragment.
+    const uint32_t dwellMs = Airtime::maxDwellMs(regime);
+    const float    dtsMin  = Airtime::dtsMinBandwidthKhz(regime);
+    const float    worstMs = _airtime.timeOnAirMs(LORA_FRAG_PAYLOAD);
+
+    if (s.bwKhz >= dtsMin) {
+      log_i("channel is in the US 902-928 ISM band at %.0f kHz — wide enough to be a digital "
+            "transmission system, so the %lu ms hopping dwell limit does not apply; longest "
+            "frame is %.0f ms", (double)s.bwKhz, (unsigned long)dwellMs, (double)worstMs);
+    } else if (worstMs > (float)dwellMs) {
+      // Worth being blunt: this is the configuration most people arrive at by
+      // copying an EU channel plan across, and it is the one that cannot comply.
+      log_w("US 902-928 ISM: a full %u-byte frame takes %.0f ms at SF%u/%.0f kHz, over the "
+            "%lu ms per-channel dwell limit for a non-hopping system. Either widen the channel "
+            "to %.0f kHz or more, or drop to a spreading factor that fits.",
+            (unsigned)LORA_FRAG_PAYLOAD, (double)worstMs, (unsigned)s.sf, (double)s.bwKhz,
+            (unsigned long)dwellMs, (double)dtsMin);
+    } else {
+      log_i("channel is in the US 902-928 ISM band — longest frame is %.0f ms, inside the "
+            "%lu ms dwell limit", (double)worstMs, (unsigned long)dwellMs);
+    }
+    if (limit) log_i("  a manual %u %% cap is set and will be enforced as well", (unsigned)s.dutyCyclePct);
+    break;
+  }
+
+  case Airtime::Regime::Ism2400:
+    // Neither a duty cycle nor a dwell ceiling: this band is bounded by
+    // radiated power and by listen-before-talk, which CSMA already does.
+    log_i("channel is in the 2.4 GHz ISM band — no duty cycle applies; CSMA and the power "
+          "ceiling are what govern here%s",
+          limit ? ", plus the manual cap you have set" : "");
+    break;
+
+  default:
+    if (limit) log_w("%.3f MHz is outside every band plan this firmware knows: applying the "
+                     "configured %u %% limit, check your local rules",
+                     (double)s.freqMhz, (unsigned)s.dutyCyclePct);
+    else log_w("%.3f MHz is outside every band plan this firmware knows and no duty cycle is "
+               "set — transmitting unlimited, which is unlikely to be legal anywhere",
+               (double)s.freqMhz);
+    break;
+  }
 }
 
 bool LoRaRadio::probeSX1262(const RadioSettings& s) {
@@ -123,6 +187,28 @@ bool LoRaRadio::probeSX1262(const RadioSettings& s) {
   sx->setCRC(true);
   _radio = _sx1262 = sx;
   _modelName = "SX1262";
+  _caps = &RadioCaps::kSX1262;
+  return true;
+}
+
+bool LoRaRadio::probeSX1280(const RadioSettings& s) {
+  // Same wiring as the SX1262: BUSY plus DIO1 as the primary IRQ.
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
+  SX1280* sx  = new SX1280(mod);
+  int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
+                            clampPower(s.txDbm, RadioCaps::kSX1280.txMaxDbm), s.preamble);
+  if (state != RADIOLIB_ERR_NONE) {
+    log_w("SX1280 not found (code %d)", state);
+    delete sx; delete mod;
+    return false;
+  }
+  // setCRC takes a *length* here, not a flag as it does on the SX126x: two
+  // bytes matches what the sub-GHz parts put on the air by default, so the
+  // framing above this layer sees the same guarantees on either radio.
+  sx->setCRC(2);
+  _radio = _sx1280 = sx;
+  _modelName = "SX1280";
+  _caps = &RadioCaps::kSX1280;
   return true;
 }
 
@@ -143,6 +229,7 @@ bool LoRaRadio::probeSX127x(const RadioSettings& s) {
   sx->setCRC(true);
   _radio = _sx1276 = sx;
   _modelName = "SX1276";
+  _caps = &RadioCaps::kSX1276;
   return true;
 }
 
@@ -166,8 +253,9 @@ void LoRaRadio::requestReconfigure(const RadioSettings& s) {
 // re-arms receive. On failure the previous settings are restored.
 bool LoRaRadio::applySettings(const RadioSettings& s) {
   // The LoRa modulation setters are not part of PhysicalLayer, so they go
-  // through whichever concrete driver was detected.
-  #define CHIP(call) (_sx1262 ? _sx1262->call : _sx1276->call)
+  // through whichever concrete driver was detected. Exactly one pointer is
+  // ever set, so the chain resolves to one call.
+  #define CHIP(call) (_sx1262 ? _sx1262->call : _sx1280 ? _sx1280->call : _sx1276->call)
   struct Step { const char* what; int16_t code; };
   Step steps[] = {
     { "standby",          _radio->standby() },
