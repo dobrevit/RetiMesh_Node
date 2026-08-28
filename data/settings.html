@@ -197,8 +197,8 @@
     <div class="msg" id="backupMsg"></div>
     <div class="note">The export contains radio, Wi-Fi (including the password), transport and admin settings &mdash; keep it private.
       It never contains the node's identity keys. Importing on another node clones its configuration; the SSID stays automatic unless set.
-      Where the Reticulum store lives is not something an import can change: a file that disagrees with this node is refused, because moving the
-      store means copying it, which is what the SD card actions above do.</div>
+      Where the Reticulum store lives is not imported. That describes the node the backup came from, not the settings being restored, and moving
+      the store means copying it &mdash; which is what the SD card actions above do.</div>
   </div>
 
   <h2>Danger zone</h2>
@@ -426,8 +426,12 @@ $("importBtn").addEventListener("click", async () => {
   if (!f) { setMsg("backupMsg", "Choose a settings JSON file first.", "bad"); return; }
   try {
     const body = JSON.parse(await f.text());
-    await api("/api/settings/import", body);
-    setMsg("backupMsg", "Imported. Restarting…", "warn");
+    const r = await api("/api/settings/import", body);
+    // The store's location is dropped rather than imported, and an operator who
+    // restored a backup expecting the card to be in use should hear that from
+    // the node rather than discover it later.
+    setMsg("backupMsg", r.note ? "Imported, except one thing: " + r.note + ". Restarting…"
+                               : "Imported. Restarting…", "warn");
   } catch (e) { setMsg("backupMsg", e.message, "bad"); }
 });
 

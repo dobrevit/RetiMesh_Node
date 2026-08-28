@@ -1125,21 +1125,21 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     if (ws.channel < 1 || ws.channel > 13 || ws.maxStations < 1 || ws.maxStations > 10) { sendError(request, 400, "wifi section invalid"); return; }
     settings.saveWifi(ws);
   }
+  bool storeHomeIgnored = false;
   if (in["transport"].is<JsonObject>()) {
     JsonObject t = in["transport"]; TransportSettings ts = settings.transport();
     ts.enabled = t["enabled"] | ts.enabled; ts.loraMode = t["lora_mode"] | ts.loraMode; ts.wifiMode = t["wifi_mode"] | ts.wifiMode;
     ts.announceCap = t["announce_cap"] | ts.announceCap; ts.announceRateTarget = t["announce_rate_target"] | ts.announceRateTarget;
     ts.announceRateGrace = t["announce_rate_grace"] | ts.announceRateGrace; ts.announceRatePenalty = t["announce_rate_penalty"] | ts.announceRatePenalty;
     ts.autoEnabled = t["auto_enabled"] | ts.autoEnabled;
-    // Same rule as the transport form, for the same reason: an import that
-    // flipped this moved nothing and left the node reading an empty store. It
-    // is refused rather than ignored, because a settings file that says the
-    // store belongs on a card is a statement about the node it came from, and
-    // silently dropping it would be the second-most surprising thing to do.
-    if (t["sd_store"].is<bool>() && (bool)t["sd_store"] != ts.sdStore) {
-      sendError(request, 409, "this file keeps the store somewhere else; import the rest and move it with the SD card actions");
-      return;
-    }
+    // Not imported, and not a reason to refuse the file either. Where the store
+    // lives describes the node the backup came from — whether that one had a
+    // card in its slot — and not the configuration being restored. Restoring
+    // onto a replacement node is exactly when this differs and exactly when
+    // failing the whole import is least welcome, so the field is dropped and
+    // the answer says so. The store is moved with the card actions, which copy
+    // the data; setting the flag alone never did.
+    storeHomeIgnored = t["sd_store"].is<bool>() && (bool)t["sd_store"] != ts.sdStore;
     ts.powerProfile = t["power_profile"] | ts.powerProfile;
     if (t["auto_group_id"].is<const char*>()) strlcpy(ts.autoGroupId, t["auto_group_id"], sizeof(ts.autoGroupId));
     if (ts.loraMode < 1 || ts.loraMode > 5 || ts.wifiMode < 1 || ts.wifiMode > 5 || ts.announceCap < 1 || ts.announceCap > 100) { sendError(request, 400, "transport section invalid"); return; }
@@ -1149,7 +1149,9 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     const char* p = in["admin"]["password"];
     if (strlen(p) >= 4 && strlen(p) <= 32) settings.saveAdminPassword(p);
   }
-  request->send(200, "application/json", "{\"ok\":true,\"restart\":true}");
+  request->send(200, "application/json", storeHomeIgnored
+    ? "{\"ok\":true,\"restart\":true,\"note\":\"the store's location was not imported; move it with the SD card actions\"}"
+    : "{\"ok\":true,\"restart\":true}");
   scheduleRestart(1500);
 }
 

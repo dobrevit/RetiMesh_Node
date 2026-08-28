@@ -389,7 +389,19 @@ void runPendingMigration() {
   TransportSettings t = settings.transport();
   t.sdStore     = adopt;
   t.pendingMove = Move::None;
-  settings.saveTransport(t);
+  if (!settings.saveTransport(t)) {
+    // This setting is what the next boot reads, so if it did not stick, the
+    // node comes back up in the home it started in — and that home must still
+    // have the data in it. The source stays, the request stays on record, and
+    // the move is retried. Deleting it here on the strength of a write that
+    // failed is the one path through this routine that loses the store
+    // outright, which is worth a branch even though NVS rarely refuses.
+    strlcpy(sResult, "failed: the move could not be recorded, retrying at the next restart",
+            sizeof(sResult));
+    log_e("store: %s", sResult);
+    sRunning = false;
+    return;
+  }
 
   // One home, not two, which is the whole claim this file makes.
   removeTree(from, RNS_FS_ROOT);
