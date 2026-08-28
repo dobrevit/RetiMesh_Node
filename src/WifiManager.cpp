@@ -405,7 +405,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     pw["profile"] = Power::profileName(Power::profile());
     pw["cpu_mhz"] = getCpuFrequencyMhz();
     pw["battery_present"] = b.present;
-    pw["battery_charging"] = b.charging;
+    // Null, not false, where the board has no way to tell. A caller can then
+    // say "unknown" instead of drawing a conclusion this node never reached.
+    if (b.chargeKnown) pw["battery_charging"] = b.charging;
+    else               pw["battery_charging"] = nullptr;
     pw["pmu"] = Pmu::model();          // "AXP192" / "AXP2101" / "none"
     pw["board"] = BOARD_NAME;
     pw["battery_v"] = b.volts;

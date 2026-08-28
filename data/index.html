@@ -135,7 +135,11 @@ async function refreshStatus() {
       card("Power", (s.power ? s.power.profile + " · " + s.power.cpu_mhz + " MHz" : "") +
         (s.power && s.power.battery_present
            ? " · battery " + s.power.battery_pct + "% (" + s.power.battery_v.toFixed(2) + " V)" +
-             (s.power.battery_charging ? " · charging" : "")
+             // null means the board has no charge-status line to read, which is
+             // not the same as knowing it is idle. Say so, so nobody goes
+             // looking for a fault in a cable that is doing its job.
+             (s.power.battery_charging === null ? " · charging unknown"
+                                                : s.power.battery_charging ? " · charging" : "")
            : " · USB")),
       card("SD card", !s.sd || s.sd.state === "absent" ? "none"
         : s.sd.state === "mounted" ? (s.sd.used_bytes/1e9).toFixed(2) + " / " + (s.sd.volume_bytes/1e9).toFixed(1) + " GB"

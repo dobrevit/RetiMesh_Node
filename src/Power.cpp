@@ -105,6 +105,7 @@ Battery battery() {
   b.volts    = p.volts;
   b.present  = p.present;
   b.charging = p.charging;
+  b.chargeKnown = true;             // the chip is asked directly
   b.percent  = p.present ? p.percent : 0;
   return b;
 #elif HAS_BATTERY_ADC
