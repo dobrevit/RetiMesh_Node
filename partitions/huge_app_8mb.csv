@@ -3,10 +3,14 @@
 # application; the four megabytes the stock table leaves unmapped go to the
 # filesystem instead of being wasted.
 #
-# It matters most on a board with no SD card. There the filesystem is the only
-# storage there is, holding the web assets *and* the Reticulum transport store —
-# paths, announces, and known destinations, which is what a node loses when it
-# runs out of room to remember them.
+# It matters because both boards using this — the Heltec WiFi LoRa 32 V3 and the
+# Wireless Stick — have 8 MB of flash and no SD card. The filesystem is then the
+# only storage there is, holding the web assets *and* the Reticulum transport
+# store: paths, announces and known destinations, which is exactly what a node
+# starts forgetting when it runs out of room to remember them. Handing a cache
+# 896 KB when five megabytes are sitting unmapped is a choice, and the wrong one.
+#
+# This is the one place that reasoning is written down; the envs just point here.
 nvs,      data, nvs,     0x9000,  0x5000,
 otadata,  data, ota,     0xe000,  0x2000,
 app0,     app,  ota_0,   0x10000, 0x300000,
