@@ -25,6 +25,8 @@
 SdCard sdCard;
 
 static const char* kMount = "/sd";
+// Only ever mounted for the presence probe, and unmounted immediately.
+static const char* kProbeMount = "/sdprobe";
 static const char* kLogDir = "/retimesh";          // SD paths are relative to the mount point
 static const char* kLogFile = SdCard::LOG_PATH;
 
@@ -132,12 +134,36 @@ void SdCard::task(void* self) {
 bool SdCard::probeCardPresent() {
   uint8_t pdrv = sdcard_init(PIN_SD_CS, &_spi, SD_SPI_HZ);
   if (pdrv == 0xFF) return false;
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  _info.type = sdcard_type(pdrv);
-  _info.cardBytes = (uint64_t)sdcard_num_sectors(pdrv) * sdcard_sector_size(pdrv);
-  xSemaphoreGive(_lock);
+
+  // What sdcard_init actually does is take a free driver slot and allocate a
+  // struct for it. It does not speak to the card, and the struct is malloc'd
+  // rather than zeroed, so its sector count is whatever the heap last held
+  // there. Reporting a card on the strength of getting a slot, and its size
+  // from that field, is how an empty slot came to announce a card of some
+  // arbitrary capacity — a terabyte, on occasion — and then sit there saying
+  // it could not be mounted.
+  //
+  // The sector count is filled in by the disk initialise, and a mount attempt
+  // is the only exported call that reaches it. The mount is expected to fail
+  // here: this runs after the real one already failed, so the card either has
+  // no filesystem or is not there at all. Reading sector zero separates those
+  // two, which is the question actually being asked.
+  //
+  // A separate mount point, because the real one may still be registered from
+  // the attempt that just failed, and re-registering it returns an error
+  // before the initialise is ever reached.
+  const bool mounted = sdcard_mount(pdrv, kProbeMount, 1, false);
+  uint8_t sector[512];
+  const bool present = sd_read_raw(pdrv, sector, 0);
+  if (present) {
+    xSemaphoreTake(_lock, portMAX_DELAY);
+    _info.type = sdcard_type(pdrv);
+    _info.cardBytes = (uint64_t)sdcard_num_sectors(pdrv) * sdcard_sector_size(pdrv);
+    xSemaphoreGive(_lock);
+  }
+  if (mounted) sdcard_unmount(pdrv);
   sdcard_uninit(pdrv);
-  return true;
+  return present;
 }
 
 bool SdCard::mount() {
