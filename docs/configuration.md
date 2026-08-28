@@ -42,6 +42,7 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 | Zero-config peering (AutoInterface) | enabled | RNS AutoInterface on the AP; group id blank = `reticulum` (peers must share it) |
 | Announce cap | 2 % | share of each interface's bandwidth announces may use (rnsd `announce_cap`) |
 | Announce rate target / grace / penalty | 0 / 0 / 0 | throttle destinations announcing too often (rnsd `announce_rate_*`); 0 = off |
+| Reticulum store on SD | on | where the store belongs when a card is present. **Read-only on this form** — saving the flag alone moved nothing and left the node reading an empty store, so the store is moved with *Use this card* / *Eject* under SD card, which copy the data and restart into the new home. See [Architecture](architecture.md#the-store-has-one-home). |
 
 See [reticulum.md](reticulum.md#interface-modes) for what the modes do.
 
@@ -49,10 +50,23 @@ See [reticulum.md](reticulum.md#interface-modes) for what the modes do.
 Password 4–32 chars (HTTP Basic Auth, user `admin`). *Factory reset* clears
 settings but keeps the identity keys.
 
+Credentials are stored **in the clear**. The admin password, the access-point
+password and any station password are plain strings in NVS, and the identity
+keys are raw bytes; flash encryption is not enabled, so anyone who can read the
+flash can read all of them. The portal is HTTP, so Basic Auth puts the password
+on the wire on every request — on the node's own access point that is within
+radio range of anyone. Change the default password, and treat a node as
+something an attacker with physical access owns completely.
+
 ## Backup & provisioning
 *Download settings (JSON)* exports radio, Wi-Fi (with password), transport
 and admin settings — never the identity keys. *Import & restart* applies such
-a file (sections optional) — clone a configuration onto other nodes.
+a file (sections optional) — clone a configuration onto other nodes. The export
+contains every password in plain text: treat the file as a credential.
+
+Where the store lives is not imported. That describes the node the backup came
+from, not the settings being restored, so it is dropped and the answer says so
+rather than failing the whole import.
 
 ## Build flags (platformio.ini / `-D`)
 | Flag | Default | Purpose |
@@ -67,6 +81,18 @@ a file (sections optional) — clone a configuration onto other nodes.
 | `ANNOUNCE_INTERVAL_S`, `BEACON_INTERVAL_S` | 600 / 0 | |
 | `HAS_DISPLAY`, `OLED_ADDR`, `OLED_ROTATION` | 1 / 0x3C / 0 | |
 | `HAS_SD`, `PIN_SD_*`, `SD_SPI_HZ`, `SD_PARTIAL_PERCENT` | 1 / T3-S3 map / 20 MHz / 50 | microSD slot |
+| `SD_POLL_MS`, `SD_LOG_MAX_BYTES` | 3000 / 1 MB | slot polling, event-log rotation |
+| `DISPLAY_WIDTH`, `DISPLAY_HEIGHT`, `DISPLAY_COMPACT` | 128 / 64 / 0 | panel size; compact drops pages and columns that do not fit a 64x32 |
+| `HAS_DISPLAY_VEXT`, `PIN_DISPLAY_VEXT`, `PIN_OLED_RST` | 0 / — / — | panels on a switched rail (both Heltec boards) |
+| `PIN_STATUS_LED` | board | activity LED, `-1` where there is none |
+| `HAS_PMU`, `HAS_BATTERY_ADC`, `PIN_BATTERY_ADC` | board | battery sensing; only a PMU can report charging |
+| `BATTERY_MIN_V`, `BATTERY_MAX_V` | 3.0 / 4.35 | outside this range means no cell is attached |
+| `PMU_VBUS_LIMIT_MA` | 500 | how much the node draws from USB |
+| `HAS_GPS`, `PIN_GPS_*`, `GPS_BAUD` | board | u-blox receiver |
+| `HAS_PA`, `HAS_RF_SWITCH`, `PIN_RF_RXEN`, `PIN_RF_TXEN` | 0 | external power amplifier and its RF switch |
+| `RADIO_SELFTEST_ON_BOOT` | 0 | transmit one frame at boot and time the interrupt — proves the DIO wiring rather than assuming it |
+| `DIAG_*` | see `Config.h` | boot counter namespace and diagnostics reporting |
+| `ASSET_STAMP` | build hash | set by `tools/asset_stamp.py`; compared at boot against `/assets.json` so a firmware-only update says so |
 | `DISPLAY_SLEEP_MS`, `DISPLAY_PAGE_TIMEOUT_MS` | 60000 / 30000 | |
 | `RNS_MAX_CLIENTS` | 4 | simultaneous TCP peers |
 | `PSRAM_MALLOC_THRESHOLD` | 128 | allocations above this size prefer PSRAM |

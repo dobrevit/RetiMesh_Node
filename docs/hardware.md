@@ -5,7 +5,29 @@
 |---|---|---|---|---|---|
 | `t3s3` | LilyGO T3-S3 v1.2/v1.3 (ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM) | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
 | `tbeam` | LilyGO T-Beam v1.1/v1.2 (ESP32, 4 MB flash, no PSRAM) | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS; **no SD slot** | see below |
+| `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
+| `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
+| `heltec-v3` | Heltec WiFi LoRa 32 V3 (ESP32-S3, 8 MB flash, no PSRAM) | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | — (no SD, no GNSS) | verified on hardware |
+| `heltec-ws` | Heltec Wireless Stick V2/V2.1 (ESP32, 8 MB flash) | SX1276 | 0.49" 64x32 SSD1306 on Vext | — (no SD, no GNSS) | verified on hardware |
 | `esp32s3-qspi` | ESP32-S3 DevKitC-1 (8 MB) + SX1262 module | SX1262 | optional SSD1306 | — | builds; wire per flags |
+
+Both Heltec boards use `partitions/huge_app_8mb.csv` rather than the stock
+table, which maps only the first 4 MB of an 8 MB part. Neither has an SD slot,
+so the filesystem is the only home the Reticulum store has, and the spare flash
+goes to it: 4900 KB instead of 896 KB.
+
+The Heltec V3 reaches the host through a CP2102 bridge rather than the S3's own
+USB, so it appears as `/dev/ttyUSB*` and not as an Espressif JTAG device. Every
+CP2102 reports the serial number `0001`, so with more than one attached
+`/dev/serial/by-id/` names only one of them and the rest have to be found by
+path.
+
+### The PA variant ships untested
+`t3s3-sx1280-pa` is built and published like every other board, but nothing in
+it has been measured. Its RF switch pins and its 20 dBm ceiling were taken from
+the reference firmware rather than from hardware, and a wrong RF switch means
+transmitting into a disabled path. Treat its output power and range as
+unverified until someone runs it.
 
 ### T-Beam notes
 The transceiver, the GPS and the display are not wired to 3V3 on this board:
@@ -65,7 +87,16 @@ display shows `bat 42%+` while charging and the status page says so in words.
 | OLED SDA / SCL | 18 / 17 (addr 0x3C) |
 | BOOT button | 0 (active low) |
 | LED | 37 |
-| Battery ADC | 1 (100k/100k divider) — not yet used |
+| Battery ADC | 1 (100k/100k divider) |
+
+On the SX1280 variants the busy and interrupt lines move: **BUSY 36, DIO1 9**.
+Those were established with a GPIO scan during transmission, because the boot
+log is byte-identical whether they are right or wrong — the radio initialises
+either way and simply never reports a completed transmission.
+
+There is no charge-status line on any T3-S3 variant. The divider measures the
+cell; whether it is charging is a question the board cannot answer, and the API
+reports null rather than claiming it is idle. Only boards with a PMU know.
 | microSD MOSI / MISO / SCK / CS | 11 / 2 / 14 / 13 (HSPI, separate from the radio bus) |
 
 The SX1262 probe waits on BUSY (GPIO 34 = DIO2 on SX127x boards) and takes
@@ -77,10 +108,20 @@ Optional; hot-plug polled every 3 s. The card is mounted as one FAT volume at
 half the card — e.g. a Raspberry Pi image with a small boot partition),
 `unformatted` (no filesystem the node recognises), `formatting`, `error`,
 `absent`. The settings page can format the whole card to a single FAT32
-volume (admin, explicit confirmation — erases everything). First consumer:
-`/retimesh/events.log` (announces, boots; rotated at 1 MB). Transport
-persistence and the propagation-node store move to the card in later
-releases.
+volume (admin, explicit confirmation — erases everything), and refuses while
+the store is on the card or a move is in progress.
+
+The card holds `/retimesh/events.log` (announces, boots; rotated at 1 MB,
+downloadable from the portal), `/retimesh/store.json` naming the node that owns
+the store, and `/rns` when the store has been moved onto it. Use the card for
+the store with **Use this card** on the settings page and take it back with
+**Eject**; both copy the data across and restart the node into its new home. See
+[Architecture](architecture.md#the-store-has-one-home).
+
+An empty slot reports `absent` with a capacity of zero. If you ever see a
+capacity that looks invented, that is the bug fixed in v0.0.8: the presence
+check used to report a card whenever a driver slot was free and read its size
+from a field nothing had written.
 
 ## OLED and button
 Pages, in cycle order: status → neighbours → transport → radio → network →

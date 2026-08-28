@@ -27,6 +27,14 @@ runs every second. Disable transport on the settings page to run as a plain
 bridge (packets are still relayed between the Wi-Fi clients and LoRa, but
 nothing is routed or re-announced).
 
+**Persistence.** The path table, known destinations and packet hash list are
+kept in a microStore under `/rns`, on the SD card when one has been taken into
+use and in internal flash otherwise — one home at a time, moved deliberately
+rather than followed automatically. See
+[Architecture](architecture.md#the-store-has-one-home). The node identity lives
+in NVS either way and survives a factory reset, so a node keeps its address even
+when its store is wiped.
+
 ## Interface modes
 Exactly rnsd's vocabulary; each interface has its own.
 
