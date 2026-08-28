@@ -63,6 +63,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "SdCard.h"
+#include "StoreHome.h"
 #include "AutoInterface.h"
 #include "Power.h"
 #include "Pmu.h"
@@ -135,7 +136,39 @@ void setup() {
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   #if HAS_SD
-    sdCard.begin();                        // optional; hot-plug polled on core 0
+    // Before the card task exists: it is the task that reads the card's
+    // ownership marker for everyone else, and it needs somewhere to put it.
+    StoreHome::begin();
+    sdCard.begin();                        // mounts; nothing polls the slot yet
+    // A move of the store asked for before the last restart happens here, and
+    // here specifically: after the card is mounted and before anything else in
+    // the node is alive. It is seconds of solid filesystem work, and it used to
+    // run further down, by which time the web server was answering requests and
+    // the card task was polling the same card. Both of those reach into state
+    // this is in the middle of changing, and the node died in the attempt often
+    // enough that a migration reliably cost two boots instead of one — visible
+    // only when nobody had a serial monitor attached, because watching it
+    // changed the timing enough to hide it.
+    // The node's name before the move, not after: the migration writes it onto
+    // the card it is claiming, and this used to happen inside the Wi-Fi
+    // start-up further down, so a card adopted at boot got an owner with no
+    // name on it.
+    wifiManager.resolveNames();
+    StoreHome::runPendingMigration();
+  #endif
+  // Where the store lives is settled here, for every board and whether or not
+  // the transport is switched on. It used to be decided inside the transport's
+  // own start-up, behind its enabled check, so a node with the transport off
+  // never decided at all: the store's filesystem stayed pointed at flash while
+  // the data sat on the card, every page and API answer said so, and an operator
+  // acting on that could have the card's real store overwritten by the copy in
+  // flash at the next boot.
+  StoreHome::chooseAtBoot();
+  #if HAS_SD
+    // Only now: everything above drives the card directly, and the poll's
+    // removal check answers a read it lost to that traffic by unmounting the
+    // card out from under whoever is using it.
+    sdCard.startPolling();                 // optional; hot-plug polled on core 0
   #endif
   #if HAS_GPS
     Gps::begin();                          // NMEA reader task; powers the receiver rail

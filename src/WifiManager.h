@@ -58,6 +58,7 @@ public:
   // from the access-point name so there is one identity per node rather than
   // two that can disagree.
   const char* hostname() const { return _hostname; }
+  void resolveNames();                   // ssid + hostname, without starting anything
   bool stationConfigured() const { return settings.wifi().staSsid[0] != '\0'; }
   bool stationConnected() const { return WiFi.status() == WL_CONNECTED; }
   const char* securityName() const { return _securityName; }
@@ -86,6 +87,8 @@ private:
   void handleAdminPost(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleTransportPost(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleSdFormat(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleSdAdopt(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleSdEject(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleExport(AsyncWebServerRequest* request);
   void handleImport(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleReset(AsyncWebServerRequest* request);

@@ -48,7 +48,15 @@ bool profileFromName(const char* name, Profile& out);
 
 struct Battery {
   bool  present;                    // a cell is connected
-  bool  charging = false;           // only a PMU can tell; false on ADC boards
+  bool  charging = false;           // meaningless unless chargeKnown
+  // Whether charging is a question this board can answer at all. A divider
+  // measures the cell and nothing else: the charger on an ADC-only board does
+  // its work in hardware and tells the processor nothing, and there is no
+  // status line to read. Reporting "not charging" there is a claim the board
+  // cannot support — a plugged-in node insisting it is not charging is worse
+  // than one admitting it has no idea, because the first sends someone looking
+  // for a fault in a cable that is working.
+  bool  chargeKnown = false;
   float volts;
   uint8_t percent;                  // rough LiPo curve; 0 when absent
 };

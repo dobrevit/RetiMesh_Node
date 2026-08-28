@@ -34,6 +34,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "Config.h"
+#include "StoreHome.h"
 
 enum class ApSecurity : uint8_t { Open = 0, WPA2 = 1, WPA2_WPA3 = 2, WPA3 = 3 };
 
@@ -87,7 +88,14 @@ struct TransportSettings {
   bool     autoEnabled = true;          // RNS AutoInterface peering on the AP
   char     autoGroupId[33] = "";        // "" = RNS default "reticulum"
   uint8_t  powerProfile = 0;            // 0 performance, 1 balanced, 2 battery (Power.h)
-  bool     sdStore = true;              // keep the Reticulum store on the SD card when one is present
+  bool     sdStore = true;              // the Reticulum store's home is the SD card
+  // A move of the store that has been asked for and not made yet. It is
+  // carried out at the next boot, before anything opens the store, so it has
+  // to survive the restart in between — which is what makes it a setting
+  // rather than a flag in RAM. StoreHome owns both of these: nothing else may
+  // write them, because changing where the store lives without copying it is
+  // how a node comes up with an empty path table.
+  StoreHome::Move pendingMove = StoreHome::Move::None;
 };
 
 struct AdminSettings {

@@ -238,25 +238,22 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   sTxRing = txRing; sRxRing = rxRing; sTcpInRing = tcpInRing;
   sEvents = xQueueCreate(8, sizeof(Event));
   sSnapLock = xSemaphoreCreateMutex();
+
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
 
   try {
     RNS::loglevel(RNS::LOG_INFO);        // DEBUG is compiled in; raise here when tracing
 
-    // Storage: the SD card when the operator wants it and one is mounted,
-    // otherwise the LittleFS partition shared with the web app. Decided once,
-    // here, because microStore holds files open for the life of the store.
-    // Nothing is migrated between the two — the path table, announce cache
-    // and hashlist all rebuild themselves from the mesh; the node identity
-    // lives in NVS either way.
-#if HAS_SD
-    if (settings.transport().sdStore && sdCard.mounted()) {
-      RnsFileSystem::useSd();
-      sdCard.reserve(true);              // no formatting, and removal is an error
-    } else {
-      RnsFileSystem::useLittleFs();
-    }
-#endif
+    // Storage: the SD card or the LittleFS partition shared with the web app.
+    // StoreHome owns that rule, the card's ownership marker and the filesystem
+    // the store is pointed at, and it has already applied all three — in
+    // setup(), before this or anything else could open a file. The choice used
+    // to be made here, which put it behind the enabled check a few lines up: a
+    // node with the transport switched off never chose, so every answer about
+    // the store's home was the default one. It said flash while the store sat
+    // on the card, the settings page offered to adopt a card that was already
+    // the home, and the boot after that copied the flash tree over the real
+    // one. Nothing to re-derive here; rnsFs already points at the home.
     rnsFs.init(false);
     log_i("Reticulum storage: %s%s (%u KB free)", RnsFileSystem::prefix(), RNS_FS_ROOT,
           (unsigned)(rnsFs.storageAvailable() / 1024));

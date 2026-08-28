@@ -150,10 +150,11 @@
     </div>
     <div class="note">Announce cap limits how much of each interface's airtime announces may use (rnsd default 2 %). The rate target/grace/penalty
       throttle destinations that announce too often — the same knobs as rnsd's <code>announce_rate_*</code>.</div>
-    <div class="note">The Reticulum store (path table, announce cache, known destinations) is kept on the microSD card when one is mounted at boot,
-      otherwise in internal flash next to this web app. The choice is made once at startup, so changing it &mdash; or inserting a card &mdash; takes
-      effect after a restart. Nothing is copied between the two: the tables rebuild themselves from the mesh and the node identity lives in NVS.
-      While the store is on the card it cannot be formatted, and removing it stops the node learning new paths until it reboots.</div>
+    <div class="note">The Reticulum store (path table, announce cache, known destinations) lives in one place at a time: the microSD card when one
+      has been taken into use, otherwise in internal flash next to this web app. It is moved only with <b>Use this card</b> and <b>Eject</b> under
+      SD card below — saving this form cannot move it, because moving it means copying the data, which happens during the restart that follows.
+      While the store is on the card it cannot be formatted, and pulling the card without ejecting stops the node learning new paths until it
+      reboots.</div>
     <button type="submit">Save &amp; restart</button>
     <div class="msg" id="transportMsg"></div>
   </form>
@@ -161,11 +162,20 @@
   <h2>SD card</h2>
   <div class="card">
     <div class="note" id="sdInfo">Checking…</div>
+    <div class="note" id="sdHome"></div>
+    <div class="row">
+      <div><button type="button" id="sdAdopt" disabled>Use this card for the store</button></div>
+      <div><button type="button" id="sdEject" disabled>Eject card</button></div>
+    </div>
     <div class="row">
       <div><button type="button" id="sdLog" disabled>Download event log</button></div>
       <div><button class="danger" type="button" id="sdFormat" disabled>Format card (erase everything)</button></div>
     </div>
     <div class="msg" id="sdMsg"></div>
+    <div class="note">Taking a card into use restarts the node and copies the store onto it on the way back up, with nothing else reading or
+      writing it, and writes this node's name to the card so no other node will claim it. Ejecting copies the store back to internal flash the
+      same way and takes it off the card, which is then free for any node to take — no formatting needed. Only one copy exists at a time. A card
+      carrying another node's store is left alone; format it first if you mean to take it.</div>
     <div class="note">The node uses a single FAT32 volume across the whole card. Cards with other layouts (e.g. a Raspberry Pi image:
       small boot partition + Linux partitions) mount only partially and can be reformatted here. Formatting erases all data on the card.</div>
   </div>
@@ -186,7 +196,9 @@
     </div>
     <div class="msg" id="backupMsg"></div>
     <div class="note">The export contains radio, Wi-Fi (including the password), transport and admin settings &mdash; keep it private.
-      It never contains the node's identity keys. Importing on another node clones its configuration; the SSID stays automatic unless set.</div>
+      It never contains the node's identity keys. Importing on another node clones its configuration; the SSID stays automatic unless set.
+      Where the Reticulum store lives is not imported. That describes the node the backup came from, not the settings being restored, and moving
+      the store means copying it &mdash; which is what the SD card actions above do.</div>
   </div>
 
   <h2>Danger zone</h2>
@@ -414,8 +426,12 @@ $("importBtn").addEventListener("click", async () => {
   if (!f) { setMsg("backupMsg", "Choose a settings JSON file first.", "bad"); return; }
   try {
     const body = JSON.parse(await f.text());
-    await api("/api/settings/import", body);
-    setMsg("backupMsg", "Imported. Restarting…", "warn");
+    const r = await api("/api/settings/import", body);
+    // The store's location is dropped rather than imported, and an operator who
+    // restored a backup expecting the card to be in use should hear that from
+    // the node rather than discover it later.
+    setMsg("backupMsg", r.note ? "Imported, except one thing: " + r.note + ". Restarting…"
+                               : "Imported. Restarting…", "warn");
   } catch (e) { setMsg("backupMsg", e.message, "bad"); }
 });
 
@@ -428,6 +444,7 @@ $("resetBtn").addEventListener("click", async () => {
 });
 
 let sdLastFormat = "";     // last_format as of the most recent refresh
+let lastMigration = "";    // ...and the migration result already reported
 let formatWas = null;      // ...as it stood when a format was requested
 async function refreshSd() {
   try {
@@ -464,9 +481,59 @@ async function refreshSd() {
     }
     $("sdFormat").disabled = !(sd.state === "mounted" || sd.state === "partial" || sd.state === "unformatted" || sd.state === "error");
     $("sdLog").disabled = !(sd.state === "mounted" || sd.state === "partial");
+
+    // Where the store lives, and what this card is, in the reader's words.
+    //
+    // Both buttons are the node's own answer about whether it would accept the
+    // move, never a case assembled here out of where the store is and what the
+    // card holds: the two used to be written separately and could disagree
+    // about a card. Eject drawn from "the store is on the card" alone stayed
+    // lit after the card had been pulled — the store is still nominally there —
+    // and the eject it allowed spent a restart to discover there was no card to
+    // read it off.
+    const onCard = sd.store_home === "sd";
+    $("sdAdopt").disabled = !sd.can_adopt;
+    $("sdEject").disabled = !sd.can_eject;
+    let home = onCard ? "The Reticulum store is on this card."
+                      : "The Reticulum store is in internal flash.";
+    if (sd.card === "foreign" && sd.owner)
+      home += ` This card holds the store of "${sd.owner}" and will not be used.`;
+    else if (sd.card === "foreign")
+      // Foreign with no name on it is a card whose marker this node could not
+      // read. Saying "another node's store" would be inventing an owner; what
+      // is true is that the claim on the card is unreadable, and that formatting
+      // is the only way past it.
+      home += " This card carries an ownership marker that cannot be read, so it will not be used;"
+            + " format it if the card is yours.";
+    else if (sd.card === "ours" && !onCard)
+      home += " This card holds a store written by this node.";
+    else if (sd.card === "legacy" && !onCard)
+      home += " This card holds a store with no owner written on it.";
+    else if (sd.card === "blank" && sd.owner)
+      home += ` This card was released by "${sd.owner}" and is free to take.`;
+    $("sdHome").textContent = home;
+    if (sd.migrating) setMsg("sdMsg", "The store moves as the node restarts…", "warn");
+    else if (sd.migration && sd.migration !== lastMigration) {
+      setMsg("sdMsg", sd.migration, sd.migration.indexOf("failed") === 0 ? "bad" : "good");
+      lastMigration = sd.migration;
+    }
   } catch (e) { $("sdInfo").textContent = "Status unavailable."; }
 }
 $("sdLog").addEventListener("click", () => { window.location.href = "/api/sd/log"; });
+$("sdAdopt").addEventListener("click", async () => {
+  if (!confirm("Restart the node and copy the Reticulum store onto this card?")) return;
+  try {
+    await api("/api/settings/sd/adopt", { confirm: "ADOPT" });
+    setMsg("sdMsg", "Restarting; the store moves onto the card on the way back up…", "warn");
+  } catch (e) { setMsg("sdMsg", e.message, "bad"); }
+});
+$("sdEject").addEventListener("click", async () => {
+  if (!confirm("Restart the node and copy the store back to internal flash? The card can be removed once the node is back.")) return;
+  try {
+    await api("/api/settings/sd/eject", { confirm: "EJECT" });
+    setMsg("sdMsg", "Restarting; the store moves to internal flash on the way back up…", "warn");
+  } catch (e) { setMsg("sdMsg", e.message, "bad"); }
+});
 $("sdFormat").addEventListener("click", async () => {
   if (prompt("This erases EVERYTHING on the card. Type FORMAT to continue.") !== "FORMAT") return;
   try {
