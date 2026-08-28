@@ -35,5 +35,11 @@
     "chip": "esp32",
     "chip_family": "ESP32",
     "notes": "0.49\" 64x32 OLED on the switched Vext rail, SX1276, no SD slot and no GNSS. The small panel gets its own page layout — ten columns and four rows — rather than the 128x64 one clipped. Serial is a CP2102 bridge."
+  },
+  "heltec-v3": {
+    "name": "Heltec WiFi LoRa 32 V3",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "notes": "0.96\" 128x64 OLED on the switched Vext rail, SX1262 with a TCXO, 8 MB flash, no SD slot and no GNSS. Very common hardware. Native USB — hold PRG while pressing RST if the port is not detected."
   }
 }
