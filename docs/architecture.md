@@ -40,6 +40,9 @@ flowchart LR
 - **radioTask** owns the transceiver: interrupt-driven RX, split-packet
   reassembly, CSMA and fragmentation on TX, live reconfiguration between
   packets, beacon/station-ID recognition.
+- **loopTask** runs the bootloader manager (every restart passes through it),
+  the serial maintenance console and the local-link bookkeeping, a few bytes
+  per 200 ms pass — see [local-link.md](local-link.md).
 - **rns task** owns microReticulum, which is single-threaded: it drains the
   rings into the interfaces (`handle_incoming`), runs Transport (forwarding,
   announce propagation, path requests, link tables) and its housekeeping
@@ -88,7 +91,11 @@ sequenceDiagram
 | `QrCode.h` | join/portal/address codes for the portal and panel |
 | `RnsAnnounce.*` | node identity keys, announce parsing/verification for the neighbour table |
 | `Neighbors.*` | table of stations heard (announces, station IDs, beacons) |
-| `WifiManager.*` | SoftAP, captive DNS, web routes, settings API, restarts |
+| `WifiManager.*` | SoftAP, captive DNS, web routes, settings and system API |
+| `LocalLinkState.h`, `LocalLink.*` | the ways a host reaches the node: phase machine (pure), registry, Wi-Fi adapters, local-address policy |
+| `BootloaderPlan.h`, `Bootloader.*` | every restart: request → quiesce → restart; software entry into the ROM downloader on S2/S3/C3; the 1200-baud touch detector (pure) |
+| `MaintenanceProtocol.h`, `Maintenance.*` | the serial maintenance console: line protocol (pure), commands |
+| `UsbDescriptorPlan.h` | the composite USB device's endpoint budget and identity (pure, static-asserted) |
 | `Display.*` | SSD1306 pages, button navigation, sleep |
 | `HDLC.h` | RNS TCP framing |
 | `data/` | web app (LittleFS): status page, settings page |
@@ -96,7 +103,7 @@ sequenceDiagram
 ## Storage
 | Where | What |
 |---|---|
-| NVS `retimesh` | settings (radio, Wi-Fi, transport, admin password) |
+| NVS `retimesh` | settings (radio, Wi-Fi, transport, links, maintenance, admin password) |
 | NVS `retimeshid` | identity keys (kept across factory reset) |
 | NVS `retimesh-diag` | boot counter |
 | LittleFS `/` | `index.html`, `settings.html`, `board.json`, `assets.json` |

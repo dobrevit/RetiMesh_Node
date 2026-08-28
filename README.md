@@ -50,6 +50,11 @@ captive-portal status page and bridges stock Reticulum clients (Sideband,
 | — | Wi-Fi SoftAP `retimesh-XXXXXX` (last three MAC octets), `10.42.0.1/24` | open network, captive portal DNS |
 | 80 | HTTP (ESPAsyncWebServer) | status page, neighbour list, **unencrypted** community bulletin board; `/settings.html` admin page (user `admin`, default password **`retimesh`** — change it there) |
 | 4242 | raw TCP, RNS HDLC framing | Reticulum transport — connect any stock RNS client |
+| — | USB serial, 115200 | the log, and a maintenance console (`VERSION`, `STATUS`, `BOOTLOADER CONFIRM`, …) — see [docs/local-link.md](docs/local-link.md) |
+
+Both servers bind every interface, so they answer on whichever local link is
+up — Wi-Fi today, USB networking and PPP once a toolchain with those drivers
+lands — and Wi-Fi can be switched off entirely.
 
 Client-side config (`~/.reticulum/config` — in Sideband just add a
 *TCP Client Interface* with the same host/port):
@@ -81,7 +86,7 @@ Client-side config (`~/.reticulum/config` — in Sideband just add a
 
 ```sh
 pio run -e t3s3                  # compile (LilyGO T3-S3)          
-pio run -e t3s3 -t upload        # flash firmware
+pio run -e t3s3 -t upload        # flash firmware — asks the running node for its bootloader, no BOOT button
 pio run -e t3s3 -t uploadfs      # flash the web app (data/ -> LittleFS)
 pio device monitor
 ```
@@ -184,8 +189,9 @@ it names (`git tag v1.2.0 && git push origin v1.2.0`) → wait for assets →
 One-time repo setup: *Settings → Pages → Source: GitHub Actions*; optionally
 a `DEPS_PR_TOKEN` fine-grained PAT so dependency PRs trigger CI.
 
-Adding a board = a `[env:…]` in `platformio.ini`, an entry in `boards.json`,
-and the env name in the two workflow matrices.
+Adding a board = a `[env:…]` in `platformio.ini`, an entry in `boards.json`
+(including its `local_link` block — what is on the USB connector), and the
+env name in the two workflow matrices.
 
 ## Notes & limits
 
@@ -193,6 +199,13 @@ and the env name in the two workflow matrices.
   are edited at `http://10.42.0.1/settings.html` (user `admin`, default
   password `retimesh` — change it). Radio changes apply live; Wi-Fi changes
   restart the node.
+- **USB networking (CDC-NCM) and PPP are designed and tested down to the
+  toolchain and no further.** The pinned Arduino core 2.0.17 ships TinyUSB
+  without the NCM class and lwIP without PPP; both arrive with the core-3
+  migration. What works today on every board: the maintenance console, the
+  bootloader manager, `POST /api/system/bootloader`, Wi-Fi-optional
+  operation and hands-free flashing. [docs/local-link.md](docs/local-link.md)
+  has the full account.
 - **WPA3 on the access point is not available on this build.** SoftAP-side
   SAE requires ESP-IDF 5; the pinned Arduino core (2.0.17 / IDF 4.4.7)
   rejects the mode, so the node runs WPA2 and greys out the WPA3 options.

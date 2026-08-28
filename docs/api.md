@@ -82,6 +82,19 @@ past the checks on the way in.
              "rx_crc_errors": 4, "rx_bad_length": 0,
              "announces_tx": 3, "announces_rx": 5, "beacons_tx": 0, "beacons_rx": 2, "apply_error": 0 },
   "peers": { "rns_tcp": 1, "wifi_sta": 1, "tcp_rx_packets": 12 },
+  "wifi_enabled": true,
+  "local_links": [
+    { "name": "wifi-ap",  "type": "wifi_ap",  "hardware": true, "firmware": true, "enabled": true,
+      "phase": "ready", "up": true, "ip": "10.42.0.1", "addressing": "static", "uptime_s": 1234, "mtu": 1500,
+      "clients": 1, "rx_bytes": null, "tx_bytes": null, "rx_packets": null, "tx_packets": null, "errors": null },
+    { "name": "wifi-sta", "type": "wifi_sta", "hardware": true, "firmware": true, "enabled": true,
+      "phase": "ready", "up": true, "ip": "192.168.1.42", "addressing": "dhcp", "uptime_s": 1200, "mtu": 1500, "clients": null },
+    { "name": "usb0", "type": "usb_ncm",  "hardware": true,  "firmware": false, "enabled": false, "phase": "disabled",
+      "reason": "this build has no USB network stack (Arduino core 2.x TinyUSB carries no NCM)" },
+    { "name": "ppp0", "type": "ppp_uart", "hardware": false, "firmware": false, "enabled": false, "phase": "disabled",
+      "reason": "this board has no bridge UART to carry PPP" }
+  ],
+  "bootloader": { "software_entry": true, "api_enabled": true, "pending": false, "state": "idle", "primary": "software_api" },
   "sd": { "state": "partial", "type": "SDHC", "card_bytes": 15931539456, "volume_bytes": 268435456,
           "used_bytes": 60000000, "last_format": "" },
   "transport": { "enabled": true, "online": true, "lora_mode": "full", "wifi_mode": "access_point",
@@ -244,6 +257,32 @@ the card's marker, `migrating` while a move is queued or running, and
 node's own answer about whether it would accept each move; a page draws its
 buttons from those rather than working the rule out again from the fields above.
 
+### Local links
+`local_links` lists every way a host can reach the node — see
+[local-link.md](local-link.md). `type` is `wifi_ap`, `wifi_sta`, `usb_ncm`,
+`ppp_uart`, `rns_serial` or `ethernet`; `phase` is `disabled`, `down`, `up`
+(carrier, no address) or `ready`; `addressing` is `static`, `dhcp`,
+`link_local` or `none`. `hardware` says the board has it, `firmware` that this
+build can run it, `enabled` that the operator has it on; when the first is
+true and the second false, `reason` says why. Counters are `null` where the
+driver cannot count — the Wi-Fi stack keeps no per-interface totals — never
+zero. `bootloader` summarises what `GET /api/system/bootloader` says in full.
+
+## System (auth, POST only, local links only)
+The privileged operations, guarded by the admin password, the
+`maintenance.bootloader_api` switch and the link the request came over: by
+default only a **host-facing** link — the access point, USB, PPP — is
+accepted, and a request from the station network answers `403` unless
+`maintenance.bootloader_from_lan` is set. Nothing here is reachable through
+Reticulum. Details and the recovery procedure: [local-link.md](local-link.md#the-bootloader-manager).
+
+- `GET /api/system/bootloader` (public) → `{ "api_enabled", "software_entry", "pending", "state", "board", "primary", "methods": ["software_api","auto_reset_dtr_rts","manual_recovery"], "allowed_from_here", "recovery", "confirm": "BOOTLOADER" }` — what this board can do and whether a request from the caller's address would be accepted
+- `POST /api/system/bootloader` `{"confirm":"BOOTLOADER"}` → `202 { "ok":true, "restart":true, "target":"bootloader", "method":"software_api", "delay_ms":600, "expect":"…", "recovery":"…" }`; the node restarts into the ROM downloader 600 ms later. `400` without the confirm word, `403` when switched off or from a non-local link, `409` while a restart is already in progress, `501` on a classic ESP32 (it cannot; use esptool's DTR/RTS reset)
+- `POST /api/system/reboot` `{"confirm":"REBOOT"}` → `202 { "ok":true, "restart":true, "target":"app" }`
+
+While a restart is pending every settings `POST` answers `503` and new
+Reticulum TCP connections are refused.
+
 ## Bulletin board (public)
 - `GET /api/board` → `[{"id":1,"author":"…","text":"…"}]` (ordered, no timestamps — no RTC)
 - `POST /api/board` `{"author":"…","text":"…"}` → `{"ok":true}`; 50 posts kept
@@ -266,20 +305,22 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 ```
 
 ## Settings (auth)
-- `GET /api/settings` → `{ radio, wifi, transport, admin }` (password never returned; `has_password`, `default_password` flags)
+- `GET /api/settings` → `{ radio, wifi, transport, links, maintenance, admin }` (password never returned; `has_password`, `default_password` flags). `links` is `{ wifi: {hardware, supported, enabled}, usb: {…, reason}, ppp: {…, reason} }`; `maintenance` is `{ bootloader_api, bootloader_from_lan, console_enabled, software_entry, bootloader_methods, recovery }`
 - `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct,gps_enabled,gps_share_position}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,sta_ssid,sta_password}` → saves, restarts (`"restart":true`); `sta_ssid` blank = station mode off
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text
 - `GET /api/settings/export` → downloadable JSON of all settings (no identity keys)
 - `POST /api/settings/import` (a settings export; sections optional) → applies, restarts
+- `POST /api/settings/links` `{wifi,usb,ppp}` (any subset, booleans) → saves; `"restart":true` when Wi-Fi changed. A link the board lacks or the build cannot run is refused by name with the reason (`400`) rather than saved
+- `POST /api/settings/maintenance` `{bootloader_api,bootloader_from_lan,console_enabled}` → saves, applies live
 - `POST /api/settings/admin` `{password}`
 - `POST /api/settings/reset` → factory defaults, restarts (identity kept)
 - `POST /api/settings/sd/format` `{"confirm":"FORMAT"}` → erases the SD card and creates one FAT32 volume; poll `sd.state`/`sd.last_format` in `/api/status` (409 if no card or already formatting)
 - `POST /api/settings/sd/adopt` `{"confirm":"ADOPT"}` → moves the Reticulum store onto the card and restarts into it; the copy is made during the restart, with nothing holding the store open (409 with the reason when refused — see `sd.can_adopt`)
 - `POST /api/settings/sd/eject` `{"confirm":"EJECT"}` → moves the store back to internal flash the same way and marks the card released, after which any node may take it (409 with the reason when refused — see `sd.can_eject`)
 
-Errors: `{"error":"<reason>"}` with 400/401/413/500.
+Errors: `{"error":"<reason>"}` with 400/401/403/409/413/500/501/503.
 
 ## Captive portal
 `/generate_204`, `/hotspot-detect.html`, `/connecttest.txt`, … and any

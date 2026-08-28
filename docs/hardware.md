@@ -163,18 +163,33 @@ against the SX127x demodulation floor for the current spreading factor
 (-7.5 dB at SF7 to -20 dB at SF12), because the same SNR means something
 different at SF7 and SF12.
 
+## Host connectivity and flashing
+What each board puts on its USB connector, which bootloader-entry methods it
+offers and which IP local links it could carry are in the capability matrix in
+[local-link.md](local-link.md#board-capability-matrix). In short: the four
+native-USB S3 boards and the Heltec V3 can restart into their ROM downloader on
+request (`BOOTLOADER CONFIRM` on the console, `POST /api/system/bootloader`);
+the classic-ESP32 boards rely on the bridge's DTR/RTS reset, which esptool
+performs; and BOOT + RST recovers any of them.
+
 ## Adding a board
 1. `src/boards/<name>.h`: the pin map and the capability flags (`HAS_SD`,
    `HAS_PMU`, `HAS_GPS`, `HAS_DISPLAY`, `HAS_BATTERY_ADC`, `BOARD_NAME`).
    Everything in `Config.h` is `#ifndef`-guarded, so the board header wins and
-   anything it omits falls back to a sensible default.
+   anything it omits falls back to a sensible default. Host connectivity is
+   **not** declared here — it comes from `boards.json` (next step).
 2. `src/Config.h`: one line in the board-selection block mapping `-DBOARD_<X>`
    to the header.
 3. `platformio.ini`: a new `[env:<name>]` (board, partitions, `-DBOARD_<X>`,
    and `build_unflags` for anything the base env sets that the board lacks —
    PSRAM and native-USB CDC are the usual ones).
-4. `boards.json`: name, chip family, notes — drives CI, release packaging, the
-   web flasher and the CLI.
+4. `boards.json`: name, chip family, notes, and the `local_link` block — what
+   is on the USB connector (`usb.native` or `usb.bridge`), whether the bridge's
+   DTR/RTS reset the chip, whether the UART may carry PPP and the highest baud
+   qualified. `tools/board_caps.py` turns it into `BOARD_*` flags at build time
+   and `tools/check_boards.py` (CI) refuses a board without one or one that
+   contradicts the framework's USB flags in `platformio.ini`. Drives CI,
+   release packaging, the web flasher and the CLI.
 5. Workflow matrices in `.github/workflows/ci.yml` and `release.yml`.
 6. If the display or radio differ: `Display.*` / `LoRaRadio.*` (probe order,
    TCXO, RF switch). Keep board specifics behind the capability flags.
