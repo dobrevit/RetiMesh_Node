@@ -455,16 +455,31 @@ Where chooseAtBoot() {
   } else {
     RnsFileSystem::useLittleFs();
   }
-  // Put this node's name on a card it is taking into use but has not signed.
-  // Only a store from before markers existed gets here: a blank card is signed
-  // by the copy that makes it a home, and this one already holds the data. An
-  // unsigned card is one that some other node will read as free.
-  if (w == Where::Sd && c == Card::Legacy) {
+  // Keep the card's account of itself true.
+  //
+  // An unsigned card gets a name: only a store from before markers existed
+  // reaches here, since a blank card is signed by the copy that makes it a
+  // home, and an unsigned card is one some other node will read as free.
+  //
+  // A card this node already owns is still checked, because the name in the
+  // marker is a copy of something the operator can change. Rename the node and
+  // the card goes on claiming to belong to a name that no longer exists, which
+  // defeats the one job that field has — telling a person holding the card
+  // whose it is. Ownership itself never depended on the name: it is the node's
+  // identity that is compared, and that is random bytes in NVS from first boot,
+  // so renaming has never risked the node disowning its own store.
+  //
+  // The generation does not move for a rename. Nothing moved; a label was
+  // wrong. And a name that already matches is not rewritten, so this is not a
+  // flash write on every boot.
+  if (w == Where::Sd && (c == Card::Legacy || c == Card::Ours)) {
     Marker m;
-    readMarker(m);
-    if (writeMarker(m.generation + 1, /*released=*/false))
-      log_i("store: this card is now marked as belonging to %s", wifiManager.hostname());
-    refreshCache();
+    const bool marked = readMarker(m);
+    if (!marked || strcmp(m.name, wifiManager.hostname()) != 0) {
+      if (writeMarker(marked ? m.generation : m.generation + 1, /*released=*/false))
+        log_i("store: this card is marked as belonging to %s", wifiManager.hostname());
+      refreshCache();
+    }
   }
   return w;
 }
