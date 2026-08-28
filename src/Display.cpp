@@ -103,6 +103,28 @@ bool Display::begin() {
   return _ok;
 }
 
+void Display::notice(const char* title, const char* detail) {
+  if (!_ok) return;
+  const auto l = DisplayLayout::active();
+  _oled.clearDisplay();
+  _oled.setTextColor(SSD1306_WHITE);
+  _oled.setTextSize(1);
+  // Centred, because a notice is the only thing on the panel and a left-aligned
+  // line on a 64-pixel display looks like a page that failed to finish drawing.
+  auto centre = [&](const char* text, int16_t y) {
+    if (!text || !*text) return;
+    const int16_t w = (int16_t)strlen(text) * DisplayLayout::FONT_W;
+    int16_t x = (int16_t)((l.width - w) / 2);
+    if (x < 0) x = 0;
+    _oled.setCursor(x, y);
+    _oled.print(text);
+  };
+  const int16_t mid = (int16_t)(l.height / 2);
+  centre(title,  (int16_t)(detail ? mid - DisplayLayout::FONT_H : mid - DisplayLayout::FONT_H / 2));
+  centre(detail, (int16_t)(mid + 1));
+  _oled.display();
+}
+
 void Display::displayTask(void* self) {
   auto* d = static_cast<Display*>(self);
   if (!d->_ok) { vTaskDelete(nullptr); return; }

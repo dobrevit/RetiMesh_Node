@@ -19,6 +19,7 @@
 #endif
 #include "RnsAnnounce.h"
 #include "WifiManager.h"
+#include "Display.h"
 
 namespace StoreHome {
 
@@ -186,6 +187,25 @@ static Entry entryAt(fs::FS& fs, const char* path) {
   return e;
 }
 
+// Long, synchronous, and running inside setup() on the main task, where
+// nothing else will hand the scheduler a turn. A store of any size takes
+// several seconds of solid filesystem work, and with no host reading the
+// console there is not even a log write to yield on — so the idle task starves
+// and the watchdog panics mid-migration. It only ever survived while somebody
+// was watching it on a serial monitor, which is the least helpful kind of bug
+// there is. Every loop that walks or copies gives the scheduler a turn.
+static inline void breathe() { vTaskDelay(1); }
+
+// Files copied so far, shown on the panel. A count that climbs is the
+// difference between a node that is working and a node that has hung, and the
+// operator holding it has no other way to tell the two apart.
+static uint16_t sCopied = 0;
+static void progress(const char* what) {
+  char line[24];
+  snprintf(line, sizeof(line), "%s %u", what, (unsigned)sCopied);
+  display.notice("Moving store", line);
+}
+
 static bool copyFile(fs::FS& from, const char* src, fs::FS& to, const char* dst) {
   File in = from.open(src, FILE_READ);
   if (!in) return false;
@@ -196,6 +216,7 @@ static bool copyFile(fs::FS& from, const char* src, fs::FS& to, const char* dst)
   bool ok = true;
   while (ok && done < expect) {
     const size_t want = (expect - done) < sizeof(sBuf) ? (expect - done) : sizeof(sBuf);
+    breathe();
     const size_t n = in.read(sBuf, want);
     // A read that returns nothing is not the end of the file — the file's own
     // size says where that is. Stopping at the first short read treated a card
@@ -227,6 +248,7 @@ static void removeTree(fs::FS& fs, const char* path) {
   for (const std::string& n : e.names) {
     char child[160];
     snprintf(child, sizeof(child), "%s/%s", path, n.c_str());
+    breathe();
     removeTree(fs, child);
   }
   fs.rmdir(path);
@@ -235,12 +257,13 @@ static void removeTree(fs::FS& fs, const char* path) {
 static bool copyTree(fs::FS& from, const char* src, fs::FS& to, const char* dst) {
   const Entry e = entryAt(from, src);
   if (!e.found) return false;
-  if (!e.isDir) return copyFile(from, src, to, dst);
+  if (!e.isDir) { sCopied++; progress("file"); return copyFile(from, src, to, dst); }
   if (!to.mkdir(dst)) return false;
   for (const std::string& n : e.names) {
     char s[160], d[160];
     snprintf(s, sizeof(s), "%s/%s", src, n.c_str());
     snprintf(d, sizeof(d), "%s/%s", dst, n.c_str());
+    breathe();
     if (!copyTree(from, s, to, d)) return false;
   }
   return true;
@@ -261,6 +284,7 @@ static bool treeMatches(fs::FS& a, const char* pa, fs::FS& b, const char* pb) {
     char s[160], d[160];
     snprintf(s, sizeof(s), "%s/%s", pa, n.c_str());
     snprintf(d, sizeof(d), "%s/%s", pb, n.c_str());
+    breathe();
     if (!treeMatches(a, s, b, d)) return false;
   }
   return true;
@@ -332,6 +356,9 @@ void runPendingMigration() {
   fs::FS& to   = adopt ? (fs::FS&)SD       : (fs::FS&)LittleFS;
   log_w("store: moving %s -> %s", whereName(adopt ? Where::LittleFs : Where::Sd),
         whereName(adopt ? Where::Sd : Where::LittleFs));
+  // Nothing else is alive yet to paint the panel, and this is about to take
+  // several seconds. Say what is happening before it starts, not after.
+  display.notice("Moving store", adopt ? "to the card" : "to flash");
 
   Marker mk;
   readMarker(mk);
@@ -351,7 +378,8 @@ void runPendingMigration() {
     if (!copyTree(from, RNS_FS_ROOT, to, kStagingRoot) ||
         !treeMatches(from, RNS_FS_ROOT, to, kStagingRoot)) {
       removeTree(to, kStagingRoot);
-      strlcpy(sResult, "failed: the store could not be copied, nothing was moved", sizeof(sResult));
+      display.notice("Store move", "failed");
+    strlcpy(sResult, "failed: the store could not be copied, nothing was moved", sizeof(sResult));
       log_e("store: %s, staying on %s", sResult, whereName(where()));
       remember(Move::None);
       sRunning = false;
@@ -366,7 +394,8 @@ void runPendingMigration() {
     removeTree(to, RNS_FS_ROOT);
     if (!to.rename(kStagingRoot, RNS_FS_ROOT) ||
         !treeMatches(from, RNS_FS_ROOT, to, RNS_FS_ROOT)) {
-      strlcpy(sResult, "failed: the copy could not be put in place, retrying at the next restart",
+      display.notice("Store move", "failed");
+    strlcpy(sResult, "failed: the copy could not be put in place, retrying at the next restart",
               sizeof(sResult));
       log_e("store: %s", sResult);
       sRunning = false;
@@ -396,6 +425,7 @@ void runPendingMigration() {
     // the move is retried. Deleting it here on the strength of a write that
     // failed is the one path through this routine that loses the store
     // outright, which is worth a branch even though NVS rarely refuses.
+    display.notice("Store move", "failed");
     strlcpy(sResult, "failed: the move could not be recorded, retrying at the next restart",
             sizeof(sResult));
     log_e("store: %s", sResult);
@@ -407,6 +437,7 @@ void runPendingMigration() {
   removeTree(from, RNS_FS_ROOT);
   refreshCache();
 
+  display.notice("Store moved", adopt ? "to the card" : "to flash");
   snprintf(sResult, sizeof(sResult), "ok: store moved to %s",
            adopt ? "the card" : "internal flash");
   log_w("store: %s", sResult);

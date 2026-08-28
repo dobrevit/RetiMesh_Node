@@ -141,7 +141,13 @@ void WifiManager::begin() {
         WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
 }
 
-void WifiManager::startAccessPoint() {
+// What this node calls itself, worked out without starting anything. The store
+// migration runs before the radios are up and writes the node's name onto the
+// card it is claiming, and it used to run after this — so the name went on the
+// card empty, and a card whose owner had no name is a card a person cannot
+// identify in their hand. Idempotent, and startAccessPoint() still calls it, so
+// there is one derivation rather than an early copy and a real one.
+void WifiManager::resolveNames() {
   const WifiSettings& w = settings.wifi();
 
   #ifdef AP_SSID
@@ -158,6 +164,12 @@ void WifiManager::startAccessPoint() {
                (uint8_t)(mac >> 24), (uint8_t)(mac >> 32), (uint8_t)(mac >> 40));
     }
   #endif
+  deriveHostname();
+}
+
+void WifiManager::startAccessPoint() {
+  const WifiSettings& w = settings.wifi();
+  resolveNames();
 
   // Every node used to answer to the same "retimesh.local", so the second one
   // on a network either lost the race or was silently renamed by conflict

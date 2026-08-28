@@ -49,6 +49,15 @@ public:
   // FreeRTOS entry point — created pinned to core 0 from main.cpp.
   static void displayTask(void* self);
 
+  // A line of text painted straight to the panel, for the parts of start-up
+  // that take long enough for a person to wonder whether the node has hung.
+  // Moving the Reticulum store is seconds of filesystem work before any task
+  // exists, and a panel that says nothing through it reads as a node that has
+  // died during boot — which is exactly when somebody reaches for the power.
+  // Callable before the display task exists, because that is the whole point:
+  // it paints synchronously rather than asking to be painted later.
+  void notice(const char* title, const char* detail = nullptr);
+
 private:
   void paint();
   void paintStatus();

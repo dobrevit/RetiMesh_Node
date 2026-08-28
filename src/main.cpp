@@ -140,6 +140,21 @@ void setup() {
     // ownership marker for everyone else, and it needs somewhere to put it.
     StoreHome::begin();
     sdCard.begin();                        // optional; hot-plug polled on core 0
+    // A move of the store asked for before the last restart happens here, and
+    // here specifically: after the card is mounted and before anything else in
+    // the node is alive. It is seconds of solid filesystem work, and it used to
+    // run further down, by which time the web server was answering requests and
+    // the card task was polling the same card. Both of those reach into state
+    // this is in the middle of changing, and the node died in the attempt often
+    // enough that a migration reliably cost two boots instead of one — visible
+    // only when nobody had a serial monitor attached, because watching it
+    // changed the timing enough to hide it.
+    // The node's name before the move, not after: the migration writes it onto
+    // the card it is claiming, and this used to happen inside the Wi-Fi
+    // start-up further down, so a card adopted at boot got an owner with no
+    // name on it.
+    wifiManager.resolveNames();
+    StoreHome::runPendingMigration();
   #endif
   #if HAS_GPS
     Gps::begin();                          // NMEA reader task; powers the receiver rail

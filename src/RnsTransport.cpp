@@ -240,13 +240,6 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   sEvents = xQueueCreate(8, sizeof(Event));
   sSnapLock = xSemaphoreCreateMutex();
 
-  // A move of the store that was asked for before the last restart happens
-  // here, first, while nothing has the store open and no other task is writing
-  // to it. Ahead of the enabled check on purpose: the operator asked for the
-  // data to be somewhere, and that should not quietly depend on whether this
-  // node is routing.
-  StoreHome::runPendingMigration();
-
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
 
   try {

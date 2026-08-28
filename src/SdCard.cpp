@@ -228,6 +228,16 @@ void SdCard::measure() {
 }
 
 void SdCard::poll() {
+  // Stand off entirely while the store is being moved. A migration runs on
+  // another task and drives this same card hard for seconds at a time, and the
+  // removal check below reads sector zero to decide whether the card is still
+  // there. A read that loses to the copy for the bus is indistinguishable from
+  // a card that has been pulled, and the answer to a pulled card is unmount() —
+  // which frees the driver's card struct underneath the task still copying
+  // through it. That is a panic mid-migration, and it showed up as an eject
+  // that had written its marker and its setting and then died before it could
+  // say whether it had worked.
+  if (StoreHome::busy()) return;
   checkSlot();
   // The store's ownership marker is read here, on the task that owns the card,
   // and handed to the status API from memory. It used to be opened and parsed
