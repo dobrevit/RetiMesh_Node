@@ -1,0 +1,52 @@
+name: HIL (self-hosted bench)
+
+# Hardware-in-the-loop: real USB enumeration, the maintenance console, the
+# bootloader transition, esptool, and the application coming back. Runs only on
+# a self-hosted runner with the boards attached — never on GitHub's runners,
+# which is why it is dispatch-only and why ordinary CI does not depend on it.
+#
+# Runner setup: label the machine `retimesh-hil`, put the T3-S3 on a port that
+# /dev/serial/by-id names (native USB has a real serial number), the Heltec on
+# its own port (CP2102s all say 0001, so by-path), and set the two repository
+# variables HIL_T3S3_PORT and HIL_HELTEC_V3_PORT to those paths.
+
+on:
+  workflow_dispatch:
+    inputs:
+      boards:
+        description: Space-separated envs to exercise (t3s3 heltec-v3)
+        default: t3s3 heltec-v3
+
+permissions:
+  contents: read
+
+jobs:
+  hil:
+    name: bench (${{ matrix.env }})
+    runs-on: [self-hosted, retimesh-hil]
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [t3s3, heltec-v3]
+    if: contains(inputs.boards, matrix.env)
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m pip install --upgrade platformio esptool pyserial
+      - name: Build ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}
+      - name: Port for this board
+        id: port
+        run: |
+          case "${{ matrix.env }}" in
+            t3s3)      echo "port=${{ vars.HIL_T3S3_PORT }}" >> "$GITHUB_OUTPUT" ;;
+            heltec-v3) echo "port=${{ vars.HIL_HELTEC_V3_PORT }}" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Flash through the PlatformIO hook (console hand-off, esptool, return)
+        run: pio run -e ${{ matrix.env }} -t upload --upload-port "${{ steps.port.outputs.port }}"
+      - name: Console, links, bootloader, ROM, flash, return
+        run: |
+          python3 tools/hil_bootloader.py --port "${{ steps.port.outputs.port }}" \
+            --firmware .pio/build/${{ matrix.env }}/firmware.bin \
+            --chip $(python3 -c "import json;print(json.load(open('boards.json'))['${{ matrix.env }}']['chip'])")
+      - name: Boot, radio, transport (existing checks)
+        run: python3 tools/hil.py --port "${{ steps.port.outputs.port }}" --reset

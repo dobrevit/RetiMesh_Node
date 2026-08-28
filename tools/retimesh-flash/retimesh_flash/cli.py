@@ -5,8 +5,10 @@ retimesh-flash — install RetiMesh Node firmware from GitHub releases.
 
     retimesh-flash list [--version vX.Y.Z]
     retimesh-flash ports
-    retimesh-flash install [--board ENV] [--port DEV] [--version vX.Y.Z]
-                           [--mode full|app|fs] [--file bundle.zip] [--yes]
+    retimesh-flash devices [--ip URL ...]
+    retimesh-flash bootloader [--port DEV | --serial SN | --ip URL] [--password PW]
+    retimesh-flash install [--board ENV] [--port DEV | --serial SN] [--version vX.Y.Z]
+                           [--mode full|app|fs] [--file bundle.zip] [--yes] [--no-handoff]
 
 Discovery: <repo>/releases/latest (or /tags/<version>) -> release.json ->
 board archive. Every part is SHA-256 checked before esptool runs.
@@ -21,6 +23,8 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
+
+from . import device as dev
 
 DEFAULT_REPO = os.environ.get("RETIMESH_REPO", "dobrevit/RetiMesh_Node")
 ESP_USB_VIDS = {0x303A, 0x10C4, 0x1A86, 0x0403}   # Espressif, CP210x, CH34x, FTDI
@@ -121,7 +125,7 @@ def esptool(args: list[str]) -> None:
         sys.exit(f"esptool failed with exit code {rc}")
 
 
-def flash(board: dict, bundle: Path, port: str, mode: str, baud: int) -> None:
+def flash(board: dict, bundle: Path, port: str, mode: str, baud: int, before: str | None = None) -> None:
     parts = board["parts"]
     if mode == "app":
         parts = [p for p in parts if p["file"] == "firmware.bin"]
@@ -138,7 +142,7 @@ def flash(board: dict, bundle: Path, port: str, mode: str, baud: int) -> None:
     print(f"Verified {len(parts)} part(s).")
 
     args = ["--chip", board["chip"], "--port", port, "--baud", str(baud),
-            "--before", opt("default_reset"), "--after", opt("hard_reset"), opt("write_flash")]
+            "--before", opt(before or "default_reset"), "--after", opt("hard_reset"), opt("write_flash")]
     if mode == "full":
         args.append("--erase-all")
     args += [opt("--flash_mode"), board["flash_mode"], opt("--flash_size"), board["flash_size"],
@@ -170,6 +174,46 @@ def cmd_ports(args):
         print("  " + label)
 
 
+def cmd_devices(args):
+    """Every RetiMesh node the host can see: serial ports that answer VERSION,
+    and any URLs given (or the two well-known addresses) that answer /api/status."""
+    found = 0
+    for p in dev.list_ports():
+        if p.kind in ("unknown", "legacy") and not args.all:
+            continue
+        info = dev.probe_console(p.device, timeout=1.5)
+        print(f"  {p.label()}" + (f"\n      {info}" if info else "      (no RetiMesh console)"))
+        found += bool(info)
+    for url in args.ip or ["http://10.42.0.1", "http://retimesh.local"]:
+        if not url.startswith("http"):
+            url = "http://" + url
+        info = dev.probe_http(url, timeout=2.0)
+        if info:
+            print(f"  {info}")
+            found += 1
+    if not found:
+        print("No RetiMesh node answered. Connected over Wi-Fi? Try --ip <address>. On a serial port, "
+              "the console needs firmware with the maintenance console (v0.2 or later).")
+
+
+def cmd_bootloader(args):
+    """Put one node into its ROM downloader and say where esptool should point."""
+    if args.ip:
+        url = args.ip if args.ip.startswith("http") else "http://" + args.ip
+        ok, msg = dev.request_bootloader_http(url, ("admin", args.password))
+        print(("Requested: " if ok else "Refused: ") + msg)
+        sys.exit(0 if ok else 1)
+    ports = dev.list_ports()
+    port = dev.select_port(ports, device=args.port, serial=args.serial)
+    if port is None:
+        candidates = [p for p in ports if p.kind not in ("unknown", "legacy")]
+        sys.exit("Which port? " + ("; ".join(p.label() for p in candidates) or "no ESP32 port found")
+                 + " — pass --port or --serial.")
+    r = dev.hand_off_to_bootloader(port=port.device, log=lambda m: print("  " + m))
+    print(("Downloader ready on " + r.port + f" ({r.method})") if r.entered else r.message)
+    sys.exit(0 if r.entered or r.method == "auto_reset_dtr_rts" else 1)
+
+
 def cmd_install(args):
     with tempfile.TemporaryDirectory(prefix="retimesh-") as tmp:
         tmp = Path(tmp)
@@ -198,8 +242,14 @@ def cmd_install(args):
             with zipfile.ZipFile(archive) as z:
                 z.extractall(tmp)
 
-        port = args.port or choose("Which serial port?", esp_ports() or
-                                   sys.exit("No serial ports found. Hold BOOT, tap RST, release BOOT, then retry."))
+        port = args.port
+        if not port and args.serial:
+            p = dev.select_port(dev.list_ports(), serial=args.serial)
+            if p is None:
+                sys.exit(f"no single port with USB serial {args.serial}")
+            port = p.device
+        port = port or choose("Which serial port?", esp_ports() or
+                              sys.exit("No serial ports found. Hold BOOT, tap RST, release BOOT, then retry."))
 
         what = {"full": "FULL install (erases everything, including settings and the web app)",
                 "app":  "firmware only (settings and web app are kept)",
@@ -209,7 +259,18 @@ def cmd_install(args):
             if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
                 sys.exit("aborted")
 
-        flash(board, tmp, port, args.mode, args.baud)
+        # A running node is asked politely for its downloader first; esptool's
+        # own reset remains the fallback, and BOOT+RST the one after that.
+        before = None
+        if not args.no_handoff:
+            r = dev.hand_off_to_bootloader(port=port, log=lambda m: print("  " + m))
+            if r.entered and r.method != "auto_reset_dtr_rts":
+                before, port = "no_reset", r.port or port
+            elif not r.entered:
+                print("  " + r.message)
+        flash(board, tmp, port, args.mode, args.baud, before=before)
+        info = dev.wait_for_application(port, timeout=20.0)
+        print(f"\nBack up: {info}" if info else "\nThe node did not answer within 20 s; press RST if it stays quiet.")
         print("\nDone. Join the Wi-Fi network \"retimesh-XXXXXX\" (last six hex digits of the board MAC)\n"
               "and open http://10.42.0.1/")
 
@@ -228,9 +289,23 @@ def main(argv=None):
     p.add_argument("--all", action="store_true", help="include ports without a USB id")
     p.set_defaults(func=cmd_ports)
 
+    p = sub.add_parser("devices", help="find RetiMesh nodes on serial ports and the network")
+    p.add_argument("--ip", action="append", help="node URL/address to probe (repeatable)")
+    p.add_argument("--all", action="store_true", help="probe ports without an ESP-looking USB id too")
+    p.set_defaults(func=cmd_devices)
+
+    p = sub.add_parser("bootloader", help="restart a running node into its ROM downloader")
+    p.add_argument("--port", help="serial port of the node")
+    p.add_argument("--serial", help="USB serial number of the node's port")
+    p.add_argument("--ip", help="node URL/address: ask over HTTP instead of the console")
+    p.add_argument("--password", default="retimesh", help="admin password for the HTTP path")
+    p.set_defaults(func=cmd_bootloader)
+
     p = sub.add_parser("install", help="download and flash")
     p.add_argument("--board", help="board env name (see `list`)")
     p.add_argument("--port", help="serial port (auto-detected if omitted)")
+    p.add_argument("--serial", help="pick the port by USB serial number")
+    p.add_argument("--no-handoff", action="store_true", help="do not ask a running node for its bootloader first")
     p.add_argument("--version", help="release tag (default: latest)")
     p.add_argument("--mode", choices=["full", "app", "fs"], default="full")
     p.add_argument("--file", help="flash from a downloaded retimesh-node-*.zip instead of GitHub")
