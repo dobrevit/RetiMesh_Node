@@ -1,0 +1,14 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# huge_app.csv, extended to the 8 MB parts. Identical up to the end of the
+# application; the four megabytes the stock table leaves unmapped go to the
+# filesystem instead of being wasted.
+#
+# It matters most on a board with no SD card. There the filesystem is the only
+# storage there is, holding the web assets *and* the Reticulum transport store —
+# paths, announces, and known destinations, which is what a node loses when it
+# runs out of room to remember them.
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x300000,
+spiffs,   data, spiffs,  0x310000,0x4E0000,
+coredump, data, coredump,0x7F0000,0x10000,
