@@ -35,6 +35,8 @@
 // ---------------------------------------------------------------------------
 #if defined(BOARD_TBEAM)
   #include "boards/tbeam.h"
+#elif defined(BOARD_HELTEC_V3)
+  #include "boards/heltec_v3.h"
 #elif defined(BOARD_HELTEC_WS)
   #include "boards/heltec_ws.h"
 #elif defined(BOARD_T3S3_SX1280_PA)

@@ -1,0 +1,18 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# huge_app.csv, extended to the 8 MB parts. Identical up to the end of the
+# application; the four megabytes the stock table leaves unmapped go to the
+# filesystem instead of being wasted.
+#
+# It matters because both boards using this — the Heltec WiFi LoRa 32 V3 and the
+# Wireless Stick — have 8 MB of flash and no SD card. The filesystem is then the
+# only storage there is, holding the web assets *and* the Reticulum transport
+# store: paths, announces and known destinations, which is exactly what a node
+# starts forgetting when it runs out of room to remember them. Handing a cache
+# 896 KB when five megabytes are sitting unmapped is a choice, and the wrong one.
+#
+# This is the one place that reasoning is written down; the envs just point here.
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x300000,
+spiffs,   data, spiffs,  0x310000,0x4E0000,
+coredump, data, coredump,0x7F0000,0x10000,

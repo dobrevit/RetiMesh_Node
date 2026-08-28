@@ -34,6 +34,12 @@
     "name": "Heltec Wireless Stick V2/V2.1",
     "chip": "esp32",
     "chip_family": "ESP32",
-    "notes": "0.49\" 64x32 OLED on the switched Vext rail, SX1276, no SD slot and no GNSS. The small panel gets its own page layout — ten columns and four rows — rather than the 128x64 one clipped. Serial is a CP2102 bridge."
+    "notes": "0.49\" 64x32 OLED on the switched Vext rail, SX1276, 8 MB flash, no SD slot and no GNSS. The small panel gets its own page layout — ten columns and four rows — rather than the 128x64 one clipped. Serial is a CP2102 bridge, and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. Uses the 8 MB partition table for the same reason the V3 does: no SD card, so the filesystem is the only storage the transport store has."
+  },
+  "heltec-v3": {
+    "name": "Heltec WiFi LoRa 32 V3",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "notes": "0.96\" 128x64 OLED on the switched Vext rail, SX1262 with a TCXO, 8 MB flash and no PSRAM, no SD slot and no GNSS. Very common hardware. A CP2102 bridge rather than the S3's native USB, so it appears as /dev/ttyUSB* and not as an Espressif JTAG device — and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. Uses an 8 MB partition table: the stock one maps only the first 4 MB, and with no SD card the filesystem is the only storage the transport store has."
   }
 }
