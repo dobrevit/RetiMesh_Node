@@ -22,7 +22,9 @@
 //  The store has exactly one home at a time: the SD card when there is one to
 //  use, the LittleFS partition otherwise. Never both. Two live copies of the
 //  same path table, each being written, is not redundancy — it is two answers
-//  to one question and no way to tell which is right.
+//  to one question and no way to tell which is right. So a move is a move:
+//  the copy is checked in its new home before the old tree is deleted, and
+//  when it is over there is one tree and not two.
 //
 //  Adopting a card used to mean editing a setting and rebooting by hand, and
 //  the store that was already on the internal flash simply stayed behind. This
@@ -44,23 +46,41 @@
 //  ambiguous in practice — it is on a card in a node that was already using
 //  it — so it counts as ours and gets a marker on the next mount.
 //
-//  Restart, not runtime swap
-//  -------------------------
-//  The stores underneath belong to the transport library and hold their files
-//  open for their lifetime, so re-pointing them while the node is routing
-//  means closing and reopening three of them mid-flight. That is a real
-//  option and it is what a surprise removal will eventually need, since you
-//  cannot reboot your way out of a card that has already gone. A deliberate
-//  migration does not need it: the node is about to restart anyway, so the
-//  copy happens with nothing else writing and the new home is chosen at boot
-//  by the same rule as always.
+//  And a released card is free
+//  ---------------------------
+//  Ejecting takes the store off the card and writes "released" into the
+//  marker. The card still names the node that owned it, which is worth having
+//  for a human holding it, but the flag is that node saying it is finished
+//  with the card. Any node may take it from there. While only the identity
+//  was compared, an ejected card stayed foreign for ever: the node that
+//  released it could pick it up again because the name matched, and every
+//  other node had to format a card whose owner had already given it up.
+//
+//  The move happens at boot, with nothing open
+//  -------------------------------------------
+//  The stores underneath belong to the transport library, hold their files
+//  open for their lifetime and buffer writes in RAM, so moving them while the
+//  node is routing means closing and reopening three of them mid-flight
+//  underneath the task that is writing to them. So a request moves nothing.
+//  It records what was asked for and restarts the node, and the move is made
+//  on the way back up, before the transport opens the store: nothing is open,
+//  nothing else is writing, and the home is then chosen by the same rule as
+//  always.
+//
+//  Which is also why a blank card is not a home yet. The setting saying the
+//  store belongs on a card is not the same as the card holding the store, and
+//  a node that opens an empty store on a blank card — with its real path
+//  table still in flash — is indistinguishable from a node that has lost its
+//  data. So a blank card is taken the same way an adopt takes one: copy
+//  first, then live there.
 // ============================================================================
 #pragma once
 
-// Deliberately free of Arduino.h and Config.h. The rule below decides where a
-// node's data lives, which makes it worth testing, and a rule that can only be
-// exercised by flashing a board with a card in it will not be.
+// Deliberately free of Arduino.h and Config.h. The rules below decide where a
+// node's data lives, which makes them worth testing, and a rule that can only
+// be exercised by flashing a board with a card in it will not be.
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 namespace StoreHome {
@@ -72,11 +92,21 @@ enum class Where : uint8_t { LittleFs, Sd };
 // question that decides whether taking it is safe.
 enum class Card : uint8_t {
   NoCard,    // nothing mounted
-  Blank,     // mounted, no store and no marker: free to take
+  Blank,     // mounted, no store of ours on it: free to take, once copied to
   Ours,      // marked with this node's identity
   Foreign,   // marked with a different node's identity: leave it alone
   Legacy,    // a store but no marker, from before markers existed
 };
+
+// A move that has been asked for and not made yet. It outlives the request —
+// the node restarts in between — so it is persisted with the settings.
+enum class Move : uint8_t { None = 0, Adopt = 1, Eject = 2 };
+
+// The identity hex written into the marker is two characters per byte of a
+// Reticulum hash. This header cannot see Rns::HASH_LEN without dragging
+// Arduino in, so StoreHome.cpp — where both are visible — static_asserts the
+// two against each other, and this is the number the host tests can reach.
+static const size_t kIdentityHexLen = 32;
 
 struct Marker {
   char     node[41]   = "";   // identity hex of the node that owns the store
@@ -86,39 +116,95 @@ struct Marker {
   bool     valid      = false;
 };
 
-// --- the rule ---------------------------------------------------------------
-// Where the store belongs, given the setting, whether a card is mounted, and
-// what that card holds. Pure, so the rule can be tested without a filesystem,
-// and so there is one statement of it rather than one per caller. It used to
-// be written inline where the transport starts, which is fine until something
-// else needs the same answer.
-inline Where decide(bool sdStoreSetting, bool cardMounted, Card c) {
-  if (!sdStoreSetting || !cardMounted) return Where::LittleFs;
-  // A card carrying another node's store is the one case where the setting
-  // does not get its way. Adopting it would mean answering to that node's path
-  // table and overwriting its data on the first write, and whoever moved the
-  // card almost certainly meant to move it, not to merge it.
-  if (c == Card::Foreign) return Where::LittleFs;
-  return Where::Sd;
+// What the slot holds, as last read by the card task. The status page asks on
+// every refresh and used to be answered by opening and parsing the marker file
+// then and there — several times per request, on the web server's task, on a
+// bus the card task was using at the same time.
+struct Ownership {
+  Card     card       = Card::NoCard;
+  char     owner[33]  = "";   // the marker's node name, for the operator
+  uint32_t generation = 0;
+};
+
+// --- the rules --------------------------------------------------------------
+// Pure, so they can be tested without a filesystem, and so there is one
+// statement of each rather than one per caller. Where the store belongs used
+// to be written inline where the transport starts, which is fine until
+// something else needs the same answer.
+
+// What the card holds, from the facts that can be read off it.
+inline Card classify(bool mounted, bool markerValid, bool markerIsOurs,
+                     bool markerReleased, bool storePresent) {
+  if (!mounted) return Card::NoCard;
+  if (markerValid) {
+    // Released outranks the name on the card: it is the owner's own note that
+    // it has taken its store back and is done here. Whatever is left behind on
+    // a released card is a leftover, not a live store.
+    if (markerReleased) return Card::Blank;
+    return markerIsOurs ? Card::Ours : Card::Foreign;
+  }
+  // No marker. A store already on the card was put there by this node before
+  // markers existed — a card does not acquire one by accident — so it is ours.
+  return storePresent ? Card::Legacy : Card::Blank;
 }
 
-// The same rule applied to this node, here, now. Call at boot to pick the
-// backing filesystem.
+// Where the store belongs, given the setting and what the card holds.
+inline Where decide(bool sdStoreSetting, bool cardMounted, Card c) {
+  if (!sdStoreSetting || !cardMounted) return Where::LittleFs;
+  // Only a card that is already carrying this node's store is a home. A card
+  // holding another node's store is not ours to answer for — adopting it would
+  // mean routing from that node's path table and overwriting its data on the
+  // first write, and whoever moved the card almost certainly meant to move it,
+  // not to merge it. A blank one is not refused but not ready: the store has
+  // to be copied onto it first, which is what planAtBoot arranges.
+  return (c == Card::Ours || c == Card::Legacy) ? Where::Sd : Where::LittleFs;
+}
+
+// Whether this node may take this card: there has to be one, and it must not
+// be carrying somebody else's store. The page that offers the action and the
+// boot that carries it out both ask here, so they cannot come to different
+// conclusions about whether it is even possible.
+inline bool adoptable(Card c) { return c != Card::NoCard && c != Card::Foreign; }
+
+// What has to be copied before the store is opened: the move the operator
+// asked for, if the card in the slot can still take it, or the one a card the
+// setting wants to use needs before it can be a home at all.
+inline Move planAtBoot(Move requested, bool sdStoreSetting, bool cardMounted, Card c) {
+  const bool usable = cardMounted && adoptable(c);
+  if (requested == Move::Adopt) return usable ? Move::Adopt : Move::None;
+  // An eject reads the store off the card, so the card has to be holding it.
+  if (requested == Move::Eject)
+    return (usable && (c == Card::Ours || c == Card::Legacy)) ? Move::Eject : Move::None;
+  return (sdStoreSetting && cardMounted && c == Card::Blank) ? Move::Adopt : Move::None;
+}
+
+// --- the node --------------------------------------------------------------
+void  begin();                // before the card task starts: the ownership cache
+
+// Carries out a queued move. Call at boot before anything opens the store,
+// and before chooseAtBoot, which then finds the home already made.
+void  runPendingMigration();
+
+// The rule applied to this node, here, now: points the store's filesystem at
+// the home it picks and returns it. Call once at boot.
 Where chooseAtBoot();
 
 Where       where();          // where the store is open right now
 Card        card();           // what the inserted card holds
-bool        readMarker(Marker& out);
-const char* lastResult();     // outcome of the last migration, for the UI
-bool        busy();           // a migration is queued or running
+Ownership   ownership();      // ... with the owner's name, for the UI
+const char* lastResult();     // outcome of the last move, for the UI
+bool        busy();           // a move is queued for the next boot, or running
 
-// Requests. Both answer immediately and are carried out by service() on the
-// RNS task, which is the only task that writes to the store — so a migration
-// never races the thing it is migrating.
-bool requestAdopt();          // LittleFS -> SD, then restart
-bool requestEject();          // SD -> LittleFS, then restart, card safe to pull
+// Requests. Both record the move, schedule a restart and answer immediately;
+// nothing is copied until the node is on its way back up. False means refused,
+// and lastResult() says why — the callers relay that rather than restating the
+// rule, so that there is one place where a move can be turned down.
+bool requestAdopt();          // LittleFS -> SD, at the next boot
+bool requestEject();          // SD -> LittleFS, after which the card is free
 
-void service();               // called from RnsTransport::loop()
+// Re-reads the card's marker. Called from the card task, which is the task
+// that owns the card.
+void refreshCache();
 
 const char* whereName(Where w);
 const char* cardName(Card c);

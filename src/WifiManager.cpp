@@ -501,12 +501,15 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // Ownership, so the page can offer the right action rather than every
     // action: a blank card can be taken, one of ours is already home or can be
     // taken back, and one belonging to another node is not ours to touch.
-    sd["card"]         = StoreHome::cardName(StoreHome::card());
+    // One read, from the copy the card task keeps — this handler runs on the
+    // AsyncTCP task, which has no business opening files on the SD bus, and
+    // certainly not once per field.
+    const StoreHome::Ownership own = StoreHome::ownership();
+    sd["card"]         = StoreHome::cardName(own.card);
     sd["store_home"]   = StoreHome::whereName(StoreHome::where());
     sd["migration"]    = StoreHome::lastResult();
     sd["migrating"]    = StoreHome::busy();
-    StoreHome::Marker mk;
-    if (StoreHome::readMarker(mk)) { sd["owner"] = mk.name; sd["generation"] = mk.generation; }
+    if (own.owner[0]) { sd["owner"] = own.owner; sd["generation"] = own.generation; }
   }
 #endif
 
@@ -577,10 +580,12 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     st["backend"] = RnsTransport::storageBackend();     // "sd" | "littlefs"
     st["path"]    = RnsTransport::storagePath();
     st["lost"]    = sdCard.storageLost();
-    // The backend is chosen at boot. A card that turned up afterwards, or was
-    // inserted since, can only be used after a restart — say so rather than
-    // leaving the operator to wonder why the card is idle.
-    st["sd_available"] = sdCard.mounted() && !sdCard.reserved() && settings.transport().sdStore;
+    // A card is in the slot, the store is not on it, and this node is allowed
+    // to take it. The condition used to be the setting plus a mounted card,
+    // which lit up for a card holding another node's store as well — and said
+    // "restart to use it" about a card the node would refuse for ever.
+    st["sd_available"] = StoreHome::where() != StoreHome::Where::Sd
+                      && StoreHome::adoptable(StoreHome::card());
   }
 
   // Reticulum transport: interfaces with their modes, and the path table
@@ -1003,7 +1008,15 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   if (in["announce_rate_grace"].is<int>())   t.announceRateGrace   = in["announce_rate_grace"];
   if (in["announce_rate_penalty"].is<int>()) t.announceRatePenalty = in["announce_rate_penalty"];
   if (in["auto_enabled"].is<bool>()) t.autoEnabled = in["auto_enabled"];
-  if (in["sd_store"].is<bool>())    t.sdStore     = in["sd_store"];
+  // Where the store lives is not a field you can save. It used to be: this
+  // wrote the new value to NVS and restarted, and the node came up pointed at
+  // a filesystem the data had never been copied to — an empty path table, with
+  // the real one still sitting on the other side. Moving it is a copy, and the
+  // copy is what adopt and eject do.
+  if (in["sd_store"].is<bool>() && (bool)in["sd_store"] != t.sdStore) {
+    sendError(request, 409, "the store is moved with the SD card actions (Use this card / Eject), not by saving this form");
+    return;
+  }
   if (in["power_profile"].is<const char*>()) {
     Power::Profile pp;
     if (!Power::profileFromName(in["power_profile"], pp)) { sendError(request, 400, "power_profile must be performance|balanced|battery"); return; }
@@ -1021,7 +1034,7 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   Power::apply((Power::Profile)t.powerProfile);                  // live
   bool needRestart = before.enabled != t.enabled || before.loraMode != t.loraMode || before.wifiMode != t.wifiMode
                   || before.autoEnabled != t.autoEnabled || strcmp(before.autoGroupId, t.autoGroupId) != 0
-                  || before.announceCap != t.announceCap || before.sdStore != t.sdStore;
+                  || before.announceCap != t.announceCap;
   JsonDocument out;
   out["ok"] = true; out["restart"] = needRestart;
   sendJson(request, 200, out);
@@ -1117,7 +1130,16 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     ts.enabled = t["enabled"] | ts.enabled; ts.loraMode = t["lora_mode"] | ts.loraMode; ts.wifiMode = t["wifi_mode"] | ts.wifiMode;
     ts.announceCap = t["announce_cap"] | ts.announceCap; ts.announceRateTarget = t["announce_rate_target"] | ts.announceRateTarget;
     ts.announceRateGrace = t["announce_rate_grace"] | ts.announceRateGrace; ts.announceRatePenalty = t["announce_rate_penalty"] | ts.announceRatePenalty;
-    ts.autoEnabled = t["auto_enabled"] | ts.autoEnabled; ts.sdStore = t["sd_store"] | ts.sdStore;
+    ts.autoEnabled = t["auto_enabled"] | ts.autoEnabled;
+    // Same rule as the transport form, for the same reason: an import that
+    // flipped this moved nothing and left the node reading an empty store. It
+    // is refused rather than ignored, because a settings file that says the
+    // store belongs on a card is a statement about the node it came from, and
+    // silently dropping it would be the second-most surprising thing to do.
+    if (t["sd_store"].is<bool>() && (bool)t["sd_store"] != ts.sdStore) {
+      sendError(request, 409, "this file keeps the store somewhere else; import the rest and move it with the SD card actions");
+      return;
+    }
     ts.powerProfile = t["power_profile"] | ts.powerProfile;
     if (t["auto_group_id"].is<const char*>()) strlcpy(ts.autoGroupId, t["auto_group_id"], sizeof(ts.autoGroupId));
     if (ts.loraMode < 1 || ts.loraMode > 5 || ts.wifiMode < 1 || ts.wifiMode > 5 || ts.announceCap < 1 || ts.announceCap > 100) { sendError(request, 400, "transport section invalid"); return; }
@@ -1137,10 +1159,13 @@ void WifiManager::handleSdFormat(AsyncWebServerRequest* request, const char* bod
   if (deserializeJson(in, body, len) != DeserializationError::Ok || strcmp(in["confirm"] | "", "FORMAT") != 0) {
     sendError(request, 400, "send {\"confirm\":\"FORMAT\"} to erase the card"); return;
   }
-  SdCard::Info si = sdCard.info();
-  if (si.state == SdCard::State::Absent) { sendError(request, 409, "no card"); return; }
-  if (sdCard.reserved())                 { sendError(request, 409, "the Reticulum store is on this card; eject it first"); return; }
-  if (!sdCard.requestFormat())           { sendError(request, 409, "format already running"); return; }
+  if (!sdCard.requestFormat()) {
+    // The reasons a format can be refused live in SdCard, which is the only
+    // thing that knows all of them; this relays whichever one applied.
+    const char* why = sdCard.formatRefusal();
+    sendError(request, 409, why ? why : "the card cannot be formatted right now");
+    return;
+  }
   request->send(200, "application/json", "{\"ok\":true,\"formatting\":true}");
 }
 
@@ -1150,13 +1175,11 @@ void WifiManager::handleSdAdopt(AsyncWebServerRequest* request, const char* body
   if (deserializeJson(in, body, len) != DeserializationError::Ok || strcmp(in["confirm"] | "", "ADOPT") != 0) {
     sendError(request, 400, "send {\"confirm\":\"ADOPT\"} to move the store onto the card"); return;
   }
-  if (!sdCard.mounted())                          { sendError(request, 409, "no card"); return; }
-  if (StoreHome::card() == StoreHome::Card::Foreign) {
-    StoreHome::Marker m; StoreHome::readMarker(m);
-    char msg[128];
-    snprintf(msg, sizeof(msg), "this card holds the store of \"%s\"; format it first if you mean to take it", m.name);
-    sendError(request, 409, msg); return;
-  }
+  // Every reason an adopt can be refused — no card, already there, a card
+  // belonging to another node — is StoreHome's to give, and it gives it in
+  // lastResult(). This handler had its own copy of the foreign-card refusal,
+  // which is one rule in two places and a message that can disagree with the
+  // decision it explains.
   if (!StoreHome::requestAdopt()) { sendError(request, 409, StoreHome::lastResult()); return; }
   request->send(200, "application/json", "{\"ok\":true,\"migrating\":true,\"restart\":true}");
 }

@@ -63,6 +63,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "SdCard.h"
+#include "StoreHome.h"
 #include "AutoInterface.h"
 #include "Power.h"
 #include "Pmu.h"
@@ -135,6 +136,9 @@ void setup() {
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   #if HAS_SD
+    // Before the card task exists: it is the task that reads the card's
+    // ownership marker for everyone else, and it needs somewhere to put it.
+    StoreHome::begin();
     sdCard.begin();                        // optional; hot-plug polled on core 0
   #endif
   #if HAS_GPS

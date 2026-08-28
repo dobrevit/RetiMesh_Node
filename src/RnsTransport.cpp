@@ -239,25 +239,27 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   sTxRing = txRing; sRxRing = rxRing; sTcpInRing = tcpInRing;
   sEvents = xQueueCreate(8, sizeof(Event));
   sSnapLock = xSemaphoreCreateMutex();
+
+  // A move of the store that was asked for before the last restart happens
+  // here, first, while nothing has the store open and no other task is writing
+  // to it. Ahead of the enabled check on purpose: the operator asked for the
+  // data to be somewhere, and that should not quietly depend on whether this
+  // node is routing.
+  StoreHome::runPendingMigration();
+
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
 
   try {
     RNS::loglevel(RNS::LOG_INFO);        // DEBUG is compiled in; raise here when tracing
 
     // Storage: the SD card or the LittleFS partition shared with the web app,
-    // as StoreHome decides — it owns that rule, and the card's ownership
-    // marker, so this is not the place to re-derive it. Decided once, here,
-    // because microStore holds files open for the life of the store; moving
-    // the store between the two is a deliberate migration that ends in a
-    // restart, which is what brings execution back through this line.
-#if HAS_SD
-    if (StoreHome::chooseAtBoot() == StoreHome::Where::Sd) {
-      RnsFileSystem::useSd();
-      sdCard.reserve(true);              // no formatting, and removal is an error
-    } else {
-      RnsFileSystem::useLittleFs();
-    }
-#endif
+    // as StoreHome decides — it owns that rule, the card's ownership marker
+    // and the filesystem the store is pointed at, so this is not the place to
+    // re-derive any of it. Decided once, here, because microStore holds files
+    // open for the life of the store; moving the store between the two is a
+    // deliberate migration that ends in a restart, which is what brings
+    // execution back through this line.
+    StoreHome::chooseAtBoot();
     rnsFs.init(false);
     log_i("Reticulum storage: %s%s (%u KB free)", RnsFileSystem::prefix(), RNS_FS_ROOT,
           (unsigned)(rnsFs.storageAvailable() / 1024));
@@ -454,10 +456,6 @@ Tables tables() {
 void loop() {
   if (!sStarted) { vTaskDelay(pdMS_TO_TICKS(500)); return; }
   try {
-    // Before anything touches the store this pass. A migration copies the whole
-    // tree and then restarts, and it runs here because this task is the only
-    // one that writes the store — so the files cannot move under a write.
-    StoreHome::service();
     processEvents();
     drainTcp();
     reticulum.loop();                      // interface loops + housekeeping (jobs_interval = 1 s)

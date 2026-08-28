@@ -21,6 +21,8 @@
 // ============================================================================
 #include "SdCard.h"
 #include <sd_diskio.h>
+#include <esp_vfs_fat.h>
+#include "StoreHome.h"
 
 SdCard sdCard;
 
@@ -111,11 +113,22 @@ bool SdCard::mounted() {
   return m;
 }
 
-bool SdCard::requestFormat() {
-  if (_formatRequested) return false;
+const char* SdCard::formatRefusal() {
+  if (_formatRequested) return "a format is already running";
+  if (info().state == State::Absent) return "no card";
   // Formatting the card the Reticulum store is open on would pull the
-  // filesystem out from under microStore mid-write.
-  if (reserved()) { log_w("SD: format refused, the Reticulum store is on this card"); return false; }
+  // filesystem out from under microStore mid-write, and formatting one a
+  // queued move is about to copy the store onto would erase it immediately
+  // afterwards. StoreHome is asked rather than second-guessed: it is the only
+  // thing that knows a move has been asked for and not made yet.
+  if (StoreHome::busy()) return "the store is being moved; let the node restart first";
+  if (reserved()) return "the Reticulum store is on this card; eject it first";
+  return nullptr;
+}
+
+bool SdCard::requestFormat() {
+  const char* why = formatRefusal();
+  if (why) { log_w("SD: format refused, %s", why); return false; }
   _formatRequested = true;
   return true;
 }
@@ -129,11 +142,27 @@ void SdCard::task(void* self) {
 }
 
 // ---------------------------------------------------------------------------
-// Card present but cannot be mounted? Talk to it below the filesystem.
+// One conversation with the card, not two
+//
+// "Does it mount" and "is anything in the slot" are the same question asked at
+// two levels, and the expensive part belongs to both: the disk-layer
+// initialise, which spends half a second on an empty slot because that is how
+// long the driver waits for an answer before giving up. A mount attempt
+// followed by a separate probe spent that half second twice, every three
+// seconds, for as long as the slot stayed empty.
+//
+// SD.begin() cannot be asked the second question. When the FAT mount fails it
+// frees the driver slot, and with it the card type and the sector count the
+// initialise had just filled in — the very facts a probe then has to go back
+// and ask the card for all over again. Driving the two steps by hand keeps the
+// slot open long enough to read them off, and a card that does turn out to
+// carry a filesystem is handed to SDFS afterwards, since owning the mount is
+// the one thing this cannot do for it.
 // ---------------------------------------------------------------------------
-bool SdCard::probeCardPresent() {
+SdCard::Probe SdCard::probe() {
+  Probe p;
   uint8_t pdrv = sdcard_init(PIN_SD_CS, &_spi, SD_SPI_HZ);
-  if (pdrv == 0xFF) return false;
+  if (pdrv == 0xFF) return p;
 
   // What sdcard_init actually does is take a free driver slot and allocate a
   // struct for it. It does not speak to the card, and the struct is malloc'd
@@ -144,26 +173,26 @@ bool SdCard::probeCardPresent() {
   // it could not be mounted.
   //
   // The sector count is filled in by the disk initialise, and a mount attempt
-  // is the only exported call that reaches it. The mount is expected to fail
-  // here: this runs after the real one already failed, so the card either has
-  // no filesystem or is not there at all. Reading sector zero separates those
-  // two, which is the question actually being asked.
+  // is the only exported call that reaches it. Whether that mount succeeds is
+  // an answer worth keeping, but it is the raw read of sector zero that
+  // separates a card with no filesystem from no card at all.
   //
-  // A separate mount point, because the real one may still be registered from
-  // the attempt that just failed, and re-registering it returns an error
-  // before the initialise is ever reached.
-  const bool mounted = sdcard_mount(pdrv, kProbeMount, 1, false);
+  // A mount point of its own, because the real one may still be registered
+  // from an attempt that failed, and re-registering a path returns an error
+  // before the initialise is ever reached. Which is also why the VFS path is
+  // released again below: sdcard_unmount() unmounts the volume but leaves the
+  // path registered, so a probe that mounted successfully would poison every
+  // probe after it.
+  p.fat = sdcard_mount(pdrv, kProbeMount, 1, false);
   uint8_t sector[512];
-  const bool present = sd_read_raw(pdrv, sector, 0);
-  if (present) {
-    xSemaphoreTake(_lock, portMAX_DELAY);
-    _info.type = sdcard_type(pdrv);
-    _info.cardBytes = (uint64_t)sdcard_num_sectors(pdrv) * sdcard_sector_size(pdrv);
-    xSemaphoreGive(_lock);
+  p.present = p.fat || sd_read_raw(pdrv, sector, 0);
+  if (p.present) {
+    p.type  = sdcard_type(pdrv);
+    p.bytes = (uint64_t)sdcard_num_sectors(pdrv) * sdcard_sector_size(pdrv);
   }
-  if (mounted) sdcard_unmount(pdrv);
+  if (p.fat) { sdcard_unmount(pdrv); esp_vfs_fat_unregister_path(kProbeMount); }
   sdcard_uninit(pdrv);
-  return present;
+  return p;
 }
 
 bool SdCard::mount() {
@@ -199,6 +228,15 @@ void SdCard::measure() {
 }
 
 void SdCard::poll() {
+  checkSlot();
+  // The store's ownership marker is read here, on the task that owns the card,
+  // and handed to the status API from memory. It used to be opened and parsed
+  // on the web server's task, more than once per request, on a bus this task
+  // was using at the same moment.
+  StoreHome::refreshCache();
+}
+
+void SdCard::checkSlot() {
   if (_formatRequested) { doFormat(); _formatRequested = false; return; }
 
   if (_mounted) {
@@ -219,7 +257,12 @@ void SdCard::poll() {
     return;
   }
 
-  if (mount()) {
+  // Nothing mounted: one attempt, and it answers both questions. Only a card
+  // that has just shown it carries a filesystem is worth handing to SDFS,
+  // which does its own initialise — so the empty slot, which is the case that
+  // repeats for hours, costs one initialise per poll instead of two.
+  const Probe p = probe();
+  if (p.fat && mount()) {
     Info i = info();
     log_i("SD card mounted: %s, card %.1f GB, volume %.1f GB (%s)",
           i.type == CARD_SDHC ? "SDHC" : i.type == CARD_SD ? "SD" : i.type == CARD_MMC ? "MMC" : "?",
@@ -228,12 +271,14 @@ void SdCard::poll() {
     return;
   }
 
-  // No filesystem we understand — is there a card at all?
-  bool present = probeCardPresent();
   xSemaphoreTake(_lock, portMAX_DELAY);
   State prev = _info.state;
-  _info.state = present ? State::Unformatted : State::Absent;
-  if (!present) { _info.type = CARD_NONE; _info.cardBytes = 0; }
+  // A card that mounted a moment ago and then would not mount again is not an
+  // unformatted card; it is one the next poll should try again, and calling it
+  // unformatted invites an operator to format a card that has a filesystem.
+  _info.state     = !p.present ? State::Absent : p.fat ? State::Error : State::Unformatted;
+  _info.type      = p.present ? p.type  : CARD_NONE;
+  _info.cardBytes = p.present ? p.bytes : 0;
   _info.volumeBytes = _info.usedBytes = 0;
   State now = _info.state;
   uint64_t bytes = _info.cardBytes;
@@ -276,11 +321,15 @@ void SdCard::doFormat() {
   // unformatted card is the usual reason to be here and will fail to mount, but
   // it is initialised either way, which is all the wipe needs.
   const bool mounted = sdcard_mount(pdrv, kMount, 1, false);
+  // ... and released again on the way out, mount point included: unmounting a
+  // volume leaves its VFS path registered, and the SD.begin() below cannot
+  // register a path that is still taken — so a card that woke up mounted would
+  // fail to format for want of a name.
 
   uint8_t zeros[512] = {0};
   bool wiped = true;
   for (uint32_t s = 0; s < 8 && wiped; s++) wiped = sd_write_raw(pdrv, zeros, s);   // MBR + slack
-  if (mounted) sdcard_unmount(pdrv);
+  if (mounted) { sdcard_unmount(pdrv); esp_vfs_fat_unregister_path(kMount); }
   sdcard_uninit(pdrv);
   if (!wiped) {
     xSemaphoreTake(_lock, portMAX_DELAY);

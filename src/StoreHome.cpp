@@ -7,6 +7,10 @@
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <string>
+#include <vector>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "RnsFileSystem.h"
 #include "Settings.h"
 #if HAS_SD
@@ -18,19 +22,20 @@
 
 namespace StoreHome {
 
-// The marker sits beside the event log rather than inside the store, so that
-// wiping the store does not silently un-own the card, and so a person putting
-// the card in a laptop finds both files in one obvious place.
-static const char* kMarkerPath = "/retimesh/store.json";
-static const char* kMarkerDir  = "/retimesh";
-static const uint8_t kSchema   = 1;
+// The identity that goes on the card is the node's Reticulum hash in hex. The
+// header cannot see that length without dragging Arduino into the host tests,
+// so the two are tied together here, where both are in scope: an identity that
+// outgrew the marker field would be truncated on the way to the card and every
+// node's own store would read back as somebody else's.
+static_assert(kIdentityHexLen == 2 * Rns::HASH_LEN,
+              "the marker's identity length is out of step with Rns::HASH_LEN");
+static_assert(kIdentityHexLen < sizeof(Marker::node),
+              "the marker's owner field cannot hold an identity hex string");
 
-static Where sWhere = Where::LittleFs;
-static char  sResult[64] = "";
-static volatile uint8_t sRequest = 0;      // 0 none, 1 adopt, 2 eject
+static char sResult[128] = "";
 
 // ---------------------------------------------------------------------------
-// The rule
+// Naming
 // ---------------------------------------------------------------------------
 const char* whereName(Where w) { return w == Where::Sd ? "sd" : "littlefs"; }
 
@@ -44,16 +49,53 @@ const char* cardName(Card c) {
   }
 }
 
-Where where()       { return sWhere; }
+// Not a variable of its own. The store's filesystem already knows which of the
+// two it is pointing at, and a second copy of that fact in this file is a
+// second answer that can disagree with the first — which is exactly what a
+// page reporting "the store is on the card" while the store was being written
+// to flash turned out to be.
+Where where() { return RnsFileSystem::onSd() ? Where::Sd : Where::LittleFs; }
+
 const char* lastResult() { return sResult; }
-bool busy()         { return sRequest != 0; }
+
+// ---------------------------------------------------------------------------
+#if HAS_SD
+// ---------------------------------------------------------------------------
+
+// The marker sits beside the event log rather than inside the store, so that
+// wiping the store does not silently un-own the card, and so a person putting
+// the card in a laptop finds both files in one obvious place.
+static const char* kMarkerPath = "/retimesh/store.json";
+static const char* kMarkerDir  = "/retimesh";
+static const uint8_t kSchema   = 1;
+
+// Where a copy is assembled before it becomes the store. Nothing is ever
+// deleted to make room for it.
+static const char* kStagingRoot = RNS_FS_ROOT ".new";
+
+static bool sRunning = false;       // a move is being carried out right now
+
+static SemaphoreHandle_t sCacheLock = nullptr;
+static Ownership         sCache;
+
+void begin() { if (!sCacheLock) sCacheLock = xSemaphoreCreateMutex(); }
+
+Ownership ownership() {
+  if (!sCacheLock) return Ownership{};
+  xSemaphoreTake(sCacheLock, portMAX_DELAY);
+  Ownership o = sCache;
+  xSemaphoreGive(sCacheLock);
+  return o;
+}
+
+Card card() { return ownership().card; }
+
+bool busy() { return sRunning || settings.transport().pendingMove != Move::None; }
 
 // ---------------------------------------------------------------------------
 // The marker
 // ---------------------------------------------------------------------------
-#if HAS_SD
-
-bool readMarker(Marker& out) {
+static bool readMarker(Marker& out) {
   out = Marker{};
   if (!sdCard.mounted()) return false;
   File f = SD.open(kMarkerPath, FILE_READ);
@@ -86,14 +128,26 @@ static bool writeMarker(uint32_t generation, bool released) {
   return ok;
 }
 
-Card card() {
-  if (!sdCard.mounted()) return Card::NoCard;
-  Marker m;
-  if (readMarker(m))
-    return strcmp(m.node, nodeIdentity.identityHex()) == 0 ? Card::Ours : Card::Foreign;
-  // No marker. A store already on the card was put there by this node before
-  // markers existed — a card does not acquire one by accident — so it is ours.
-  return SD.exists(RNS_FS_ROOT) ? Card::Legacy : Card::Blank;
+// Read on the card task, handed out from memory everywhere else. Unconditional
+// rather than invalidated when something is known to have changed it: a cache
+// with a list of things that must remember to dirty it grows a case that
+// forgot, and a status page confidently naming the wrong owner is worse than
+// one small read every poll.
+void refreshCache() {
+  if (!sCacheLock) return;
+  Ownership o;
+  if (sdCard.mounted()) {
+    Marker m;
+    const bool valid = readMarker(m);
+    o.card = classify(true, valid,
+                      valid && strcmp(m.node, nodeIdentity.identityHex()) == 0,
+                      m.released, SD.exists(RNS_FS_ROOT));
+    strlcpy(o.owner, m.name, sizeof(o.owner));
+    o.generation = m.generation;
+  }
+  xSemaphoreTake(sCacheLock, portMAX_DELAY);
+  sCache = o;
+  xSemaphoreGive(sCacheLock);
 }
 
 // ---------------------------------------------------------------------------
@@ -105,147 +159,284 @@ Card card() {
 // ---------------------------------------------------------------------------
 static uint8_t sBuf[512];
 
+// One path, either end: whether it is there, whether it is a directory, how
+// big it is, and what is in it. The names are read out and the handle is
+// closed before anything is done with them, which is what removeTree needs:
+// deleting through an open directory moves the cursor under the reader, so
+// entries get stepped over and a tree that was "removed" keeps some of its
+// files — leaving behind a store that is neither the old one nor an empty one.
+struct Entry {
+  bool                     found = false;
+  bool                     isDir = false;
+  size_t                   size  = 0;
+  std::vector<std::string> names;
+};
+
+static Entry entryAt(fs::FS& fs, const char* path) {
+  Entry e;
+  File f = fs.open(path);
+  if (!f) return e;
+  e.found = true;
+  e.isDir = f.isDirectory();
+  if (e.isDir)
+    for (File c = f.openNextFile(); c; c = f.openNextFile()) { e.names.push_back(c.name()); c.close(); }
+  else
+    e.size = f.size();
+  f.close();
+  return e;
+}
+
 static bool copyFile(fs::FS& from, const char* src, fs::FS& to, const char* dst) {
   File in = from.open(src, FILE_READ);
   if (!in) return false;
+  const size_t expect = in.size();
   File out = to.open(dst, FILE_WRITE);
   if (!out) { in.close(); return false; }
+  size_t done = 0;
   bool ok = true;
-  while (ok) {
-    const size_t n = in.read(sBuf, sizeof(sBuf));
-    if (n == 0) break;
+  while (ok && done < expect) {
+    const size_t want = (expect - done) < sizeof(sBuf) ? (expect - done) : sizeof(sBuf);
+    const size_t n = in.read(sBuf, want);
+    // A read that returns nothing is not the end of the file — the file's own
+    // size says where that is. Stopping at the first short read treated a card
+    // that had gone quiet mid-copy as a file that had simply ended, and the
+    // truncated result was indistinguishable from a complete one.
+    if (n == 0) { ok = false; break; }
     ok = out.write(sBuf, n) == n;
+    done += n;
   }
-  in.close();
+  out.flush();
   out.close();
-  return ok;
+  in.close();
+  if (!ok || done != expect) return false;
+  // The length is checked after the handle is closed, not before: a filesystem
+  // is entitled to keep it in RAM until then, so asking an open file how big it
+  // is answers from wherever it happens to have the number rather than from
+  // what reached the medium. This is the only way a flush that failed on the
+  // way out gets noticed at all — close() and flush() have nothing to say.
+  File check = to.open(dst, FILE_READ);
+  const bool complete = check && check.size() == expect;
+  if (check) check.close();
+  return complete;
 }
 
 static void removeTree(fs::FS& fs, const char* path) {
-  File dir = fs.open(path);
-  if (!dir) return;
-  if (!dir.isDirectory()) { dir.close(); fs.remove(path); return; }
-  File e;
-  while ((e = dir.openNextFile())) {
-    char child[128];
-    snprintf(child, sizeof(child), "%s/%s", path, e.name());
-    const bool isDir = e.isDirectory();
-    e.close();
-    if (isDir) removeTree(fs, child);
-    else       fs.remove(child);
+  const Entry e = entryAt(fs, path);
+  if (!e.found) return;
+  if (!e.isDir) { fs.remove(path); return; }
+  for (const std::string& n : e.names) {
+    char child[160];
+    snprintf(child, sizeof(child), "%s/%s", path, n.c_str());
+    removeTree(fs, child);
   }
-  dir.close();
   fs.rmdir(path);
 }
 
 static bool copyTree(fs::FS& from, const char* src, fs::FS& to, const char* dst) {
-  File dir = from.open(src);
-  if (!dir) return false;
-  if (!dir.isDirectory()) { dir.close(); return copyFile(from, src, to, dst); }
-  to.mkdir(dst);
-  bool ok = true;
-  File e;
-  while (ok && (e = dir.openNextFile())) {
-    char s[128], d[128];
-    snprintf(s, sizeof(s), "%s/%s", src, e.name());
-    snprintf(d, sizeof(d), "%s/%s", dst, e.name());
-    const bool isDir = e.isDirectory();
-    e.close();
-    ok = isDir ? copyTree(from, s, to, d) : copyFile(from, s, to, d);
+  const Entry e = entryAt(from, src);
+  if (!e.found) return false;
+  if (!e.isDir) return copyFile(from, src, to, dst);
+  if (!to.mkdir(dst)) return false;
+  for (const std::string& n : e.names) {
+    char s[160], d[160];
+    snprintf(s, sizeof(s), "%s/%s", src, n.c_str());
+    snprintf(d, sizeof(d), "%s/%s", dst, n.c_str());
+    if (!copyTree(from, s, to, d)) return false;
   }
-  dir.close();
-  return ok;
+  return true;
+}
+
+// The same shape and the same sizes at both ends. copyFile checks the bytes it
+// moved; this checks that nothing was missed altogether — an entry the
+// directory read stepped over, a file the destination quietly declined to
+// create — which is the failure that leaves a store looking complete and one
+// segment short. Nothing is deleted until this has agreed.
+static bool treeMatches(fs::FS& a, const char* pa, fs::FS& b, const char* pb) {
+  const Entry ea = entryAt(a, pa);
+  const Entry eb = entryAt(b, pb);
+  if (!ea.found || !eb.found || ea.isDir != eb.isDir) return false;
+  if (!ea.isDir) return ea.size == eb.size;
+  if (ea.names.size() != eb.names.size()) return false;
+  for (const std::string& n : ea.names) {
+    char s[160], d[160];
+    snprintf(s, sizeof(s), "%s/%s", pa, n.c_str());
+    snprintf(d, sizeof(d), "%s/%s", pb, n.c_str());
+    if (!treeMatches(a, s, b, d)) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------
-bool requestAdopt() {
-  if (sRequest) return false;
-  if (!sdCard.mounted())        { strlcpy(sResult, "no card", sizeof(sResult)); return false; }
-  if (sWhere == Where::Sd)      { strlcpy(sResult, "already on the card", sizeof(sResult)); return false; }
-  if (card() == Card::Foreign)  { strlcpy(sResult, "refused: another node's store", sizeof(sResult)); return false; }
-  sRequest = 1;
+static bool remember(Move m) {
+  TransportSettings t = settings.transport();
+  t.pendingMove = m;
+  return settings.saveTransport(t);
+}
+
+static bool queue(Move m, const char* said) {
+  if (!remember(m)) { strlcpy(sResult, "failed: the request could not be saved", sizeof(sResult)); return false; }
+  strlcpy(sResult, said, sizeof(sResult));
+  log_w("store: %s", sResult);
+  wifiManager.scheduleRestart(1200);
   return true;
+}
+
+bool requestAdopt() {
+  const Ownership o = ownership();
+  if (busy())                  { strlcpy(sResult, "a move is already queued", sizeof(sResult)); return false; }
+  if (o.card == Card::NoCard)  { strlcpy(sResult, "no card", sizeof(sResult)); return false; }
+  if (where() == Where::Sd)    { strlcpy(sResult, "the store is already on the card", sizeof(sResult)); return false; }
+  if (o.card == Card::Foreign) {
+    snprintf(sResult, sizeof(sResult),
+             "refused: this card holds the store of \"%s\"; format it first if you mean to take it",
+             o.owner[0] ? o.owner : "another node");
+    return false;
+  }
+  return queue(Move::Adopt, "queued: the store moves onto the card as the node restarts");
 }
 
 bool requestEject() {
-  if (sRequest) return false;
-  if (sWhere != Where::Sd)      { strlcpy(sResult, "the store is not on the card", sizeof(sResult)); return false; }
-  sRequest = 2;
-  return true;
+  if (busy())               { strlcpy(sResult, "a move is already queued", sizeof(sResult)); return false; }
+  if (where() != Where::Sd) { strlcpy(sResult, "the store is not on the card", sizeof(sResult)); return false; }
+  return queue(Move::Eject, "queued: the store moves to internal flash as the node restarts");
 }
 
-// Called from the RNS task, the only task that writes the store, so nothing is
-// being written while the files move.
-void service() {
-  const uint8_t req = sRequest;
-  if (!req) return;
+// ---------------------------------------------------------------------------
+// The move itself, at boot, with nothing open
+// ---------------------------------------------------------------------------
+void runPendingMigration() {
+  refreshCache();                        // what is actually in the slot this boot
+  const TransportSettings before = settings.transport();
+  const Move m = planAtBoot(before.pendingMove, before.sdStore, sdCard.mounted(), card());
 
-  const bool adopt = (req == 1);
-  fs::FS& from = adopt ? (fs::FS&)LittleFS : (fs::FS&)SD;
-  fs::FS& to   = adopt ? (fs::FS&)SD       : (fs::FS&)LittleFS;
-
-  Marker m;
-  readMarker(m);
-  const uint32_t generation = m.generation + 1;
-
-  log_w("store: moving %s -> %s", adopt ? "littlefs" : "sd", adopt ? "sd" : "littlefs");
-  removeTree(to, RNS_FS_ROOT);
-  const bool copied = copyTree(from, RNS_FS_ROOT, to, RNS_FS_ROOT);
-
-  if (!copied) {
-    // The destination is now a partial copy, which is why nothing has been
-    // pointed at it yet: the node restarts into the home it already had and
-    // the half-written tree is overwritten by the next attempt.
-    strlcpy(sResult, "failed: copy error", sizeof(sResult));
-    log_e("store: copy failed, staying on %s", whereName(sWhere));
-    sRequest = 0;
+  if (m == Move::None) {
+    // Only report a refusal for a move somebody asked for. The card in the
+    // slot at the restart need not be the card the request was made about, so
+    // the request is dropped rather than kept waiting for a card that may
+    // never come back.
+    if (before.pendingMove != Move::None) {
+      snprintf(sResult, sizeof(sResult), "failed: %s",
+               !sdCard.mounted() ? "no card in the slot when the node restarted"
+                                 : "this card is not carrying this node's store");
+      log_e("store: %s", sResult);
+      remember(Move::None);
+    }
     return;
   }
 
-  // The marker is written after the copy and before the setting, so a power
-  // cut in the middle leaves a card that names its owner and a node that has
-  // not yet moved — recoverable — rather than a node pointed at a card that
-  // does not have the data.
+  sRunning = true;
+  const bool adopt = (m == Move::Adopt);
+  fs::FS& from = adopt ? (fs::FS&)LittleFS : (fs::FS&)SD;
+  fs::FS& to   = adopt ? (fs::FS&)SD       : (fs::FS&)LittleFS;
+  log_w("store: moving %s -> %s", whereName(adopt ? Where::LittleFs : Where::Sd),
+        whereName(adopt ? Where::Sd : Where::LittleFs));
+
+  Marker mk;
+  readMarker(mk);
+  const uint32_t generation = mk.generation + 1;
+
+  // A node that has never written a store has nothing to move: the tree is
+  // created by the library the first time it is used. That is a move that is
+  // already done, not a failure, and it is the ordinary case for a new node
+  // with a card in the slot from the start.
+  if (from.exists(RNS_FS_ROOT)) {
+    // The copy is assembled beside the destination's own store and nothing is
+    // deleted to make room for it. Removing the destination first and copying
+    // into the hole is how a card pulled mid-copy, or a filesystem that ran
+    // out of room, ended with a half-written store at one end and nothing at
+    // the other.
+    removeTree(to, kStagingRoot);
+    if (!copyTree(from, RNS_FS_ROOT, to, kStagingRoot) ||
+        !treeMatches(from, RNS_FS_ROOT, to, kStagingRoot)) {
+      removeTree(to, kStagingRoot);
+      strlcpy(sResult, "failed: the store could not be copied, nothing was moved", sizeof(sResult));
+      log_e("store: %s, staying on %s", sResult, whereName(where()));
+      remember(Move::None);
+      sRunning = false;
+      return;
+    }
+
+    // From here the destination's old copy goes and the verified one takes its
+    // place. The request stays on record across that window on purpose: a
+    // power cut in it is retried from the source, which is still whole, at the
+    // next boot.
+    remember(m);
+    removeTree(to, RNS_FS_ROOT);
+    if (!to.rename(kStagingRoot, RNS_FS_ROOT) ||
+        !treeMatches(from, RNS_FS_ROOT, to, RNS_FS_ROOT)) {
+      strlcpy(sResult, "failed: the copy could not be put in place, retrying at the next restart",
+              sizeof(sResult));
+      log_e("store: %s", sResult);
+      sRunning = false;
+      return;
+    }
+  }
+
+  // The marker is written before the setting, so a power cut between them
+  // leaves a card that names its owner and a node that has not moved yet —
+  // recoverable — rather than a node pointed at a card that does not have the
+  // data. An eject leaves the name on the card and marks it released, which is
+  // what lets any node take it afterwards.
   writeMarker(generation, /*released=*/!adopt);
 
+  // The setting is the point of no return: after it the node boots into the
+  // new home, so it is written while both copies still exist. The old tree
+  // goes afterwards. A power cut between the two leaves a stale tree behind —
+  // cleared by the next move in that direction — and never a node pointed at a
+  // home with nothing in it.
   TransportSettings t = settings.transport();
-  t.sdStore = adopt;
+  t.sdStore     = adopt;
+  t.pendingMove = Move::None;
   settings.saveTransport(t);
 
-  snprintf(sResult, sizeof(sResult), "ok: store moved to %s, restarting",
+  // One home, not two, which is the whole claim this file makes.
+  removeTree(from, RNS_FS_ROOT);
+  refreshCache();
+
+  snprintf(sResult, sizeof(sResult), "ok: store moved to %s",
            adopt ? "the card" : "internal flash");
   log_w("store: %s", sResult);
   sdCard.log(adopt ? "store: adopted this card" : "store: released this card");
-  sRequest = 0;
-  wifiManager.scheduleRestart(1200);
+  sRunning = false;
 }
 
 Where chooseAtBoot() {
+  refreshCache();
   const Card c = card();
-  sWhere = decide(settings.transport().sdStore, sdCard.mounted(), c);
+  const Where w = decide(settings.transport().sdStore, sdCard.mounted(), c);
+  if (w == Where::Sd) {
+    RnsFileSystem::useSd();
+    sdCard.reserve(true);                // no formatting, and removal is an error
+  } else {
+    RnsFileSystem::useLittleFs();
+  }
   // Put this node's name on a card it is taking into use but has not signed.
-  // Either it predates markers, or the setting was on when a blank card went
-  // in; both end with the store on a card that does not say whose it is, and
-  // an unsigned card is one that some other node will read as free.
-  if (sWhere == Where::Sd && (c == Card::Legacy || c == Card::Blank)) {
+  // Only a store from before markers existed gets here: a blank card is signed
+  // by the copy that makes it a home, and this one already holds the data. An
+  // unsigned card is one that some other node will read as free.
+  if (w == Where::Sd && c == Card::Legacy) {
     Marker m;
     readMarker(m);
     if (writeMarker(m.generation + 1, /*released=*/false))
       log_i("store: this card is now marked as belonging to %s", wifiManager.hostname());
+    refreshCache();
   }
-  return sWhere;
+  return w;
 }
 
 #else   // !HAS_SD — no slot, so there is nothing to decide and nothing to move.
 
-bool readMarker(Marker& out) { out = Marker{}; return false; }
-Card card()                  { return Card::NoCard; }
-bool requestAdopt()          { return false; }
-bool requestEject()          { return false; }
-void service()               {}
-Where chooseAtBoot()         { sWhere = Where::LittleFs; return sWhere; }
+void      begin()               {}
+Ownership ownership()           { return Ownership{}; }
+Card      card()                { return Card::NoCard; }
+bool      busy()                { return false; }
+bool      requestAdopt()        { return false; }
+bool      requestEject()        { return false; }
+void      refreshCache()        {}
+void      runPendingMigration() {}
+Where     chooseAtBoot()        { RnsFileSystem::useLittleFs(); return Where::LittleFs; }
 
 #endif
 

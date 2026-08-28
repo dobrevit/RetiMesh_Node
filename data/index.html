@@ -168,7 +168,7 @@ async function refreshStatus() {
       ]),
       card("Reticulum store", !s.storage ? "" :
         s.storage.lost ? "lost — card removed, restart to use flash"
-        : s.storage.sd_available ? "internal flash · restart to move it to the SD card"
+        : s.storage.sd_available ? "internal flash · a card is free, move it from the settings page"
         : (s.storage.backend === "sd" ? "SD card" : "internal flash") + " · " + s.storage.path,
         s.storage && (s.storage.lost || s.storage.sd_available) ? "offline" : "")
     );

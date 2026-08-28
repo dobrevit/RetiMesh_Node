@@ -34,6 +34,10 @@
 //
 //  begin() mounts synchronously so that whoever boots next (the Reticulum
 //  transport, which may want to keep its store here) sees the final state.
+//
+//  The poll also re-reads the store's ownership marker (StoreHome), because
+//  this is the task that owns the card: everyone else is handed the answer
+//  from memory rather than opening files on this bus behind its back.
 // ============================================================================
 #pragma once
 
@@ -60,7 +64,13 @@ public:
   void begin();                          // first mount attempt, then the poll task
   Info info();
   bool mounted();
-  bool requestFormat();                  // performed by the task; false if busy or reserved
+  bool requestFormat();                  // performed by the task; false if refused
+
+  // Why the card may not be formatted, or nullptr when it may be. The rule
+  // lives here and nowhere else: the HTTP handler used to keep its own copy of
+  // the "the store is on this card" refusal, and two statements of a rule are
+  // two rules the moment one of them is edited.
+  const char* formatRefusal();
 
   // "The Reticulum store lives on this card." Set at boot by RnsTransport
   // when it puts its microStore files on the card. While reserved the card
@@ -80,12 +90,24 @@ public:
   static void task(void* self);
 
 private:
-  void poll();
-  bool mount();
-  void unmount();
-  bool probeCardPresent();               // low level, without mounting
-  void doFormat();
-  void measure();
+  // What one attempt at the card says: whether anything is in the slot, and
+  // whether it carries a filesystem this node can mount. Both answers come out
+  // of the same disk-layer initialise, which is the only part that costs
+  // anything (see probe()).
+  struct Probe {
+    bool     present = false;
+    bool     fat     = false;
+    uint8_t  type    = CARD_NONE;
+    uint64_t bytes   = 0;
+  };
+
+  void  poll();                          // the slot, then the store's marker
+  void  checkSlot();
+  bool  mount();
+  void  unmount();
+  Probe probe();                         // low level: mount attempt + raw read
+  void  doFormat();
+  void  measure();
 
   SPIClass          _spi{HSPI};
   SemaphoreHandle_t _lock = nullptr;
