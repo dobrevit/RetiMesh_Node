@@ -28,6 +28,7 @@
 
 #include <Arduino.h>
 #include "Config.h"
+#include "DisplayLayout.h"
 #include "Power.h"
 
 #if HAS_DISPLAY
@@ -54,7 +55,9 @@ private:
   void paintNeighbors();
   void paintRadio();
   void paintNetwork();
+#if !DISPLAY_COMPACT
   void paintQr();
+#endif
 #if HAS_GPS
   void paintGps();
 #endif
@@ -64,11 +67,24 @@ private:
   void meter(uint8_t row, const char* label, const char* value, uint8_t pct);
 
 
-  // The GNSS page exists only where there is a receiver to read.
+  // The GNSS page exists only where there is a receiver to read, and the QR
+  // page only where a camera could read the result. On a 0.49" panel the
+  // module pitch is 0.17 mm and a version-3 symbol is 5.4 mm across — below
+  // what a phone lens resolves and inside its near-focus blur, so it scans as
+  // a single bright blob however it is drawn. A page that cannot work costs a
+  // button press to reach and another to leave, so it is not in the cycle.
 #if HAS_GPS
-  enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, GPS, QR, PAGE_COUNT };
+  enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, GPS,
+  #if !DISPLAY_COMPACT
+    QR,
+  #endif
+    PAGE_COUNT };
 #else
-  enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, QR, PAGE_COUNT };
+  enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK,
+  #if !DISPLAY_COMPACT
+    QR,
+  #endif
+    PAGE_COUNT };
 #endif
   // Typed, so paint()'s switch can list every page and let the compiler
   // object when one is added without being drawn (-Werror=switch).
@@ -86,7 +102,7 @@ private:
   bool     _longFired = false;
 
 #if HAS_DISPLAY
-  Adafruit_SSD1306 _oled{128, 64, &Wire, -1};
+  Adafruit_SSD1306 _oled{DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, PIN_OLED_RST};
 #endif
   static bool ack(uint8_t addr);         // true if a device ACKs at addr
   bool    _ok   = false;

@@ -107,13 +107,19 @@ Battery battery() {
   b.charging = p.charging;
   b.percent  = p.present ? p.percent : 0;
   return b;
-#else
+#elif HAS_BATTERY_ADC
   if (millis() - sLastSample > BATTERY_SAMPLE_MS) sample();
   Battery b;
   b.volts   = sVolts;
   b.present = sVolts >= BATTERY_MIN_V && sVolts <= BATTERY_MAX_V;
   b.percent = b.present ? percentFor(sVolts) : 0;
   return b;
+#else
+  // Neither a power-management chip nor a divider: this board cannot see a
+  // cell even if one is fitted. Saying "no battery" is the truthful answer and
+  // the one every caller already handles — the alternative was not compiling,
+  // which is what a board with no sensing used to do.
+  return Battery{};
 #endif
 }
 

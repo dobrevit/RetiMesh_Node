@@ -29,5 +29,11 @@
     "chip": "esp32s3",
     "chip_family": "ESP32-S3",
     "notes": "As t3s3-sx1280, but for the amplified module: the PA sits behind an RX/TX switch on GPIO 21/10 and the ceiling rises to 20 dBm. Flashing this image on a plain board would drive two GPIOs that board uses for something else, so pick by what is actually fitted."
+  },
+  "heltec-ws": {
+    "name": "Heltec Wireless Stick V2/V2.1",
+    "chip": "esp32",
+    "chip_family": "ESP32",
+    "notes": "0.49\" 64x32 OLED on the switched Vext rail, SX1276, no SD slot and no GNSS. The small panel gets its own page layout — ten columns and four rows — rather than the 128x64 one clipped. Serial is a CP2102 bridge."
   }
 }
