@@ -26,6 +26,7 @@
 #include <map>
 #include <vector>
 #include "RnsFileSystem.h"
+#include "StoreHome.h"
 #include "Neighbors.h"
 #include "SdCard.h"
 #include "RnsAnnounce.h"
@@ -243,14 +244,14 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   try {
     RNS::loglevel(RNS::LOG_INFO);        // DEBUG is compiled in; raise here when tracing
 
-    // Storage: the SD card when the operator wants it and one is mounted,
-    // otherwise the LittleFS partition shared with the web app. Decided once,
-    // here, because microStore holds files open for the life of the store.
-    // Nothing is migrated between the two — the path table, announce cache
-    // and hashlist all rebuild themselves from the mesh; the node identity
-    // lives in NVS either way.
+    // Storage: the SD card or the LittleFS partition shared with the web app,
+    // as StoreHome decides — it owns that rule, and the card's ownership
+    // marker, so this is not the place to re-derive it. Decided once, here,
+    // because microStore holds files open for the life of the store; moving
+    // the store between the two is a deliberate migration that ends in a
+    // restart, which is what brings execution back through this line.
 #if HAS_SD
-    if (settings.transport().sdStore && sdCard.mounted()) {
+    if (StoreHome::chooseAtBoot() == StoreHome::Where::Sd) {
       RnsFileSystem::useSd();
       sdCard.reserve(true);              // no formatting, and removal is an error
     } else {
@@ -453,6 +454,10 @@ Tables tables() {
 void loop() {
   if (!sStarted) { vTaskDelay(pdMS_TO_TICKS(500)); return; }
   try {
+    // Before anything touches the store this pass. A migration copies the whole
+    // tree and then restarts, and it runs here because this task is the only
+    // one that writes the store — so the files cannot move under a write.
+    StoreHome::service();
     processEvents();
     drainTcp();
     reticulum.loop();                      // interface loops + housekeeping (jobs_interval = 1 s)

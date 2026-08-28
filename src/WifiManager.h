@@ -86,6 +86,8 @@ private:
   void handleAdminPost(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleTransportPost(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleSdFormat(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleSdAdopt(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleSdEject(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleExport(AsyncWebServerRequest* request);
   void handleImport(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleReset(AsyncWebServerRequest* request);

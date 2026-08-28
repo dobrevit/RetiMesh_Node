@@ -150,10 +150,10 @@
     </div>
     <div class="note">Announce cap limits how much of each interface's airtime announces may use (rnsd default 2 %). The rate target/grace/penalty
       throttle destinations that announce too often — the same knobs as rnsd's <code>announce_rate_*</code>.</div>
-    <div class="note">The Reticulum store (path table, announce cache, known destinations) is kept on the microSD card when one is mounted at boot,
-      otherwise in internal flash next to this web app. The choice is made once at startup, so changing it &mdash; or inserting a card &mdash; takes
-      effect after a restart. Nothing is copied between the two: the tables rebuild themselves from the mesh and the node identity lives in NVS.
-      While the store is on the card it cannot be formatted, and removing it stops the node learning new paths until it reboots.</div>
+    <div class="note">The Reticulum store (path table, announce cache, known destinations) lives in one place at a time: the microSD card when one
+      has been taken into use, otherwise in internal flash next to this web app. Move it with <b>Use this card</b> and <b>Eject</b> under SD card
+      below, which copy the data across and restart the node into its new home. While the store is on the card it cannot be formatted, and pulling
+      the card without ejecting stops the node learning new paths until it reboots.</div>
     <button type="submit">Save &amp; restart</button>
     <div class="msg" id="transportMsg"></div>
   </form>
@@ -161,11 +161,19 @@
   <h2>SD card</h2>
   <div class="card">
     <div class="note" id="sdInfo">Checking…</div>
+    <div class="note" id="sdHome"></div>
+    <div class="row">
+      <div><button type="button" id="sdAdopt" disabled>Use this card for the store</button></div>
+      <div><button type="button" id="sdEject" disabled>Eject card</button></div>
+    </div>
     <div class="row">
       <div><button type="button" id="sdLog" disabled>Download event log</button></div>
       <div><button class="danger" type="button" id="sdFormat" disabled>Format card (erase everything)</button></div>
     </div>
     <div class="msg" id="sdMsg"></div>
+    <div class="note">Taking a card into use copies the store onto it, writes this node's name to the card so no other node will claim it, and
+      restarts. Ejecting copies the store back to internal flash and restarts, after which the card can be pulled safely. A card carrying another
+      node's store is left alone; format it first if you mean to take it.</div>
     <div class="note">The node uses a single FAT32 volume across the whole card. Cards with other layouts (e.g. a Raspberry Pi image:
       small boot partition + Linux partitions) mount only partially and can be reformatted here. Formatting erases all data on the card.</div>
   </div>
@@ -428,6 +436,7 @@ $("resetBtn").addEventListener("click", async () => {
 });
 
 let sdLastFormat = "";     // last_format as of the most recent refresh
+let lastMigration = "";    // ...and the migration result already reported
 let formatWas = null;      // ...as it stood when a format was requested
 async function refreshSd() {
   try {
@@ -464,9 +473,43 @@ async function refreshSd() {
     }
     $("sdFormat").disabled = !(sd.state === "mounted" || sd.state === "partial" || sd.state === "unformatted" || sd.state === "error");
     $("sdLog").disabled = !(sd.state === "mounted" || sd.state === "partial");
+
+    // Where the store lives, and what this card is, in the reader's words.
+    const onCard = sd.store_home === "sd";
+    const usable = sd.state === "mounted" || sd.state === "partial";
+    $("sdAdopt").disabled = !!sd.migrating || onCard || !usable || sd.card === "foreign";
+    $("sdEject").disabled = !!sd.migrating || !onCard;
+    let home = onCard ? "The Reticulum store is on this card."
+                      : "The Reticulum store is in internal flash.";
+    if (sd.card === "foreign")
+      home += ` This card holds the store of "${sd.owner || "another node"}" and will not be used.`;
+    else if (sd.card === "ours" && !onCard)
+      home += " This card holds a store written by this node.";
+    else if (sd.card === "legacy" && !onCard)
+      home += " This card holds a store with no owner written on it.";
+    $("sdHome").textContent = home;
+    if (sd.migrating) setMsg("sdMsg", "Moving the store…", "warn");
+    else if (sd.migration && sd.migration !== lastMigration) {
+      setMsg("sdMsg", sd.migration, sd.migration.indexOf("failed") === 0 ? "bad" : "good");
+      lastMigration = sd.migration;
+    }
   } catch (e) { $("sdInfo").textContent = "Status unavailable."; }
 }
 $("sdLog").addEventListener("click", () => { window.location.href = "/api/sd/log"; });
+$("sdAdopt").addEventListener("click", async () => {
+  if (!confirm("Copy the Reticulum store onto this card and restart the node?")) return;
+  try {
+    await api("/api/settings/sd/adopt", { confirm: "ADOPT" });
+    setMsg("sdMsg", "Moving the store onto the card, then restarting…", "warn");
+  } catch (e) { setMsg("sdMsg", e.message, "bad"); }
+});
+$("sdEject").addEventListener("click", async () => {
+  if (!confirm("Copy the store back to internal flash and restart? The card can be removed once the node is back.")) return;
+  try {
+    await api("/api/settings/sd/eject", { confirm: "EJECT" });
+    setMsg("sdMsg", "Moving the store to internal flash, then restarting…", "warn");
+  } catch (e) { setMsg("sdMsg", e.message, "bad"); }
+});
 $("sdFormat").addEventListener("click", async () => {
   if (prompt("This erases EVERYTHING on the card. Type FORMAT to continue.") !== "FORMAT") return;
   try {

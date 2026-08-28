@@ -36,6 +36,7 @@
 #include "Mdns.h"
 #include "Diag.h"
 #include "SdCard.h"
+#include "StoreHome.h"
 #include "AutoInterface.h"
 #include "Power.h"
 
@@ -299,6 +300,8 @@ void WifiManager::setupRoutes() {
     { "/api/settings/admin", &WifiManager::handleAdminPost },
     { "/api/settings/transport", &WifiManager::handleTransportPost },
     { "/api/settings/sd/format", &WifiManager::handleSdFormat },
+    { "/api/settings/sd/adopt",  &WifiManager::handleSdAdopt  },
+    { "/api/settings/sd/eject",  &WifiManager::handleSdEject  },
     { "/api/settings/import", &WifiManager::handleImport },
   };
   for (const Route& rt : posts) {
@@ -495,6 +498,15 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     sd["last_format"]  = si.lastFormat;
     sd["reserved"]     = sdCard.reserved();      // Reticulum store lives here
     sd["storage_lost"] = sdCard.storageLost();   // ... and the card was pulled
+    // Ownership, so the page can offer the right action rather than every
+    // action: a blank card can be taken, one of ours is already home or can be
+    // taken back, and one belonging to another node is not ours to touch.
+    sd["card"]         = StoreHome::cardName(StoreHome::card());
+    sd["store_home"]   = StoreHome::whereName(StoreHome::where());
+    sd["migration"]    = StoreHome::lastResult();
+    sd["migrating"]    = StoreHome::busy();
+    StoreHome::Marker mk;
+    if (StoreHome::readMarker(mk)) { sd["owner"] = mk.name; sd["generation"] = mk.generation; }
   }
 #endif
 
@@ -1127,9 +1139,37 @@ void WifiManager::handleSdFormat(AsyncWebServerRequest* request, const char* bod
   }
   SdCard::Info si = sdCard.info();
   if (si.state == SdCard::State::Absent) { sendError(request, 409, "no card"); return; }
-  if (sdCard.reserved())                 { sendError(request, 409, "the Reticulum store is on this card; turn off \"Reticulum store on SD\" and reboot first"); return; }
+  if (sdCard.reserved())                 { sendError(request, 409, "the Reticulum store is on this card; eject it first"); return; }
   if (!sdCard.requestFormat())           { sendError(request, 409, "format already running"); return; }
   request->send(200, "application/json", "{\"ok\":true,\"formatting\":true}");
+}
+
+// POST /api/settings/sd/adopt — copy the store onto the card and restart into it.
+void WifiManager::handleSdAdopt(AsyncWebServerRequest* request, const char* body, size_t len) {
+  JsonDocument in;
+  if (deserializeJson(in, body, len) != DeserializationError::Ok || strcmp(in["confirm"] | "", "ADOPT") != 0) {
+    sendError(request, 400, "send {\"confirm\":\"ADOPT\"} to move the store onto the card"); return;
+  }
+  if (!sdCard.mounted())                          { sendError(request, 409, "no card"); return; }
+  if (StoreHome::card() == StoreHome::Card::Foreign) {
+    StoreHome::Marker m; StoreHome::readMarker(m);
+    char msg[128];
+    snprintf(msg, sizeof(msg), "this card holds the store of \"%s\"; format it first if you mean to take it", m.name);
+    sendError(request, 409, msg); return;
+  }
+  if (!StoreHome::requestAdopt()) { sendError(request, 409, StoreHome::lastResult()); return; }
+  request->send(200, "application/json", "{\"ok\":true,\"migrating\":true,\"restart\":true}");
+}
+
+// POST /api/settings/sd/eject — copy the store back to internal flash, restart,
+// and leave the card safe to pull.
+void WifiManager::handleSdEject(AsyncWebServerRequest* request, const char* body, size_t len) {
+  JsonDocument in;
+  if (deserializeJson(in, body, len) != DeserializationError::Ok || strcmp(in["confirm"] | "", "EJECT") != 0) {
+    sendError(request, 400, "send {\"confirm\":\"EJECT\"} to move the store off the card"); return;
+  }
+  if (!StoreHome::requestEject()) { sendError(request, 409, StoreHome::lastResult()); return; }
+  request->send(200, "application/json", "{\"ok\":true,\"migrating\":true,\"restart\":true}");
 }
 
 void WifiManager::handleReset(AsyncWebServerRequest* request) {
