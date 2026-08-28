@@ -15,6 +15,7 @@
 #include "Settings.h"
 #if HAS_SD
   #include <SD.h>
+  #include <sys/stat.h>
   #include "SdCard.h"
 #endif
 #include "RnsAnnounce.h"
@@ -96,21 +97,32 @@ bool busy() { return sRunning || settings.transport().pendingMove != Move::None;
 // ---------------------------------------------------------------------------
 // The marker
 // ---------------------------------------------------------------------------
-static bool readMarker(Marker& out) {
+// Absent and unreadable are different answers and the caller acts on the
+// difference (see classify): no marker means nobody has claimed this card,
+// while a marker that will not parse means somebody has and this node cannot
+// check the claim. The file is written with FILE_WRITE, which truncates it
+// before anything is serialised in, so a power cut mid-write leaves exactly the
+// zero-byte case this has to tell apart from a card with no marker on it.
+static MarkerState readMarker(Marker& out) {
   out = Marker{};
-  if (!sdCard.mounted()) return false;
+  if (!sdCard.mounted()) return MarkerState::Absent;
   File f = SD.open(kMarkerPath, FILE_READ);
-  if (!f) return false;
+  // The extra existence check costs an open, and only on the path where the
+  // first one already failed: a file that is there and will not open is a card
+  // refusing to answer, not a card with nothing to say.
+  if (!f) return SD.exists(kMarkerPath) ? MarkerState::Unreadable : MarkerState::Absent;
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, f);
   f.close();
-  if (err) return false;
+  if (err) return MarkerState::Unreadable;
   strlcpy(out.node, doc["node"] | "", sizeof(out.node));
   strlcpy(out.name, doc["name"] | "", sizeof(out.name));
   out.generation = doc["generation"] | 0;
   out.released   = doc["released"] | false;
   out.valid      = out.node[0] != '\0';
-  return out.valid;
+  // Valid JSON with no identity in it names nobody, so it cannot be checked
+  // either. Same answer as a file that would not parse at all.
+  return out.valid ? MarkerState::Read : MarkerState::Unreadable;
 }
 
 static bool writeMarker(uint32_t generation, bool released) {
@@ -129,20 +141,35 @@ static bool writeMarker(uint32_t generation, bool released) {
   return ok;
 }
 
-// Read on the card task, handed out from memory everywhere else. Unconditional
-// rather than invalidated when something is known to have changed it: a cache
-// with a list of things that must remember to dirty it grows a case that
-// forgot, and a status page confidently naming the wrong owner is worse than
-// one small read every poll.
+// Whether the card holds a store, without opening anything: SD.exists() opens
+// the path read-only and logs an error when it is missing, which is a file open
+// and a log line to answer a question stat() answers in silence.
+// RnsFileSystem::present() does the same trick for the store's own backend and
+// cannot be borrowed here, because it asks whichever filesystem the store is
+// pointed at and the question is specifically about the card.
+static bool cardHas(const char* path) {
+  char full[80];
+  snprintf(full, sizeof(full), "%s%s", SdCard::MOUNT_POINT, path);
+  struct stat st;
+  return stat(full, &st) == 0;
+}
+
+// Read on the card task, handed out from memory everywhere else. Called when
+// something can have changed it — a card arriving or leaving, a format, a move,
+// a marker rewritten — and not on a timer: it opens and parses a file and
+// allocates a JsonDocument, and doing that every three seconds for the life of
+// the node came to some thirty thousand opens a day on the bus the store is
+// being written to, to notice a file that changes when this node changes it.
 void refreshCache() {
   if (!sCacheLock) return;
   Ownership o;
   if (sdCard.mounted()) {
     Marker m;
-    const bool valid = readMarker(m);
-    o.card = classify(true, valid,
-                      valid && strcmp(m.node, nodeIdentity.identityHex()) == 0,
-                      m.released, SD.exists(RNS_FS_ROOT));
+    const MarkerState marker = readMarker(m);
+    o.card = classify(true, marker,
+                      marker == MarkerState::Read &&
+                        strcmp(m.node, nodeIdentity.identityHex()) == 0,
+                      m.released, cardHas(RNS_FS_ROOT));
     strlcpy(o.owner, m.name, sizeof(o.owner));
     o.generation = m.generation;
   }
@@ -200,7 +227,19 @@ static inline void breathe() { vTaskDelay(1); }
 // difference between a node that is working and a node that has hung, and the
 // operator holding it has no other way to tell the two apart.
 static uint16_t sCopied = 0;
+static uint32_t sLastPaintMs = 0;
+static const uint32_t kProgressPaintMs = 250;   // four frames a second
+
 static void progress(const char* what) {
+  // Painting is not free: notice() clears the buffer and pushes the whole
+  // kilobyte of it over I2C, some 25 ms at 400 kHz, so a store of a few hundred
+  // files spent longer drawing the count than copying the bytes — on the boot
+  // path, with the node not yet up. Four frames a second reads as "still
+  // working" exactly as well as every frame does. The count itself keeps rising
+  // per file; this only stops reporting every single step of it.
+  const uint32_t now = millis();
+  if (now - sLastPaintMs < kProgressPaintMs) return;
+  sLastPaintMs = now;
   char line[24];
   snprintf(line, sizeof(line), "%s %u", what, (unsigned)sCopied);
   display.notice("Moving store", line);
@@ -307,29 +346,74 @@ static bool queue(Move m, const char* said) {
   return true;
 }
 
+// The facts each rule is applied to, gathered in one place so that the button
+// the page draws and the request it sends are answering the same question. A
+// second reading of them, assembled in the status handler, is how the Eject
+// button came to be lit for a card that was no longer in the slot.
+static const char* adoptRefusalNow() {
+  return adoptRefusal(busy(), where(), card(), sdCard.storageLost());
+}
+static const char* ejectRefusalNow() {
+  return ejectRefusal(busy(), where(), sdCard.storageLost());
+}
+
+bool canAdopt() { return adoptRefusalNow() == nullptr; }
+bool canEject() { return ejectRefusalNow() == nullptr; }
+
 bool requestAdopt() {
-  const Ownership o = ownership();
-  if (busy())                  { strlcpy(sResult, "a move is already queued", sizeof(sResult)); return false; }
-  if (o.card == Card::NoCard)  { strlcpy(sResult, "no card", sizeof(sResult)); return false; }
-  if (where() == Where::Sd)    { strlcpy(sResult, "the store is already on the card", sizeof(sResult)); return false; }
-  if (o.card == Card::Foreign) {
-    snprintf(sResult, sizeof(sResult),
-             "refused: this card holds the store of \"%s\"; format it first if you mean to take it",
-             o.owner[0] ? o.owner : "another node");
+  const char* why = adoptRefusalNow();
+  if (why) {
+    // The rule's sentence, finished with the name on the card where there is
+    // one: whose store this is cannot be seen by a pure rule, and is the first
+    // thing the operator wants to know.
+    const Ownership o = ownership();
+    if (o.card == Card::Foreign && o.owner[0])
+      snprintf(sResult, sizeof(sResult),
+               "refused: this card holds the store of \"%s\"; format it first if you mean to take it",
+               o.owner);
+    else
+      strlcpy(sResult, why, sizeof(sResult));
     return false;
   }
   return queue(Move::Adopt, "queued: the store moves onto the card as the node restarts");
 }
 
 bool requestEject() {
-  if (busy())               { strlcpy(sResult, "a move is already queued", sizeof(sResult)); return false; }
-  if (where() != Where::Sd) { strlcpy(sResult, "the store is not on the card", sizeof(sResult)); return false; }
+  const char* why = ejectRefusalNow();
+  if (why) { strlcpy(sResult, why, sizeof(sResult)); return false; }
   return queue(Move::Eject, "queued: the store moves to internal flash as the node restarts");
 }
 
 // ---------------------------------------------------------------------------
 // The move itself, at boot, with nothing open
 // ---------------------------------------------------------------------------
+// How a move that did not work ends. Three things have to happen together and
+// used to happen separately: the operator is told, the request is taken off the
+// books, and the "a move is in progress" state is cleared.
+//
+// Taking the request off the books is the part that changed. A failed move used
+// to leave it queued and promise a retry at the next restart — a restart
+// nothing scheduled. Until somebody power-cycled the node, every question that
+// asks whether a move is under way answered yes: the format was refused, both
+// buttons on the settings page stayed grey, and the page went on saying the
+// store was about to move. Nothing was lost by any of the failure paths — each
+// one leaves the store readable where it already was — so the honest ending is
+// to say what happened and let the operator ask again, on a node that is
+// otherwise working normally.
+static void fail(const char* what) {
+  display.notice("Store move", "failed");
+  strlcpy(sResult, what, sizeof(sResult));
+  // Which home the node is about to open, asked of the rule rather than of
+  // where(): nothing has pointed the store's filesystem anywhere yet at this
+  // point in the boot, so where() answers with its default and this line used
+  // to say "littlefs" about a store sitting on the card.
+  const TransportSettings t = settings.transport();
+  log_e("store: %s, staying on %s", sResult,
+        whereName(decide(t.sdStore, sdCard.mounted(), card())));
+  remember(Move::None);
+  sRunning = false;
+}
+
 void runPendingMigration() {
   refreshCache();                        // what is actually in the slot this boot
   const TransportSettings before = settings.transport();
@@ -341,11 +425,11 @@ void runPendingMigration() {
     // the request is dropped rather than kept waiting for a card that may
     // never come back.
     if (before.pendingMove != Move::None) {
-      snprintf(sResult, sizeof(sResult), "failed: %s",
+      char why[128];
+      snprintf(why, sizeof(why), "failed: %s",
                !sdCard.mounted() ? "no card in the slot when the node restarted"
                                  : "this card is not carrying this node's store");
-      log_e("store: %s", sResult);
-      remember(Move::None);
+      fail(why);
     }
     return;
   }
@@ -364,43 +448,43 @@ void runPendingMigration() {
   readMarker(mk);
   const uint32_t generation = mk.generation + 1;
 
-  // A node that has never written a store has nothing to move: the tree is
+  // The copy is assembled beside the destination's own store and nothing is
+  // deleted to make room for it. Removing the destination first and copying
+  // into the hole is how a card pulled mid-copy, or a filesystem that ran out
+  // of room, ended with a half-written store at one end and nothing at the
+  // other. Anything an interrupted attempt left behind goes now.
+  removeTree(to, kStagingRoot);
+
+  // A node that has never written a store has nothing to copy: the tree is
   // created by the library the first time it is used. That is a move that is
   // already done, not a failure, and it is the ordinary case for a new node
   // with a card in the slot from the start.
-  if (from.exists(RNS_FS_ROOT)) {
-    // The copy is assembled beside the destination's own store and nothing is
-    // deleted to make room for it. Removing the destination first and copying
-    // into the hole is how a card pulled mid-copy, or a filesystem that ran
-    // out of room, ended with a half-written store at one end and nothing at
-    // the other.
-    removeTree(to, kStagingRoot);
+  const bool haveSource = from.exists(RNS_FS_ROOT);
+  if (haveSource) {
     if (!copyTree(from, RNS_FS_ROOT, to, kStagingRoot) ||
         !treeMatches(from, RNS_FS_ROOT, to, kStagingRoot)) {
       removeTree(to, kStagingRoot);
-      display.notice("Store move", "failed");
-    strlcpy(sResult, "failed: the store could not be copied, nothing was moved", sizeof(sResult));
-      log_e("store: %s, staying on %s", sResult, whereName(where()));
-      remember(Move::None);
-      sRunning = false;
+      fail("failed: the store could not be copied, nothing was moved");
       return;
     }
-
     // From here the destination's old copy goes and the verified one takes its
-    // place. The request stays on record across that window on purpose: a
-    // power cut in it is retried from the source, which is still whole, at the
-    // next boot.
+    // place. The request stays on record across that window on purpose: a power
+    // cut in it is retried from the source, which is still whole, at the next
+    // boot.
     remember(m);
-    removeTree(to, RNS_FS_ROOT);
-    if (!to.rename(kStagingRoot, RNS_FS_ROOT) ||
-        !treeMatches(from, RNS_FS_ROOT, to, RNS_FS_ROOT)) {
-      display.notice("Store move", "failed");
-    strlcpy(sResult, "failed: the copy could not be put in place, retrying at the next restart",
-              sizeof(sResult));
-      log_e("store: %s", sResult);
-      sRunning = false;
-      return;
-    }
+  }
+
+  // The destination's old tree goes whether or not there was anything to copy
+  // onto it. Skipping this with the rest of the copy left a tree from some
+  // earlier life sitting at the new home, and the node opened it: a store
+  // nobody meant to keep, quietly promoted to the live one, with no sign that
+  // anything had happened.
+  removeTree(to, RNS_FS_ROOT);
+
+  if (haveSource && (!to.rename(kStagingRoot, RNS_FS_ROOT) ||
+                     !treeMatches(from, RNS_FS_ROOT, to, RNS_FS_ROOT))) {
+    fail("failed: the copy could not be put in place; the store still works where it was");
+    return;
   }
 
   // The marker is written before the setting, so a power cut between them
@@ -421,15 +505,11 @@ void runPendingMigration() {
   if (!settings.saveTransport(t)) {
     // This setting is what the next boot reads, so if it did not stick, the
     // node comes back up in the home it started in — and that home must still
-    // have the data in it. The source stays, the request stays on record, and
-    // the move is retried. Deleting it here on the strength of a write that
-    // failed is the one path through this routine that loses the store
-    // outright, which is worth a branch even though NVS rarely refuses.
-    display.notice("Store move", "failed");
-    strlcpy(sResult, "failed: the move could not be recorded, retrying at the next restart",
-            sizeof(sResult));
-    log_e("store: %s", sResult);
-    sRunning = false;
+    // have the data in it. The source is therefore left alone. Deleting it here
+    // on the strength of a write that failed is the one path through this
+    // routine that loses the store outright, which is worth a branch even
+    // though NVS rarely refuses.
+    fail("failed: the move could not be recorded; the store still works where it was");
     return;
   }
 
@@ -474,7 +554,7 @@ Where chooseAtBoot() {
   // flash write on every boot.
   if (w == Where::Sd && (c == Card::Legacy || c == Card::Ours)) {
     Marker m;
-    const bool marked = readMarker(m);
+    const bool marked = readMarker(m) == MarkerState::Read;
     if (!marked || strcmp(m.name, wifiManager.hostname()) != 0) {
       if (writeMarker(marked ? m.generation : m.generation + 1, /*released=*/false))
         log_i("store: this card is marked as belonging to %s", wifiManager.hostname());
@@ -490,6 +570,8 @@ void      begin()               {}
 Ownership ownership()           { return Ownership{}; }
 Card      card()                { return Card::NoCard; }
 bool      busy()                { return false; }
+bool      canAdopt()            { return false; }
+bool      canEject()            { return false; }
 bool      requestAdopt()        { return false; }
 bool      requestEject()        { return false; }
 void      refreshCache()        {}

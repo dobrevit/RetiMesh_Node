@@ -46,6 +46,14 @@
 //  ambiguous in practice — it is on a card in a node that was already using
 //  it — so it counts as ours and gets a marker on the next mount.
 //
+//  A marker that cannot be read is not the same as no marker at all. The file
+//  is opened for writing, which empties it before anything is serialised into
+//  it, so a power cut while it is written leaves nothing behind but a name —
+//  and a node that reads "no marker" off another node's card, finds a store
+//  beside it and calls it legacy, adopts that card and signs it. The card is
+//  then taken for good. So an unreadable claim is treated as somebody else's:
+//  a card this node will not touch until a human formats it.
+//
 //  And a released card is free
 //  ---------------------------
 //  Ejecting takes the store off the card and writes "released" into the
@@ -98,6 +106,12 @@ enum class Card : uint8_t {
   Legacy,    // a store but no marker, from before markers existed
 };
 
+// What reading the card's marker produced. Absent and Unreadable are opposite
+// answers — nobody has claimed this card, versus somebody has and the claim
+// cannot be checked — and a bool cannot tell them apart, which is how a
+// truncated marker on another node's card came to look like a card of ours.
+enum class MarkerState : uint8_t { Absent, Read, Unreadable };
+
 // A move that has been asked for and not made yet. It outlives the request —
 // the node restarts in between — so it is persisted with the settings.
 enum class Move : uint8_t { None = 0, Adopt = 1, Eject = 2 };
@@ -133,18 +147,25 @@ struct Ownership {
 // something else needs the same answer.
 
 // What the card holds, from the facts that can be read off it.
-inline Card classify(bool mounted, bool markerValid, bool markerIsOurs,
+inline Card classify(bool mounted, MarkerState marker, bool markerIsOurs,
                      bool markerReleased, bool storePresent) {
   if (!mounted) return Card::NoCard;
-  if (markerValid) {
+  if (marker == MarkerState::Read) {
     // Released outranks the name on the card: it is the owner's own note that
     // it has taken its store back and is done here. Whatever is left behind on
     // a released card is a leftover, not a live store.
     if (markerReleased) return Card::Blank;
     return markerIsOurs ? Card::Ours : Card::Foreign;
   }
-  // No marker. A store already on the card was put there by this node before
-  // markers existed — a card does not acquire one by accident — so it is ours.
+  // A marker that is there and unreadable is a claim, and a claim this node
+  // cannot check is not a claim it may overrule. Foreign is the conservative
+  // reading: the card is left alone, and a human who knows it is theirs can
+  // still format it. Reading it as ours would sign somebody else's card on the
+  // strength of a file that says nothing.
+  if (marker == MarkerState::Unreadable) return Card::Foreign;
+  // No marker at all. A store already on the card was put there by this node
+  // before markers existed — a card does not acquire one by accident — so it
+  // is ours.
   return storePresent ? Card::Legacy : Card::Blank;
 }
 
@@ -169,16 +190,59 @@ inline bool adoptable(Card c) { return c != Card::NoCard && c != Card::Foreign; 
 // What has to be copied before the store is opened: the move the operator
 // asked for, if the card in the slot can still take it, or the one a card the
 // setting wants to use needs before it can be a home at all.
+//
+// Every answer is measured against where the store already is — decide()'s
+// answer for this same card, from these same facts, rather than a runtime flag
+// saying which filesystem is currently pointed at. The two came apart when the
+// home was chosen inside a transport that had been switched off: the flag said
+// flash while the store sat on the card, the page offered to adopt a card that
+// was already the home, and the boot after that copied the flash tree over the
+// real one. A move to where the store already is has nothing to copy, so it is
+// never planned however stale anything else's idea of the home has become.
 inline Move planAtBoot(Move requested, bool sdStoreSetting, bool cardMounted, Card c) {
-  const bool usable = cardMounted && adoptable(c);
-  if (requested == Move::Adopt) return usable ? Move::Adopt : Move::None;
-  // An eject reads the store off the card, so the card has to be holding it.
-  if (requested == Move::Eject)
-    return (usable && (c == Card::Ours || c == Card::Legacy)) ? Move::Eject : Move::None;
+  const bool  usable = cardMounted && adoptable(c);
+  const Where home   = decide(sdStoreSetting, cardMounted, c);
+  if (requested == Move::Adopt) return (usable && home != Where::Sd) ? Move::Adopt : Move::None;
+  // An eject reads the store off the card, so the card has to be the home it
+  // is read from.
+  if (requested == Move::Eject) return (usable && home == Where::Sd) ? Move::Eject : Move::None;
   return (sdStoreSetting && cardMounted && c == Card::Blank) ? Move::Adopt : Move::None;
 }
 
+// Why a move cannot be offered, or nullptr when it can. One statement of each
+// rule, in the words the operator reads: the page draws its buttons from it and
+// the request refuses with it, so a button is never lit for a move that will be
+// turned down. Eject used to be offered on "the store is on the card" alone,
+// which stays true after the card has been pulled — the eject it queued cost a
+// restart and then failed for want of a card to read the store off.
+inline const char* ejectRefusal(bool moveQueued, Where current, bool cardLost) {
+  if (moveQueued)           return "a move is already queued";
+  if (current != Where::Sd) return "the store is not on the card";
+  if (cardLost)             return "the card was removed; restart the node before moving the store";
+  return nullptr;
+}
+
+inline const char* adoptRefusal(bool moveQueued, Where current, Card c, bool cardLost) {
+  if (moveQueued)           return "a move is already queued";
+  if (cardLost)             return "the card was removed; restart the node before moving the store";
+  if (c == Card::NoCard)    return "no card";
+  if (current == Where::Sd) return "the store is already on the card";
+  // The owner's name is not something a pure rule can see; requestAdopt() adds
+  // it to this sentence rather than writing a second one.
+  if (c == Card::Foreign)   return "refused: this card holds another node's store; format it first if you mean to take it";
+  return nullptr;
+}
+
 // --- the node --------------------------------------------------------------
+//
+// Both of the boot calls below drive the card directly, for seconds at a time
+// in the case of a move, and neither may share the bus with the card task. The
+// task is therefore not started until they are done — see main.cpp, which
+// mounts the card, moves the store, chooses the home and only then lets the
+// slot be polled. A flag read at the top of the poll cannot help here: it stops
+// the next poll, not the one already inside a removal check, and the answer to
+// a removal check that loses the bus to a copy is unmount(), which frees the
+// card struct under the task doing the copying.
 void  begin();                // before the card task starts: the ownership cache
 
 // Carries out a queued move. Call at boot before anything opens the store,
@@ -186,7 +250,11 @@ void  begin();                // before the card task starts: the ownership cach
 void  runPendingMigration();
 
 // The rule applied to this node, here, now: points the store's filesystem at
-// the home it picks and returns it. Call once at boot.
+// the home it picks and returns it. Call once at boot, from setup() and not
+// from whatever happens to open the store first — this used to live inside the
+// transport's start-up, behind its enabled check, so a node with the transport
+// switched off never chose at all and every answer about the store's home was
+// the default one: flash, even with the store sitting on the card.
 Where chooseAtBoot();
 
 Where       where();          // where the store is open right now
@@ -202,8 +270,19 @@ bool        busy();           // a move is queued for the next boot, or running
 bool requestAdopt();          // LittleFS -> SD, at the next boot
 bool requestEject();          // SD -> LittleFS, after which the card is free
 
+// Whether each move can be offered at all, asked of this node as it stands.
+// The pages publish their buttons from these, so a button and the request
+// behind it cannot come to different conclusions.
+bool canAdopt();
+bool canEject();
+
 // Re-reads the card's marker. Called from the card task, which is the task
-// that owns the card.
+// that owns the card, when something has happened that can have changed it: a
+// card arriving or going away, a format, a move, a marker rewritten. It used to
+// run on every poll — an open, a JSON parse and a directory probe every three
+// seconds, for ever, on the bus the store is using — to save having to remember
+// the occasions on which it matters. Those occasions all pass through this
+// file or the card task, and there are five of them.
 void refreshCache();
 
 const char* whereName(Where w);

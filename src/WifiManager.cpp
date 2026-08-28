@@ -524,7 +524,23 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     sd["store_home"]   = StoreHome::whereName(StoreHome::where());
     sd["migration"]    = StoreHome::lastResult();
     sd["migrating"]    = StoreHome::busy();
-    if (own.owner[0]) { sd["owner"] = own.owner; sd["generation"] = own.generation; }
+    // Whether each move can be offered is the node's answer and not the page's
+    // to work out: "the store is on the card" stays true after the card has
+    // been pulled, and a page reasoning from that alone offered an eject that
+    // cost a restart and then had no card to read the store off.
+    sd["can_adopt"]    = StoreHome::canAdopt();
+    sd["can_eject"]    = StoreHome::canEject();
+    // JsonString, which copies, and not the bare array. ArduinoJson stores a
+    // const char array by address — it reads as a string literal, which lives
+    // for ever — and this one is a local that goes out of scope with the block,
+    // some eighty lines of document-building before any of it is serialised.
+    // What left the node as the owner's name was whatever the stack held by
+    // then. The neighbouring fields survived only because they are copied from
+    // non-const arrays, which is not a distinction to leave anything resting on.
+    if (own.owner[0]) {
+      sd["owner"]      = JsonString(own.owner);
+      sd["generation"] = own.generation;
+    }
   }
 #endif
 
@@ -595,12 +611,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     st["backend"] = RnsTransport::storageBackend();     // "sd" | "littlefs"
     st["path"]    = RnsTransport::storagePath();
     st["lost"]    = sdCard.storageLost();
-    // A card is in the slot, the store is not on it, and this node is allowed
-    // to take it. The condition used to be the setting plus a mounted card,
-    // which lit up for a card holding another node's store as well — and said
-    // "restart to use it" about a card the node would refuse for ever.
-    st["sd_available"] = StoreHome::where() != StoreHome::Where::Sd
-                      && StoreHome::adoptable(StoreHome::card());
+    // Whether a card in the slot could take the store is published once, above,
+    // as sd.can_adopt. It used to be worked out a second time here — the same
+    // rule in two places, and the dashboard's copy went on saying a card was
+    // free while a move onto it was already queued.
   }
 
   // Reticulum transport: interfaces with their modes, and the path table
@@ -1176,13 +1190,12 @@ void WifiManager::handleSdFormat(AsyncWebServerRequest* request, const char* bod
   if (deserializeJson(in, body, len) != DeserializationError::Ok || strcmp(in["confirm"] | "", "FORMAT") != 0) {
     sendError(request, 400, "send {\"confirm\":\"FORMAT\"} to erase the card"); return;
   }
-  if (!sdCard.requestFormat()) {
-    // The reasons a format can be refused live in SdCard, which is the only
-    // thing that knows all of them; this relays whichever one applied.
-    const char* why = sdCard.formatRefusal();
-    sendError(request, 409, why ? why : "the card cannot be formatted right now");
-    return;
-  }
+  // The reasons a format can be refused live in SdCard, which is the only thing
+  // that knows all of them, and the request answers with the one that applied.
+  // Asking it again for something to say was a second reading of a rule that
+  // turns on a card and a queued move, either of which can change in between —
+  // so the message could name a reason that no longer held, or come up empty.
+  if (const char* why = sdCard.requestFormat()) { sendError(request, 409, why); return; }
   request->send(200, "application/json", "{\"ok\":true,\"formatting\":true}");
 }
 

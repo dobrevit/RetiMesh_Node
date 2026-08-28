@@ -233,6 +233,25 @@ void Display::paint() {
 // difference between "there is a cell" and "it is filling", without the
 // animation ever claiming the cell is fuller than it is.
 
+// Whether the cell is filling is a question some boards cannot answer at all:
+// a divider measures the cell and nothing else, and the charger beside it does
+// its work in hardware without telling the processor (Power.h). "Not charging"
+// and "no idea" are different readings and the panel has to show the
+// difference, or a node plugged in and charging looks exactly like one that is
+// quietly draining and somebody goes looking for a fault in a working cable.
+// So: "+" while it fills, "?" where the board cannot tell, and nothing at all
+// for a cell that is known to be idle — one character, which is all the room
+// there is, and written here once because four places used to render
+// _bat.charging on its own.
+static const char* chargeMark(const Power::Battery& b) {
+  if (!b.chargeKnown) return "?";
+  return b.charging ? "+" : "";
+}
+
+// ... and the same question for the icon, which has only the sweep to say it
+// with. A board that cannot tell must not animate: the travelling line is a
+// claim, and this one would be made on a field that means nothing.
+static bool chargeSure(const Power::Battery& b) { return b.chargeKnown && b.charging; }
 
 // RSSI in dBm to something a bar chart can show. The window is the usable
 // range of an SX127x on this band: below the floor a packet is luck, above the
@@ -309,9 +328,18 @@ void Display::header(const char* title) {
     right -= l.batteryW;
     // Dark on the light header bar, so the travelling line is drawn light.
     DisplayIcons::batteryVertical(_oled, right, iy, l.batteryW, l.batteryH,
-                                  _bat.percent, _bat.charging, _chargeSweep,
+                                  _bat.percent, chargeSure(_bat), _chargeSweep,
                                   SSD1306_BLACK, SSD1306_WHITE);
     right -= 2;
+    // A cell that is not animating reads as one that is sitting idle, which on
+    // a board with no charger status is a claim it cannot make. Six pixels of
+    // title, given up only on the boards that have to say it.
+    if (!_bat.chargeKnown) {
+      right -= DisplayLayout::FONT_W;
+      _oled.setCursor(right, ty);         // still black-on-white from the page number
+      _oled.print("?");
+      right -= 2;
+    }
   }
 
   if (l.statusIcons) {
@@ -433,7 +461,7 @@ void Display::paintStatus() {
     _oled.print(line);
 
     if (_bat.present) snprintf(line, sizeof(line), "%u%%%s %luh%02lum", _bat.percent,
-                               _bat.charging ? "+" : "",
+                               chargeMark(_bat),
                                (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
     else              snprintf(line, sizeof(line), "%luh%02lum",
                                (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
@@ -502,10 +530,11 @@ void Display::paintStatus() {
   // Row 5 — peers + uptime
   _oled.setCursor(0, DisplayLayout::rowY(4));
   if (_bat.present)
-    // The charge marker earns its two characters: it is how you tell a node
-    // that is filling up from one that is quietly draining.
+    // The charge marker earns its character: it is how you tell a node that is
+    // filling up from one that is quietly draining — or, on a board that cannot
+    // see its charger, from one that has no way of knowing which it is doing.
     snprintf(line, sizeof(line), "bat %u%%%s %.2fV %luh%02lum", _bat.percent,
-             _bat.charging ? "+" : "", (double)_bat.volts,
+             chargeMark(_bat), (double)_bat.volts,
              (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
   else
     snprintf(line, sizeof(line), "rns %u wifi %u  %luh%02lum",
@@ -808,7 +837,7 @@ void Display::paintNetwork() {
   if (si.state == SdCard::State::Absent) snprintf(line, sizeof(line), "SD: none");
   else snprintf(line, sizeof(line), "SD: %.0fG %s", si.cardBytes / 1e9, SdCard::stateName(si.state));
 #else
-  if (_bat.present) snprintf(line, sizeof(line), "batt %.2fV %u%%%s", (double)_bat.volts, _bat.percent, _bat.charging ? " chg" : "");
+  if (_bat.present) snprintf(line, sizeof(line), "batt %.2fV %u%%%s", (double)_bat.volts, _bat.percent, chargeMark(_bat));
   else              snprintf(line, sizeof(line), "USB power");
 #endif
   _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(line);

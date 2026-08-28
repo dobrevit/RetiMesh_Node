@@ -26,7 +26,6 @@
 #include <map>
 #include <vector>
 #include "RnsFileSystem.h"
-#include "StoreHome.h"
 #include "Neighbors.h"
 #include "SdCard.h"
 #include "RnsAnnounce.h"
@@ -245,14 +244,16 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   try {
     RNS::loglevel(RNS::LOG_INFO);        // DEBUG is compiled in; raise here when tracing
 
-    // Storage: the SD card or the LittleFS partition shared with the web app,
-    // as StoreHome decides — it owns that rule, the card's ownership marker
-    // and the filesystem the store is pointed at, so this is not the place to
-    // re-derive any of it. Decided once, here, because microStore holds files
-    // open for the life of the store; moving the store between the two is a
-    // deliberate migration that ends in a restart, which is what brings
-    // execution back through this line.
-    StoreHome::chooseAtBoot();
+    // Storage: the SD card or the LittleFS partition shared with the web app.
+    // StoreHome owns that rule, the card's ownership marker and the filesystem
+    // the store is pointed at, and it has already applied all three — in
+    // setup(), before this or anything else could open a file. The choice used
+    // to be made here, which put it behind the enabled check a few lines up: a
+    // node with the transport switched off never chose, so every answer about
+    // the store's home was the default one. It said flash while the store sat
+    // on the card, the settings page offered to adopt a card that was already
+    // the home, and the boot after that copied the flash tree over the real
+    // one. Nothing to re-derive here; rnsFs already points at the home.
     rnsFs.init(false);
     log_i("Reticulum storage: %s%s (%u KB free)", RnsFileSystem::prefix(), RNS_FS_ROOT,
           (unsigned)(rnsFs.storageAvailable() / 1024));

@@ -32,12 +32,20 @@
 //  Boards without a slot (HAS_SD 0) never call begin(), so every accessor
 //  answers "no card" rather than touching a mutex that was never created.
 //
-//  begin() mounts synchronously so that whoever boots next (the Reticulum
-//  transport, which may want to keep its store here) sees the final state.
+//  Mounting and polling are two calls, in that order, with the store's move
+//  between them. begin() mounts synchronously so that whoever boots next — the
+//  migration, and then the choice of where the store lives — sees the final
+//  state; startPolling() is called once those are done. They drive this same
+//  card for seconds at a time, on the same bus, and the removal check answers a
+//  read that loses the bus with unmount(), which frees the card struct
+//  underneath them. Not starting the task until they have finished is the only
+//  thing that actually prevents that: a flag tested at the top of poll() stops
+//  the next poll, not the one already inside the check.
 //
-//  The poll also re-reads the store's ownership marker (StoreHome), because
-//  this is the task that owns the card: everyone else is handed the answer
-//  from memory rather than opening files on this bus behind its back.
+//  The poll also re-reads the store's ownership marker (StoreHome) when the
+//  slot changes, because this is the task that owns the card: everyone else is
+//  handed the answer from memory rather than opening files on this bus behind
+//  its back.
 // ============================================================================
 #pragma once
 
@@ -61,16 +69,19 @@ public:
     char     lastFormat[40] = "";       // result of the last format request
   };
 
-  void begin();                          // first mount attempt, then the poll task
+  void begin();                          // mount, synchronously; no task yet
+  void startPolling();                   // ... once the store's home is settled
   Info info();
   bool mounted();
-  bool requestFormat();                  // performed by the task; false if refused
 
-  // Why the card may not be formatted, or nullptr when it may be. The rule
-  // lives here and nowhere else: the HTTP handler used to keep its own copy of
-  // the "the store is on this card" refusal, and two statements of a rule are
-  // two rules the moment one of them is edited.
-  const char* formatRefusal();
+  // Asks for a format, and answers with the reason it was refused or nullptr
+  // when it was accepted. One call, because the rule turns on a card and a
+  // queued move and both can change between two readings of it: this used to
+  // answer true or false and leave the caller to ask formatRefusal() a second
+  // time for something to say, which could name a reason that no longer applied
+  // or come back with nothing at all for a request that had just been refused.
+  // Which is why that rule is now private — there is one way to ask.
+  const char* requestFormat();           // performed by the task
 
   // "The Reticulum store lives on this card." Set at boot by RnsTransport
   // when it puts its microStore files on the card. While reserved the card
@@ -78,6 +89,11 @@ public:
   void reserve(bool on);
   bool reserved();
   bool storageLost();                    // reserved card was removed
+
+  // Where the volume is mounted in the VFS. Named here because StoreHome builds
+  // paths for the silent stat() it uses to look at the card without opening
+  // anything, and a second spelling of "/sd" is a second thing to keep in step.
+  static constexpr const char* MOUNT_POINT = "/sd";
 
   static constexpr const char* LOG_PATH = "/retimesh/events.log";        // relative to /sd
   static constexpr const char* LOG_PREV_PATH = "/retimesh/events.1.log";
@@ -101,8 +117,14 @@ private:
     uint64_t bytes   = 0;
   };
 
-  void  poll();                          // the slot, then the store's marker
-  void  checkSlot();
+  // Why the card may not be formatted, or nullptr when it may be. The rule
+  // lives here and nowhere else: the HTTP handler used to keep its own copy of
+  // the "the store is on this card" refusal, and two statements of a rule are
+  // two rules the moment one of them is edited.
+  const char* formatRefusal();
+
+  void  poll();                          // the slot, and the marker when it moves
+  bool  checkSlot();                     // true when what the slot holds changed
   bool  mount();
   void  unmount();
   Probe probe();                         // low level: mount attempt + raw read

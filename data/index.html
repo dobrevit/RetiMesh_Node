@@ -95,6 +95,20 @@ function fmtUptime(s) {
 
 function fmtAge(s) { return s < 60 ? s + " s" : s < 3600 ? Math.floor(s/60) + " min" : Math.floor(s/3600) + " h"; }
 
+// What the card in the slot is, for the one line this page gives the store.
+// Whether it may be taken at all is the node's answer — sd.can_adopt, the same
+// one the settings page's button is drawn from — and this does not re-derive
+// it. What it adds is that only a blank card is free: a card carrying this
+// node's own store, or one carrying a store with nobody's name on it, can be
+// taken as well, and calling either of those "free" told an operator that a
+// card they had just written was empty.
+function cardOnOffer(sd) {
+  if (!sd || !sd.can_adopt) return "";
+  if (sd.card === "ours")   return "a card holding this node's store is in the slot";
+  if (sd.card === "legacy") return "a card holding an unowned store is in the slot";
+  return "a blank card is free";
+}
+
 function card(k, v, cls) {
   const el = document.createElement("div");
   el.className = "card";
@@ -172,9 +186,9 @@ async function refreshStatus() {
       ]),
       card("Reticulum store", !s.storage ? "" :
         s.storage.lost ? "lost — card removed, restart to use flash"
-        : s.storage.sd_available ? "internal flash · a card is free, move it from the settings page"
+        : cardOnOffer(s.sd) ? "internal flash · " + cardOnOffer(s.sd) + ", move it from the settings page"
         : (s.storage.backend === "sd" ? "SD card" : "internal flash") + " · " + s.storage.path,
-        s.storage && (s.storage.lost || s.storage.sd_available) ? "offline" : "")
+        s.storage && (s.storage.lost || cardOnOffer(s.sd)) ? "offline" : "")
     );
     const qr = $("qrimg");
     if (qr && !qr.dataset.loaded) { qr.dataset.loaded = "1"; qr.src = "/api/qr?what=portal"; }

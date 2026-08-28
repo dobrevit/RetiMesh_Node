@@ -483,16 +483,28 @@ async function refreshSd() {
     $("sdLog").disabled = !(sd.state === "mounted" || sd.state === "partial");
 
     // Where the store lives, and what this card is, in the reader's words.
-    // Whether the card can be taken is the node's own answer, not a second
-    // opinion assembled here out of the card's state and its ownership: the
-    // two used to be written separately and could disagree about a card.
+    //
+    // Both buttons are the node's own answer about whether it would accept the
+    // move, never a case assembled here out of where the store is and what the
+    // card holds: the two used to be written separately and could disagree
+    // about a card. Eject drawn from "the store is on the card" alone stayed
+    // lit after the card had been pulled — the store is still nominally there —
+    // and the eject it allowed spent a restart to discover there was no card to
+    // read it off.
     const onCard = sd.store_home === "sd";
-    $("sdAdopt").disabled = !!sd.migrating || !(s.storage && s.storage.sd_available);
-    $("sdEject").disabled = !!sd.migrating || !onCard;
+    $("sdAdopt").disabled = !sd.can_adopt;
+    $("sdEject").disabled = !sd.can_eject;
     let home = onCard ? "The Reticulum store is on this card."
                       : "The Reticulum store is in internal flash.";
-    if (sd.card === "foreign")
-      home += ` This card holds the store of "${sd.owner || "another node"}" and will not be used.`;
+    if (sd.card === "foreign" && sd.owner)
+      home += ` This card holds the store of "${sd.owner}" and will not be used.`;
+    else if (sd.card === "foreign")
+      // Foreign with no name on it is a card whose marker this node could not
+      // read. Saying "another node's store" would be inventing an owner; what
+      // is true is that the claim on the card is unreadable, and that formatting
+      // is the only way past it.
+      home += " This card carries an ownership marker that cannot be read, so it will not be used;"
+            + " format it if the card is yours.";
     else if (sd.card === "ours" && !onCard)
       home += " This card holds a store written by this node.";
     else if (sd.card === "legacy" && !onCard)

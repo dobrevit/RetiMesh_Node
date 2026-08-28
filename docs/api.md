@@ -235,6 +235,15 @@ was removed — the node keeps routing with what it has in memory but learns no
 new paths until it restarts. `sd.reserved` says the store is on the card, which
 also blocks formatting it.
 
+`sd` also says what the card in the slot holds and what may be done with it:
+`store_home` (`"sd"` or `"littlefs"`), `card` (`none`, `blank`, `ours`,
+`foreign` — another node's store, or a marker that cannot be read — or
+`legacy`, a store written before cards were marked), `owner`/`generation` from
+the card's marker, `migrating` while a move is queued or running, and
+`migration`, the result of the last one. `can_adopt` and `can_eject` are the
+node's own answer about whether it would accept each move; a page draws its
+buttons from those rather than working the rule out again from the fields above.
+
 ## Bulletin board (public)
 - `GET /api/board` → `[{"id":1,"author":"…","text":"…"}]` (ordered, no timestamps — no RTC)
 - `POST /api/board` `{"author":"…","text":"…"}` → `{"ok":true}`; 50 posts kept
@@ -267,6 +276,8 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 - `POST /api/settings/admin` `{password}`
 - `POST /api/settings/reset` → factory defaults, restarts (identity kept)
 - `POST /api/settings/sd/format` `{"confirm":"FORMAT"}` → erases the SD card and creates one FAT32 volume; poll `sd.state`/`sd.last_format` in `/api/status` (409 if no card or already formatting)
+- `POST /api/settings/sd/adopt` `{"confirm":"ADOPT"}` → moves the Reticulum store onto the card and restarts into it; the copy is made during the restart, with nothing holding the store open (409 with the reason when refused — see `sd.can_adopt`)
+- `POST /api/settings/sd/eject` `{"confirm":"EJECT"}` → moves the store back to internal flash the same way and marks the card released, after which any node may take it (409 with the reason when refused — see `sd.can_eject`)
 
 Errors: `{"error":"<reason>"}` with 400/401/413/500.
 

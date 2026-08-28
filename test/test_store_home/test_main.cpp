@@ -21,6 +21,7 @@
 using StoreHome::Where;
 using StoreHome::Card;
 using StoreHome::Move;
+using StoreHome::MarkerState;
 
 // --- decide(): where the store is opened ------------------------------------
 
@@ -67,12 +68,12 @@ static void test_another_nodes_card_is_refused_however_the_setting_is_set() {
 // --- classify(): what the card in the slot holds -----------------------------
 
 static void test_an_unmounted_slot_holds_nothing() {
-  TEST_ASSERT_TRUE(StoreHome::classify(false, true, true, false, true) == Card::NoCard);
+  TEST_ASSERT_TRUE(StoreHome::classify(false, MarkerState::Read, true, false, true) == Card::NoCard);
 }
 
 static void test_a_marked_card_is_ours_or_somebody_elses() {
-  TEST_ASSERT_TRUE(StoreHome::classify(true, true, true,  false, true) == Card::Ours);
-  TEST_ASSERT_TRUE(StoreHome::classify(true, true, false, false, true) == Card::Foreign);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Read, true,  false, true) == Card::Ours);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Read, false, false, true) == Card::Foreign);
 }
 
 static void test_a_released_card_is_free_for_any_node() {
@@ -81,19 +82,47 @@ static void test_a_released_card_is_free_for_any_node() {
   // foreign for ever: its own node could pick it up again because the name
   // matched, and every other node had to format a card whose owner had
   // already given it up.
-  TEST_ASSERT_TRUE(StoreHome::classify(true, true, false, true, false) == Card::Blank);
-  TEST_ASSERT_TRUE(StoreHome::classify(true, true, true,  true, false) == Card::Blank);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Read, false, true, false) == Card::Blank);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Read, true,  true, false) == Card::Blank);
   // Even with a tree left behind on it: what a released card still holds is a
   // leftover, and the node that wrote it is working from its own copy.
-  TEST_ASSERT_TRUE(StoreHome::classify(true, true, false, true, true) == Card::Blank);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Read, false, true, true) == Card::Blank);
   // And it can then be taken, which is the whole point of consulting the flag.
   TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Adopt, true, true,
-                                         StoreHome::classify(true, true, false, true, false)) == Move::Adopt);
+                                         StoreHome::classify(true, MarkerState::Read, false, true, false)) == Move::Adopt);
 }
 
 static void test_an_unmarked_card_is_legacy_only_when_it_holds_a_store() {
-  TEST_ASSERT_TRUE(StoreHome::classify(true, false, false, false, true)  == Card::Legacy);
-  TEST_ASSERT_TRUE(StoreHome::classify(true, false, false, false, false) == Card::Blank);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Absent, false, false, true)  == Card::Legacy);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Absent, false, false, false) == Card::Blank);
+}
+
+static void test_a_marker_that_cannot_be_read_is_never_ours() {
+  // The marker is written with FILE_WRITE, which empties the file before
+  // anything is serialised into it, so a power cut mid-write leaves a zero-byte
+  // store.json. Read as "no marker" and found beside a store, that card was
+  // classified legacy — ours — and the next boot signed it. On another node's
+  // card that takes it for good, and the node that owned it comes back to a
+  // card claimed by somebody else.
+  //
+  // Nothing about the identity is knowable from a file that will not parse, so
+  // neither argument below is allowed to change the answer.
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Unreadable, false, false, true)  == Card::Foreign);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Unreadable, true,  false, true)  == Card::Foreign);
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Unreadable, true,  true,  true)  == Card::Foreign);
+  // Not even an empty one: an unreadable claim on a card with nothing on it is
+  // still a claim, and formatting it is a decision for the person holding it.
+  TEST_ASSERT_TRUE(StoreHome::classify(true, MarkerState::Unreadable, false, false, false) == Card::Foreign);
+}
+
+static void test_a_card_with_an_unreadable_marker_is_left_alone() {
+  // Which is the whole point of calling it foreign: it is not opened as a home,
+  // it is not offered, and a queued adopt does not take it either.
+  const Card c = StoreHome::classify(true, MarkerState::Unreadable, true, false, true);
+  TEST_ASSERT_TRUE(StoreHome::decide(true, true, c) == Where::LittleFs);
+  TEST_ASSERT_FALSE(StoreHome::adoptable(c));
+  TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Adopt, true, true, c) == Move::None);
+  TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::None,  true, true, c) == Move::None);
 }
 
 // --- planAtBoot(): what is copied before the store is opened -----------------
@@ -108,7 +137,27 @@ static void test_a_queued_adopt_is_refused_on_another_nodes_card() {
   // request was made about.
   TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Adopt, true, true, Card::Foreign) == Move::None);
   TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Adopt, true, true, Card::Blank)   == Move::Adopt);
-  TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Adopt, true, true, Card::Ours)    == Move::Adopt);
+  // A card of ours with the store still in flash — the setting says flash, so
+  // that is where the data is — is taken back by copying onto it.
+  TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Adopt, false, true, Card::Ours)   == Move::Adopt);
+}
+
+static void test_nothing_is_copied_to_where_the_store_already_is() {
+  // The guard against a stale idea of the home. With the setting on and a card
+  // of ours in the slot the store is already on that card, so an adopt has
+  // nothing to copy — and copying anyway means writing the flash tree, which is
+  // whatever was left there before the card was taken, over the live one.
+  //
+  // This is not hypothetical: while the home was chosen inside the transport's
+  // start-up, a node with the transport switched off never chose, reported
+  // flash, and the settings page duly offered the adopt.
+  TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Adopt, true, true, Card::Ours)   == Move::None);
+  TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Adopt, true, true, Card::Legacy) == Move::None);
+  // The same in the other direction: the store is not on the card unless the
+  // setting says so, and an eject that reads from a card that is not the home
+  // copies an old tree over the live one in flash.
+  TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Eject, false, true, Card::Ours)   == Move::None);
+  TEST_ASSERT_TRUE(StoreHome::planAtBoot(Move::Eject, false, true, Card::Legacy) == Move::None);
 }
 
 static void test_an_eject_needs_the_card_to_be_holding_the_store() {
@@ -136,6 +185,33 @@ static void test_a_card_is_offered_unless_it_belongs_to_somebody_else() {
   TEST_ASSERT_TRUE (StoreHome::adoptable(Card::Blank));
   TEST_ASSERT_TRUE (StoreHome::adoptable(Card::Ours));
   TEST_ASSERT_TRUE (StoreHome::adoptable(Card::Legacy));
+}
+
+// --- what may be offered -----------------------------------------------------
+
+static void test_an_eject_is_not_offered_once_the_card_is_gone() {
+  // Pulling the card leaves the store nominally on it — the home cannot change
+  // while the node is running — so "the store is on the card" stays true and
+  // used to be the whole rule. The eject it allowed cost a restart and then
+  // failed for want of a card to read the store off.
+  TEST_ASSERT_NULL(StoreHome::ejectRefusal(false, Where::Sd, false));
+  TEST_ASSERT_NOT_NULL(StoreHome::ejectRefusal(false, Where::Sd, true));
+  TEST_ASSERT_NOT_NULL(StoreHome::ejectRefusal(false, Where::LittleFs, false));
+  // And nothing is offered while a move is already on the books.
+  TEST_ASSERT_NOT_NULL(StoreHome::ejectRefusal(true, Where::Sd, false));
+}
+
+static void test_an_adopt_is_offered_for_a_card_this_node_may_take() {
+  TEST_ASSERT_NULL(StoreHome::adoptRefusal(false, Where::LittleFs, Card::Blank,  false));
+  TEST_ASSERT_NULL(StoreHome::adoptRefusal(false, Where::LittleFs, Card::Ours,   false));
+  TEST_ASSERT_NULL(StoreHome::adoptRefusal(false, Where::LittleFs, Card::Legacy, false));
+  TEST_ASSERT_NOT_NULL(StoreHome::adoptRefusal(false, Where::LittleFs, Card::Foreign, false));
+  TEST_ASSERT_NOT_NULL(StoreHome::adoptRefusal(false, Where::LittleFs, Card::NoCard,  false));
+  // Already there, already queued, or the card is gone: all three are answers
+  // the page needs before it lights the button, not after the request.
+  TEST_ASSERT_NOT_NULL(StoreHome::adoptRefusal(false, Where::Sd,       Card::Ours,  false));
+  TEST_ASSERT_NOT_NULL(StoreHome::adoptRefusal(true,  Where::LittleFs, Card::Blank, false));
+  TEST_ASSERT_NOT_NULL(StoreHome::adoptRefusal(false, Where::LittleFs, Card::Blank, true));
 }
 
 // --- the marker --------------------------------------------------------------
@@ -174,11 +250,16 @@ int main(int, char**) {
   RUN_TEST(test_a_marked_card_is_ours_or_somebody_elses);
   RUN_TEST(test_a_released_card_is_free_for_any_node);
   RUN_TEST(test_an_unmarked_card_is_legacy_only_when_it_holds_a_store);
+  RUN_TEST(test_a_marker_that_cannot_be_read_is_never_ours);
+  RUN_TEST(test_a_card_with_an_unreadable_marker_is_left_alone);
   RUN_TEST(test_a_move_needs_a_card_to_move_to_or_from);
   RUN_TEST(test_a_queued_adopt_is_refused_on_another_nodes_card);
+  RUN_TEST(test_nothing_is_copied_to_where_the_store_already_is);
   RUN_TEST(test_an_eject_needs_the_card_to_be_holding_the_store);
   RUN_TEST(test_nothing_is_copied_when_nothing_was_asked_and_the_card_is_in_use);
   RUN_TEST(test_a_card_is_offered_unless_it_belongs_to_somebody_else);
+  RUN_TEST(test_an_eject_is_not_offered_once_the_card_is_gone);
+  RUN_TEST(test_an_adopt_is_offered_for_a_card_this_node_may_take);
   RUN_TEST(test_a_marker_starts_invalid_and_empty);
   RUN_TEST(test_an_identity_hex_fits_the_marker_field);
   return UNITY_END();
