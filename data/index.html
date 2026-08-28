@@ -66,6 +66,9 @@
     </div>
   </div>
 
+  <h2>Local links</h2>
+  <div id="links"><div class="post"><span class="t">Loading&hellip;</span></div></div>
+
   <h2>Reticulum transport</h2>
   <div id="transport"><div class="post"><span class="t">Loading&hellip;</span></div></div>
 
@@ -192,6 +195,29 @@ async function refreshStatus() {
     );
     const qr = $("qrimg");
     if (qr && !qr.dataset.loaded) { qr.dataset.loaded = "1"; qr.src = "/api/qr?what=portal"; }
+    // Local links: every way a host reaches this node, in one vocabulary.
+    // Links the board has but this build cannot run are listed with the
+    // reason rather than left out, so "why is there no USB" is answered here.
+    const lk = $("links"); lk.replaceChildren();
+    for (const l of s.local_links || []) {
+      const el = document.createElement("div"); el.className = "post";
+      const a = document.createElement("span"); a.className = "a";
+      a.textContent = l.name + " (" + l.type.replace("_", " ") + ")";
+      const t = document.createElement("div"); t.className = "t";
+      let text;
+      if (!l.hardware)       text = "not on this board";
+      else if (!l.firmware)  text = "not in this build — " + (l.reason || "");
+      else if (!l.enabled)   text = "switched off";
+      else if (l.up)         text = "up · " + l.ip + " (" + l.addressing + ") · " + fmtUptime(l.uptime_s)
+                                  + (l.clients !== null && l.clients !== undefined ? " · " + l.clients + " client" + (l.clients === 1 ? "" : "s") : "")
+                                  + (l.rx_bytes !== null && l.rx_bytes !== undefined ? " · rx " + l.rx_bytes + " B / tx " + l.tx_bytes + " B" : "");
+      else                   text = l.phase;
+      t.textContent = text;
+      if (l.hardware && l.firmware && l.enabled && !l.up) t.classList.add("offline");
+      el.append(a, t); lk.appendChild(el);
+    }
+    if (!lk.children.length) lk.innerHTML = '<div class="post"><span class="t">No local links reported.</span></div>';
+
     const tr = $("transport"); tr.replaceChildren();
     if (s.transport) {
       const d = document.createElement("div"); d.className = "post";

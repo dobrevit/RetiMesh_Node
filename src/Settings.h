@@ -102,6 +102,27 @@ struct AdminSettings {
   char password[33] = ADMIN_PASSWORD_DEFAULT;
 };
 
+// Which local links run (LocalLink.h). A link the board lacks, or that this
+// build has no driver for, is reported as such and its switch is refused by
+// the API rather than saved and silently ignored. Wi-Fi off is honoured on
+// every board: the node then answers only on USB or PPP where it has them,
+// and on the maintenance console everywhere (WIFI ON turns it back on).
+struct LinkSettings {
+  bool wifiEnabled = true;
+  bool usbEnabled  = true;              // USB networking, where the board and build carry it
+  bool pppEnabled  = false;             // PPP over the bridge UART, likewise
+};
+
+// Maintenance surfaces. The bootloader API is on by default because the
+// flashing workflow depends on it, and it is guarded by the admin password
+// and by the link the request arrives over; a deployed relay can switch it
+// off here and be flashed by hand only.
+struct MaintenanceSettings {
+  bool bootloaderApi     = true;        // POST /api/system/bootloader answers at all
+  bool bootloaderFromLan = false;       // ...also from the station (upstream LAN) link
+  bool consoleEnabled    = true;        // the serial maintenance console reads commands
+};
+
 class Settings {
 public:
   void load();                            // call once, before anything else
@@ -110,8 +131,12 @@ public:
   const WifiSettings&  wifi()  const { return _wifi;  }
   const AdminSettings& admin() const { return _admin; }
   const TransportSettings& transport() const { return _transport; }
+  const LinkSettings& links() const { return _links; }
+  const MaintenanceSettings& maintenance() const { return _maintenance; }
 
   bool saveRadio(const RadioSettings& r);
+  bool saveLinks(const LinkSettings& l);
+  bool saveMaintenance(const MaintenanceSettings& m);
   bool saveWifi(const WifiSettings& w);
   bool saveAdminPassword(const char* password);
   bool saveTransport(const TransportSettings& t);
@@ -128,6 +153,8 @@ private:
   WifiSettings  _wifi;
   AdminSettings _admin;
   TransportSettings _transport;
+  LinkSettings      _links;
+  MaintenanceSettings _maintenance;
 };
 
 extern Settings settings;

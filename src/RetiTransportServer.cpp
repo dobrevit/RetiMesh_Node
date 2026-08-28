@@ -21,6 +21,7 @@
 // ============================================================================
 #include "RetiTransportServer.h"
 #include "RnsTransport.h"
+#include "Bootloader.h"
 
 RetiTransportServer transportServer;
 
@@ -51,6 +52,10 @@ size_t RetiTransportServer::clientCount() {
 // ---------------------------------------------------------------------------
 void RetiTransportServer::onClient(AsyncClient* client) {
   if (client == nullptr) return;
+
+  // A restart is seconds away: a peer accepted now would be registered with
+  // Transport and torn down before it exchanged a packet.
+  if (Bootloader::pending()) { client->close(); return; }
 
   if (clientCount() >= RNS_MAX_CLIENTS) {
     log_w("Rejecting %s: client limit (%d) reached",

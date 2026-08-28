@@ -48,6 +48,56 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// Local-link capabilities: what the PCB puts on its USB connector. These come
+// from boards.json — the one registry of board facts — through
+// tools/board_caps.py, which turns the env's "local_link" block into -D flags
+// at build time and refuses to build when they contradict the framework's own
+// USB flags in platformio.ini. The defaults below are what a build with no
+// entry (the host-native test env) gets: nothing.
+//
+//   BOARD_USB_NATIVE        the MCU's own USB D+/D- reach the connector
+//   BOARD_USB_NCM           ...and the silicon can present CDC-NCM there
+//   BOARD_USB_CDC_OTG       this firmware runs its own CDC-ACM on that USB
+//                           (TinyUSB OTG); 0 while the S3 stays on the fixed
+//                           USB-Serial/JTAG personality
+//   BOARD_USB_BRIDGE        "CP2102", "CH9102", ... or "none"
+//   BOARD_BRIDGE_AUTO_RESET the bridge's DTR/RTS reach EN/IO0 (esptool resets it)
+//   BOARD_UART_NETWORK      the UART behind the bridge may carry PPP
+//   BOARD_UART_MAX_BAUD     the highest rate qualified on this board
+// ---------------------------------------------------------------------------
+#ifndef BOARD_USB_NATIVE
+  #define BOARD_USB_NATIVE        0
+#endif
+#ifndef BOARD_USB_NCM
+  #define BOARD_USB_NCM           0
+#endif
+#ifndef BOARD_USB_CDC_OTG
+  #define BOARD_USB_CDC_OTG       0
+#endif
+#ifndef BOARD_USB_BRIDGE
+  #define BOARD_USB_BRIDGE        "none"
+#endif
+#ifndef BOARD_BRIDGE_AUTO_RESET
+  #define BOARD_BRIDGE_AUTO_RESET 0
+#endif
+#ifndef BOARD_UART_NETWORK
+  #define BOARD_UART_NETWORK      0
+#endif
+#ifndef BOARD_UART_MAX_BAUD
+  #define BOARD_UART_MAX_BAUD     115200
+#endif
+// Whether this build carries the drivers. Both are 0 on the pinned Arduino
+// core 2.0.17, whose prebuilt TinyUSB has no NCM class and whose lwIP has no
+// PPP — see docs/local-link.md. The board flags above say what the hardware
+// could do; these say what the firmware does.
+#ifndef LOCAL_LINK_USB_NCM
+  #define LOCAL_LINK_USB_NCM      0
+#endif
+#ifndef LOCAL_LINK_PPP
+  #define LOCAL_LINK_PPP          0
+#endif
+
+// ---------------------------------------------------------------------------
 // Firmware version — single-sourced from the git tag by CI
 // (PLATFORMIO_BUILD_FLAGS=-DFW_VERSION=\"v1.2.3\"); local builds say "dev".
 // ---------------------------------------------------------------------------
@@ -504,5 +554,12 @@ struct NodeStats {
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
 };
+
+// Restart into the application or the bootloader: the delay before the
+// quiesce step, chosen so the HTTP reply or console acknowledgement has left
+// the network stack. A settings save that follows with a restart uses the
+// longer figure the settings page always waited.
+#define RESTART_ACK_DELAY_MS      600
+#define RESTART_SETTINGS_DELAY_MS 1500
 
 extern NodeStats g_stats;
