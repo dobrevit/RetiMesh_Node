@@ -427,6 +427,8 @@ $("resetBtn").addEventListener("click", async () => {
   } catch (e) { setMsg("resetMsg", e.message, "bad"); }
 });
 
+let sdLastFormat = "";     // last_format as of the most recent refresh
+let formatWas = null;      // ...as it stood when a format was requested
 async function refreshSd() {
   try {
     const s = await (await fetch("/api/status")).json();
@@ -441,6 +443,25 @@ async function refreshSd() {
     else text = "Card error." ;
     if (sd.last_format) text += " Last format: " + sd.last_format + ".";
     $("sdInfo").textContent = text;
+    // The click handler puts "Formatting…" in the banner; nothing used to take
+    // it out again, so it sat there long after the format had finished and, in
+    // the case that prompted this, long after it had failed. The refresh owns
+    // it now: while one is running it says so, and when one ends it says how it
+    // ended rather than leaving the reader watching a stale word.
+    //
+    // The result is recognised by last_format *changing*, not merely being
+    // present. A request only sets a flag, and the card task can take a poll
+    // interval to pick it up, so for a moment the field still holds the
+    // previous attempt's verdict — long enough for the early refreshes below to
+    // report the wrong outcome with total confidence.
+    sdLastFormat = sd.last_format || "";
+    if (sd.state === "formatting" || sd.last_format === "in progress") {
+      setMsg("sdMsg", "Formatting…", "warn");
+    } else if (formatWas !== null && sd.last_format && sd.last_format !== formatWas) {
+      setMsg("sdMsg", "Format " + sd.last_format,
+             sd.last_format.indexOf("failed") === 0 ? "bad" : "good");
+      formatWas = null;
+    }
     $("sdFormat").disabled = !(sd.state === "mounted" || sd.state === "partial" || sd.state === "unformatted" || sd.state === "error");
     $("sdLog").disabled = !(sd.state === "mounted" || sd.state === "partial");
   } catch (e) { $("sdInfo").textContent = "Status unavailable."; }
@@ -450,8 +471,12 @@ $("sdFormat").addEventListener("click", async () => {
   if (prompt("This erases EVERYTHING on the card. Type FORMAT to continue.") !== "FORMAT") return;
   try {
     await api("/api/settings/sd/format", { confirm: "FORMAT" });
+    formatWas = sdLastFormat;
     setMsg("sdMsg", "Formatting…", "warn");
-    setTimeout(refreshSd, 5000); setTimeout(refreshSd, 20000); setTimeout(refreshSd, 60000);
+    // A format can finish in well under a second when it fails early, so poll
+    // soon as well as late rather than leaving the first news until the next
+    // ten-second tick.
+    [500, 2000, 5000, 20000, 60000].forEach(ms => setTimeout(refreshSd, ms));
   } catch (e) { setMsg("sdMsg", e.message, "bad"); }
 });
 refreshSd(); setInterval(refreshSd, 10000);

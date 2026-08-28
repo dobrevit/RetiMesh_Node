@@ -238,9 +238,23 @@ void SdCard::doFormat() {
     xSemaphoreGive(_lock);
     return;
   }
+  // The card has to be woken before it will take a raw write. sdcard_init()
+  // only registers the disk driver and leaves the card flagged not-initialised;
+  // the flag is cleared by the disk layer's own initialise, which nothing but a
+  // mount attempt reaches. Without this every sd_write_raw() below returns
+  // "not ready" on the first sector, the wipe gives up, and mkfs is never
+  // reached — so formatting failed identically on every card, which is exactly
+  // what it did until this line existed.
+  //
+  // Whether the mount succeeds is beside the point and deliberately ignored: an
+  // unformatted card is the usual reason to be here and will fail to mount, but
+  // it is initialised either way, which is all the wipe needs.
+  const bool mounted = sdcard_mount(pdrv, kMount, 1, false);
+
   uint8_t zeros[512] = {0};
   bool wiped = true;
   for (uint32_t s = 0; s < 8 && wiped; s++) wiped = sd_write_raw(pdrv, zeros, s);   // MBR + slack
+  if (mounted) sdcard_unmount(pdrv);
   sdcard_uninit(pdrv);
   if (!wiped) {
     xSemaphoreTake(_lock, portMAX_DELAY);
