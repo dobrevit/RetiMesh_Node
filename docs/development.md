@@ -8,8 +8,16 @@ pio run -e t3s3 -t upload             # flash firmware
 pio run -e t3s3 -t uploadfs           # flash the web app (data/ → LittleFS)
 pio device monitor                    # console, 115200
 ```
-Envs: `t3s3` (LilyGO T3-S3, `qio_qspi`, 4 MB, `huge_app.csv`),
-`esp32s3-qspi` (generic 8 MB DevKit). Add `-D` overrides under `build_flags`.
+Seven board environments ship: `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`,
+`esp32s3-qspi`, `tbeam`, `heltec-ws`, `heltec-v3`. CI and the release matrix
+build all of them, so a change has to compile everywhere — including the three
+with no SD slot, where `HAS_SD 0` has to actually work. `boards.json` is the
+registry they come from. Add `-D` overrides under `build_flags`.
+
+Shared build settings live in named sections rather than per-board copies:
+`[esp32s3]` for what any S3 wants, `[esp32s3_psram_usb]` for the four boards
+that also have in-package PSRAM and the S3's own USB on the connector. The
+Heltec V3 has neither, which is why it takes the plain one.
 
 `PLATFORMIO_BUILD_FLAGS='-DFW_VERSION=\"v1.2.3\"'` bakes a version (CI does this
 from the tag).
@@ -41,21 +49,63 @@ Checks boot (identity, radio, transport, no error lines), that rnsd holds a
 path to the node, that plain packets sent through rnsd arrive on LoRa, and
 that the RNode hears the node. Exit code = number of failures.
 
+## Soak testing
+A soak is only worth running if someone reads the result, and a week of JSON is
+not something anyone reads. `tools/soak.py` samples every node by its mDNS name
+and summarises what a soak is actually asked:
+
+```sh
+python tools/soak.py --out soak.csv retimesh-8249cc retimesh-cd5a28   # collect
+python tools/soak.py --summarise soak.csv                             # read it
+```
+
+It reports restarts and why, the heap trend with its low-water mark and largest
+block, the lowest stack headroom by task name, table growth, and the five loss
+counters as deltas. Every one of those has caught something real on this bench.
+A node that misses a poll is recorded as absent and the run continues, because
+one unreachable node is a finding rather than a reason to stop collecting from
+the others.
+
+Two signatures worth knowing. A **falling largest block against a healthy free
+heap** is fragmentation, and it ends with a node that still routes but can no
+longer build a status response — it goes quiet on HTTP and mDNS with its boot
+count frozen. And **a reset reason of power-on with the previous run length
+missing** means the RTC domain was lost, which is what an EN-pin reset from a
+USB bridge looks like: opening the console on a CH34x board resets it, so a
+"restart" in the data may be the person watching it.
+
 ## Unit tests
 Pure headers are tested on the host, no hardware needed:
 ```sh
 pio test -e native
 ```
-`test/stubs/` provides the few Arduino/IDF headers those files expect.
-Current suites: `test_hdlc` (RNS TCP framing). CI runs them on every push.
+`test/stubs/` provides the few Arduino/IDF headers those files expect. CI runs
+them on every push.
+
+| Suite | Covers |
+|---|---|
+| `test_hdlc` | RNS TCP framing |
+| `test_airtime` | duty cycle, dwell budget, CSMA accounting |
+| `test_radio_plan` | per-chip radio limits, regional regimes, node naming |
+| `test_store_home` | where the Reticulum store belongs, card ownership, what a move does |
+
+The pattern worth keeping: a rule that decides something consequential is
+written as a pure function in a header with no Arduino dependency, so it can be
+exercised without a board. `StoreHome::decide()` and `Mdns::label()` are there
+for that reason — both used to be inline in code whose only test was flashing a
+node and reading the log.
 
 ## Layout
 ```
 src/            firmware (single PlatformIO project, Arduino framework)
 data/           web app → LittleFS image
 web/            GitHub Pages web flasher (ESP Web Tools)
+test/           host-side unit tests (see above)
+partitions/     huge_app_8mb.csv, for the 8 MB boards with no SD slot
 tools/          make_manifest.py (release bundles), build_site.py (Pages),
-                bump_deps.py (PlatformIO dependency PRs), retimesh-flash/ (CLI)
+                bump_deps.py (PlatformIO dependency PRs), retimesh-flash/ (CLI),
+                hil.py (hardware-in-the-loop), soak.py (fleet sampler and
+                summariser), asset_stamp.py (build-time web asset hash)
 boards.json     board registry used by CI, packaging, flasher and CLI
 docs/           this documentation
 .github/        CI, Release Drafter, tag-driven releases, Pages, Dependabot

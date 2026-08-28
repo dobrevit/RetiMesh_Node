@@ -15,13 +15,16 @@ flowchart LR
   subgraph core0[Core 0]
     WIFI[Wi-Fi / LwIP]
     ATCP[AsyncTCP task<br/>HTTP :80, RNS TCP :4242]
-    DNS[dnsTask<br/>captive portal]
-    DISP[displayTask<br/>OLED + BOOT button]
+    DNS[dns 3 KB<br/>captive portal]
+    DISP[display 6 KB<br/>OLED pages + BOOT button]
+    AUTO[autoif 6 KB<br/>RNS AutoInterface peers]
+    SD[sdcard 8 KB<br/>hot-plug, event log, marker]
+    GPS[gps 3 KB<br/>NMEA reader]
   end
   subgraph core1[Core 1]
-    RADIO[radioTask<br/>SX126x/SX127x, CSMA,<br/>RNode framing, beacons]
-    RNS[rns task<br/>microReticulum Transport,<br/>interfaces, announces, persistence]
-    LOOP[loopTask<br/>heartbeat, scheduled restart]
+    RADIO[radio 8 KB<br/>SX126x/SX127x/SX128x, CSMA,<br/>RNode framing, beacons]
+    RNS[rns 16 KB<br/>microReticulum Transport,<br/>interfaces, announces, persistence]
+    LOOP[loopTask<br/>heartbeat, diagnostics, scheduled restart]
   end
   ATCP -- tcpInRing --> RNS
   RNS -- sendTo() --> ATCP
@@ -70,7 +73,19 @@ sequenceDiagram
 | `LoRaRadio.*` | RadioLib driver, auto-detect, RNode framing, CSMA, beacons |
 | `RetiTransportServer.*` | TCP :4242, HDLC, per-client ids, announce bookkeeping |
 | `RnsTransport.*` | microReticulum integration: interfaces, transport, announces, snapshots |
-| `RnsFileSystem.h` | microStore adapter over LittleFS (`/rns`, never formats) |
+| `RnsFileSystem.h` | microStore adapter over LittleFS or SD (`/rns`, never formats) |
+| `StoreHome.*` | where the Reticulum store lives, the card's ownership marker, and moving it |
+| `SdCard.*` | slot polling, capacity and filesystem detection, FAT32 format, event log |
+| `Diag.*` | reset reason, boot counter, previous run length, per-task stack headroom, heap |
+| `Airtime.*` | regulatory regime per region, duty cycle and dwell budget, airtime accounting |
+| `RadioCaps.*` | per-chip frequency, bandwidth, spreading-factor and power limits |
+| `Power.*`, `Pmu.*` | CPU/Wi-Fi/display profiles; battery via PMU or ADC divider |
+| `Gps.*` | NMEA reader, fix and satellite count, receiver power rail |
+| `AutoInterface.*` | RNS AutoInterface: IPv6 link-local multicast peering |
+| `Mdns.h` | node name to a legal DNS label (pure, unit-tested) |
+| `DisplayLayout.h` | panel geometry and refresh cost, per board |
+| `DisplayIcons.h` | procedural glyphs, sized at the call site |
+| `QrCode.h` | join/portal/address codes for the portal and panel |
 | `RnsAnnounce.*` | node identity keys, announce parsing/verification for the neighbour table |
 | `Neighbors.*` | table of stations heard (announces, station IDs, beacons) |
 | `WifiManager.*` | SoftAP, captive DNS, web routes, settings API, restarts |
@@ -83,8 +98,45 @@ sequenceDiagram
 |---|---|
 | NVS `retimesh` | settings (radio, Wi-Fi, transport, admin password) |
 | NVS `retimeshid` | identity keys (kept across factory reset) |
-| LittleFS `/` | `index.html`, `settings.html`, `board.json` |
-| LittleFS `/rns` | Transport persistence: paths, known destinations, hash list, cache |
+| NVS `retimesh-diag` | boot counter |
+| LittleFS `/` | `index.html`, `settings.html`, `board.json`, `assets.json` |
+| LittleFS `/rns` **or** SD `/rns` | the Reticulum store: paths, known destinations, hash list, cache |
+| SD `/retimesh/events.log` | rolling event log, downloadable from the portal |
+| SD `/retimesh/store.json` | which node owns the store on this card |
+
+### The store has one home
+The store lives in exactly one place at a time: the card when one has been
+taken into use, internal flash otherwise. Never both — two live copies of the
+same path table, each being written, is two answers to one question with no way
+to tell which is right.
+
+`StoreHome` owns that rule. Where the store belongs is one pure function of
+three facts (the setting, whether a card is mounted, and what the card holds),
+so it is unit-tested rather than only observable by booting a node with a card
+in it.
+
+**Moving it** is a copy, not a flag. Adopt and eject record the request, restart,
+and perform the move early in boot, before the web server, the card task or the
+store itself exist — the underlying stores hold their files open for their
+lifetime, so nothing may be reading them while they move. The copy is staged
+beside the destination and verified before anything is deleted, so a failure at
+any point leaves a readable store at one end or the other.
+
+**Ownership.** A card holding a store is indistinguishable from a card holding
+somebody else's, so the owner writes its identity onto the card. A node then
+recognises its own card, refuses one belonging to another node, and takes one
+whose previous owner released it. Matching is on the node's identity, not its
+name, so renaming a node never costs it its store — but a factory reset that
+regenerates the identity does, and the card must then be formatted before it can
+be used again.
+
+### Partition tables
+`huge_app.csv` (3 MB app, 896 KB filesystem) on 4 MB boards. The 8 MB boards use
+`partitions/huge_app_8mb.csv`, which is the same up to the end of the
+application and gives the four megabytes the stock table leaves unmapped to the
+filesystem instead. That matters most where there is no SD slot, because the
+filesystem is then the only home the store has: 4900 KB of room rather than
+896 KB.
 
 ## Memory (T3-S3)
 Flash 1.38 MB of the 3 MB app partition. Internal RAM is the scarce
