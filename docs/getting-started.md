@@ -46,8 +46,8 @@ For `rnsd`/NomadNet on a laptop on the same Wi-Fi, add to `~/.reticulum/config`:
 ```
 
 Every client gets its own transport interface on the node (default mode
-`access_point`). Within seconds the node announces itself and Sideband
-learns paths through it.
+`full`). Within seconds the node announces itself and Sideband learns paths
+through it.
 
 ## 4. Send a message
 
@@ -57,9 +57,11 @@ parameters (default **868.100 MHz, BW 125 kHz, SF8, CR 4/5**). Paths are found
 automatically; the first message may take a few seconds while the path request
 crosses the air.
 
-To see remote peers appear in Sideband's *Announce stream*, set *Wi-Fi clients
-mode* to `full` on the settings page (default `access_point` deliberately
-withholds announces from phones — see [reticulum.md](reticulum.md#interface-modes)).
+Remote peers appear in Sideband's *Announce stream* as their announces arrive;
+Sideband lists LXMF and NomadNet aspects only, so the stream fills once a real
+LXMF peer announces rather than on the node's own `retimesh.node`. Setting
+*Client interface mode* to `access_point` withholds announces from phones
+deliberately — see [reticulum.md](reticulum.md#interface-modes).
 
 ## 5. Administer
 

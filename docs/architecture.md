@@ -84,7 +84,7 @@ sequenceDiagram
 | `RadioCaps.*` | per-chip frequency, bandwidth, spreading-factor and power limits |
 | `Power.*`, `Pmu.*` | CPU/Wi-Fi/display profiles; battery via PMU or ADC divider |
 | `Gps.*` | NMEA reader, fix and satellite count, receiver power rail |
-| `AutoInterface.*` | RNS AutoInterface: IPv6 link-local multicast peering |
+| `AutoInterface.*` | RNS AutoInterface: IPv6 link-local peering, multicast and unicast |
 | `Mdns.h` | node name to a legal DNS label (pure, unit-tested) |
 | `DisplayLayout.h` | panel geometry and refresh cost, per board |
 | `DisplayIcons.h` | procedural glyphs, sized at the call site |
