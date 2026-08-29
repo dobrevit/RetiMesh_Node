@@ -511,6 +511,14 @@ PPP_DEFAULT_BAUD = 115200
 # from an idle one (it hands its port back to the console after 30 s of
 # silence) and how pppd notices the node restarting into its downloader.
 PPPD_OPTIONS = ["noauth", "local", "nodetach", "lcp-echo-interval", "5", "lcp-echo-failure", "4"]
+# The same options as a peers file. `noauth` is a privileged pppd option, so
+# the command line above needs root every time; the options in
+# /etc/ppp/peers/<name> are trusted, so once that file is there any member
+# of the group pppd is setuid for (`dip` on Debian and its descendants) can
+# bring the link up with `call <name>` and no sudo — which is the way to
+# run it on a bench.
+PPPD_PEERS_NAME = "retimesh"
+PPPD_PEERS_PATH = f"/etc/ppp/peers/{PPPD_PEERS_NAME}"
 
 
 @dataclass
@@ -599,10 +607,27 @@ def ppp_addresses(links_data: Iterable[dict]) -> Optional[tuple]:
     return None
 
 
-def pppd_command(port: str, node_ip: str, host_ip: str, baud: int = PPP_DEFAULT_BAUD) -> list:
+def pppd_command(port: str, node_ip: str, host_ip: str, baud: int = PPP_DEFAULT_BAUD, peers: bool = False) -> list:
     """The pppd command line for one node on one port, ready to print. The
-    host's address comes first in pppd's local:remote pair."""
-    return ["pppd", port, str(baud), *PPPD_OPTIONS, f"{host_ip}:{node_ip}"]
+    host's address comes first in pppd's local:remote pair. With `peers` the
+    options come from the peers file instead (pppd_peers_file()), which is
+    the form that needs no root."""
+    options = ["call", PPPD_PEERS_NAME] if peers else list(PPPD_OPTIONS)
+    return ["pppd", port, str(baud), *options, f"{host_ip}:{node_ip}"]
+
+
+def pppd_peers_file() -> str:
+    """The contents of the peers file the `call` form relies on: one option
+    per line, the same options as the command line."""
+    words = list(PPPD_OPTIONS)
+    lines = []
+    while words:
+        w = words.pop(0)
+        if words and words[0].isdigit():
+            lines.append(f"{w} {words.pop(0)}")
+        else:
+            lines.append(w)
+    return "\n".join(lines) + "\n"
 
 
 def shell_words(argv: Iterable[str]) -> str:

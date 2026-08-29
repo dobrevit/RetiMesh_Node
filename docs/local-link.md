@@ -489,6 +489,17 @@ sudo pppd /dev/ttyUSB0 115200 noauth local nodetach \
      lcp-echo-interval 5 lcp-echo-failure 4 10.65.<n>.2:10.65.<n>.1
 ```
 
+`noauth` is a privileged option, which is what makes that line need root.
+The options in `/etc/ppp/peers/<name>` are trusted, so on a bench the
+better shape is a peers file written once and `call` afterwards, which any
+member of the group pppd is setuid for (`dip` on Debian and its
+descendants) may run without sudo:
+
+```sh
+printf 'noauth\nlocal\nnodetach\nlcp-echo-interval 5\nlcp-echo-failure 4\n' | sudo tee /etc/ppp/peers/retimesh
+pppd /dev/ttyUSB0 115200 call retimesh 10.65.<n>.2:10.65.<n>.1
+```
+
 When both follow the rule nothing is negotiated at all; when the host
 chooses otherwise the node takes what it is given (`accept_local`) and
 reports it, since the peer decides on a client. `addressing` is therefore
@@ -496,9 +507,8 @@ reports it, since the peer decides on a client. `addressing` is therefore
 not take DNS servers from the peer, and offers no route: the wire reaches the
 node and nothing beyond it. `retimesh-flash ppp --port /dev/ttyUSB0` asks the
 node — the console's `LINKS` line for ppp0 names `asks=` and `peer=` and
-the speed — and prints that command with the octet filled in. pppd needs
-root on most distributions; the tool prints commands and never runs them
-with sudo. `local` is there because a USB bridge has no carrier to watch,
+the speed — and prints both forms with the octet filled in; the tool
+prints commands and never runs them with sudo. `local` is there because a USB bridge has no carrier to watch,
 and the LCP echoes because they are how the node tells a dead host from an
 idle one (below) and how pppd notices the node restarting into its
 downloader. No `persist`: the flashing tool waits for pppd to exit.

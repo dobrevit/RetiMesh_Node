@@ -552,6 +552,10 @@ class PppTest(unittest.TestCase):
         node, host, baud, enabled = device.ppp_addresses(data)
         self.assertEqual((node, host, baud, enabled), ("10.65.84.1", "10.65.84.2", 115200, False))
         self.assertEqual(device.pppd_command("/dev/ttyUSB0", node, host, baud), PPPD_ARGV)
+        # The unprivileged form takes the same options from the peers file.
+        self.assertEqual(device.pppd_command("/dev/ttyUSB0", node, host, baud, peers=True),
+                         ["pppd", "/dev/ttyUSB0", str(baud), "call", "retimesh", f"{host}:{node}"])
+        self.assertEqual(device.pppd_peers_file(), "noauth\nlocal\nnodetach\nlcp-echo-interval 5\nlcp-echo-failure 4\n")
         self.assertIn("10.65.84.2:10.65.84.1", device.shell_words(PPPD_ARGV))
         # A board with no PPP names no addresses.
         no_ppp = [{"link": "ppp0", "type": "ppp_uart", "hardware": "no", "firmware": "no", "enabled": "no"}]

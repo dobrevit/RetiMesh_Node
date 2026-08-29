@@ -251,6 +251,9 @@ def cmd_ppp(args):
         print("  switch it on first: PPP ON at the console, or the settings page")
     print("  then, as root (the ppp package's pppd):")
     print("    sudo " + dev.shell_words(dev.pppd_command(port.device, node_ip, host_ip, baud)))
+    print("or, with the options in a peers file, no root needed after the one-time install:")
+    print(f"  printf '%s' | sudo tee {dev.PPPD_PEERS_PATH}" % dev.pppd_peers_file().replace(chr(10), "\\n"))
+    print("  " + dev.shell_words(dev.pppd_command(port.device, addresses.node_ip, addresses.host_ip, addresses.baud, peers=True)))
     print(f"  and the node answers at http://{node_ip}/ — while it does, the console on {port.device} is PPP's")
 
 
