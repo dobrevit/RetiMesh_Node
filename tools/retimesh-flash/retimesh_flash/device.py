@@ -729,13 +729,20 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
         # MAC, by being new on the bus since the request. A serial-JTAG unit
         # that was already there is somebody else's chip.
         before = {p.device for p in ports_fn() if p.kind == "usb_serial_jtag"}
+        def still_here(ps):
+            # By MAC when known; by path otherwise — with two nameless
+            # composite devices on the bench, "the one composite device" is
+            # nobody, and the port would have counted as gone before it went.
+            if port.node_id:
+                return _port_of(ps, "retimesh_composite", port.node_id)
+            return next((p for p in ps if p.kind == "retimesh_composite" and same_device(p.device, port.device)), None)
         def downloader(ps):
             if port.node_id:
                 return _port_of(ps, "usb_serial_jtag", port.node_id)
             fresh = [p for p in ps if p.kind == "usb_serial_jtag" and p.device not in before]
             return fresh[0] if len(fresh) == 1 else None
         log(f"watching for {port.device} to go and the serial-JTAG downloader to come")
-        gone = wait_for_port(lambda ps: None if _port_of(ps, "retimesh_composite", port.node_id) else port,
+        gone = wait_for_port(lambda ps: None if still_here(ps) else port,
                              window, ports_fn, sleep, clock, interval=0.1)
         if gone is None and probe(port.device, timeout=1.0):
             return HandOff(False, "none", port.device,

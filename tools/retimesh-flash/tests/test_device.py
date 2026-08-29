@@ -375,6 +375,17 @@ class HandOffTest(unittest.TestCase):
         self.assertTrue(r.entered)
         self.assertEqual(r.port, "/dev/ttyACM5")     # S3_ROM's device, the newcomer — not /dev/ttyACM9
 
+    def test_two_nameless_composite_devices_do_not_count_each_other_as_gone(self):
+        # With the MAC unknown the port is followed by path: the neighbour
+        # staying on the bus does not make ours look gone, nor the reverse.
+        ours = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, None, "RetiMesh Node", "1-11")
+        neighbour = fake_comport("/dev/ttyACM6", 0x1209, 0x0001, None, "RetiMesh Node", "1-12")
+        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
+        # ours never leaves: the node did not reset, and the console still answers
+        r = self.run_handoff([[ours, neighbour]] * 3, probe=lambda dev, timeout=2.0, console=None: info, port="/dev/ttyACM5")
+        self.assertFalse(r.entered)
+        self.assertIn("still answers", r.message)
+
     def test_a_composite_device_whose_console_cannot_enter_is_touched(self):
         touched = []
         info = device.NodeInfo("RetiMesh Node", "v0.2.0", "LilyGO T3-S3", "console:/dev/ttyACM5")

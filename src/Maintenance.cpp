@@ -246,9 +246,14 @@ void poll() {
     // earlier version let them sit until the console was switched back on —
     // at which point a "BOOTLOADER CONFIRM" typed days before was executed.
     size_t budget = kBudget;
-    if (sIo->available() <= 0 && sLines.idle(millis())) log_d("console: dropped a line the port went silent on");
     while (budget-- && sIo->available() > 0) sIo->read();
     sLines.reset();
+    return;
+  }
+  // Nothing to read: the port is silent, which is when a stalled partial
+  // line — a prober's leftovers — expires (MaintenanceProtocol.h).
+  if (sIo->available() <= 0) {
+    if (sLines.idle(millis())) log_d("console: dropped a line the port went silent on");
     return;
   }
   size_t budget = kBudget;
