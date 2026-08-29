@@ -51,10 +51,10 @@ captive-portal status page and bridges stock Reticulum clients (Sideband,
 | 80 | HTTP (ESPAsyncWebServer) | status page, neighbour list, **unencrypted** community bulletin board; `/settings.html` admin page (user `admin`, default password **`retimesh`** — change it there) |
 | 4242 | raw TCP, RNS HDLC framing | Reticulum transport — connect any stock RNS client |
 | — | USB serial, 115200 | the log, and a maintenance console (`VERSION`, `STATUS`, `BOOTLOADER CONFIRM`, …) — see [docs/local-link.md](docs/local-link.md) |
+| `http://10.64.<n>.1/` | USB (CDC-NCM), native-USB boards | the same web app and API over the cable: the node is an Ethernet link with DHCP, `<n>` from its MAC — no Wi-Fi needed |
 
 Both servers bind every interface, so they answer on whichever local link is
-up — Wi-Fi today, USB networking and PPP once a toolchain with those drivers
-lands — and Wi-Fi can be switched off entirely.
+up — Wi-Fi and USB networking today, PPP over the bridge UART to come
 
 Client-side config (`~/.reticulum/config` — in Sideband just add a
 *TCP Client Interface* with the same host/port):
@@ -199,14 +199,11 @@ env name in the two workflow matrices.
   are edited at `http://10.42.0.1/settings.html` (user `admin`, default
   password `retimesh` — change it). Radio changes apply live; Wi-Fi changes
   restart the node.
-- **USB networking (CDC-NCM) and PPP are designed and tested down to the
-  toolchain and no further.** The toolchain now has what they need — the
-  Arduino core 3.x (ESP-IDF 5.x, via the pioarduino platform) ships TinyUSB
-  with the NCM class and lwIP with PPP — but the firmware does not drive
-  either yet. What works today on every board: the maintenance console, the
-  bootloader manager, `POST /api/system/bootloader`, Wi-Fi-optional
-  operation and hands-free flashing. [docs/local-link.md](docs/local-link.md)
-  has the full account.
+- **USB networking (CDC-NCM) is in, PPP over the bridge UART is not yet.**
+  On boards whose own USB reaches the connector the node is a composite USB
+  device — a console port and an Ethernet link with DHCP — and flashing goes
+  through the same tooling. PPP for the CP2102/CH9102 boards is specified in
+  [docs/local-link.md](docs/local-link.md) and still to be written.
 - **WPA3 on the access point is offered but not yet validated.** SoftAP-side
   SAE requires ESP-IDF 5, which the core 3.x toolchain brings, so the settings
   page no longer greys out the WPA3 modes. The earlier core (2.0.17 / IDF

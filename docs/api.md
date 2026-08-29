@@ -88,8 +88,8 @@ past the checks on the way in.
       "phase": "ready", "up": true, "ip": "10.42.0.1", "addressing": "static", "uptime_s": 1234, "clients": 1 },
     { "name": "wifi-sta", "type": "wifi_sta", "hardware": true, "firmware": true, "enabled": true,
       "phase": "ready", "up": true, "ip": "192.168.1.42", "addressing": "dhcp", "uptime_s": 1200 },
-    { "name": "usb0", "type": "usb_ncm",  "hardware": true,  "firmware": false, "enabled": false, "phase": "disabled",
-      "reason": "this build has no USB network stack (the core's TinyUSB carries NCM; the firmware does not drive it yet)" },
+    { "name": "usb0",     "type": "usb_ncm",  "hardware": true, "firmware": true, "enabled": true,
+      "phase": "ready", "up": true, "ip": "10.64.84.1", "addressing": "static", "uptime_s": 1230, "clients": 1 },
     { "name": "ppp0", "type": "ppp_uart", "hardware": false, "firmware": false, "enabled": false, "phase": "disabled",
       "reason": "this board has no bridge UART to carry PPP" }
   ],
