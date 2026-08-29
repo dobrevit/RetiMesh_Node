@@ -52,9 +52,10 @@ captive-portal status page and bridges stock Reticulum clients (Sideband,
 | 4242 | raw TCP, RNS HDLC framing | Reticulum transport — connect any stock RNS client |
 | — | USB serial, 115200 | the log, and a maintenance console (`VERSION`, `STATUS`, `BOOTLOADER CONFIRM`, …) — see [docs/local-link.md](docs/local-link.md) |
 | `http://10.64.<n>.1/` | USB (CDC-NCM), native-USB boards | the same web app and API over the cable: the node is an Ethernet link with DHCP, `<n>` from its MAC — no Wi-Fi needed |
+| `http://10.65.<n>.1/` | PPP over the serial bridge, CP2102/CH9102 boards | the same again through `pppd` on the host: the node is a PPP client on its serial port and asks for that address — see [docs/local-link.md](docs/local-link.md#ppp-over-the-bridge-uart) |
 
 Both servers bind every interface, so they answer on whichever local link is
-up — Wi-Fi and USB networking today, PPP over the bridge UART to come
+up — Wi-Fi, USB networking or PPP over the bridge UART
 
 Client-side config (`~/.reticulum/config` — in Sideband just add a
 *TCP Client Interface* with the same host/port):
@@ -199,11 +200,15 @@ env name in the two workflow matrices.
   are edited at `http://10.42.0.1/settings.html` (user `admin`, default
   password `retimesh` — change it). Radio changes apply live; Wi-Fi changes
   restart the node.
-- **USB networking (CDC-NCM) is in, PPP over the bridge UART is not yet.**
+- **USB networking (CDC-NCM) and PPP over the bridge UART are both in.**
   On boards whose own USB reaches the connector the node is a composite USB
-  device — a console port and an Ethernet link with DHCP — and flashing goes
-  through the same tooling. PPP for the CP2102/CH9102 boards is specified in
-  [docs/local-link.md](docs/local-link.md) and still to be written.
+  device — a console port and an Ethernet link with DHCP. On the
+  CP2102/CH9102 boards it is a PPP client on its serial port: `pppd` on the
+  host makes it a network interface at `10.65.<n>.1`, and the console on
+  that port is silent while the link is up. Flashing goes through the same
+  tooling either way. Both are described in
+  [docs/local-link.md](docs/local-link.md); PPP has been built against the
+  core's headers and libraries but not yet run on a board.
 - **WPA3 on the access point is offered but not yet validated.** SoftAP-side
   SAE requires ESP-IDF 5, which the core 3.x toolchain brings, so the settings
   page no longer greys out the WPA3 modes. The earlier core (2.0.17 / IDF

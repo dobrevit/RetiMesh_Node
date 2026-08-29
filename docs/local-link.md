@@ -25,15 +25,15 @@ flowchart TB
   subgraph links[Local links — LocalLink.h]
     AP[wifi-ap<br/>10.42.0.1/24 · DHCP server]
     STA[wifi-sta<br/>DHCP client on your LAN]
-    USB[usb0 · CDC-NCM<br/>10.64.n.1/24 · not driven yet]
-    PPP[ppp0 · PPPoS over CP2102<br/>not driven yet]
+    USB[usb0 · CDC-NCM<br/>10.64.n.1/24 · DHCP server]
+    PPP[ppp0 · PPP client over the bridge UART<br/>asks the host's pppd for 10.65.n.1]
   end
   LWIP --- AP
   LWIP --- STA
   LWIP --- USB
   LWIP --- PPP
   USB -.-> S3USB[ESP32-S3 USB OTG]
-  PPP -.-> UART[UART0 → CP2102]
+  PPP -.-> UART[UART0 → CP2102 / CH9102]
   subgraph lora[Not a local link]
     LORA[LoRa — Reticulum transport only]
   end
@@ -49,16 +49,18 @@ packager and the flasher never disagree about it.
 | Env | MCU | On the USB connector | Bootloader methods, best first | IP local links |
 |---|---|---|---|---|
 | `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi` | ESP32-S3 | the chip's own USB (D+/D− routed), driven by the OTG stack as the composite device below | `software_api` (the core's persist-restart), `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **usb0** |
-| `heltec-v3` | ESP32-S3 | CP2102 bridge on UART0 (the S3's own USB is not on the connector) | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; **ppp0 hardware-capable, not in this build** |
-| `heltec-ws` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; ppp0 as above |
-| `tbeam` | ESP32 | CH9102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; ppp0 as above |
+| `heltec-v3` | ESP32-S3 | CP2102 bridge on UART0 (the S3's own USB is not on the connector) | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** (PPP client; the host runs pppd on the port) |
+| `heltec-ws` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
+| `heltec-wb` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
+| `tbeam` | ESP32 | CH9102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
 
 The `heltec-v3` row is the one to read twice: it is an S3, so its firmware can
 put it into the ROM downloader on request, but its USB is a serial bridge, so
 there is no USB networking to be had — CDC-NCM is a property of the connector
 wiring, not of the chip. Its S3 siblings run the OTG stack instead of the
 serial-JTAG unit, which is what makes usb0 possible and what puts software
-entry back on the table for them.
+entry back on the table for them. What a bridge *can* carry is PPP, and the
+four bridged boards do — as PPP clients, for a reason given below.
 
 `GET /api/status` reports every link under `local_links` (type, phase,
 address, uptime, a client count where the link can tell, and a `reason` where
@@ -86,6 +88,12 @@ RM NETWORK_STATUS link=wifi-sta type=wifi_sta phase=disabled ip=- addressing=non
 RM NETWORK_STATUS link=usb0 type=usb_ncm phase=disabled ip=- addressing=none uptime_s=0
 RM NETWORK_STATUS link=ppp0 type=ppp_uart phase=disabled ip=- addressing=none uptime_s=0
 RM OK NETWORK_STATUS lines=4
+LINKS
+RM LINKS link=wifi-ap type=wifi_ap hardware=yes firmware=yes enabled=yes
+RM LINKS link=wifi-sta type=wifi_sta hardware=yes firmware=yes enabled=yes
+RM LINKS link=usb0 type=usb_ncm hardware=no firmware=no enabled=no reason="this board's USB is a serial bridge, not the chip's own"
+RM LINKS link=ppp0 type=ppp_uart hardware=yes firmware=yes enabled=no baud=115200 asks=10.65.84.1 peer=10.65.84.2
+RM OK LINKS lines=4
 BOOTLOADER
 RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 ```
@@ -97,8 +105,9 @@ RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 | `STATUS` | uptime, boot count, reset reason, heap, radio, transport, whether a restart is pending — and when one is, its target, who asked (`restart_source`) and `restart_in_ms` |
 | `USB_STATUS` | how the host is attached, the bootloader methods this board offers |
 | `NETWORK_STATUS` | one line per local link |
-| `LINKS` | per link: hardware / firmware / enabled, and the reason when it cannot run |
+| `LINKS` | per link: hardware / firmware / enabled, and the reason when it cannot run; for ppp0 the speed and the addresses it asks for (`baud=`, `asks=`, `peer=`) |
 | `WIFI ON` / `WIFI OFF` | saves the link setting and restarts — the way back from a Wi-Fi-off node |
+| `PPP ON` / `PPP OFF` | saves the PPP switch; applies live, no restart. Typed on the very port PPP will take, before pppd is started on it |
 | `RESET CONFIRM` | restart into the application |
 | `BOOTLOADER CONFIRM` | restart into the ROM downloader (`501` on a classic ESP32, which cannot) |
 
@@ -293,11 +302,11 @@ usb0             CDC-NCM     10.64.<n>.2 from the node's DHCP, node at 10.64.<n>
 /dev/ttyACM0     CDC-ACM     RetiMesh Maintenance — console, 1200-baud touch
 ```
 
-CP2102 boards:
+CP2102 / CH9102 boards:
 
 ```
-/dev/ttyUSB0     10c4:ea60  CP2102 — console + log; esptool resets through DTR/RTS
-ppp0             (follow-up) PPP over that port, node at 10.65.<n>.1
+/dev/ttyUSB0     10c4:ea60  CP2102 — console + log while the console owns the port; esptool resets through DTR/RTS
+ppp0             PPP over that port while pppd runs: node at 10.65.<n>.1, host at .2 — the console is silent meanwhile
 ```
 
 ## Recovery
@@ -329,9 +338,10 @@ one.
 `links.wifi` off (settings page, `POST /api/settings/links {"wifi":false}`,
 or `WIFI OFF` at the console) restarts the node without its access point or
 station. The web server and the Reticulum TCP server still start, bound to
-every interface, so the USB link — or PPP, when a build carries it — serves
-them unchanged; the console always does. `WIFI ON` at the console is the way
-back, and so is `http://10.64.<n>.1/` over the cable on a native-USB board.
+every interface, so the USB link — or PPP on a bridged board — serves them
+unchanged; the console always does. `WIFI ON` at the console is the way
+back, and so is `http://10.64.<n>.1/` over the cable on a native-USB board
+or `http://10.65.<n>.1/` over pppd on a bridged one.
 Turning every link off is allowed and the answer says so in words.
 
 ## Native USB: the composite device
@@ -443,51 +453,168 @@ and the hardware UART0 pins remain the panic output for anyone with a probe.
 IPv6 over usb0; a lease count (the link reports one client whenever the
 host has the interface up).
 
-## PPP over the bridge UART — follow-up specification
+## PPP over the bridge UART
 
-For `heltec-v3`, `heltec-ws`, `tbeam`: PPPoS on UART0 behind the CP2102/CH9102,
-as `PppLink` in the same registry, the same `0.0.0.0` services on top.
+On the boards whose USB connector is a serial bridge — `heltec-v3`,
+`heltec-ws` and `heltec-wb` on a CP2102, `tbeam` on a CH9102 — the one
+serial port carries IP as well as text. The host runs `pppd` on
+`/dev/ttyUSB0` and the node is a network interface at the other end of it,
+`ppp0` on both sides. Every service binds every interface, so
+`http://10.65.<n>.1/`, the Reticulum TCP transport and the bootloader API
+answer over the wire as they do over Wi-Fi. `PppUart.h` is the driver,
+`PppArbiter.h` the rule that shares the port (pure, host-tested), `PppLink`
+in `LocalLink.h` the registry entry, and the `ppp` switch applies live,
+like `usb`: `PPP ON` at the console, the settings page, or
+`POST /api/settings/links {"ppp":true}`.
 
-- **lwIP side:** `esp_netif` PPP (`esp_netif_ppp.h`; the core's prebuilt
-  lwIP is built with `CONFIG_LWIP_PPP_SUPPORT`, and the core's own `PPP`
-  library wraps it), server mode with the node at `10.65.<n>.1` and the host
-  at `10.65.<n>.2`, `<n>` as for USB.
-- **UART task:** core 0, priority below the radio task, reading into a bounded
-  ring (`PPP_RX_RING_BYTES`, 4 KB) and dropping on overflow — PPP retransmits
-  and the radio must never wait for it. TX from the lwIP output callback with
-  a bounded UART queue.
-- **Baud:** `settings.links.pppBaud`, qualified per board from
-  `boards.json` `uart.qualification` (115200, 230400, 460800, 921600) up to
-  `uart.tested_max_baud`; RTS/CTS only where the board says the bridge exposes
-  them (none do today).
-- **Console coexistence:** the console and the log share UART0 with PPP. PPP
-  frames are HDLC-delimited (`0x7E`); the console stays available *until* the
-  host opens PPP and comes back when LCP terminates — the host flashing helper
-  therefore uses HTTP over ppp0 to request the bootloader, then closes PPP.
-- **Host side (Linux first):** `pppd /dev/ttyUSB0 921600 noauth local
-  nodetach 10.65.n.2:10.65.n.1` or a NetworkManager serial connection; the
-  helper detects the `ppp0` route, POSTs `/api/system/bootloader`, waits for
-  the interface to drop, stops pppd, runs esptool on the underlying port, and
-  restarts pppd. Documented dependencies: `ppp`, `pyserial`, `esptool`.
-- **Bootloader:** `software_api` on the S3 Heltec V3; on the classic-ESP32
-  boards the helper closes PPP and lets esptool's DTR/RTS reset do it, which
-  the plan already reports.
-- **HIL:** `tools/hil_ppp.py` following `hil_bootloader.py`: detect the port,
-  bring PPP up, `/api/status`, bootloader API, PPP drop, esptool, PPP restore,
-  `/api/status` again.
+**The node is the client, and that is not a choice.** The specification
+this was built from had the node serving the link — at `10.65.<n>.1`, the
+host assigned `.2`, the way usb0 serves DHCP. The core's prebuilt lwIP is
+built with `CONFIG_LWIP_PPP_SUPPORT` but *without*
+`CONFIG_LWIP_PPP_SERVER_SUPPORT` (`sdkconfig` in the
+`framework-arduinoespressif32-libs` package; `lwipopts.h` takes `PPP_SERVER`
+from it), so the node cannot wait for a peer or assign one an address, and
+carrying a private lwIP to get that is not on the table. The core's own
+`PPP` library is no help either: it is a cellular-modem client that speaks
+AT commands through `esp_modem`. So the node runs `esp_netif`'s PPP client
+directly, over a UART transport of its own, and the host's `pppd` is the
+server. What survives of the addressing rule is the *request*: IPCP lets a
+client ask for its own address, and the node asks for `10.65.<n>.1`, `<n>`
+the last octet of its MAC exactly as for usb0 (`pppNodeAddress` in
+`LocalLinkState.h`, beside `usbNodeAddress`). The host's pppd is told to take
+`.2` and offer `.1`:
+
+```sh
+sudo pppd /dev/ttyUSB0 115200 noauth local nodetach \
+     lcp-echo-interval 5 lcp-echo-failure 4 10.65.<n>.2:10.65.<n>.1
+```
+
+When both follow the rule nothing is negotiated at all; when the host
+chooses otherwise the node takes what it is given (`accept_local`) and
+reports it, since the peer decides on a client. `addressing` is therefore
+`ipcp` in the API — assigned by the peer — and not `static`. The node does
+not take DNS servers from the peer, and offers no route: the wire reaches the
+node and nothing beyond it. `retimesh-flash ppp --port /dev/ttyUSB0` asks the
+node — the console's `LINKS` line for ppp0 names `asks=` and `peer=` and
+the speed — and prints that command with the octet filled in. pppd needs
+root on most distributions; the tool prints commands and never runs them
+with sudo. `local` is there because a USB bridge has no carrier to watch,
+and the LCP echoes because they are how the node tells a dead host from an
+idle one (below) and how pppd notices the node restarting into its
+downloader. No `persist`: the flashing tool waits for pppd to exit.
+
+**One port, one owner.** UART0 carries the log, the maintenance console and
+PPP, and a log line inside an HDLC frame is a corrupt frame. So the port has
+one owner at a time:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Console
+  Console --> Ppp: the host sends an LCP Configure-Request
+  Ppp --> Console: LCP finishes — pppd exits, PPP OFF, the node restarts
+  Ppp --> Console: no frame from the host for 30 s
+  note right of Console
+    the log prints, the console answers;
+    a 0x7E is held until it is or is not a frame
+  end note
+  note right of Ppp
+    the log is muted at its sources,
+    the console is silent, every byte is lwIP's
+  end note
+```
+
+While the console owns the port everything is as it was, except that a
+`0x7E` — the HDLC flag, `~` in ASCII, which no console command uses — is
+held back with what follows it until it is clear whether a frame is
+starting. pppd opens with an LCP Configure-Request whose first bytes are
+unmistakable once unescaped: `FF 03` (address, control), `C0 21` (LCP), `01`
+(Configure-Request). Anything else — a typed `~`, a frame of another kind, a
+candidate the port goes quiet on for half a second — is released to the
+console as it came, so the console never loses a byte to a frame that was
+not one. When a Configure-Request is recognised the port changes hands: the
+log is muted at each of its three sources (the core's `log_*` putc,
+ESP-IDF's `vprintf`, microReticulum's level, which only the rns task may
+change and does at its next pass), the console stops reading and its replies
+are dropped, the held bytes and everything after go to lwIP, and the node
+sends its own Configure-Request. The reader is one task on core 0, priority
+2, that blocks on the UART driver and on nothing else; the driver's own
+receive ring is PPP's receive ring (`PPP_RX_RING_BYTES`, 4 KB), what does not
+fit is dropped and PPP retransmits, and the radio never waits for the serial
+port. Transmit gathers each frame from the pieces lwIP hands over and writes
+it in one piece into a 4 KB queue (`PPP_TX_QUEUE_BYTES`), so nothing can land
+inside it; a frame the queue cannot take is dropped whole, on the TCP/IP task,
+without waiting.
+
+The port comes back to the console when the session ends: pppd exits (LCP
+terminates), `PPP OFF` is saved (over HTTP — the console cannot hear it), or
+the node restarts, where the restart sequencer closes the session in its
+quiesce step so that pppd exits at once instead of after its echo failures. A
+host that vanishes without a word — pppd killed, the cable pulled — is
+caught by the idle rule: no frame from it for 30 s and the node closes the
+session itself. With the echoes in the command above a live pppd sends a
+frame every five seconds whether or not there is traffic. The first line the
+log prints afterwards says why the session ended, and `USB_STATUS` reports
+`uart_owner=`, the sessions so far and the byte counts.
+
+**Speed.** `links.ppp_baud` is the speed of the whole port while `links.ppp`
+is on — the console and the log run at it too, since they share the port —
+and the console's 115200 while it is off. The default is 115200, so
+switching PPP on changes nothing a host already relies on. A faster rate is
+refused by the settings API unless the board's registry entry lists it
+(`boards.json` `uart.qualification`) and it is no higher than the rate the
+board has actually been run at (`uart.tested_max_baud`). The rule is
+`pppBaudAllowed` in `LocalLinkState.h`, once; the ladder reaches the build as
+`BOARD_UART_BAUDS` and the ceiling as `BOARD_UART_MAX_BAUD` through
+`tools/board_caps.py`, `tools/check_boards.py` keeps the registry data in the
+shape the rule expects, and `GET /api/settings` lists what passes as
+`links.ppp.bauds`, which is the list the settings page offers. Every board
+has been tried at 115200 only, so that is the one speed on offer until
+somebody raises `tested_max_baud` after trying a higher one. A change of
+speed is applied when the console next owns the port, never under a
+session, so a change saved over ppp0 does not cut off the reply that reports
+it. RTS/CTS are not driven: no board brings the bridge's lines to the chip
+(`uart.rts`/`uart.cts`), and the hooks are two pin constants at the top of
+`PppUart.cpp`.
+
+**Flashing over PPP.** The console on the port is PPP's while pppd runs, so
+the tooling asks the other way: `retimesh-flash install`, `retimesh-flash
+bootloader` and the PlatformIO upload hook notice a pppd holding the port
+(its command line in `/proc`, which is everyone's to read), find the `ppp0`
+route in the host's table, `POST /api/system/bootloader` at the far end of
+it — a directly attached link, so the request is allowed — and wait for pppd
+to exit before pointing esptool at the freed port. On the Heltec V3 the ROM
+downloader is then up on that port (`software_api`, confirmed by esptool's
+own sync). On a classic ESP32 the request answers `501`; esptool has to reset
+the chip itself and cannot while pppd holds the port, so the tool prints the
+`kill` to run and stops rather than run it. Nothing here opens a port pppd
+holds: a second opener would write into the PPP stream. After a flash the
+tool prints the pppd command that was running, to bring the link back.
+`tools/hil_ppp.py` runs the whole round on a bench, under sudo.
+
+**Not yet.** IPv6 over ppp0 (the core's lwIP has `PPP_IPV6_SUPPORT` off);
+a bridge on any UART but UART0 (`uart.instance` is carried but every board
+says 0); NetworkManager's serial connections, macOS and Windows hosts (none
+tried); and speeds above 115200, which the registry lists and the rule
+refuses until a board has been run at them.
 
 ## Tests
 
 Host (`pio test -e native`, in CI): `test_local_link` (phase machine, address
-rules, USB subnet), `test_bootloader` (plan per board, sequencer,
-touch detector), `test_maintenance` (parser, malformed and overlong lines,
-noise, line assembler, reply format). Host
+rules, the USB and PPP subnets, the PPP baud rule), `test_bootloader` (plan
+per board, sequencer, touch detector), `test_maintenance` (parser, malformed
+and overlong lines, noise, line assembler, reply format), `test_ppp_uart`
+(who owns the bridge UART: pppd's opening frame taken whole, a typed `~`
+released, other frames refused, the idle rule). Host
 tooling (`python -m unittest discover -s tools/retimesh-flash/tests`, in CI):
 port discovery and selection, the console protocol against a fake port that
-interleaves log lines, the hand-off in every outcome, HTTP probing, bounded
-waits.
+interleaves log lines, the hand-off in every outcome — including under a
+pppd that holds the port — HTTP probing, bounded waits, the routing-table
+and `/proc` readers behind the PPP flow.
 
 Bench (`.github/workflows/hil.yml`, self-hosted, dispatch only):
 `tools/hil_bootloader.py` — console, links, bootloader entry, esptool reaches
 the ROM, flash, application returns — plus the existing `tools/hil.py` radio
-checks, per board.
+checks, per board; and, run by hand under sudo on a bridged board,
+`tools/hil_ppp.py` — `PPP ON`, pppd up, `/api/status` over ppp0, the
+bootloader request over ppp0, pppd exiting as the node goes down, esptool,
+the application back, ppp0 up again.
