@@ -51,6 +51,9 @@
 #include <esp_system.h>
 #include <soc/rtc_cntl_reg.h>
 #include <soc/soc.h>
+#if HAS_USB_NCM
+  #include "esp32-hal-tinyusb.h"
+#endif
 #include "Config.h"
 #include "Diag.h"
 
@@ -70,6 +73,7 @@ Caps caps() {
   Caps c;
   c.forceDownloadBoot = HAS_FORCE_DOWNLOAD_BOOT;
   c.nativeUsb         = BOARD_USB_NATIVE;
+  c.otgStack          = HAS_USB_NCM;
   c.bridgeAutoReset   = BOARD_BRIDGE_AUTO_RESET;
   return c;
 }
@@ -85,7 +89,9 @@ static void IRAM_ATTR forceDownloadBootHandler() {
 // registration of the same function as an invalid state, which here means
 // the work is done. Nothing caches that; IDF is the record.
 static bool armDownloadBoot() {
-  #if HAS_FORCE_DOWNLOAD_BOOT
+  #if HAS_USB_NCM
+    return true;                      // restart() takes the core's path instead
+  #elif HAS_FORCE_DOWNLOAD_BOOT
     const esp_err_t err = esp_register_shutdown_handler(forceDownloadBootHandler);
     if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) return true;
     log_e("bootloader: esp_register_shutdown_handler failed (%d): the shutdown table is full", (int)err);
@@ -154,10 +160,17 @@ static void quiesce() {
 }
 
 static void restart() {
-  // The download-boot handler, if this restart wants one, was registered
-  // when the request was accepted; a restart into the application makes
-  // sure none is left over from a request that failed to arm.
-  if (sSeq.snapshot().target != Target::Bootloader) disarmDownloadBoot();
+  const Target target = sSeq.snapshot().target;
+  #if HAS_USB_NCM
+    // The core's own way into the downloader on the composite device: it
+    // registers a shutdown handler that sets the download bit, hands the
+    // USB peripheral back to the serial-JTAG unit, and restarts. Our own
+    // handler stays unarmed on this path — armDownloadBoot() defers to it.
+    if (target == Target::Bootloader) { usb_persist_restart(RESTART_BOOTLOADER); return; }
+  #endif
+  // A plain restart must not carry a download flag armed by an earlier
+  // request that was then outranked.
+  if (target != Target::Bootloader) disarmDownloadBoot();
   esp_restart();
 }
 

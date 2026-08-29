@@ -94,6 +94,19 @@ static void test_a_request_waits_out_its_delay_then_quiesces_then_restarts() {
   TEST_ASSERT_EQUAL((int)Source::Http, (int)s.snapshot().source);
 }
 
+static void test_the_composite_device_offers_software_entry_again() {
+  // The serial-JTAG unit alone hangs the chip on a software entry; with the
+  // OTG stack in charge the core hands the unit back before restarting.
+  Caps jtag;      jtag.forceDownloadBoot = true; jtag.nativeUsb = true;
+  Caps composite = jtag; composite.otgStack = true;
+  TEST_ASSERT_FALSE(canEnterAutomatically(jtag));
+  TEST_ASSERT_TRUE(canEnterAutomatically(composite));
+  TEST_ASSERT_TRUE(plan(composite).has(Method::SoftwareApi));
+  TEST_ASSERT_EQUAL((int)Method::SoftwareApi, (int)plan(composite).primary());
+  TEST_ASSERT_EQUAL_STRING("", whyNotAutomatic(composite));
+  TEST_ASSERT_TRUE(strlen(whyNotAutomatic(jtag)) > 0);
+}
+
 static void test_a_bootloader_request_outranks_a_pending_reboot() {
   Sequencer s;
   TEST_ASSERT_TRUE(s.request(Target::App, Source::Settings, 1500, 0));
@@ -205,6 +218,7 @@ int main() {
   RUN_TEST(test_manual_recovery_is_always_last_and_always_there);
   RUN_TEST(test_every_method_has_a_name_and_the_list_joins_them);
   RUN_TEST(test_a_request_waits_out_its_delay_then_quiesces_then_restarts);
+  RUN_TEST(test_the_composite_device_offers_software_entry_again);
   RUN_TEST(test_a_bootloader_request_outranks_a_pending_reboot);
   RUN_TEST(test_a_reboot_cannot_downgrade_a_pending_bootloader_entry);
   RUN_TEST(test_a_second_request_keeps_the_earlier_deadline);
