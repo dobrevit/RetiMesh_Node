@@ -71,6 +71,7 @@
 #include "Diag.h"
 #include "LocalLink.h"
 #include "Bootloader.h"
+#include "Leds.h"
 #include "Maintenance.h"
 
 NodeStats g_stats;
@@ -117,12 +118,7 @@ void setup() {
   // ever readable here.
   Diag::begin();
 
-  #if PIN_STATUS_LED >= 0
-    // Claimed and held off. No feature drives it yet, but leaving a wired pin
-    // floating invites it to do something the firmware never asked for.
-    pinMode(PIN_STATUS_LED, OUTPUT);
-    digitalWrite(PIN_STATUS_LED, LOW);
-  #endif
+  Leds::begin();                           // claimed and off until the services are up
 
   // Filesystem first — the web app and the bulletin board live here.
   if (!LittleFS.begin(true)) {
@@ -224,8 +220,10 @@ void setup() {
   // 6 KB: the panel driver and the I2C stack are deep enough that 4 KB left
   // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
   // transaction to every network page.
-  xTaskCreatePinnedToCore(Display::displayTask, "display",
-                          6144, &display, 1, nullptr, 0);
+  #if HAS_DISPLAY
+    xTaskCreatePinnedToCore(Display::displayTask, "display",
+                            6144, &display, 1, nullptr, 0);
+  #endif
 
   // The RNS task owns every call into microReticulum (Transport is
   // single-threaded): interface loops, forwarding, announces, persistence.
@@ -249,6 +247,7 @@ void loop() {
   Bootloader::tick();                      // may not return: this is where restarts happen
   Maintenance::poll();
   LocalLink::poll(millis());
+  Leds::tick(millis());
   // Every pass, not on the heartbeat: a crash 29 s after the last beat would
   // otherwise be recorded as having happened 29 s earlier, and a node stuck in
   // a restart loop would report every run as zero seconds — indistinguishable
