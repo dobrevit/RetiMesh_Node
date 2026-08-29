@@ -138,12 +138,16 @@ void WifiManager::begin() {
     // so a USB or PPP link — or WIFI ON at the console — reaches it.
     resolveNames();
     // lwIP and the netif layer have to exist for the servers below to bind,
-    // and the Wi-Fi driver is where the core normally brings them up. Asking
-    // the driver for that directly is better than the earlier trick of
-    // starting the radio in station mode and stopping it again: that paid
-    // for a driver initialisation nobody wanted, and it stops working the
-    // day the netif comes from TinyUSB rather than from Wi-Fi at all.
-    tcpipInit();
+    // and the Wi-Fi driver is where the core brings them up. The driver is
+    // started and stopped again for that — a version that called the stack
+    // initialisation on its own, and skipped the driver, overflowed the IPC
+    // task on core 1 the moment the radio attached its receive interrupt.
+    // Something the driver's start-up does leaves that task able to carry
+    // the GPIO interrupt registration it is later asked to run, and until
+    // that something is named the sequence that works is the one kept.
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    WiFi.mode(WIFI_OFF);
     log_w("Wi-Fi is switched off in settings; the access point will not start");
   }
 
