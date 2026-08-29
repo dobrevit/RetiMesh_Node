@@ -84,15 +84,17 @@ def main():
         report("bootloader: software entry refused politely, esptool's reset offered", r.method == "auto_reset_dtr_rts", r.message)
 
     port = r.port or a.port
-    rc = esptool(a.chip, port, r.esptool_before, "no_reset", "chip_id")
+    # One esptool launch here, with the reset the application needs folded
+    # in when no firmware follows; the downloader was already confirmed by
+    # the hand-off's own sync where entered is true.
+    rc = esptool(a.chip, port, r.esptool_before, "hard_reset" if not a.firmware else "no_reset", "chip_id")
     tail = (rc.stdout + rc.stderr).strip().splitlines()
     report("rom: esptool reaches the downloader", rc.returncode == 0, tail[-1] if tail else "")
 
     if a.firmware:
         rc = esptool(a.chip, port, "no_reset", "hard_reset", "write_flash", "0x10000", a.firmware, timeout=300)
         report("flash: esptool wrote the application", rc.returncode == 0)
-    else:
-        esptool(a.chip, port, "no_reset", "hard_reset", "chip_id")
+
 
     # No pause first: wait_for_application asks VERSION rather than waiting
     # for a banner, so it is bounded by the node answering, not by a guess.

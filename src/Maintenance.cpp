@@ -33,6 +33,7 @@ namespace Maintenance {
 static Stream*       sIo = nullptr;
 static LineAssembler sLines;
 static char          sOut[224];
+static unsigned      sDataLines = 0;   // data lines sent for the command in hand; the OK line reports it
 
 // Bytes read per poll. The loop task runs every 200 ms and a typed command is
 // a dozen bytes; a host script pasting a line is under a hundred. Anything
@@ -45,7 +46,7 @@ static void send(size_t n) {
   sIo->write((const uint8_t*)sOut, n < sizeof(sOut) ? n : sizeof(sOut) - 1);
   sIo->write('\n');
 }
-static void ok(const char* cmd, const char* kv = nullptr) { send(formatOk(sOut, sizeof(sOut), cmd, kv)); }
+static void ok(const char* cmd, const char* kv = nullptr) { send(formatOk(sOut, sizeof(sOut), cmd, sDataLines, kv)); }
 static void err(const char* cmd, int code, const char* text) { send(formatErr(sOut, sizeof(sOut), cmd, code, text)); }
 
 // A data line, formatted straight into the output buffer after its prefix.
@@ -54,12 +55,16 @@ static void err(const char* cmd, int code, const char* text) { send(formatErr(sO
 // diagnostics report and the restart sequence, and whose stack is the one
 // nothing in platformio.ini has enlarged.
 static void dataf(const char* cmd, const char* fmt, ...) {
-  const int head = snprintf(sOut, sizeof(sOut), REPLY_PREFIX "%s ", cmd);
+  // The line's shape comes from the protocol header — a data line with
+  // nothing after the command yet — so this file does not carry a second
+  // spelling of it.
+  const int head = (int)formatData(sOut, sizeof(sOut), cmd, "");
   if (head < 0 || (size_t)head >= sizeof(sOut)) { send(sizeof(sOut)); return; }
   va_list ap; va_start(ap, fmt);
   const int body = vsnprintf(sOut + head, sizeof(sOut) - (size_t)head, fmt, ap);
   va_end(ap);
   send((size_t)head + (body < 0 ? 0 : (size_t)body));
+  sDataLines++;
 }
 
 // --- handlers ---------------------------------------------------------------
@@ -87,9 +92,17 @@ static void doStatus() {
         (unsigned long)h.largestBlock, (unsigned long)h.freePsram);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
-  dataf("STATUS", "transport=%s tcp_clients=%lu restart_pending=%s",
+  // The armed restart, in the same words /api/status uses: what it is for,
+  // who asked, and how long until it fires.
+  const Bootloader::Pending p = Bootloader::snapshot();
+  char restart[96] = "";
+  if (p.armed())
+    snprintf(restart, sizeof(restart), " restart_target=%s restart_source=%s restart_in_ms=%lu",
+             Bootloader::targetName(p.target), Bootloader::sourceName(p.source),
+             (unsigned long)p.dueInMs(millis()));
+  dataf("STATUS", "transport=%s tcp_clients=%lu restart_pending=%s%s",
         g_stats.transportOnline ? "online" : "offline", (unsigned long)g_stats.tcpClients,
-        Bootloader::pending() ? "true" : "false");
+        p.armed() ? "true" : "false", restart);
   ok("STATUS");
 }
 
@@ -103,10 +116,12 @@ static void doUsbStatus() {
     dataf("USB_STATUS", "native=false bridge=%s uart_network=%s auto_reset=%s",
           BOARD_USB_BRIDGE, BOARD_UART_NETWORK ? "hardware" : "no", BOARD_BRIDGE_AUTO_RESET ? "yes" : "no");
   #endif
+  // Software entry is offered exactly when the plan lists it; the plan is
+  // built from the same facts the request path decides on.
+  const Bootloader::Plan p = Bootloader::plan();
   char methods[64];
   dataf("USB_STATUS", "bootloader_methods=%s software_entry=%s",
-        Bootloader::plan().names(methods, sizeof(methods)),
-        Bootloader::canEnterAutomatically() ? "yes" : "no");
+        p.names(methods, sizeof(methods)), p.has(Bootloader::Method::SoftwareApi) ? "yes" : "no");
   ok("USB_STATUS");
 }
 
@@ -137,22 +152,24 @@ static void doLinks() {
 }
 
 static void doWifi(const Request& r) {
-  // The same refusal every HTTP write gives while a restart is armed: a
-  // setting saved now might not reach flash before it.
-  if (Bootloader::pending()) { err("WIFI", 409, "a restart is already in progress"); return; }
-  LinkSettings ls = settings.links();
+  // The same rule the HTTP handler applies, in the one place it is written.
   const bool on = strcmp(r.args[0], "ON") == 0;
-  if (ls.wifiEnabled == on) { ok("WIFI", on ? "wifi=on unchanged=true" : "wifi=off unchanged=true"); return; }
-  ls.wifiEnabled = on;
-  if (!settings.saveLinks(ls)) { err("WIFI", 500, "NVS write failed"); return; }
-  // Saved either way; whether a restart follows is the manager's answer — a
-  // bootloader entry already on its way is not downgraded, and the operator
-  // is told the setting takes effect at the next boot instead.
-  const bool restarting = Bootloader::reboot(RESTART_SETTINGS_DELAY_MS, Bootloader::Source::Console);
-  char kv[64];
-  snprintf(kv, sizeof(kv), "wifi=%s restart=%s%s", on ? "on" : "off", restarting ? "true" : "false",
-           restarting ? "" : " note=applies_at_next_boot");
-  ok("WIFI", kv);
+  LinkSettings want = settings.links();
+  want.wifiEnabled = on;
+  bool changed[8] = { true };            // only the first field, wifi, is given
+  const char* detail = "";
+  char kv[96];
+  const char* state = on ? "on" : "off";
+  switch (LocalLink::applyLinks(want, changed, Bootloader::Source::Console, &detail)) {
+    case LocalLink::Apply::Unchanged:        snprintf(kv, sizeof(kv), "wifi=%s unchanged=true", state); ok("WIFI", kv); break;
+    case LocalLink::Apply::Saved:            snprintf(kv, sizeof(kv), "wifi=%s restart=false", state); ok("WIFI", kv); break;
+    case LocalLink::Apply::SavedRestarting:  snprintf(kv, sizeof(kv), "wifi=%s restart=true", state); ok("WIFI", kv); break;
+    case LocalLink::Apply::SavedNextBoot:    snprintf(kv, sizeof(kv), "wifi=%s restart=false note=applies_at_next_boot", state); ok("WIFI", kv); break;
+    case LocalLink::Apply::RefusedUnusable:  err("WIFI", 400, detail); break;
+    case LocalLink::Apply::RefusedLockedOut: err("WIFI", 400, "refused: with the serial console switched off this would leave no way to reach the node"); break;
+    case LocalLink::Apply::RefusedBusy:      err("WIFI", 409, "a restart is already in progress"); break;
+    case LocalLink::Apply::NvsFailed:        err("WIFI", 500, "NVS write failed"); break;
+  }
 }
 
 static void doRestart(const Request& r, Bootloader::Target target) {
@@ -166,10 +183,8 @@ static void doRestart(const Request& r, Bootloader::Target target) {
   const char* why = nullptr;
   // The reply has to leave before the port goes away; the same grace the
   // HTTP path gives its 202, so a host tool can wait on one figure.
-  if (!Bootloader::request(target, Bootloader::Source::Console, RESTART_ACK_DELAY_MS, &why)) {
-    err(name, target == Bootloader::Target::Bootloader && !Bootloader::canEnterAutomatically() ? 501 : 409, why);
-    return;
-  }
+  const Bootloader::Refusal r2 = Bootloader::request(target, Bootloader::Source::Console, RESTART_ACK_DELAY_MS, &why);
+  if (r2 != Bootloader::Refusal::None) { err(name, Bootloader::httpStatus(r2), why); return; }
   char kv[96];
   snprintf(kv, sizeof(kv), "target=%s method=%s delay_ms=%d", Bootloader::targetName(target),
            target == Bootloader::Target::Bootloader ? Bootloader::methodName(Bootloader::Method::SoftwareApi) : "esp_restart",
@@ -178,6 +193,13 @@ static void doRestart(const Request& r, Bootloader::Target target) {
 }
 
 static void dispatch(const char* line) {
+  sDataLines = 0;
+  // The reply begins on a fresh line. The S3's USB unit drops the last
+  // packet it was holding when the host opened the port; when that was the
+  // end of a log line, the host's buffer holds an unterminated fragment and
+  // the first reply line arrives glued to it — read as log noise, not as a
+  // reply. An empty line costs nothing and ends whatever was left hanging.
+  if (sIo) sIo->write('\n');
   Request r;
   const ParseError e = parse(line, r);
   if (e != ParseError::None) {
@@ -202,11 +224,22 @@ static void dispatch(const char* line) {
 void begin(Stream& io) {
   sIo = &io;
   sLines.reset();
-  dataf("HELLO", "firmware=\"%s\" version=%s board=\"%s\" protocol=1", FW_NAME, FW_VERSION, BOARD_NAME);
+  dataf("HELLO", "firmware=\"%s\" version=%s board=\"%s\" protocol=%d", FW_NAME, FW_VERSION, BOARD_NAME,
+        MAINT_PROTOCOL_VERSION);
 }
 
 void poll() {
-  if (!sIo || !settings.maintenance().consoleEnabled) return;
+  if (!sIo) return;
+  if (!settings.maintenance().consoleEnabled) {
+    // Off means off, not deferred. Bytes that arrive while the console is
+    // disabled are discarded rather than left in the port's buffer, where an
+    // earlier version let them sit until the console was switched back on —
+    // at which point a "BOOTLOADER CONFIRM" typed days before was executed.
+    size_t budget = kBudget;
+    while (budget-- && sIo->available() > 0) sIo->read();
+    sLines.reset();
+    return;
+  }
   size_t budget = kBudget;
   while (budget-- && sIo->available() > 0) {
     const int c = sIo->read();

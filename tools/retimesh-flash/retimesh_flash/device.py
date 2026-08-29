@@ -50,6 +50,10 @@ RETIMESH_PRODUCT = "RetiMesh Node"
 
 CONSOLE_BAUD = 115200
 REPLY_PREFIX = "RM "
+# The admin credentials the firmware ships with (ADMIN_USER / ADMIN_PASSWORD_DEFAULT
+# in the firmware). Written once here; the CLI's --password default and both
+# HTTP callers read it.
+DEFAULT_ADMIN = ("admin", "retimesh")
 
 Log = Callable[[str], None]
 
@@ -175,6 +179,7 @@ class Console:
         self.timeout = timeout
         self.device = device or getattr(ser, "port", None) or "?"
         self.clock = clock
+        self._pending = bytearray()
 
     @staticmethod
     def open(device: str, timeout: float = 2.0) -> "Console":
@@ -193,19 +198,15 @@ class Console:
         ser.dtr = True
         ser.rts = True
         ser.open()
-        # The S3's USB CDC loses the first line the node writes after a fresh
-        # open, and a pause does not change that — measured on the bench as
-        # the first line of a STATUS answer going missing on the first open
-        # of a session, with or without a delay, and never afterwards. So
-        # the session is warmed with an exchange nobody needs: HELP, read
-        # through to its OK. Whatever is lost is lost from that.
-        time.sleep(0.1)
-        con = Console(ser, timeout, device)
-        try:
-            con.command("HELP")
-        except Exception:
-            pass
-        return con
+        # Nothing is done here about the S3's habit of losing the last USB
+        # packet it held when the port was opened: the node begins every
+        # reply on a fresh line, so a log line that lost its newline cannot
+        # swallow the first reply line, and every OK line says how many data
+        # lines came before it, so command() sees a short reply and asks
+        # again. An earlier version warmed the session with a HELP nobody
+        # needed, which cost every probe of a silent port a timeout and still
+        # could not tell a whole reply from a short one.
+        return Console(ser, timeout, device)
 
     def close(self) -> None:
         try:
@@ -214,24 +215,52 @@ class Console:
             pass
 
     def _readline(self, deadline: float) -> Optional[str]:
-        buf = bytearray()
-        while self.clock() < deadline:
-            b = self.ser.read(1)
-            if not b:
+        # Whole chunks, not one byte per read: a HELP reply is several hundred
+        # bytes, and one syscall per byte with a 200 ms port timeout also let
+        # every idle line overshoot the deadline by that much. The remainder
+        # after a newline is kept for the next call.
+        while True:
+            nl = -1
+            for i, b in enumerate(self._pending):
+                if b in (0x0A, 0x0D):
+                    nl = i
+                    break
+            if nl >= 0:
+                line = bytes(self._pending[:nl]); del self._pending[:nl + 1]
+                if line:
+                    return line.decode("utf-8", "replace")
                 continue
-            if b in (b"\n", b"\r"):
-                if buf:
-                    return buf.decode("utf-8", "replace")
-                continue
-            buf += b
-            if len(buf) > 512:
-                buf.clear()
-        return None
+            if len(self._pending) > 512:
+                self._pending.clear()
+            if self.clock() >= deadline:
+                return None
+            waiting = getattr(self.ser, "in_waiting", 0) or 0
+            chunk = self.ser.read(max(1, min(waiting, 512)))
+            if chunk:
+                self._pending += chunk
 
     def command(self, line: str) -> tuple[str, dict, list[dict]]:
         """Send one command. Returns (status, kv, data_lines) where status is
-        "OK", "ERR" or "TIMEOUT"; kv are the key=value pairs of the final line
-        (for ERR: code and text); data_lines are the RM <CMD> lines before it."""
+        "OK", "ERR", "SHORT" or "TIMEOUT"; kv are the key=value pairs of the
+        final line (for ERR: code and text); data_lines are the RM <CMD> lines
+        before it.
+
+        The node's OK line says how many data lines it sent (`lines=`, taken
+        out of kv here). A reply with fewer is asked for again, once — a line
+        can still be lost to the port — and a reply short on the second try
+        is SHORT, its data handed back for what it is worth rather than passed
+        off as complete. A node that does not count (protocol 1) is taken at
+        its word."""
+        for attempt in (1, 2):
+            status, kv, data = self._exchange(line)
+            if status != "OK":
+                return status, kv, data
+            expected = kv.pop("lines", None)
+            if expected is None or not expected.isdigit() or int(expected) == len(data):
+                return status, kv, data
+        return "SHORT", kv, data
+
+    def _exchange(self, line: str) -> tuple[str, dict, list[dict]]:
         cmd = line.split()[0].upper()
         self.ser.write((line.strip() + "\n").encode())
         self.ser.flush()
@@ -327,9 +356,17 @@ def _http(url: str, body: Optional[dict] = None, auth: Optional[tuple[str, str]]
         return 0, {}
 
 
+def _doc(value) -> dict:
+    """Whatever the wire returned as an object, or nothing. A captive page or
+    another device answering the path with a list, a string or null is a
+    'not a node', not a traceback."""
+    return value if isinstance(value, dict) else {}
+
+
 def probe_http(base_url: str, timeout: float = 3.0, fetch=_http) -> Optional[NodeInfo]:
     base_url = node_url(base_url)
     code, doc = fetch(base_url + "/api/status", timeout=timeout)
+    doc = _doc(doc)
     if code != 200 or doc.get("firmware") != RETIMESH_PRODUCT:
         return None
     return NodeInfo(doc["firmware"], doc.get("version", "?"), (doc.get("power") or {}).get("board", "?"), base_url)
@@ -342,10 +379,11 @@ def _int(v, default: int) -> int:
         return default
 
 
-def request_bootloader_http(base_url: str, auth: tuple[str, str] = ("admin", "retimesh"),
+def request_bootloader_http(base_url: str, auth: tuple[str, str] = DEFAULT_ADMIN,
                             fetch=_http) -> tuple[bool, str, int]:
     """(accepted, message, delay_ms the node said it would wait)."""
     code, doc = fetch(node_url(base_url) + "/api/system/bootloader", {"confirm": "BOOTLOADER"}, auth)
+    doc = _doc(doc)
     if code == 202:
         return True, f"accepted ({doc.get('method')}, {doc.get('delay_ms')} ms)", _int(doc.get("delay_ms"), 600)
     if code == 0:
@@ -356,6 +394,23 @@ def request_bootloader_http(base_url: str, auth: tuple[str, str] = ("admin", "re
 # ---------------------------------------------------------------------------
 # esptool
 # ---------------------------------------------------------------------------
+_ESPTOOL_MAJOR: Optional[int] = None
+
+
+def esptool_major() -> int:
+    """The installed esptool's major version, for the option spelling below;
+    4 when it cannot be imported, which is the spelling PlatformIO's bundled
+    copy uses. Looked up once: opt() runs for every argument."""
+    global _ESPTOOL_MAJOR
+    if _ESPTOOL_MAJOR is None:
+        try:
+            import esptool
+            _ESPTOOL_MAJOR = int(esptool.__version__.split(".")[0])
+        except Exception:
+            _ESPTOOL_MAJOR = 4
+    return _ESPTOOL_MAJOR
+
+
 def opt(name: str) -> str:
     """esptool >= 5 spells options and commands with dashes; 4.x only
     accepts underscores. Emit whichever the installed version wants."""
@@ -428,7 +483,7 @@ def wait_for_port(predicate: Callable[[list[Port]], Optional[Port]], timeout: fl
 
 
 def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[str] = None,
-                           auth: tuple[str, str] = ("admin", "retimesh"), log: Log = _quiet,
+                           auth: tuple[str, str] = DEFAULT_ADMIN, log: Log = _quiet,
                            ports_fn=list_ports, probe=probe_console, open_console=Console.open,
                            request_http=request_bootloader_http, probe_rom=None,
                            esptool_cmd: Optional[list[str]] = None,
@@ -445,8 +500,14 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
     ports = ports_fn()
     chosen = select_port(ports, device=port)
     if port and chosen is None:
-        return HandOff(False, "none", port, f"{port} is not present; nothing to hand off")
-    if chosen is None:
+        # The named port is not there — mid-re-enumeration, or a by-id link
+        # that is momentarily gone. That is no reason to skip the HTTP path,
+        # which is precisely the one that does not need the port; an earlier
+        # version gave up here with RETIMESH_NODE_URL unread.
+        if not node_url_text:
+            return HandOff(False, "none", port, f"{port} is not present; nothing to hand off")
+        log(f"{port} is not present; trying HTTP")
+    elif chosen is None:
         eligible = esp_candidates(ports)
         if len(eligible) > 1:
             return HandOff(False, "none", None, ambiguous_ports_message(ports, port_hint))
@@ -497,7 +558,12 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
             if target:
                 return _await_downloader(target, "http", log, ports_fn, probe, probe_rom, sleep, clock,
                                          reappear_timeout, delay_ms=delay_ms)
-            return HandOff(True, "http", None, "downloader requested but no serial port appeared")
+            # Requested, but nothing to point esptool at: not "entered". The
+            # field promises a port the downloader is known to be up on, and
+            # the hook turns it into no_reset for whatever port PlatformIO
+            # finds next — a promise nobody checked.
+            return HandOff(False, "http", None, "downloader requested but no serial port appeared; "
+                           "hold BOOT, press RST, then retry")
 
     # 3. Nothing worked, or nothing needed to: esptool resets what it can.
     if chosen and chosen.auto_reset:
@@ -535,25 +601,25 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
     On a bridge, whose port belongs to the bridge and never moves, those two
     questions are the whole test."""
     window = delay_ms / 1000.0 + _RESTART_SLACK_S
+    gone = None
     if port.kind == "usb_serial_jtag":
         log(f"watching {port.device} for the reset")
         gone = wait_for_port(lambda ps: None if select_port(ps, device=port.device) else port,
                              window, ports_fn, sleep, clock, interval=0.1)
-        if gone is None:
-            if probe(port.device, timeout=1.0):
-                return HandOff(False, "auto_reset_dtr_rts", port.device,
-                               "the console still answers after the request, so the node did not reset; "
-                               "leaving the reset to esptool")
-            log("the reset gap was not seen and the console is silent; asking esptool")
-            return _confirm_downloader(port.device, method, log, probe_rom)
-        log(f"{port.device} went away; waiting for it to come back")
     else:
         sleep(window)
+    if gone is None:
+        # No drop seen — normal on a bridge, and on the S3 the usual case
+        # after a software reset. The console decides: a running application
+        # answers, a downloader does not.
         log(f"checking that the console on {port.device} has gone quiet")
         if probe(port.device, timeout=1.0):
             return HandOff(False, "auto_reset_dtr_rts", port.device,
                            "the console still answers after the request, so the node did not reset; "
                            "leaving the reset to esptool")
+        log("the console is silent; asking esptool")
+        return _confirm_downloader(port.device, method, log, probe_rom)
+    log(f"{port.device} went away; waiting for it to come back")
     back = wait_for_port(lambda ps: select_port(ps, device=port.device), timeout, ports_fn, sleep, clock)
     if back is None:
         # It may have come back under a new name (ttyACM0 -> ttyACM1 on a
@@ -592,21 +658,19 @@ def wait_for_application(port: Optional[str], timeout: float, log: Log = _quiet,
     whenever the application is up, whoever missed what.
 
     `port` is a hint. The application may come back under a different name
-    from the downloader (ttyACM1 -> ttyACM0 once the busy host lets go), so a
-    single ESP-looking port is accepted when the named one is absent."""
+    from the downloader (ttyACM1 -> ttyACM0 once the busy host lets go), and
+    with no hint at all there may be several ESP-looking ports; every
+    candidate is asked, since VERSION is what tells a node from the rest."""
     deadline = clock() + timeout
-    announced = None
+    announced = set()
     while clock() < deadline:
         ports = ports_fn()
-        target = select_port(ports, device=port) if port else None
-        if target is None:
-            candidates = esp_candidates(ports)
-            if len(candidates) == 1:
-                target = candidates[0]
-        if target:
-            if target.device != announced:
+        named = select_port(ports, device=port) if port else None
+        targets = [named] if named else esp_candidates(ports)
+        for target in targets:
+            if target.device not in announced:
                 log(f"asking VERSION on {target.device}")
-                announced = target.device
+                announced.add(target.device)
             info = probe(target.device, timeout=1.5)
             if info:
                 return info

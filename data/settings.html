@@ -206,14 +206,7 @@
     <div class="note">The ways a computer or phone reaches this node directly. Every service &mdash; this page, the API, Reticulum TCP on
       :4242 &mdash; answers on whichever of them is up; LoRa is not one of them and never carries IP. A switch that is greyed out names
       the reason: the board lacks the hardware, or this firmware build has no driver for it.</div>
-    <div class="row">
-      <div id="wifiField"><label>Wi-Fi (access point &amp; station) <span class="hint" id="wifiHint"></span></label>
-        <select name="wifi"><option value="1">On</option><option value="0">Off &mdash; USB/PPP or the serial console only</option></select></div>
-      <div id="usbField"><label>USB networking (CDC-NCM) <span class="hint" id="usbHint"></span></label>
-        <select name="usb"><option value="1">On</option><option value="0">Off</option></select></div>
-      <div id="pppField"><label>PPP over the serial bridge <span class="hint" id="pppHint"></span></label>
-        <select name="ppp"><option value="1">On</option><option value="0">Off</option></select></div>
-    </div>
+    <div class="row" id="linkFields"></div>
     <div id="linksStatus" class="note"></div>
     <button type="submit">Save links</button>
     <div class="msg" id="linksMsg"></div>
@@ -405,19 +398,30 @@ async function load() {
   }
   // Local links: the switch is shown for what the board has; whether it can be
   // turned on is the node's answer, with its reason, not the page's guess.
-  // The element ids follow the key, so every link is handled the same way
-  // and a fourth one needs a div, not a new call shape.
-  const lk = cfg.links || {};
-  const linkSel = key => {
-    const l = lk[key]; const f = $("linksForm").elements[key];
-    const field = $(key + "Field"), hint = $(key + "Hint");
-    if (!l) { field.hidden = true; return; }
-    f.value = l.enabled ? "1" : "0";
-    if (!l.supported) { f.disabled = true; f.value = "0"; }
-    hint.textContent = l.supported ? "" : (l.hardware ? "— not in this build" : "— not on this board");
-    if (!l.hardware) field.title = l.reason || "";
+  // The switches are drawn from what the node reports, so a link the
+  // firmware learns to offer appears here without an edit. The only thing
+  // this page adds is the human wording for each key.
+  const LINK_LABELS = {
+    wifi: ["Wi-Fi (access point & station)", "Off — USB/PPP or the serial console only"],
+    usb:  ["USB networking (CDC-NCM)", "Off"],
+    ppp:  ["PPP over the serial bridge", "Off"],
   };
-  ["wifi", "usb", "ppp"].forEach(linkSel);
+  const lk = cfg.links || {};
+  const fields = $("linkFields"); fields.replaceChildren();
+  for (const [key, l] of Object.entries(lk)) {
+    const [label, offText] = LINK_LABELS[key] || [key, "Off"];
+    const div = document.createElement("div");
+    const lab = document.createElement("label"); lab.textContent = label + " ";
+    const hint = document.createElement("span"); hint.className = "hint";
+    hint.textContent = l.supported ? "" : (l.hardware ? "— not in this build" : "— not on this board");
+    lab.appendChild(hint);
+    const sel = document.createElement("select"); sel.name = key;
+    for (const [v, t] of [["1", "On"], ["0", offText]]) { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.appendChild(o); }
+    sel.value = l.enabled ? "1" : "0";
+    if (!l.supported) { sel.disabled = true; sel.value = "0"; }
+    if (!l.hardware) div.title = l.reason || "";
+    div.append(lab, sel); fields.appendChild(div);
+  }
   const reasons = ["usb", "ppp"].filter(k => lk[k] && !lk[k].supported && lk[k].hardware).map(k => k + ": " + lk[k].reason);
   $("linksStatus").textContent = reasons.length ? reasons.join(" · ") : "";
 
@@ -494,11 +498,10 @@ $("adminForm").addEventListener("submit", async ev => {
 
 $("linksForm").addEventListener("submit", async ev => {
   ev.preventDefault();
-  const f = ev.target.elements;
-  const body = { wifi: f.wifi.value === "1" };
-  if (!f.usb.disabled && !$("usbField").hidden) body.usb = f.usb.value === "1";
-  if (!f.ppp.disabled && !$("pppField").hidden) body.ppp = f.ppp.value === "1";
-  if (!body.wifi && !confirm("Turn Wi-Fi off? The access point and this page go away until it is turned back on over USB, PPP or the serial console (WIFI ON).")) return;
+  const body = {};
+  for (const sel of ev.target.querySelectorAll("#linkFields select"))
+    if (!sel.disabled) body[sel.name] = sel.value === "1";
+  if (body.wifi === false && !confirm("Turn Wi-Fi off? The access point and this page go away until it is turned back on over USB, PPP or the serial console (WIFI ON).")) return;
   try {
     const r = await api("/api/settings/links", body);
     setMsg("linksMsg", (r.restart ? "Saved. Restarting… " : "Saved. ") + (r.note || ""), r.restart ? "warn" : "ok");

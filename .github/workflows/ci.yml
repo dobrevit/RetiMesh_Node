@@ -56,5 +56,7 @@ jobs:
         run: cd tools/retimesh-flash && python -m unittest discover -s tests -t . -v
       - name: boards.json local_link blocks are complete
         run: python tools/check_boards.py
+      - name: docs/hardware.md board matrix matches boards.json
+        run: python tools/board_docs.py --check
       - name: bump_deps dry run
         run: python tools/bump_deps.py --dry-run

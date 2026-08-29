@@ -1,10 +1,15 @@
 {
-  "_comment": "Single source of truth for release packaging, the web flasher and the CLI. Keys are PlatformIO env names.",
+  "_comment": "Single source of truth for release packaging, the web flasher and the CLI. Keys are PlatformIO env names. mcu/radio/display/extras/status are what the board matrix in docs/hardware.md shows; tools/board_docs.py renders it from here.",
   "_local_link": "Per-board host connectivity, read by tools/board_caps.py into BOARD_* build flags and by the settings API. usb.native = the MCU's own D+/D- reach the connector; usb.ncm/cdc_acm = the silicon could present those classes there (whether this firmware build does is LOCAL_LINK_USB_NCM); usb.auto_reset_dtr_rts = esptool can reset the chip through this port without BOOT being held; uart.network = the UART behind the bridge may carry PPP (LOCAL_LINK_PPP says whether the build does); uart.tested_max_baud = the highest rate qualified on hardware, rts/cts = flow-control lines the bridge exposes to the chip.",
   "t3s3": {
     "name": "LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78)",
     "chip": "esp32s3",
     "chip_family": "ESP32-S3",
+    "mcu": "ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM",
+    "radio": "SX1276/78 **or** SX1262 — detected at boot",
+    "display": "0.96\" SSD1306 (I²C)",
+    "extras": "microSD, battery ADC",
+    "status": "verified (SX1276), SX1262 expected",
     "notes": "0.96\" OLED, 4 MB flash, 2 MB PSRAM. The transceiver (SX1262 or SX1276/78) is detected at boot. Native USB — hold BOOT while pressing RST if the port is not detected.",
     "local_link": {
       "usb": {
@@ -26,6 +31,11 @@
     "name": "Generic ESP32-S3 DevKitC-1 + SX1262 module",
     "chip": "esp32s3",
     "chip_family": "ESP32-S3",
+    "mcu": "ESP32-S3: 8 MB flash, quad PSRAM",
+    "radio": "SX1262",
+    "display": "optional SSD1306",
+    "extras": "—",
+    "status": "builds; wire per flags",
     "notes": "8 MB flash, quad PSRAM. Wire the SX1262 as documented in platformio.ini (PIN_LORA_* overrides).",
     "local_link": {
       "usb": {
@@ -47,6 +57,11 @@
     "name": "LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262)",
     "chip": "esp32",
     "chip_family": "ESP32",
+    "mcu": "ESP32: 4 MB flash, no PSRAM",
+    "radio": "SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot",
+    "display": "0.96\" SSD1306 (I²C)",
+    "extras": "18650 holder, AXP192/AXP2101 PMU, u-blox GPS; **no SD slot**",
+    "status": "verified on hardware — see the T-Beam notes below",
     "notes": "18650 holder, AXP192/AXP2101 power management, u-blox GPS, 0.96\" OLED, no SD card slot. The transceiver and the PMU revision are both detected at boot. Serial is a CH9102 bridge — hold the middle button while pressing RST if flashing does not start.",
     "local_link": {
       "usb": {
@@ -79,6 +94,11 @@
     "name": "LilyGO T3-S3 with SX1280 (2.4 GHz)",
     "chip": "esp32s3",
     "chip_family": "ESP32-S3",
+    "mcu": "ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM",
+    "radio": "SX1280",
+    "display": "0.96\" SSD1306",
+    "extras": "microSD, battery ADC",
+    "status": "verified on hardware",
     "notes": "0.96\" OLED, SD slot, 4 MB flash. The plain SX1280 module: no power amplifier, so the chip's 13 dBm ceiling applies. The amplified variant is a different image — see t3s3-sx1280-pa. The radio is selected at build time rather than detected, so neither is interchangeable with the sub-GHz t3s3 build. Defaults to 2445 MHz / 812.5 kHz / SF8.",
     "local_link": {
       "usb": {
@@ -100,6 +120,11 @@
     "name": "LilyGO T3-S3 with SX1280 + PA (2.4 GHz)",
     "chip": "esp32s3",
     "chip_family": "ESP32-S3",
+    "mcu": "ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM",
+    "radio": "SX1280 + PA",
+    "display": "0.96\" SSD1306",
+    "extras": "microSD, battery ADC",
+    "status": "**builds only — never run on hardware**, see below",
     "notes": "As t3s3-sx1280, but for the amplified module: the PA sits behind an RX/TX switch on GPIO 21/10 and the ceiling rises to 20 dBm. Flashing this image on a plain board would drive two GPIOs that board uses for something else, so pick by what is actually fitted.",
     "local_link": {
       "usb": {
@@ -121,6 +146,11 @@
     "name": "Heltec Wireless Stick V2/V2.1",
     "chip": "esp32",
     "chip_family": "ESP32",
+    "mcu": "ESP32: 8 MB flash",
+    "radio": "SX1276",
+    "display": "0.49\" 64x32 SSD1306 on Vext",
+    "extras": "— (no SD, no GNSS)",
+    "status": "verified on hardware",
     "notes": "0.49\" 64x32 OLED on the switched Vext rail, SX1276, 8 MB flash, no SD slot and no GNSS. The small panel gets its own page layout — ten columns and four rows — rather than the 128x64 one clipped. Serial is a CP2102 bridge, and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. Uses the 8 MB partition table for the same reason the V3 does: no SD card, so the filesystem is the only storage the transport store has.",
     "local_link": {
       "usb": {
@@ -153,6 +183,11 @@
     "name": "Heltec WiFi LoRa 32 V3",
     "chip": "esp32s3",
     "chip_family": "ESP32-S3",
+    "mcu": "ESP32-S3: 8 MB flash, no PSRAM",
+    "radio": "SX1262 (TCXO, DIO2 drives the RF switch)",
+    "display": "0.96\" SSD1306 on the switched Vext rail",
+    "extras": "— (no SD, no GNSS)",
+    "status": "verified on hardware",
     "notes": "0.96\" 128x64 OLED on the switched Vext rail, SX1262 with a TCXO, 8 MB flash and no PSRAM, no SD slot and no GNSS. Very common hardware. A CP2102 bridge rather than the S3's native USB, so it appears as /dev/ttyUSB* and not as an Espressif JTAG device — and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. Uses an 8 MB partition table: the stock one maps only the first 4 MB, and with no SD card the filesystem is the only storage the transport store has.",
     "local_link": {
       "usb": {

@@ -491,7 +491,7 @@ void Display::paintStatus() {
   // and with Wi-Fi off there is none to give: say that, rather than print a
   // number nobody can reach.
   _oled.setCursor(0, DisplayLayout::rowY(0));
-  snprintf(line, sizeof(line), "%s  %s", wifiManager.wifiEnabled() ? "10.42.0.1" : "wifi off", FW_VERSION);
+  snprintf(line, sizeof(line), "%s  %s", wifiManager.wifiEnabled() ? AP_IP.toString().c_str() : "wifi off", FW_VERSION);
   _oled.print(line);
 
   // Row 2 — radio model + channel
@@ -821,7 +821,7 @@ void Display::paintNetwork() {
              (unsigned)g_stats.tcpClients);
     _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(l);
     _oled.setCursor(0, DisplayLayout::rowY(3));
-    _oled.print(wifiManager.stationConnected() ? WiFi.localIP().toString().c_str() : "10.42.0.1");
+    _oled.print((wifiManager.stationConnected() ? WiFi.localIP() : AP_IP).toString().c_str());
     return;
   }
   char line[24];

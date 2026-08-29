@@ -1,15 +1,18 @@
 # Hardware
 
 ## Supported boards
-| Env | Board | Radio | Display | Extras | Status |
-|---|---|---|---|---|---|
-| `t3s3` | LilyGO T3-S3 v1.2/v1.3 (ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM) | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
-| `tbeam` | LilyGO T-Beam v1.1/v1.2 (ESP32, 4 MB flash, no PSRAM) | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS; **no SD slot** | see below |
-| `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
-| `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
-| `heltec-v3` | Heltec WiFi LoRa 32 V3 (ESP32-S3, 8 MB flash, no PSRAM) | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | — (no SD, no GNSS) | verified on hardware |
-| `heltec-ws` | Heltec Wireless Stick V2/V2.1 (ESP32, 8 MB flash) | SX1276 | 0.49" 64x32 SSD1306 on Vext | — (no SD, no GNSS) | verified on hardware |
-| `esp32s3-qspi` | ESP32-S3 DevKitC-1 (8 MB) + SX1262 module | SX1262 | optional SSD1306 | — | builds; wire per flags |
+<!-- boards.json:begin -->
+<!-- Rendered by tools/board_docs.py from boards.json. Edit the registry, not this table. -->
+| Env | Board | MCU | Radio | Display | Extras | Status |
+|---|---|---|---|---|---|---|
+| `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
+| `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
+| `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, no PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS; **no SD slot** | verified on hardware — see the T-Beam notes below |
+| `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
+| `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
+| `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | — (no SD, no GNSS) | verified on hardware |
+| `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | — (no SD, no GNSS) | verified on hardware |
+<!-- boards.json:end -->
 
 Both Heltec boards use `partitions/huge_app_8mb.csv` rather than the stock
 table, which maps only the first 4 MB of an 8 MB part. Neither has an SD slot,
@@ -187,7 +190,8 @@ performs; and BOOT + RST recovers any of them.
    is on the USB connector (`usb.native` or `usb.bridge`), whether the bridge's
    DTR/RTS reset the chip, whether the UART may carry PPP and the highest baud
    qualified. `tools/board_caps.py` turns it into `BOARD_*` flags at build time
-   and `tools/check_boards.py` (CI) refuses a board without one or one that
+   and `tools/check_boards.py` (CI) refuses a board without one, one whose
+   connector facts contradict its chip, or one that
    contradicts the framework's USB flags in `platformio.ini`. Drives CI,
    release packaging, the web flasher and the CLI.
 5. Workflow matrices in `.github/workflows/ci.yml` and `release.yml`.

@@ -27,7 +27,7 @@ import zipfile
 from pathlib import Path
 
 from . import device as dev
-from .device import esptool_args, opt  # noqa: F401  (one builder, one esptool 4/5 spelling rule)
+from .device import DEFAULT_ADMIN, esptool_args, esptool_major, opt  # noqa: F401
 
 DEFAULT_REPO = os.environ.get("RETIMESH_REPO", "dobrevit/RetiMesh_Node")
 
@@ -97,14 +97,6 @@ def esp_ports(show_all: bool = False) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 # Flashing
 # ---------------------------------------------------------------------------
-def esptool_major() -> int:
-    try:
-        import esptool
-        return int(esptool.__version__.split(".")[0])
-    except Exception:
-        return 4
-
-
 
 def esptool(args: list[str]) -> None:
     cmd = [sys.executable, "-m", "esptool", *args]
@@ -181,14 +173,14 @@ def cmd_devices(args):
         # The name is tried only if the address did not answer: resolving
         # retimesh.local on a host with no mDNS resolver can stall for longer
         # than the whole probe, and it can only find the same node.
-        urls = ["http://10.42.0.1"]
-        if not dev.probe_http(urls[0], timeout=2.0):
-            urls = ["http://retimesh.local"]
+        urls = ["http://10.42.0.1", "http://retimesh.local"]
     for url in urls:
         info = dev.probe_http(url, timeout=2.0)
         if info:
             print(f"  {info}")
             found += 1
+            if not args.ip:
+                break                      # the name can only find the same node again
     if not found:
         print("No RetiMesh node answered. Connected over Wi-Fi? Try --ip <address>. On a serial port, "
               "the console needs firmware with the maintenance console (v0.2 or later).")
@@ -197,7 +189,7 @@ def cmd_devices(args):
 def cmd_bootloader(args):
     """Put one node into its ROM downloader and say where esptool should point."""
     if args.ip:
-        ok, msg, _ = dev.request_bootloader_http(dev.node_url(args.ip), ("admin", args.password))
+        ok, msg, _ = dev.request_bootloader_http(dev.node_url(args.ip), (DEFAULT_ADMIN[0], args.password))
         print(("Requested: " if ok else "Refused: ") + msg)
         sys.exit(0 if ok else 1)
     ports = dev.list_ports()
@@ -297,7 +289,7 @@ def main(argv=None):
     p.add_argument("--port", help="serial port of the node")
     p.add_argument("--serial", help="USB serial number of the node's port")
     p.add_argument("--ip", help="node URL/address: ask over HTTP instead of the console")
-    p.add_argument("--password", default="retimesh", help="admin password for the HTTP path")
+    p.add_argument("--password", default=DEFAULT_ADMIN[1], help="admin password for the HTTP path")
     p.set_defaults(func=cmd_bootloader)
 
     p = sub.add_parser("install", help="download and flash")

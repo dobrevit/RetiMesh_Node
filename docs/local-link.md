@@ -48,7 +48,7 @@ packager and the flasher never disagree about it.
 
 | Env | MCU | On the USB connector | Bootloader methods, best first | IP local links |
 |---|---|---|---|---|
-| `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi` | ESP32-S3 | the chip's own USB (D+/D− routed): USB-Serial/JTAG today, OTG capable | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; **usb0 hardware-capable, not in this build** |
+| `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi` | ESP32-S3 | the chip's own USB (D+/D− routed): USB-Serial/JTAG today, OTG capable | `auto_reset_dtr_rts`, `manual_recovery` (no software entry: see below) | wifi-ap, wifi-sta; **usb0 hardware-capable, not in this build** |
 | `heltec-v3` | ESP32-S3 | CP2102 bridge on UART0 (the S3's own USB is not on the connector) | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; **ppp0 hardware-capable, not in this build** |
 | `heltec-ws` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; ppp0 as above |
 | `tbeam` | ESP32 | CH9102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; ppp0 as above |
@@ -77,13 +77,13 @@ host-tested.
 $ python -m serial.tools.miniterm /dev/ttyACM0 115200
 VERSION
 RM VERSION firmware="RetiMesh Node" version=v0.2.0 board="LilyGO T3-S3" idf=v4.4.7 assets=1a2b3c4d5e6f7a8b
-RM OK VERSION
+RM OK VERSION lines=1
 NETWORK_STATUS
 RM NETWORK_STATUS link=wifi-ap type=wifi_ap phase=ready ip=10.42.0.1 addressing=static uptime_s=812 clients=1
 RM NETWORK_STATUS link=wifi-sta type=wifi_sta phase=disabled ip=- addressing=none uptime_s=0
 RM NETWORK_STATUS link=usb0 type=usb_ncm phase=disabled ip=- addressing=none uptime_s=0
 RM NETWORK_STATUS link=ppp0 type=ppp_uart phase=disabled ip=- addressing=none uptime_s=0
-RM OK NETWORK_STATUS
+RM OK NETWORK_STATUS lines=4
 BOOTLOADER
 RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 ```
@@ -92,7 +92,7 @@ RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 |---|---|
 | `HELP` | one `RM HELP cmd=… help="…"` line per command |
 | `VERSION` | firmware, version, board, IDF, asset stamp |
-| `STATUS` | uptime, boot count, reset reason, heap, radio, transport, whether a restart is pending |
+| `STATUS` | uptime, boot count, reset reason, heap, radio, transport, whether a restart is pending — and when one is, its target, who asked (`restart_source`) and `restart_in_ms` |
 | `USB_STATUS` | how the host is attached, the bootloader methods this board offers |
 | `NETWORK_STATUS` | one line per local link |
 | `LINKS` | per link: hardware / firmware / enabled, and the reason when it cannot run |
@@ -100,15 +100,29 @@ RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 | `RESET CONFIRM` | restart into the application |
 | `BOOTLOADER CONFIRM` | restart into the ROM downloader (`501` on a classic ESP32, which cannot) |
 
+Every reply begins on a fresh line — an empty one, which readers skip — and
+every `RM OK <CMD>` line begins with `lines=<n>`, the number of data lines
+that came before it, so a reader can tell a whole reply from one with a line
+missing. Both exist for the S3's USB unit, which drops the last packet it was
+holding when the host opened the port: when that was the end of a log line,
+the first reply line used to arrive glued to the unterminated fragment and be
+read as log noise. The empty line ends the fragment; the count lets the host
+tool see a reply fall short, ask once more, and report one that is still
+short as `SHORT` rather than pass it off as complete. Command-specific pairs
+follow the count on the same line. The `HELLO` banner the node prints when
+the console starts says `protocol=2`; protocol 1 had neither.
+
 Errors are `RM ERR <CMD> <code> <text>` with HTTP-style codes (400, 404, 409,
-501). Lines longer than 96 bytes are dropped whole and answered with a 400 —
+501); an error never carries data lines. Lines longer than 96 bytes are dropped whole and answered with a 400 —
 never truncated into something shorter that might parse. Bytes outside
 printable ASCII make a line unusable, so bridge noise at the wrong baud is not
 a command. The console can be switched off (`maintenance.console_enabled`);
 the log keeps flowing either way.
 
 On the S3's USB-Serial/JTAG port, opening the console does not reset the node:
-the tooling opens it with DTR and RTS left low. A terminal program that
+the tooling opens it with DTR and RTS both asserted, which is the running
+state on every board here — both lines high is what the kernel sets on open,
+and asking for either low passes through the reset handshake. A terminal program that
 asserts them will reset it, which is the same as it always was.
 
 ## The bootloader manager
@@ -339,7 +353,7 @@ MAC, so two nodes on one computer land on two subnets without anyone typing
 anything. The static fallback (`10.64.<n>.2` for the host) is there for a
 network manager that does not ask. IPv4 link-local alone was rejected because
 phones and older managers get the probe wrong often enough that a fixed
-address beside it is worth having. `LocalLink::usbSubnetFor()` is the rule,
+address beside it is worth having. That rule lands with the NCM driver,
 tested.
 
 **Logging.** With the OTG stack owning the USB peripheral the fixed
@@ -411,7 +425,7 @@ as `PppLink` in the same registry, the same `0.0.0.0` services on top.
 Host (`pio test -e native`, in CI): `test_local_link` (phase machine, address
 rules, USB subnet), `test_bootloader` (plan per board, sequencer,
 touch detector), `test_maintenance` (parser, malformed and overlong lines,
-noise, line assembler, reply format), `test_usb_plan` (endpoint budget). Host
+noise, line assembler, reply format). Host
 tooling (`python -m unittest discover -s tools/retimesh-flash/tests`, in CI):
 port discovery and selection, the console protocol against a fake port that
 interleaves log lines, the hand-off in every outcome, HTTP probing, bounded

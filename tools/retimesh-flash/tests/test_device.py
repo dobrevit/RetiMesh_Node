@@ -9,9 +9,9 @@ import unittest
 from types import SimpleNamespace
 
 from retimesh_flash import device
-from retimesh_flash.device import (Console, HandOff, Port, esp_candidates, hand_off_to_bootloader, list_ports,
-                                   node_url, parse_kv, probe_http, request_bootloader_http, select_port,
-                                   wait_for_application)
+from retimesh_flash.device import (Console, HandOff, Port, esp_candidates, esptool_args, hand_off_to_bootloader,
+                                   list_ports, node_url, parse_kv, probe_http, request_bootloader_http,
+                                   select_port, wait_for_application)
 
 
 def fake_comport(dev, vid=None, pid=None, serial=None, product=None, location=None):
@@ -29,13 +29,24 @@ FT2232 = fake_comport("/dev/ttyUSB2", 0x0403, 0x6010, "AB12", "FT2232H Dual UART
 class FakeSerial:
     """Answers like the firmware's Maintenance.cpp, log lines included."""
 
-    def __init__(self, board="LilyGO T3-S3", software_entry=True, silent=False):
+    def __init__(self, board="LilyGO T3-S3", software_entry=True, silent=False,
+                 drop_first=False, drop_always=False, counts=True):
         self.board = board
         self.software_entry = software_entry
         self.silent = silent
+        # The S3's habit: the first RM line after open goes missing. drop_always
+        # is a port that never delivers a whole reply; counts=False is a node on
+        # protocol 1, before OK lines carried the count.
+        self.drop_first = drop_first
+        self.drop_always = drop_always
+        self.counts = counts
         self.out = bytearray()
         self.sent = []
         self.dtr = self.rts = None
+
+    def _ok(self, cmd, lines, kv=""):
+        count = f" lines={lines}" if self.counts else ""
+        return f"RM OK {cmd}{count}{' ' + kv if kv else ''}"
 
     def write(self, data):
         self.sent.append(data.decode())
@@ -45,16 +56,20 @@ class FakeSerial:
         reply = ["[I][main.cpp:200] heartbeat line that shares the port"]
         if line == "VERSION":
             reply += [f'RM VERSION firmware="RetiMesh Node" version=v0.2.0 board="{self.board}" idf=v4.4.7',
-                      "RM OK VERSION"]
+                      self._ok("VERSION", 1)]
         elif line == "BOOTLOADER CONFIRM":
             if self.software_entry:
-                reply += ["RM OK BOOTLOADER target=bootloader method=software_api delay_ms=300"]
+                reply += [self._ok("BOOTLOADER", 0, "target=bootloader method=software_api delay_ms=300")]
             else:
                 reply += ["RM ERR BOOTLOADER 501 this chip cannot enter its downloader from software"]
         elif line == "BOOTLOADER":
             reply += ["RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM"]
         else:
             reply += [f"RM ERR {line.split()[0]} 404 unknown command, try HELP"]
+        if self.drop_first or self.drop_always:
+            first = next(i for i, l in enumerate(reply) if l.startswith("RM "))
+            del reply[first]
+            self.drop_first = False
         self.out += ("\n".join(reply) + "\n").encode()
 
     def flush(self):
@@ -141,6 +156,27 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(status, "OK")
         self.assertEqual(data[0]["firmware"], "RetiMesh Node")
         self.assertEqual(data[0]["board"], "LilyGO T3-S3")
+
+    def test_a_reply_missing_a_line_is_asked_for_again(self):
+        # The S3 loses the first line after open. The count on the OK line
+        # shows the loss, and the command goes out a second time.
+        ser = FakeSerial(drop_first=True)
+        status, kv, data = Console(ser, timeout=1.0).command("VERSION")
+        self.assertEqual((status, data[0]["board"]), ("OK", "LilyGO T3-S3"))
+        self.assertEqual(ser.sent.count("VERSION\n"), 2)
+        self.assertNotIn("lines", kv)
+
+    def test_a_reply_that_stays_short_is_reported_not_trusted(self):
+        ser = FakeSerial(drop_always=True)
+        status, _, data = Console(ser, timeout=1.0).command("VERSION")
+        self.assertEqual((status, data), ("SHORT", []))
+        self.assertEqual(ser.sent.count("VERSION\n"), 2)     # once more, not forever
+
+    def test_a_node_that_does_not_count_is_taken_at_its_word(self):
+        ser = FakeSerial(counts=False)
+        status, _, data = Console(ser, timeout=1.0).command("VERSION")
+        self.assertEqual((status, len(data)), ("OK", 1))
+        self.assertEqual(ser.sent.count("VERSION\n"), 1)
 
     def test_error_replies_carry_code_and_text(self):
         con = Console(FakeSerial(), timeout=1.0)
@@ -348,6 +384,14 @@ class HttpTest(unittest.TestCase):
         fetch = lambda url, body=None, auth=None, timeout=3.0: (200, {"firmware": "Something Else"})
         self.assertIsNone(probe_http("http://10.42.0.1", fetch=fetch))
 
+    def test_a_body_that_is_not_an_object_is_not_a_node(self):
+        # A captive page or another device answering the path with null, a
+        # list or a string must read as "no node", not as a traceback.
+        for body in (None, [], "text", 42):
+            fetch = lambda url, b=None, auth=None, timeout=3.0, body=body: (200, body)
+            self.assertIsNone(probe_http("http://10.42.0.1", fetch=fetch))
+            self.assertFalse(request_bootloader_http("http://x", fetch=fetch)[0])
+
     def test_bootloader_request_outcomes(self):
         ok = lambda url, body=None, auth=None, timeout=3.0: (202, {"method": "software_api", "delay_ms": 600})
         self.assertEqual(request_bootloader_http("http://x", fetch=ok)[0], True)
@@ -356,6 +400,43 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(request_bootloader_http("http://x", fetch=refused), (False, "HTTP 403: switched off", 0))
         dead = lambda url, body=None, auth=None, timeout=3.0: (0, {})
         self.assertEqual(request_bootloader_http("http://x", fetch=dead)[1], "no HTTP answer")
+
+
+class EsptoolTest(unittest.TestCase):
+    def test_the_argument_builder_runs_at_all(self):
+        # The helper it needs once lived in another module; this call raised
+        # NameError in every real invocation while the tests, which inject the
+        # downloader check, stayed green.
+        args = esptool_args("esp32s3", "/dev/ttyACM0", "no_reset", "hard_reset", "write_flash", "0x0", "fw.bin", baud=921600)
+        self.assertEqual(args[:4], ["--chip", "esp32s3", "--port", "/dev/ttyACM0"])
+        self.assertIn("--baud", args)
+        self.assertIn("fw.bin", args)
+        # Without a chip the option is left out, so esptool detects it.
+        self.assertEqual(esptool_args(None, "/dev/x", "no_reset", "no_reset", "chip_id")[:2], ["--port", "/dev/x"])
+
+    def test_a_handoff_over_http_with_no_port_is_not_entered(self):
+        # Requested is not the same as known-to-be-up on a port esptool can
+        # use; the hook would otherwise tell esptool no_reset for a port
+        # PlatformIO finds a moment later, unchecked.
+        clock = Clock()
+        r = hand_off_to_bootloader(port=None, node_url_text="http://10.42.0.1", ports_fn=lambda: [],
+                                   probe=lambda d, timeout=2.0, console=None: None,
+                                   request_http=lambda url, auth: (True, "accepted", 600),
+                                   probe_rom=lambda d: True, sleep=clock.sleep, clock=clock.now, reappear_timeout=2.0)
+        self.assertFalse(r.entered)
+        self.assertEqual(r.esptool_before, "default_reset")
+        self.assertIsNone(r.port)
+
+    def test_an_absent_named_port_still_tries_http(self):
+        clock = Clock()
+        asked = []
+        r = hand_off_to_bootloader(port="/dev/ttyACM9", node_url_text="http://10.42.0.1",
+                                   ports_fn=lambda: list_ports([S3]),
+                                   probe=lambda d, timeout=2.0, console=None: None,
+                                   request_http=lambda url, auth: (asked.append(url), (True, "accepted", 600))[1],
+                                   probe_rom=lambda d: True, sleep=clock.sleep, clock=clock.now, reappear_timeout=2.0)
+        self.assertEqual(asked, ["http://10.42.0.1"])
+        self.assertTrue(r.entered)
 
 
 class WaitForApplicationTest(unittest.TestCase):
@@ -377,6 +458,17 @@ class WaitForApplicationTest(unittest.TestCase):
                                     ports_fn=lambda: list_ports([S3]), sleep=clock.sleep, clock=clock.now)
         self.assertIsNone(info)
         self.assertGreaterEqual(clock.t, 5.0)
+
+    def test_with_no_hint_every_candidate_is_asked(self):
+        # A bench with a node and an RNode: both look like ESP32 ports. Neither
+        # is "the" port, so both are asked and the one that answers wins.
+        clock = Clock()
+        rnode = fake_comport("/dev/ttyUSB3", 0x10C4, 0xEA60, "0001", "CP2102N")
+        info = wait_for_application(None, 10.0,
+                                    probe=lambda d, timeout=2.0, console=None:
+                                        device.NodeInfo("RetiMesh Node", "v2", "T3-S3", f"console:{d}") if d == "/dev/ttyACM0" else None,
+                                    ports_fn=lambda: list_ports([rnode, S3]), sleep=clock.sleep, clock=clock.now)
+        self.assertEqual(info.via, "console:/dev/ttyACM0")
 
     def test_the_application_may_come_back_under_another_name(self):
         # The downloader was ttyACM1 because ttyACM0 was briefly held; the

@@ -48,6 +48,11 @@
 #include "Config.h"
 #include "Settings.h"
 #include "LocalLinkState.h"
+#include "BootloaderPlan.h"
+
+// The restart source a link change is attributed to; spelled here so the
+// header stays free of Bootloader.h.
+using Bootloader_Source = Bootloader::Source;
 
 namespace LocalLink {
 
@@ -69,8 +74,10 @@ public:
   virtual void begin() = 0;                      // bring up, if enabled and possible
   virtual void poll(uint32_t nowMs) = 0;         // refresh the phase machine from the driver
   virtual Snapshot snapshot() const = 0;
-  // The node's own IPv4 address on this link, host order; 0 unless Ready.
+  // The node's own IPv4 address on this link and the link's netmask, host
+  // order; both 0 unless Ready.
   virtual uint32_t address() const = 0;
+  virtual uint32_t netmask() const = 0;
   // Why a link the board has cannot run in this build. Empty for links that
   // can. A virtual, because the alternative — casting on the strength of
   // firmware() being false — was sound only while one class answered false.
@@ -95,13 +102,20 @@ void   poll(uint32_t nowMs);                     // from loop()
 // which only hints. nullptr when no Ready link holds that address.
 Link* serving(uint32_t localIpHostOrder);
 
-// True when a request that arrived at `localIpHostOrder` came in over a
-// host-facing link. The bootloader API accepts requests from those and from
-// no other, so a relay on somebody's LAN cannot be put into its downloader
-// from across that LAN unless the operator says so. Deciding by the local
-// address rather than the remote one means a LAN that happens to be numbered
-// like the access point neither gets in nor locks the operator out.
-bool requestIsHostFacing(uint32_t localIpHostOrder);
+// True when a request accepted at `localIp`, from `remoteIp`, came in over
+// a host-facing link. The bootloader API accepts requests from those and
+// from no other, so a relay on somebody's LAN cannot be put into its
+// downloader from across that LAN unless the operator says so.
+//
+// Both addresses are needed. The local one names the link the connection was
+// accepted on, which is what an earlier version relied on alone — but lwIP
+// accepts a packet for any of its addresses on any interface, so a LAN host
+// that routes the access point's address through the node's station address
+// arrives at the access point's address from the wrong side. The remote
+// address has to belong to that link's own subnet as well. And the remote
+// address alone was never enough either: a LAN that happens to be numbered
+// like the access point looked local from where it sat.
+bool requestIsHostFacing(uint32_t localIpHostOrder, uint32_t remoteIpHostOrder);
 
 // An IPAddress as a host-order number, for comparing with address().
 uint32_t hostOrder(const IPAddress& a);
@@ -127,6 +141,25 @@ bool switchOn(const Link& l, const LinkSettings& s);
 // Whether any link this build can run is switched on in these settings.
 bool anySwitchOn(const LinkSettings& l);
 
+// What applying a set of link switches came to. One function, because the
+// HTTP handler and the console command each used to walk the same steps —
+// check, save, ask for the restart, phrase the answer — and the console's
+// copy had already lost the lock-out check on the way.
+enum class Apply : uint8_t {
+  Unchanged,        // nothing differed from what was stored
+  Saved,            // saved; no restart needed
+  SavedRestarting,  // saved; a restart is armed and will apply it
+  SavedNextBoot,    // saved; a restart is already in progress, so it applies at the next boot
+  RefusedUnusable,  // a switch was turned on for a link this board or build cannot run
+  RefusedLockedOut, // it would leave no way to reach the node
+  RefusedBusy,      // a restart is already in progress, so nothing was written
+  NvsFailed,
+};
+// `want` carries the switches to apply; `changed` names which keys were
+// given (the rest keep their stored value). `detail` receives the link key
+// or reason text a refusal is about.
+Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Source source, const char** detail);
+
 // Whether these settings would leave the node with no way in at all: no
 // usable link switched on, and the console off. Refused wherever settings are
 // written, because a node in that state can only be recovered by erasing it.
@@ -140,28 +173,39 @@ class WifiLink : public Link {
 public:
   bool hardware() const override { return true; }
   bool firmware() const override { return true; }
+  // The switch as it was applied at boot, not as it is stored now. A Wi-Fi
+  // change takes effect at the restart that follows the save; for the second
+  // and a half in between, the access point is still on the air and reading
+  // the fresh setting reported it gone — which mis-answered the trust rule
+  // for the very client that had just saved it.
+  bool enabled() const override { return _applied; }
   void begin() override;
   void poll(uint32_t nowMs) override;
   Snapshot snapshot() const override;
   uint32_t address() const override;
+  uint32_t netmask() const override;
 protected:
+  virtual bool       wanted() const = 0;        // the stored switch, read once at begin()
   virtual bool       carrier() const = 0;
   virtual IPAddress  ip() const = 0;
+  virtual IPAddress  mask() const = 0;
   virtual Addressing addressing() const = 0;
   virtual bool       clientsKnown() const { return false; }
   virtual uint8_t    clients() const { return 0; }
 private:
   Machine _m;
+  bool    _applied = false;
 };
 
 class WifiApLink : public WifiLink {
 public:
   Type type() const override { return Type::WifiAp; }
   const char* name() const override { return "wifi-ap"; }
-  bool enabled() const override;
 protected:
+  bool       wanted() const override;
   bool       carrier() const override;
   IPAddress  ip() const override;
+  IPAddress  mask() const override;
   Addressing addressing() const override { return Addressing::Static; }
   bool       clientsKnown() const override { return true; }
   uint8_t    clients() const override;
@@ -171,10 +215,11 @@ class WifiStaLink : public WifiLink {
 public:
   Type type() const override { return Type::WifiSta; }
   const char* name() const override { return "wifi-sta"; }
-  bool enabled() const override;
 protected:
+  bool       wanted() const override;
   bool       carrier() const override;
   IPAddress  ip() const override;
+  IPAddress  mask() const override;
   Addressing addressing() const override { return Addressing::Dhcp; }
 };
 
@@ -195,6 +240,7 @@ public:
   void poll(uint32_t) override {}
   Snapshot snapshot() const override;
   uint32_t address() const override { return 0; }
+  uint32_t netmask() const override { return 0; }
   const char* reason() const override { return _reason; }
 private:
   Type        _type;

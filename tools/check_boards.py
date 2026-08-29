@@ -26,9 +26,17 @@ for env, meta in boards.items():
     if not link:
         problems.append(f"{env}: no local_link block"); continue
     usb, uart = link.get("usb", {}), link.get("uart", {})
-    for key in ("native", "bridge", "auto_reset_dtr_rts"):
+    for key in ("native", "bridge", "auto_reset_dtr_rts", "serial_jtag", "otg"):
         if key not in usb:
             problems.append(f"{env}: local_link.usb.{key} missing")
+    # serial_jtag/otg say whether the chip's USB unit reaches the connector.
+    # A classic ESP32 has none to route, and a board cannot be native-USB
+    # without one of them on the socket.
+    on_connector = bool(usb.get("serial_jtag") or usb.get("otg"))
+    if meta.get("chip") == "esp32" and on_connector:
+        problems.append(f"{env}: a classic ESP32 has no USB unit to put on the connector")
+    if usb.get("native") and not on_connector:
+        problems.append(f"{env}: usb.native without serial_jtag or otg on the connector")
     if usb.get("native") and usb.get("bridge", "none") != "none":
         problems.append(f"{env}: native USB and a bridge cannot both be on the connector")
     if not usb.get("native") and usb.get("bridge", "none") == "none":
