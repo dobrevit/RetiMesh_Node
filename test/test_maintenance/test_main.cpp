@@ -132,10 +132,12 @@ static void test_an_overlong_line_is_dropped_whole_and_reported_once() {
 
 static void test_replies_carry_the_prefix_a_host_filters_on() {
   char buf[128];
-  formatOk(buf, sizeof(buf), "VERSION");
-  TEST_ASSERT_EQUAL_STRING("RM OK VERSION", buf);
-  formatOk(buf, sizeof(buf), "BOOTLOADER", "method=software_api delay_ms=300");
-  TEST_ASSERT_EQUAL_STRING("RM OK BOOTLOADER method=software_api delay_ms=300", buf);
+  // The count of data lines comes first on every OK line, with or without
+  // command-specific pairs after it.
+  formatOk(buf, sizeof(buf), "VERSION", 1);
+  TEST_ASSERT_EQUAL_STRING("RM OK VERSION lines=1", buf);
+  formatOk(buf, sizeof(buf), "BOOTLOADER", 0, "method=software_api delay_ms=300");
+  TEST_ASSERT_EQUAL_STRING("RM OK BOOTLOADER lines=0 method=software_api delay_ms=300", buf);
   formatData(buf, sizeof(buf), "VERSION", "version=v1.0.0");
   TEST_ASSERT_EQUAL_STRING("RM VERSION version=v1.0.0", buf);
   formatErr(buf, sizeof(buf), "FLASH", 404, "unknown command, try HELP");

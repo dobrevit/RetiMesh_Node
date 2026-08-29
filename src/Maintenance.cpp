@@ -33,6 +33,7 @@ namespace Maintenance {
 static Stream*       sIo = nullptr;
 static LineAssembler sLines;
 static char          sOut[224];
+static unsigned      sDataLines = 0;   // data lines sent for the command in hand; the OK line reports it
 
 // Bytes read per poll. The loop task runs every 200 ms and a typed command is
 // a dozen bytes; a host script pasting a line is under a hundred. Anything
@@ -45,7 +46,7 @@ static void send(size_t n) {
   sIo->write((const uint8_t*)sOut, n < sizeof(sOut) ? n : sizeof(sOut) - 1);
   sIo->write('\n');
 }
-static void ok(const char* cmd, const char* kv = nullptr) { send(formatOk(sOut, sizeof(sOut), cmd, kv)); }
+static void ok(const char* cmd, const char* kv = nullptr) { send(formatOk(sOut, sizeof(sOut), cmd, sDataLines, kv)); }
 static void err(const char* cmd, int code, const char* text) { send(formatErr(sOut, sizeof(sOut), cmd, code, text)); }
 
 // A data line, formatted straight into the output buffer after its prefix.
@@ -63,6 +64,7 @@ static void dataf(const char* cmd, const char* fmt, ...) {
   const int body = vsnprintf(sOut + head, sizeof(sOut) - (size_t)head, fmt, ap);
   va_end(ap);
   send((size_t)head + (body < 0 ? 0 : (size_t)body));
+  sDataLines++;
 }
 
 // --- handlers ---------------------------------------------------------------
@@ -181,6 +183,13 @@ static void doRestart(const Request& r, Bootloader::Target target) {
 }
 
 static void dispatch(const char* line) {
+  sDataLines = 0;
+  // The reply begins on a fresh line. The S3's USB unit drops the last
+  // packet it was holding when the host opened the port; when that was the
+  // end of a log line, the host's buffer holds an unterminated fragment and
+  // the first reply line arrives glued to it — read as log noise, not as a
+  // reply. An empty line costs nothing and ends whatever was left hanging.
+  if (sIo) sIo->write('\n');
   Request r;
   const ParseError e = parse(line, r);
   if (e != ParseError::None) {
@@ -205,7 +214,8 @@ static void dispatch(const char* line) {
 void begin(Stream& io) {
   sIo = &io;
   sLines.reset();
-  dataf("HELLO", "firmware=\"%s\" version=%s board=\"%s\" protocol=1", FW_NAME, FW_VERSION, BOARD_NAME);
+  dataf("HELLO", "firmware=\"%s\" version=%s board=\"%s\" protocol=%d", FW_NAME, FW_VERSION, BOARD_NAME,
+        MAINT_PROTOCOL_VERSION);
 }
 
 void poll() {

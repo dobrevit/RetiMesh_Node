@@ -62,6 +62,8 @@ namespace Maintenance {
 // object — a different definition of the same inline function per file. A
 // literal also concatenates into the format strings.
 #define REPLY_PREFIX "RM "
+// Announced by the HELLO banner. 2 added the line count on every OK line.
+#define MAINT_PROTOCOL_VERSION 2
 constexpr size_t MAX_LINE = 96;           // request line, bytes, excluding the newline
 constexpr size_t MAX_ARGS = 3;
 constexpr size_t MAX_ARG  = 24;
@@ -212,9 +214,14 @@ private:
 inline size_t formatData(char* out, size_t len, const char* cmd, const char* kv) {
   return (size_t)snprintf(out, len, REPLY_PREFIX "%s %s", cmd, kv);
 }
-inline size_t formatOk(char* out, size_t len, const char* cmd, const char* kv = nullptr) {
-  if (kv && *kv) return (size_t)snprintf(out, len, REPLY_PREFIX "OK %s %s", cmd, kv);
-  return (size_t)snprintf(out, len, REPLY_PREFIX "OK %s", cmd);
+// The OK line carries the number of data lines that preceded it, so a host
+// can tell a complete reply from one with a line missing rather than guess:
+// a reply that is one line short parses just as well as a whole one. A reply
+// with no data lines says lines=0. The pair comes first, before any
+// command-specific ones, so a reader finds it in the same place every time.
+inline size_t formatOk(char* out, size_t len, const char* cmd, unsigned lines, const char* kv = nullptr) {
+  if (kv && *kv) return (size_t)snprintf(out, len, REPLY_PREFIX "OK %s lines=%u %s", cmd, lines, kv);
+  return (size_t)snprintf(out, len, REPLY_PREFIX "OK %s lines=%u", cmd, lines);
 }
 inline size_t formatErr(char* out, size_t len, const char* cmd, int code, const char* text) {
   return (size_t)snprintf(out, len, REPLY_PREFIX "ERR %s %d %s", cmd, code, text);

@@ -77,13 +77,13 @@ host-tested.
 $ python -m serial.tools.miniterm /dev/ttyACM0 115200
 VERSION
 RM VERSION firmware="RetiMesh Node" version=v0.2.0 board="LilyGO T3-S3" idf=v4.4.7 assets=1a2b3c4d5e6f7a8b
-RM OK VERSION
+RM OK VERSION lines=1
 NETWORK_STATUS
 RM NETWORK_STATUS link=wifi-ap type=wifi_ap phase=ready ip=10.42.0.1 addressing=static uptime_s=812 clients=1
 RM NETWORK_STATUS link=wifi-sta type=wifi_sta phase=disabled ip=- addressing=none uptime_s=0
 RM NETWORK_STATUS link=usb0 type=usb_ncm phase=disabled ip=- addressing=none uptime_s=0
 RM NETWORK_STATUS link=ppp0 type=ppp_uart phase=disabled ip=- addressing=none uptime_s=0
-RM OK NETWORK_STATUS
+RM OK NETWORK_STATUS lines=4
 BOOTLOADER
 RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 ```
@@ -100,8 +100,20 @@ RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 | `RESET CONFIRM` | restart into the application |
 | `BOOTLOADER CONFIRM` | restart into the ROM downloader (`501` on a classic ESP32, which cannot) |
 
+Every reply begins on a fresh line — an empty one, which readers skip — and
+every `RM OK <CMD>` line begins with `lines=<n>`, the number of data lines
+that came before it, so a reader can tell a whole reply from one with a line
+missing. Both exist for the S3's USB unit, which drops the last packet it was
+holding when the host opened the port: when that was the end of a log line,
+the first reply line used to arrive glued to the unterminated fragment and be
+read as log noise. The empty line ends the fragment; the count lets the host
+tool see a reply fall short, ask once more, and report one that is still
+short as `SHORT` rather than pass it off as complete. Command-specific pairs
+follow the count on the same line. The `HELLO` banner the node prints when
+the console starts says `protocol=2`; protocol 1 had neither.
+
 Errors are `RM ERR <CMD> <code> <text>` with HTTP-style codes (400, 404, 409,
-501). Lines longer than 96 bytes are dropped whole and answered with a 400 —
+501); an error never carries data lines. Lines longer than 96 bytes are dropped whole and answered with a 400 —
 never truncated into something shorter that might parse. Bytes outside
 printable ASCII make a line unusable, so bridge noise at the wrong baud is not
 a command. The console can be switched off (`maintenance.console_enabled`);

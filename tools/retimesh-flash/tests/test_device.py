@@ -29,13 +29,24 @@ FT2232 = fake_comport("/dev/ttyUSB2", 0x0403, 0x6010, "AB12", "FT2232H Dual UART
 class FakeSerial:
     """Answers like the firmware's Maintenance.cpp, log lines included."""
 
-    def __init__(self, board="LilyGO T3-S3", software_entry=True, silent=False):
+    def __init__(self, board="LilyGO T3-S3", software_entry=True, silent=False,
+                 drop_first=False, drop_always=False, counts=True):
         self.board = board
         self.software_entry = software_entry
         self.silent = silent
+        # The S3's habit: the first RM line after open goes missing. drop_always
+        # is a port that never delivers a whole reply; counts=False is a node on
+        # protocol 1, before OK lines carried the count.
+        self.drop_first = drop_first
+        self.drop_always = drop_always
+        self.counts = counts
         self.out = bytearray()
         self.sent = []
         self.dtr = self.rts = None
+
+    def _ok(self, cmd, lines, kv=""):
+        count = f" lines={lines}" if self.counts else ""
+        return f"RM OK {cmd}{count}{' ' + kv if kv else ''}"
 
     def write(self, data):
         self.sent.append(data.decode())
@@ -45,16 +56,20 @@ class FakeSerial:
         reply = ["[I][main.cpp:200] heartbeat line that shares the port"]
         if line == "VERSION":
             reply += [f'RM VERSION firmware="RetiMesh Node" version=v0.2.0 board="{self.board}" idf=v4.4.7',
-                      "RM OK VERSION"]
+                      self._ok("VERSION", 1)]
         elif line == "BOOTLOADER CONFIRM":
             if self.software_entry:
-                reply += ["RM OK BOOTLOADER target=bootloader method=software_api delay_ms=300"]
+                reply += [self._ok("BOOTLOADER", 0, "target=bootloader method=software_api delay_ms=300")]
             else:
                 reply += ["RM ERR BOOTLOADER 501 this chip cannot enter its downloader from software"]
         elif line == "BOOTLOADER":
             reply += ["RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM"]
         else:
             reply += [f"RM ERR {line.split()[0]} 404 unknown command, try HELP"]
+        if self.drop_first or self.drop_always:
+            first = next(i for i, l in enumerate(reply) if l.startswith("RM "))
+            del reply[first]
+            self.drop_first = False
         self.out += ("\n".join(reply) + "\n").encode()
 
     def flush(self):
@@ -141,6 +156,27 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(status, "OK")
         self.assertEqual(data[0]["firmware"], "RetiMesh Node")
         self.assertEqual(data[0]["board"], "LilyGO T3-S3")
+
+    def test_a_reply_missing_a_line_is_asked_for_again(self):
+        # The S3 loses the first line after open. The count on the OK line
+        # shows the loss, and the command goes out a second time.
+        ser = FakeSerial(drop_first=True)
+        status, kv, data = Console(ser, timeout=1.0).command("VERSION")
+        self.assertEqual((status, data[0]["board"]), ("OK", "LilyGO T3-S3"))
+        self.assertEqual(ser.sent.count("VERSION\n"), 2)
+        self.assertNotIn("lines", kv)
+
+    def test_a_reply_that_stays_short_is_reported_not_trusted(self):
+        ser = FakeSerial(drop_always=True)
+        status, _, data = Console(ser, timeout=1.0).command("VERSION")
+        self.assertEqual((status, data), ("SHORT", []))
+        self.assertEqual(ser.sent.count("VERSION\n"), 2)     # once more, not forever
+
+    def test_a_node_that_does_not_count_is_taken_at_its_word(self):
+        ser = FakeSerial(counts=False)
+        status, _, data = Console(ser, timeout=1.0).command("VERSION")
+        self.assertEqual((status, len(data)), ("OK", 1))
+        self.assertEqual(ser.sent.count("VERSION\n"), 1)
 
     def test_error_replies_carry_code_and_text(self):
         con = Console(FakeSerial(), timeout=1.0)

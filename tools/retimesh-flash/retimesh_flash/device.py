@@ -198,25 +198,15 @@ class Console:
         ser.dtr = True
         ser.rts = True
         ser.open()
-        # The S3's USB CDC loses the first line the node writes after a fresh
-        # open, and a pause does not change that — measured on the bench as
-        # the first line of a STATUS answer going missing on the first open
-        # of a session, with or without a delay, and never afterwards. So
-        # the session is warmed with an exchange nobody needs: HELP, read
-        # through to its OK. Whatever is lost is lost from that.
-        time.sleep(0.1)
-        con = Console(ser, timeout, device)
-        # A short window for the warm-up, not the session's: on a port that
-        # is not a running node — a downloader, a foreign board — nothing
-        # answers, and waiting the full timeout here doubled the cost of every
-        # probe that was going to fail anyway.
-        con.timeout = min(timeout, 0.4)
-        try:
-            con.command("HELP")
-        except Exception:
-            pass
-        con.timeout = timeout
-        return con
+        # Nothing is done here about the S3's habit of losing the last USB
+        # packet it held when the port was opened: the node begins every
+        # reply on a fresh line, so a log line that lost its newline cannot
+        # swallow the first reply line, and every OK line says how many data
+        # lines came before it, so command() sees a short reply and asks
+        # again. An earlier version warmed the session with a HELP nobody
+        # needed, which cost every probe of a silent port a timeout and still
+        # could not tell a whole reply from a short one.
+        return Console(ser, timeout, device)
 
     def close(self) -> None:
         try:
@@ -251,8 +241,26 @@ class Console:
 
     def command(self, line: str) -> tuple[str, dict, list[dict]]:
         """Send one command. Returns (status, kv, data_lines) where status is
-        "OK", "ERR" or "TIMEOUT"; kv are the key=value pairs of the final line
-        (for ERR: code and text); data_lines are the RM <CMD> lines before it."""
+        "OK", "ERR", "SHORT" or "TIMEOUT"; kv are the key=value pairs of the
+        final line (for ERR: code and text); data_lines are the RM <CMD> lines
+        before it.
+
+        The node's OK line says how many data lines it sent (`lines=`, taken
+        out of kv here). A reply with fewer is asked for again, once — a line
+        can still be lost to the port — and a reply short on the second try
+        is SHORT, its data handed back for what it is worth rather than passed
+        off as complete. A node that does not count (protocol 1) is taken at
+        its word."""
+        for attempt in (1, 2):
+            status, kv, data = self._exchange(line)
+            if status != "OK":
+                return status, kv, data
+            expected = kv.pop("lines", None)
+            if expected is None or not expected.isdigit() or int(expected) == len(data):
+                return status, kv, data
+        return "SHORT", kv, data
+
+    def _exchange(self, line: str) -> tuple[str, dict, list[dict]]:
         cmd = line.split()[0].upper()
         self.ser.write((line.strip() + "\n").encode())
         self.ser.flush()
