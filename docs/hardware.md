@@ -187,7 +187,8 @@ performs; and BOOT + RST recovers any of them.
    is on the USB connector (`usb.native` or `usb.bridge`), whether the bridge's
    DTR/RTS reset the chip, whether the UART may carry PPP and the highest baud
    qualified. `tools/board_caps.py` turns it into `BOARD_*` flags at build time
-   and `tools/check_boards.py` (CI) refuses a board without one or one that
+   and `tools/check_boards.py` (CI) refuses a board without one, one whose
+   connector facts contradict its chip, or one that
    contradicts the framework's USB flags in `platformio.ini`. Drives CI,
    release packaging, the web flasher and the CLI.
 5. Workflow matrices in `.github/workflows/ci.yml` and `release.yml`.

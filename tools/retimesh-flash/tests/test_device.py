@@ -9,9 +9,9 @@ import unittest
 from types import SimpleNamespace
 
 from retimesh_flash import device
-from retimesh_flash.device import (Console, HandOff, Port, esp_candidates, hand_off_to_bootloader, list_ports,
-                                   node_url, parse_kv, probe_http, request_bootloader_http, select_port,
-                                   wait_for_application)
+from retimesh_flash.device import (Console, HandOff, Port, esp_candidates, esptool_args, hand_off_to_bootloader,
+                                   list_ports, node_url, parse_kv, probe_http, request_bootloader_http,
+                                   select_port, wait_for_application)
 
 
 def fake_comport(dev, vid=None, pid=None, serial=None, product=None, location=None):
@@ -348,6 +348,14 @@ class HttpTest(unittest.TestCase):
         fetch = lambda url, body=None, auth=None, timeout=3.0: (200, {"firmware": "Something Else"})
         self.assertIsNone(probe_http("http://10.42.0.1", fetch=fetch))
 
+    def test_a_body_that_is_not_an_object_is_not_a_node(self):
+        # A captive page or another device answering the path with null, a
+        # list or a string must read as "no node", not as a traceback.
+        for body in (None, [], "text", 42):
+            fetch = lambda url, b=None, auth=None, timeout=3.0, body=body: (200, body)
+            self.assertIsNone(probe_http("http://10.42.0.1", fetch=fetch))
+            self.assertFalse(request_bootloader_http("http://x", fetch=fetch)[0])
+
     def test_bootloader_request_outcomes(self):
         ok = lambda url, body=None, auth=None, timeout=3.0: (202, {"method": "software_api", "delay_ms": 600})
         self.assertEqual(request_bootloader_http("http://x", fetch=ok)[0], True)
@@ -356,6 +364,43 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(request_bootloader_http("http://x", fetch=refused), (False, "HTTP 403: switched off", 0))
         dead = lambda url, body=None, auth=None, timeout=3.0: (0, {})
         self.assertEqual(request_bootloader_http("http://x", fetch=dead)[1], "no HTTP answer")
+
+
+class EsptoolTest(unittest.TestCase):
+    def test_the_argument_builder_runs_at_all(self):
+        # The helper it needs once lived in another module; this call raised
+        # NameError in every real invocation while the tests, which inject the
+        # downloader check, stayed green.
+        args = esptool_args("esp32s3", "/dev/ttyACM0", "no_reset", "hard_reset", "write_flash", "0x0", "fw.bin", baud=921600)
+        self.assertEqual(args[:4], ["--chip", "esp32s3", "--port", "/dev/ttyACM0"])
+        self.assertIn("--baud", args)
+        self.assertIn("fw.bin", args)
+        # Without a chip the option is left out, so esptool detects it.
+        self.assertEqual(esptool_args(None, "/dev/x", "no_reset", "no_reset", "chip_id")[:2], ["--port", "/dev/x"])
+
+    def test_a_handoff_over_http_with_no_port_is_not_entered(self):
+        # Requested is not the same as known-to-be-up on a port esptool can
+        # use; the hook would otherwise tell esptool no_reset for a port
+        # PlatformIO finds a moment later, unchecked.
+        clock = Clock()
+        r = hand_off_to_bootloader(port=None, node_url_text="http://10.42.0.1", ports_fn=lambda: [],
+                                   probe=lambda d, timeout=2.0, console=None: None,
+                                   request_http=lambda url, auth: (True, "accepted", 600),
+                                   probe_rom=lambda d: True, sleep=clock.sleep, clock=clock.now, reappear_timeout=2.0)
+        self.assertFalse(r.entered)
+        self.assertEqual(r.esptool_before, "default_reset")
+        self.assertIsNone(r.port)
+
+    def test_an_absent_named_port_still_tries_http(self):
+        clock = Clock()
+        asked = []
+        r = hand_off_to_bootloader(port="/dev/ttyACM9", node_url_text="http://10.42.0.1",
+                                   ports_fn=lambda: list_ports([S3]),
+                                   probe=lambda d, timeout=2.0, console=None: None,
+                                   request_http=lambda url, auth: (asked.append(url), (True, "accepted", 600))[1],
+                                   probe_rom=lambda d: True, sleep=clock.sleep, clock=clock.now, reappear_timeout=2.0)
+        self.assertEqual(asked, ["http://10.42.0.1"])
+        self.assertTrue(r.entered)
 
 
 class WaitForApplicationTest(unittest.TestCase):
@@ -377,6 +422,17 @@ class WaitForApplicationTest(unittest.TestCase):
                                     ports_fn=lambda: list_ports([S3]), sleep=clock.sleep, clock=clock.now)
         self.assertIsNone(info)
         self.assertGreaterEqual(clock.t, 5.0)
+
+    def test_with_no_hint_every_candidate_is_asked(self):
+        # A bench with a node and an RNode: both look like ESP32 ports. Neither
+        # is "the" port, so both are asked and the one that answers wins.
+        clock = Clock()
+        rnode = fake_comport("/dev/ttyUSB3", 0x10C4, 0xEA60, "0001", "CP2102N")
+        info = wait_for_application(None, 10.0,
+                                    probe=lambda d, timeout=2.0, console=None:
+                                        device.NodeInfo("RetiMesh Node", "v2", "T3-S3", f"console:{d}") if d == "/dev/ttyACM0" else None,
+                                    ports_fn=lambda: list_ports([rnode, S3]), sleep=clock.sleep, clock=clock.now)
+        self.assertEqual(info.via, "console:/dev/ttyACM0")
 
     def test_the_application_may_come_back_under_another_name(self):
         # The downloader was ttyACM1 because ttyACM0 was briefly held; the

@@ -72,9 +72,11 @@ def flags(entry: dict) -> list:
         ("BOARD_UART_NETWORK", 1 if uart.get("network") else 0),
         ("BOARD_UART_MAX_BAUD", int(uart.get("tested_max_baud", 115200))),
     ]
-    # The framework's view of the same facts. The classic ESP32 has no USB
-    # peripheral, and the core's headers take these flags as a promise that
-    # there is one.
+    # The framework's view of the same facts. ARDUINO_USB_MODE says the chip
+    # has a USB peripheral, which is a fact about the silicon and so follows
+    # the chip; the registry's serial_jtag/otg say whether that peripheral
+    # reaches the connector, which is a different fact (the Heltec V3 is an
+    # S3 with neither on its socket). CDC_ON_BOOT follows the connector.
     if entry.get("chip") != "esp32":
         out.append(("ARDUINO_USB_MODE", 1))
         if native:

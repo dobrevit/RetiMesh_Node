@@ -48,7 +48,7 @@ packager and the flasher never disagree about it.
 
 | Env | MCU | On the USB connector | Bootloader methods, best first | IP local links |
 |---|---|---|---|---|
-| `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi` | ESP32-S3 | the chip's own USB (D+/D− routed): USB-Serial/JTAG today, OTG capable | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; **usb0 hardware-capable, not in this build** |
+| `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi` | ESP32-S3 | the chip's own USB (D+/D− routed): USB-Serial/JTAG today, OTG capable | `auto_reset_dtr_rts`, `manual_recovery` (no software entry: see below) | wifi-ap, wifi-sta; **usb0 hardware-capable, not in this build** |
 | `heltec-v3` | ESP32-S3 | CP2102 bridge on UART0 (the S3's own USB is not on the connector) | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; **ppp0 hardware-capable, not in this build** |
 | `heltec-ws` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; ppp0 as above |
 | `tbeam` | ESP32 | CH9102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; ppp0 as above |
@@ -108,7 +108,9 @@ a command. The console can be switched off (`maintenance.console_enabled`);
 the log keeps flowing either way.
 
 On the S3's USB-Serial/JTAG port, opening the console does not reset the node:
-the tooling opens it with DTR and RTS left low. A terminal program that
+the tooling opens it with DTR and RTS both asserted, which is the running
+state on every board here — both lines high is what the kernel sets on open,
+and asking for either low passes through the reset handshake. A terminal program that
 asserts them will reset it, which is the same as it always was.
 
 ## The bootloader manager
@@ -339,7 +341,7 @@ MAC, so two nodes on one computer land on two subnets without anyone typing
 anything. The static fallback (`10.64.<n>.2` for the host) is there for a
 network manager that does not ask. IPv4 link-local alone was rejected because
 phones and older managers get the probe wrong often enough that a fixed
-address beside it is worth having. `LocalLink::usbSubnetFor()` is the rule,
+address beside it is worth having. That rule lands with the NCM driver,
 tested.
 
 **Logging.** With the OTG stack owning the USB peripheral the fixed
@@ -417,7 +419,7 @@ as `PppLink` in the same registry, the same `0.0.0.0` services on top.
 Host (`pio test -e native`, in CI): `test_local_link` (phase machine, address
 rules, USB subnet), `test_bootloader` (plan per board, sequencer,
 touch detector), `test_maintenance` (parser, malformed and overlong lines,
-noise, line assembler, reply format), `test_usb_plan` (endpoint budget). Host
+noise, line assembler, reply format). Host
 tooling (`python -m unittest discover -s tools/retimesh-flash/tests`, in CI):
 port discovery and selection, the console protocol against a fake port that
 interleaves log lines, the hand-off in every outcome, HTTP probing, bounded

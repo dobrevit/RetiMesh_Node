@@ -57,8 +57,16 @@ def before_upload(source, target, env):  # noqa: ARG001
     # PlatformIO's interpreter has no esptool package; its bundled esptool.py
     # is what the upload itself will run, so the downloader check runs it too.
     esptool_cmd = [env.subst("$PYTHONEXE"), env.subst("$UPLOADER")]
-    result = device.hand_off_to_bootloader(port=port, node_url_text=node_url, log=_log, port_hint="--upload-port",
-                                           esptool_cmd=esptool_cmd)
+    try:
+        result = device.hand_off_to_bootloader(port=port, node_url_text=node_url, log=_log,
+                                               port_hint="--upload-port", esptool_cmd=esptool_cmd)
+    except Exception as exc:
+        # Stepping aside is the promise: a missing pyserial (imported lazily
+        # inside the library, so the import above cannot catch it) or any
+        # other failure of the hand-off must not fail the upload it was only
+        # meant to ease. esptool's own reset still happens.
+        _log(f"bootloader hand-off failed ({exc}); esptool will try its own reset")
+        return
     if result.port and (not port or not device.same_device(result.port, port)):
         # Discovery found the node, or the downloader came back under a new
         # name (ttyACM0 -> ttyACM1 on a busy host): point esptool at it.
