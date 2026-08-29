@@ -23,6 +23,7 @@
 #include <microReticulum.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <atomic>
 #include <map>
 #include <vector>
 #include "RnsFileSystem.h"
@@ -286,6 +287,21 @@ namespace RnsTransport {
 
 bool started() { return sStarted; }
 
+// The library's level while it may print, and whether it may. The mute is
+// asked for from another task and applied on this one, in loop().
+static constexpr RNS::LogLevel kLogLevel = RNS::LOG_INFO;
+static std::atomic<bool> sMuteWanted{false};
+static bool sMuted = false;
+
+void muteLog(bool mute) { sMuteWanted = mute; }
+
+static void applyLogMute() {
+  const bool want = sMuteWanted;
+  if (want == sMuted) return;
+  RNS::loglevel(want ? RNS::LOG_NONE : kLogLevel);
+  sMuted = want;
+}
+
 bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpInRing) {
   sTxRing = txRing; sRxRing = rxRing; sTcpInRing = tcpInRing;
   // Deep enough that every interface this node can hold could register at
@@ -297,7 +313,7 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
 
   try {
-    RNS::loglevel(RNS::LOG_INFO);        // DEBUG is compiled in; raise here when tracing
+    RNS::loglevel(kLogLevel);            // DEBUG is compiled in; raise kLogLevel when tracing
 
     // Storage: the SD card or the LittleFS partition shared with the web app.
     // StoreHome owns that rule, the card's ownership marker and the filesystem
@@ -572,6 +588,7 @@ Tables tables() {
 void loop() {
   if (!sStarted) { vTaskDelay(pdMS_TO_TICKS(500)); return; }
   try {
+    applyLogMute();
     processEvents();
     drainTcp();
     reticulum.loop();                      // interface loops + housekeeping (jobs_interval = 1 s)

@@ -57,6 +57,7 @@
 #endif
 #include "Config.h"
 #include "Diag.h"
+#include "PppUart.h"
 
 namespace Bootloader {
 
@@ -171,6 +172,13 @@ static void quiesce() {
   // happens on this pass and the previous run's length is how the next boot
   // tells a deliberate restart from a crash loop.
   Diag::tick(millis() / 1000);
+  #if HAS_PPP
+    // A host with PPP open on the port is told the link is ending, so its
+    // pppd exits now and frees the port for esptool, rather than after its
+    // echoes go unanswered. The request that asked for this restart may
+    // have come over that very link; its reply left during the delay.
+    PppUart::shutdown(1500);
+  #endif
   Serial.flush();
   // NVS writes are transactional and the Reticulum store checkpoints itself;
   // LittleFS is not unmounted here on purpose. The transport task may be in a

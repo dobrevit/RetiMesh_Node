@@ -23,6 +23,7 @@
 #include "LocalLink.h"
 #include "UsbNcm.h"
 #include <lwip/def.h>
+#include "PppUart.h"
 #include <WiFi.h>
 #include "WifiManager.h"
 #include "Bootloader.h"
@@ -54,11 +55,17 @@ Link* serving(uint32_t localIp) {
   return nullptr;
 }
 
+// The default: an address is on this link when it falls inside the link's
+// subnet. A point-to-point link has no subnet to fall inside and overrides
+// this — see PppLink, whose one peer is the only address it answers for.
+bool Link::remoteOnLink(uint32_t remoteIp) const {
+  const uint32_t mask = netmask();
+  return mask != 0 && (remoteIp & mask) == (address() & mask);
+}
+
 bool requestIsOnItsLink(uint32_t localIp, uint32_t remoteIp) {
   const Link* l = serving(localIp);
-  if (!l) return false;
-  const uint32_t mask = l->netmask();
-  return mask != 0 && (remoteIp & mask) == (l->address() & mask);
+  return l && l->remoteOnLink(remoteIp);
 }
 
 bool requestIsHostFacing(uint32_t localIp, uint32_t remoteIp) {
@@ -99,6 +106,20 @@ bool lockedOut(const LinkSettings& l, bool consoleEnabled) {
   return !consoleEnabled && !anySwitchOn(l);
 }
 
+const uint32_t* pppBauds(size_t& n) {
+  // The registry's ladder for this board, as tools/board_caps.py hands it
+  // to the build: a brace-initialiser body.
+  static const uint32_t kBauds[] = { BOARD_UART_BAUDS };
+  n = sizeof(kBauds) / sizeof(kBauds[0]);
+  return kBauds;
+}
+
+bool pppBaudUsable(uint32_t baud) {
+  size_t n = 0;
+  const uint32_t* ladder = pppBauds(n);
+  return pppBaudAllowed(baud, ladder, n, BOARD_UART_MAX_BAUD);
+}
+
 Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Source source, const char** detail) {
   if (detail) *detail = "";
   // The same refusal every HTTP write gives while a restart is armed: a
@@ -117,9 +138,24 @@ Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Sourc
     }
     next.*(f[i].on) = on;
   }
+  // The PPP speed travels with the switches: one save, one answer. It is
+  // judged by the board's rule, not by whether PPP is on — a speed saved
+  // while PPP is off is the one PPP will run at when it is switched on.
+  if (want.pppBaud != next.pppBaud) {
+    const Link* ppp = find(Type::PppUart);
+    if (!ppp || !ppp->usable()) {
+      if (detail) *detail = ppp ? ppp->reason() : "no PPP link on this board";
+      return Apply::RefusedUnusable;
+    }
+    if (!pppBaudUsable(want.pppBaud)) {
+      if (detail) *detail = "not a speed this board is qualified for; the settings list the ones it is";
+      return Apply::RefusedBaud;
+    }
+    next.pppBaud = want.pppBaud;
+  }
   if (lockedOut(next, settings.maintenance().consoleEnabled)) return Apply::RefusedLockedOut;
   const bool wifiChanged = next.wifiEnabled != settings.links().wifiEnabled;
-  bool same = true;
+  bool same = next.pppBaud == settings.links().pppBaud;
   for (size_t i = 0; i < n; i++) if (next.*(f[i].on) != settings.links().*(f[i].on)) same = false;
   if (same) return Apply::Unchanged;
   if (!settings.saveLinks(next)) return Apply::NvsFailed;
@@ -197,6 +233,34 @@ void      UsbNcmLink::drive()         { UsbNcm::poll(enabled()); }
 bool      UsbNcmLink::carrier() const { return UsbNcm::linkUp(); }
 IPAddress UsbNcmLink::ip() const      { return UsbNcm::address(); }
 IPAddress UsbNcmLink::mask() const    { return IPAddress(htonl(kUsbNetmask)); }
+#endif
+
+// ---------------------------------------------------------------------------
+// PPP
+// ---------------------------------------------------------------------------
+#if HAS_PPP
+bool PppLink::enabled() const { return settings.links().pppEnabled; }
+void PppLink::begin() { PppUart::begin(); MachineLink::begin(); }
+
+// The driver follows the switch and the speed every pass, on the loop task,
+// so a change saved by the API or the console takes effect here.
+void PppLink::drive() { PppUart::poll(enabled(), settings.links().pppBaud); }
+
+// Carrier is the host having opened PPP — the port is PPP's — and the address
+// follows when IPCP finishes, which is the machine's own next step. Down is a
+// port the console owns: nothing wrong, nobody dialling.
+bool      PppLink::carrier() const { return PppUart::owner() == PppUart::Owner::Ppp; }
+IPAddress PppLink::ip() const      { return PppUart::address(); }
+// What lwIP puts on a point-to-point interface: the one address.
+IPAddress PppLink::mask() const    { return IPAddress(0xFFFFFFFFu); }
+
+bool PppLink::remoteOnLink(uint32_t remoteIp) const {
+  // The subnet rule would refuse the peer — a /32 contains only ourselves —
+  // and the peer is the only address the wire can carry.
+  // address() is non-zero only once the machine is Ready, which is the
+  // condition this needs and the base class already answers.
+  return address() != 0 && remoteIp != 0 && remoteIp == hostOrder(PppUart::peer());
+}
 #endif
 
 // ---------------------------------------------------------------------------

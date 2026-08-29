@@ -122,6 +122,41 @@ static void test_the_usb_link_takes_its_subnet_from_the_mac() {
   TEST_ASSERT_TRUE(isHostFacing(Type::UsbNcm));
 }
 
+static void test_the_ppp_link_takes_the_next_subnet_over_from_the_same_byte() {
+  // 10.65.<n>: the USB rule one subnet over, so a node on both links at
+  // once — a Heltec on a bridge and a T3-S3 on its own USB, on one desk —
+  // never lands two links on one subnet. The node asks for .1 and the host
+  // is told to take .2; the peer decides, since the node is the client.
+  TEST_ASSERT_EQUAL_UINT32(ipv4(10, 65, 0x54, 1), pppNodeAddress(0x54));
+  TEST_ASSERT_EQUAL_UINT32(ipv4(10, 65, 0x54, 2), pppHostAddress(0x54));
+  TEST_ASSERT_NOT_EQUAL(pppNodeAddress(0x54), usbNodeAddress(0x54));
+  TEST_ASSERT_NOT_EQUAL(pppNodeAddress(0x54), pppNodeAddress(0x55));
+  TEST_ASSERT_TRUE(isHostFacing(Type::PppUart));
+  TEST_ASSERT_EQUAL_STRING("ipcp", addressingName(Addressing::Ipcp));
+}
+
+static void test_a_ppp_baud_must_be_listed_and_no_faster_than_tried() {
+  // The ladder comes from boards.json; the ceiling is what the board has
+  // actually been run at. Both bind: 921600 is on every board's ladder and
+  // refused on every board until somebody has tried it.
+  const uint32_t ladder[] = { 115200, 230400, 460800, 921600 };
+  const size_t n = sizeof(ladder) / sizeof(ladder[0]);
+  TEST_ASSERT_TRUE(pppBaudAllowed(115200, ladder, n, 115200));
+  TEST_ASSERT_FALSE(pppBaudAllowed(230400, ladder, n, 115200));
+  TEST_ASSERT_TRUE(pppBaudAllowed(230400, ladder, n, 460800));
+  TEST_ASSERT_TRUE(pppBaudAllowed(460800, ladder, n, 460800));
+  TEST_ASSERT_FALSE(pppBaudAllowed(921600, ladder, n, 460800));
+  // Not on the ladder at all: neither a typo nor a rate the bridge could
+  // do but nobody qualified.
+  TEST_ASSERT_FALSE(pppBaudAllowed(9600, ladder, n, 921600));
+  TEST_ASSERT_FALSE(pppBaudAllowed(250000, ladder, n, 921600));
+  TEST_ASSERT_FALSE(pppBaudAllowed(0, ladder, n, 921600));
+  // A board with one rung offers exactly that.
+  const uint32_t one[] = { 115200 };
+  TEST_ASSERT_TRUE(pppBaudAllowed(115200, one, 1, 115200));
+  TEST_ASSERT_FALSE(pppBaudAllowed(230400, one, 1, 230400));
+}
+
 static void test_an_address_is_one_number_octets_first() {
   // hostOrder() and the trust rule compare these; the first octet has to be
   // the most significant or two addresses on one link compare unequal.
@@ -142,6 +177,8 @@ int main() {
   RUN_TEST(test_every_type_and_phase_has_a_name);
   RUN_TEST(test_only_the_station_uplink_is_not_host_facing);
   RUN_TEST(test_the_usb_link_takes_its_subnet_from_the_mac);
+  RUN_TEST(test_the_ppp_link_takes_the_next_subnet_over_from_the_same_byte);
+  RUN_TEST(test_a_ppp_baud_must_be_listed_and_no_faster_than_tried);
   RUN_TEST(test_an_address_is_one_number_octets_first);
   return UNITY_END();
 }

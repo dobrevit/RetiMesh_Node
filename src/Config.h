@@ -62,7 +62,9 @@
 //   BOARD_USB_BRIDGE        "CP2102", "CH9102", ... or "none"
 //   BOARD_BRIDGE_AUTO_RESET the bridge's DTR/RTS reach EN/IO0 (esptool resets it)
 //   BOARD_UART_NETWORK      the UART behind the bridge may carry PPP
-//   BOARD_UART_MAX_BAUD     the highest rate qualified on this board
+//   BOARD_UART_INSTANCE     which UART the bridge sits on (0 on every board so far)
+//   BOARD_UART_BAUDS        the rates the registry lists for it, comma-separated
+//   BOARD_UART_MAX_BAUD     the highest of them tried on this board's hardware
 // ---------------------------------------------------------------------------
 #ifndef BOARD_USB_NATIVE
   #define BOARD_USB_NATIVE        0
@@ -79,6 +81,12 @@
 #ifndef BOARD_UART_NETWORK
   #define BOARD_UART_NETWORK      0
 #endif
+#ifndef BOARD_UART_INSTANCE
+  #define BOARD_UART_INSTANCE     0
+#endif
+#ifndef BOARD_UART_BAUDS
+  #define BOARD_UART_BAUDS        115200
+#endif
 #ifndef BOARD_UART_MAX_BAUD
   #define BOARD_UART_MAX_BAUD     115200
 #endif
@@ -90,6 +98,31 @@
   #define HAS_USB_NCM 1
 #else
   #define HAS_USB_NCM 0
+#endif
+// Whether this build drives PPP over the bridge UART: every board whose
+// registry entry says the UART may carry it does, because the core's
+// prebuilt lwIP carries the PPP client on every chip. See PppUart.h.
+#if BOARD_UART_NETWORK
+  #define HAS_PPP 1
+#else
+  #define HAS_PPP 0
+#endif
+// PPP over the bridge UART (PppUart.h). The receive ring is the UART
+// driver's own, sized here; what does not fit while the reader is behind is
+// dropped and PPP retransmits — the radio never waits for the serial port.
+// The transmit queue holds one largest frame (an escaped 1500-byte packet is
+// a little over 3 KB) with room to spare; a frame that does not fit is
+// dropped whole. The default speed is the console's, so that switching PPP
+// on changes nothing a host already relies on; a faster one has to be
+// qualified per board (boards.json uart.tested_max_baud).
+#ifndef PPP_RX_RING_BYTES
+  #define PPP_RX_RING_BYTES   4096
+#endif
+#ifndef PPP_TX_QUEUE_BYTES
+  #define PPP_TX_QUEUE_BYTES  4096
+#endif
+#ifndef PPP_BAUD_DEFAULT
+  #define PPP_BAUD_DEFAULT    115200
 #endif
 
 // ---------------------------------------------------------------------------

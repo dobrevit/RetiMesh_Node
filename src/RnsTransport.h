@@ -57,6 +57,12 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
 void loop();                               // RNS task only
 bool started();
 
+// Silence microReticulum's log, or restore it. It prints through Serial,
+// and while PPP owns the serial port (PppUart.h) a log line lands between
+// frames. Only the RNS task may call into the library, so the request is
+// recorded here and applied by loop() at its next pass.
+void muteLog(bool mute);
+
 // Posted by the AsyncTCP task; applied on the RNS task.
 void clientConnected(uint32_t id, const char* remote);
 void clientDisconnected(uint32_t id);

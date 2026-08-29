@@ -52,6 +52,7 @@ static const char* const kTasks[] = {
   "sdcard",       // hot-plug polling
   "gps",          // NMEA parsing
   "async_tcp",    // ESPAsyncWebServer
+  "ppp-uart",     // the bridge UART reader (PppUart.h)
 };
 
 const char* resetReasonName(uint8_t reason) {

@@ -41,13 +41,19 @@ static void test_bootloader_and_reset_need_confirm_and_say_so() {
   TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("BOOTLOADER CONFIRM NOW", bad));
 }
 
-static void test_wifi_takes_exactly_on_or_off() {
+static void test_wifi_and_ppp_take_exactly_on_or_off() {
   TEST_ASSERT_EQUAL_STRING("OFF", parseOk("wifi off").args[0]);
   TEST_ASSERT_EQUAL_STRING("ON",  parseOk("WIFI on").args[0]);
   Request bad;
   TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("WIFI", bad));
   TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("WIFI maybe", bad));
   TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("WIFI ON OFF", bad));
+  // PPP is the same switch for the other link a host reaches through this
+  // port — typed on the port itself, before pppd takes it.
+  TEST_ASSERT_EQUAL((int)Cmd::Ppp, (int)parseOk("ppp on").cmd);
+  TEST_ASSERT_EQUAL_STRING("OFF", parseOk("PPP off").args[0]);
+  TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("PPP", bad));
+  TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("PPP 115200", bad));
 }
 
 static void test_unknown_and_empty_lines_are_reported_not_ignored() {
@@ -217,7 +223,7 @@ int main() {
   UNITY_BEGIN();
   RUN_TEST(test_commands_match_without_regard_to_case_or_whitespace);
   RUN_TEST(test_bootloader_and_reset_need_confirm_and_say_so);
-  RUN_TEST(test_wifi_takes_exactly_on_or_off);
+  RUN_TEST(test_wifi_and_ppp_take_exactly_on_or_off);
   RUN_TEST(test_unknown_and_empty_lines_are_reported_not_ignored);
   RUN_TEST(test_commands_that_take_nothing_refuse_arguments);
   RUN_TEST(test_line_noise_is_not_a_command);
