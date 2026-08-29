@@ -66,6 +66,7 @@ public:
   // two that can disagree.
   const char* hostname() const { return _hostname; }
   void resolveNames();                   // ssid + hostname, without starting anything
+  bool dnsListening() { return _dns.listening(); }
   bool stationConfigured() const { return settings.wifi().staSsid[0] != '\0'; }
   bool stationConnected() const { return WiFi.status() == WL_CONNECTED; }
   const char* securityName() const { return _securityName; }

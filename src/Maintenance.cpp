@@ -26,6 +26,7 @@
 #include "Settings.h"
 #include "Bootloader.h"
 #include "LocalLink.h"
+#include "WifiManager.h"
 #include "UsbNcm.h"
 #include "Diag.h"
 
@@ -101,8 +102,9 @@ static void doStatus() {
     snprintf(restart, sizeof(restart), " restart_target=%s restart_source=%s restart_in_ms=%lu",
              Bootloader::targetName(p.target), Bootloader::sourceName(p.source),
              (unsigned long)p.dueInMs(millis()));
-  dataf("STATUS", "transport=%s tcp_clients=%lu restart_pending=%s%s",
+  dataf("STATUS", "transport=%s tcp_clients=%lu dns=%s restart_pending=%s%s",
         g_stats.transportOnline ? "online" : "offline", (unsigned long)g_stats.tcpClients,
+        wifiManager.dnsListening() ? "listening" : "down",
         p.armed() ? "true" : "false", restart);
   ok("STATUS");
 }

@@ -45,6 +45,7 @@ public:
   // and refuse every query that arrives anywhere else.
   bool begin(const IPAddress& ip, uint32_t ttlSeconds = 60);
   void end();
+  bool listening() { return _udp.connected(); }         // the socket is bound
 
 private:
   void handle(AsyncUDPPacket& pkt);
