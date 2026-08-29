@@ -37,9 +37,15 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
 # USB identities. The S3's fixed USB-Serial/JTAG unit is the same device in
-# the application and in the ROM downloader. A RetiMesh composite device would
-# be a second pair, listed when it ships.
+# the ROM downloader and in an application that leaves it in charge. A node
+# whose own USB is driven by the OTG stack presents the composite device
+# instead — CDC-ACM console and CDC-NCM network, docs/local-link.md — under
+# the pair boards.json's _usb_identity names; it is copied here because this
+# package installs on its own, and tests/test_device.py holds the two to each
+# other. The composite device's downloader is the serial-JTAG pair again: the
+# firmware hands the peripheral back to that unit before it restarts.
 ESP_USB_SERIAL_JTAG = (0x303A, 0x1001)
+RETIMESH_COMPOSITE = (0x1209, 0x0001)
 BRIDGES = {(0x10C4, 0xEA60): "CP2102", (0x1A86, 0x55D4): "CH9102", (0x1A86, 0x7523): "CH340",
            (0x0403, 0x6001): "FT232", (0x0403, 0x6015): "FT231X"}
 # Vendors whose unlisted products are still, almost always, an ESP32 or the
@@ -78,6 +84,8 @@ class Port:
     def kind(self) -> str:
         if (self.vid, self.pid) == ESP_USB_SERIAL_JTAG:
             return "usb_serial_jtag"
+        if (self.vid, self.pid) == RETIMESH_COMPOSITE:
+            return "retimesh_composite"
         return BRIDGES.get((self.vid, self.pid), "unknown" if self.vid is not None else "legacy")
 
     @property
@@ -90,8 +98,22 @@ class Port:
     def auto_reset(self) -> bool:
         """Whether esptool's DTR/RTS reset is expected to work on this port. It
         is the norm on every bridge these vendors make and on the S3's own
-        unit, so an unlisted product from one of them gets the benefit."""
-        return self.likely_esp
+        unit, so an unlisted product from one of them gets the benefit. The
+        composite device is the exception: its ACM port honours the same
+        DTR/RTS pattern by restarting into the ROM — which then enumerates as
+        the serial-JTAG unit, another port — so esptool would be left
+        resetting a port that has gone. The hand-off does that transition
+        itself and points esptool at the port that appears."""
+        return self.likely_esp and self.kind != "retimesh_composite"
+
+    @property
+    def node_id(self) -> Optional[str]:
+        """The chip's MAC as this port reports it, colons dropped and upper-cased,
+        so the composite device (1CDBD4821454) and the serial-JTAG unit
+        (1C:DB:D4:82:14:54) of one chip compare equal. None unless the serial
+        is a MAC: a port with no serial, or one whose serial is something
+        else, identifies no chip and must not be taken for one."""
+        return mac_node_id(self.serial)
 
     def label(self) -> str:
         bits = [self.device, self.kind]
@@ -153,6 +175,55 @@ def select_port(ports: list[Port], device: Optional[str] = None, serial: Optiona
         return hits[0] if len(hits) == 1 else None
     candidates = esp_candidates(ports)
     return candidates[0] if len(candidates) == 1 else None
+
+
+def mac_node_id(text: Optional[str]) -> Optional[str]:
+    """Twelve hex digits, colons dropped, upper-cased — or None."""
+    if not text:
+        return None
+    t = text.replace(":", "").upper()
+    return t if re.fullmatch(r"[0-9A-F]{12}", t) else None
+
+
+def node_id_from_path(device: str) -> Optional[str]:
+    """The MAC a /dev/serial/by-id name carries, colons dropped and upper-cased,
+    for either face of the chip: usb-RetiMesh_RetiMesh_Node_1CDBD4821454-if00
+    or usb-Espressif_USB_JTAG_serial_debug_unit_1C:DB:D4:82:14:54-if00."""
+    m = re.search(r"(?:RetiMesh_Node_|serial_debug_unit_)([0-9A-Fa-f:]{12,17})-if", device)
+    return mac_node_id(m.group(1)) if m else None
+
+
+def usb_node_url(node_id: Optional[str]) -> Optional[str]:
+    """Where a node answers over its USB link, from its MAC: 10.64.<n>.1 with
+    <n> the last octet — the firmware's usbNodeAddress() (LocalLinkState.h),
+    written here a second time because this package cannot include that
+    header; the tests hold both to the same vector. None for anything that
+    is not a MAC, rather than an address aimed at the wrong subnet."""
+    node_id = mac_node_id(node_id)
+    return f"http://10.64.{int(node_id[-2:], 16)}.1" if node_id else None
+
+
+def touch_1200(device: str, sleep=time.sleep) -> None:
+    """The 1200-baud touch: opening the composite device's ACM port at 1200
+    baud with DTR and RTS low makes the core restart into the ROM downloader
+    (its USBCDC honours the Arduino convention). The port vanishes under the
+    open, which pyserial reports as an error that here means success."""
+    import serial
+    # The core reports a line coding only when it changes, so a port left at
+    # 1200 by an earlier touch is opened at the console's speed first: the
+    # second touch is then a change too.
+    for baud in (CONSOLE_BAUD, 1200):
+        ser = serial.Serial()
+        ser.port = device
+        ser.baudrate = baud
+        ser.dtr = False
+        ser.rts = False
+        try:
+            ser.open()
+            sleep(0.2)
+            ser.close()
+        except Exception:
+            pass
 
 
 def node_url(text: str) -> str:
@@ -253,6 +324,11 @@ class Console:
         its word."""
         for attempt in (1, 2):
             status, kv, data = self._exchange(line)
+            if status == "ERR" and kv.get("cmd") == "?" and attempt == 1:
+                # The node refused a line it could not even name: ours, glued
+                # onto bytes a port prober left in its buffer. The node has
+                # discarded them with that reply; once more and it is clean.
+                continue
             if status != "OK":
                 return status, kv, data
             expected = kv.pop("lines", None)
@@ -278,7 +354,7 @@ class Console:
             if words.startswith("ERR "):
                 m = re.match(r"ERR (\S+) (\d+) ?(.*)", words)
                 if m and (m.group(1) == cmd or m.group(1) == "?"):
-                    return "ERR", {"code": int(m.group(2)), "text": m.group(3)}, data
+                    return "ERR", {"cmd": m.group(1), "code": int(m.group(2)), "text": m.group(3)}, data
                 continue
             if words.startswith(cmd + " "):
                 data.append(parse_kv(words[len(cmd) + 1:]))
@@ -460,15 +536,23 @@ def downloader_present(device: str, timeout: float = 15.0, esptool_cmd: Optional
 @dataclass
 class HandOff:
     entered: bool                     # the ROM downloader is known to be up on `port`
-    method: str                       # "console", "http", "downloader", "auto_reset_dtr_rts", "none"
+    method: str                       # "console", "touch", "http", "downloader", "auto_reset_dtr_rts", "none"
     port: Optional[str]
     message: str
+    reset_capable: bool = True        # esptool's DTR/RTS reaches EN/BOOT (or the serial-JTAG unit) on `port`
 
     @property
     def esptool_before(self) -> str:
         """What to tell esptool. Decided here once: the CLI, the PlatformIO hook
-        and the HIL script each used to derive it from the fields above."""
-        return "no_reset" if self.entered else "default_reset"
+        and the HIL script each used to derive it from the fields above.
+
+        esptool's own reset at connect is skipped only where the port cannot
+        drive one and the downloader is already there. Where it can, it is
+        run even on a downloader that is already up: on the S3's serial-JTAG
+        unit a ROM entered from software stays in the downloader through
+        esptool's closing hard reset unless esptool's connect-time sequence
+        ran first — measured, and the bench spent an afternoon on it."""
+        return "no_reset" if self.entered and not self.reset_capable else "default_reset"
 
 
 def wait_for_port(predicate: Callable[[list[Port]], Optional[Port]], timeout: float,
@@ -488,7 +572,7 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
                            request_http=request_bootloader_http, probe_rom=None,
                            esptool_cmd: Optional[list[str]] = None,
                            sleep=time.sleep, clock=time.monotonic, reappear_timeout: float = 8.0,
-                           port_hint: str = "--port") -> HandOff:
+                           port_hint: str = "--port", touch=touch_1200) -> HandOff:
     """Console first, HTTP second, esptool's own reset last.
 
     Returns where esptool should point and whether the downloader is known to
@@ -500,10 +584,20 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
     ports = ports_fn()
     chosen = select_port(ports, device=port)
     if port and chosen is None:
-        # The named port is not there — mid-re-enumeration, or a by-id link
-        # that is momentarily gone. That is no reason to skip the HTTP path,
-        # which is precisely the one that does not need the port; an earlier
-        # version gave up here with RETIMESH_NODE_URL unread.
+        # The named port is not there. If it was the composite device and the
+        # chip is already in its ROM — an earlier attempt got it there and
+        # then lost track — its serial-JTAG downloader is on the bus under
+        # the same MAC, which the by-id name carries.
+        node_id = node_id_from_path(port)
+        rom = _port_of(ports, "usb_serial_jtag", node_id) if node_id else None
+        if rom and probe_rom(rom.device):
+            log(f"{port} is gone, but the chip's serial-JTAG downloader answers on {rom.device}")
+            return HandOff(True, "downloader", rom.device, "the downloader is already on the port",
+                           reset_capable=rom.auto_reset)
+        # Otherwise: mid-re-enumeration, or a by-id link that is momentarily
+        # gone. That is no reason to skip the HTTP path, which is precisely
+        # the one that does not need the port; an earlier version gave up
+        # here with RETIMESH_NODE_URL unread.
         if not node_url_text:
             return HandOff(False, "none", port, f"{port} is not present; nothing to hand off")
         log(f"{port} is not present; trying HTTP")
@@ -535,6 +629,14 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
                 return _await_downloader(chosen, "console", log, ports_fn, probe, probe_rom, sleep, clock,
                                          reappear_timeout, delay_ms=_int(kv.get("delay_ms"), 600))
             if status == "ERR" and kv.get("code") == 501:
+                if chosen.kind == "retimesh_composite":
+                    # A firmware that presents the composite device but has
+                    # not learnt to enter from its console; the core's own
+                    # touch does it regardless.
+                    log("the console does not offer software entry; using the 1200-baud touch")
+                    touch(chosen.device)
+                    return _await_downloader(chosen, "touch", log, ports_fn, probe, probe_rom, sleep, clock,
+                                             reappear_timeout)
                 log(f"this board cannot enter its downloader from software: {kv.get('text')}")
                 return HandOff(False, "auto_reset_dtr_rts", chosen.device,
                                "leaving the reset to esptool (bridge DTR/RTS)")
@@ -543,13 +645,22 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
             if con:
                 con.close()
             log(f"no RetiMesh console on {chosen.device}")
+            if chosen.kind == "retimesh_composite":
+                # The console may be switched off; the touch needs no console.
+                log("using the 1200-baud touch")
+                touch(chosen.device)
+                return _await_downloader(chosen, "touch", log, ports_fn, probe, probe_rom, sleep, clock,
+                                         reappear_timeout)
             # Silent is what a ROM downloader sounds like too — a node left
             # there by an earlier attempt, or by somebody's BOOT button.
             if probe_rom(chosen.device):
                 log("a ROM downloader is already answering on the port")
-                return HandOff(True, "downloader", chosen.device, "a ROM downloader is already on the port")
+                return HandOff(True, "downloader", chosen.device, "a ROM downloader is already on the port",
+                               reset_capable=chosen.auto_reset)
 
-    # 2. HTTP, when a URL is known.
+    # 2. HTTP, when a URL is known — and over the USB link it always is.
+    if not node_url_text and chosen and chosen.kind == "retimesh_composite" and chosen.node_id:
+        node_url_text = usb_node_url(chosen.node_id)
     if node_url_text:
         ok, msg, delay_ms = request_http(node_url_text, auth)
         log(f"HTTP bootloader request: {msg}")
@@ -580,6 +691,16 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
 # is telling esptool to reset a chip that is already in its downloader.
 _RESTART_SLACK_S = 1.5
 
+# How long a composite device's downloader may take to show up. The chip is
+# in its ROM within two seconds of the request; whether the host learns of
+# it is another matter. A root port notices the change at once. Some hubs
+# do not report a full-speed device's departure until a transfer to it
+# fails, which can be minutes later — one bench hub took anything from
+# three seconds to two and a half minutes, whatever the device did on the
+# wire — and the serial-JTAG unit is only enumerated after that. Waiting
+# is the whole cure: the ROM sits there for as long as it takes.
+_COMPOSITE_DOWNLOADER_S = 180.0
+
 
 def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_rom, sleep, clock,
                       timeout: float, delay_ms: int = 600) -> HandOff:
@@ -601,6 +722,47 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
     On a bridge, whose port belongs to the bridge and never moves, those two
     questions are the whole test."""
     window = delay_ms / 1000.0 + _RESTART_SLACK_S
+    if port.kind == "retimesh_composite":
+        # The composite device goes away with the restart and the ROM comes
+        # up on the chip's serial-JTAG unit: another port, known to be the
+        # same chip by the MAC both report — or, when this port reported no
+        # MAC, by being new on the bus since the request. A serial-JTAG unit
+        # that was already there is somebody else's chip.
+        before = {p.device for p in ports_fn() if p.kind == "usb_serial_jtag"}
+        def still_here(ps):
+            # By MAC when known; by path otherwise — with two nameless
+            # composite devices on the bench, "the one composite device" is
+            # nobody, and the port would have counted as gone before it went.
+            if port.node_id:
+                return _port_of(ps, "retimesh_composite", port.node_id)
+            return next((p for p in ps if p.kind == "retimesh_composite" and same_device(p.device, port.device)), None)
+        def downloader(ps):
+            if port.node_id:
+                return _port_of(ps, "usb_serial_jtag", port.node_id)
+            fresh = [p for p in ps if p.kind == "usb_serial_jtag" and p.device not in before]
+            return fresh[0] if len(fresh) == 1 else None
+        log(f"watching for {port.device} to go and the serial-JTAG downloader to come")
+        gone = wait_for_port(lambda ps: None if still_here(ps) else port,
+                             window, ports_fn, sleep, clock, interval=0.1)
+        if gone is None and probe(port.device, timeout=1.0):
+            return HandOff(False, "none", port.device,
+                           "the console still answers after the request, so the node did not reset; "
+                           "hold BOOT, press RST, then retry")
+        if gone is None:
+            log("the node has stopped answering; its port will drop when the host notices — "
+                "at once on a root port, up to a minute behind some hubs")
+        started = clock()
+        back = None
+        while back is None and clock() - started < _COMPOSITE_DOWNLOADER_S:
+            back = wait_for_port(downloader, 15.0, ports_fn, sleep, clock)
+            if back is None:
+                log(f"still waiting for the serial-JTAG downloader ({clock() - started:.0f} s)")
+        if back is None:
+            return HandOff(False, method, None,
+                           f"the serial-JTAG downloader did not appear within {_COMPOSITE_DOWNLOADER_S:.0f} s after the request; "
+                           "hold BOOT, press RST, then retry")
+        log(f"the downloader is on {back.device}")
+        return _confirm_downloader(back.device, method, log, probe_rom, reset_capable=back.auto_reset)
     gone = None
     if port.kind == "usb_serial_jtag":
         log(f"watching {port.device} for the reset")
@@ -618,7 +780,7 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
                            "the console still answers after the request, so the node did not reset; "
                            "leaving the reset to esptool")
         log("the console is silent; asking esptool")
-        return _confirm_downloader(port.device, method, log, probe_rom)
+        return _confirm_downloader(port.device, method, log, probe_rom, reset_capable=port.auto_reset)
     log(f"{port.device} went away; waiting for it to come back")
     back = wait_for_port(lambda ps: select_port(ps, device=port.device), timeout, ports_fn, sleep, clock)
     if back is None:
@@ -629,15 +791,22 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
         return HandOff(False, method, port.device,
                        f"{port.device} did not reappear within {timeout:.0f} s after the bootloader request; "
                        "hold BOOT, press RST, then retry")
-    return _confirm_downloader(back.device, method, log, probe_rom)
+    return _confirm_downloader(back.device, method, log, probe_rom, reset_capable=back.auto_reset)
 
 
-def _confirm_downloader(device: str, method: str, log: Log, probe_rom) -> HandOff:
+def _confirm_downloader(device: str, method: str, log: Log, probe_rom, reset_capable: bool = True) -> HandOff:
     if probe_rom(device):
-        return HandOff(True, method, device, "downloader confirmed by esptool")
+        return HandOff(True, method, device, "downloader confirmed by esptool", reset_capable=reset_capable)
     log(f"no downloader answers on {device}; leaving the reset to esptool")
     return HandOff(False, "auto_reset_dtr_rts", device,
                    "the port is back but no ROM downloader answers on it; leaving the reset to esptool")
+
+
+def _port_of(ports: list[Port], kind: str, node_id: Optional[str]) -> Optional[Port]:
+    """The one port of this kind belonging to this chip — or, when the chip's
+    MAC is unknown, the one port of this kind at all."""
+    hits = [p for p in ports if p.kind == kind and (node_id is None or p.node_id == node_id)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _same_kind(ports: list[Port], like: Port) -> Optional[Port]:
@@ -663,10 +832,29 @@ def wait_for_application(port: Optional[str], timeout: float, log: Log = _quiet,
     candidate is asked, since VERSION is what tells a node from the rest."""
     deadline = clock() + timeout
     announced = set()
+    # The chip that was flashed is known by the MAC in the port's name, on a
+    # native-USB board; when its port comes back under another face (the
+    # composite device after the serial-JTAG downloader), only that chip is
+    # asked. Without it, a bench with several nodes answered with whichever
+    # was first, and once reported a soak node as the application coming back.
+    node_id = node_id_from_path(port) if port else None
     while clock() < deadline:
         ports = ports_fn()
         named = select_port(ports, device=port) if port else None
-        targets = [named] if named else esp_candidates(ports)
+        if named:
+            targets = [named]
+        elif node_id:
+            # This chip by its MAC — and, failing that, any candidate that
+            # names no chip at all (a port without a usable serial), which
+            # may be it; never one that names another chip.
+            same = [p for p in ports if p.node_id == node_id]
+            # A chip known by its MAC is a native-USB chip; it comes back as
+            # the composite device or the serial-JTAG unit, never as a
+            # bridge, so a bridge with no usable serial is not a candidate.
+            targets = same or [p for p in esp_candidates(ports)
+                               if p.node_id is None and p.kind in ("retimesh_composite", "usb_serial_jtag")]
+        else:
+            targets = esp_candidates(ports)
         for target in targets:
             if target.device not in announced:
                 log(f"asking VERSION on {target.device}")

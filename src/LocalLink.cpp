@@ -21,6 +21,7 @@
 //  See LocalLink.h.
 // ============================================================================
 #include "LocalLink.h"
+#include "UsbNcm.h"
 #include <WiFi.h>
 #include "WifiManager.h"
 #include "Bootloader.h"
@@ -173,6 +174,54 @@ bool      WifiStaLink::wanted() const  { return settings.links().wifiEnabled && 
 bool      WifiStaLink::carrier() const { return wifiManager.stationConnected(); }
 IPAddress WifiStaLink::ip() const      { return WiFi.localIP(); }
 IPAddress WifiStaLink::mask() const    { return WiFi.subnetMask(); }
+
+// ---------------------------------------------------------------------------
+// USB
+// ---------------------------------------------------------------------------
+#if HAS_USB_NCM
+bool UsbNcmLink::enabled() const { return settings.links().usbEnabled; }
+
+void UsbNcmLink::begin() {
+  _m = Machine(enabled());
+  UsbNcm::begin();
+  poll(millis());
+}
+
+void UsbNcmLink::poll(uint32_t nowMs) {
+  // The driver follows the switch every pass, so a change saved by the API
+  // or the console takes effect here, on the loop task, where the network
+  // stack may be called.
+  UsbNcm::poll(enabled());
+  if (!enabled()) { _m.apply(Event::Disable, nowMs); return; }
+  _m.apply(Event::Enable, nowMs);
+  const bool up = UsbNcm::linkUp();
+  _m.apply(up ? Event::CarrierUp : Event::CarrierDown, nowMs);
+  if (up) _m.apply(Event::AddressUp, nowMs);          // static: it comes with the carrier
+}
+
+Snapshot UsbNcmLink::snapshot() const {
+  Snapshot s;
+  s.type = type();
+  strlcpy(s.name, name(), sizeof(s.name));
+  s.phase = _m.phase();
+  s.uptimeS = _m.uptimeS(millis());
+  // One host per cable: the count is whether it is there.
+  s.clientKnown = true;
+  s.clients = s.phase == Phase::Ready ? 1 : 0;
+  if (s.phase == Phase::Ready) {
+    s.addressing = Addressing::Static;
+    strlcpy(s.ip, UsbNcm::address().toString().c_str(), sizeof(s.ip));
+  }
+  return s;
+}
+
+uint32_t UsbNcmLink::address() const {
+  return _m.phase() == Phase::Ready ? hostOrder(UsbNcm::address()) : 0;
+}
+uint32_t UsbNcmLink::netmask() const {
+  return _m.phase() == Phase::Ready ? kUsbNetmask : 0;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 Snapshot UnavailableLink::snapshot() const {

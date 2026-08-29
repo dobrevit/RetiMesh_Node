@@ -43,6 +43,36 @@ bool Display::ack(uint8_t addr) {
   return Wire.endTransmission() == 0;    // 0 = ACK received
 }
 
+// A reset that lands in the middle of a transfer — esptool's after a flash,
+// the RST button, a watchdog — leaves the panel holding SDA low, waiting for
+// clocks that never come, and it holds it until it loses power. The probe in
+// begin() then finds nothing, the display task never starts, and the board
+// runs dark until somebody pulls the plug. So the bus is clocked free before
+// anything else touches it: up to nine pulses on SCL with SDA released, then
+// a STOP, all of which is a no-op on a bus that is idle.
+static void releaseBus(int sda, int scl) {
+  // Open-drain with the internal pull-ups, the same way Wire drives the
+  // lines: a board with no external resistors gets its clocks that way too.
+  pinMode(sda, INPUT_PULLUP);
+  pinMode(scl, OUTPUT_OPEN_DRAIN | PULLUP);
+  digitalWrite(scl, HIGH);
+  delayMicroseconds(5);
+  int pulses = 0;
+  while (digitalRead(sda) == LOW && pulses < 9) {
+    digitalWrite(scl, LOW);  delayMicroseconds(5);
+    digitalWrite(scl, HIGH); delayMicroseconds(5);
+    pulses++;
+  }
+  if (pulses) {
+    // STOP: SDA rising while SCL is high.
+    pinMode(sda, OUTPUT_OPEN_DRAIN | PULLUP);
+    digitalWrite(sda, LOW);  delayMicroseconds(5);
+    digitalWrite(scl, HIGH); delayMicroseconds(5);
+    digitalWrite(sda, HIGH); delayMicroseconds(5);
+    log_w("display: the panel was holding SDA low from an interrupted transfer; released after %d clocks", pulses);
+  }
+}
+
 bool Display::begin() {
 #if HAS_DISPLAY_VEXT
   // The panel is fed from a switched rail, active low, and needs a moment to
@@ -53,6 +83,7 @@ bool Display::begin() {
   delay(50);
 #endif
 
+  releaseBus(PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.setTimeOut(50);                   // a missing panel must not stall boot
 

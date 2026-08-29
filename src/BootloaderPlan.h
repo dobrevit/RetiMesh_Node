@@ -93,6 +93,7 @@ inline const char* methodName(Method m) {
 struct Caps {
   bool forceDownloadBoot = false;   // silicon has RTC_CNTL_FORCE_DOWNLOAD_BOOT (S2/S3/C3)
   bool nativeUsb         = false;   // the chip's own USB is on the connector
+  bool otgStack          = false;   // ...and the OTG stack owns it (the composite device)
   bool bridgeAutoReset   = false;   // a USB-UART bridge with DTR/RTS wired to EN/IO0
 };
 
@@ -121,8 +122,14 @@ struct Plan {
 
 // Whether firmware can get the chip into the downloader on its own, which is
 // what the HTTP endpoint and the console command promise. Silicon with the
-// bit, and a console that is not the S3's own USB unit — see the header.
-inline bool canEnterAutomatically(const Caps& c) { return c.forceDownloadBoot && !c.nativeUsb; }
+// bit, and a USB unit that will not be left hanging: the fixed serial-JTAG
+// unit survives the software reset and the ROM cannot bring it back up
+// until the power is cycled, but with the OTG stack in charge the core
+// hands the peripheral back to the serial-JTAG unit before it restarts, and
+// the ROM's downloader enumerates on it as usual — see the header.
+inline bool canEnterAutomatically(const Caps& c) {
+  return c.forceDownloadBoot && (!c.nativeUsb || c.otgStack);
+}
 
 // Why not, in the operator's words, from the same facts the decision used.
 // An earlier version derived the text from a board macro one line after the
@@ -130,7 +137,7 @@ inline bool canEnterAutomatically(const Caps& c) { return c.forceDownloadBoot &&
 inline const char* whyNotAutomatic(const Caps& c) {
   if (!c.forceDownloadBoot)
     return "this chip cannot enter its downloader from software; use the bridge's auto-reset or hold BOOT";
-  if (c.nativeUsb)
+  if (c.nativeUsb && !c.otgStack)
     return "software entry hangs a native-USB board until power is cycled (its USB unit survives the reset); esptool's DTR/RTS handshake does it instead";
   return "";
 }
@@ -169,7 +176,7 @@ inline Plan plan(const Caps& c) {
 // The request sequence
 // ---------------------------------------------------------------------------
 enum class Target : uint8_t { App = 0, Bootloader = 1 };
-enum class Source : uint8_t { Http = 0, Console, Settings };
+enum class Source : uint8_t { Http = 0, Console, Settings, Touch };   // Touch: the 1200-baud touch on the USB console port
 
 inline const char* targetName(Target t) { return t == Target::Bootloader ? "bootloader" : "app"; }
 inline const char* sourceName(Source s) {
@@ -177,6 +184,7 @@ inline const char* sourceName(Source s) {
     case Source::Http:     return "http";
     case Source::Console:  return "console";
     case Source::Settings: return "settings";
+    case Source::Touch:    return "touch";
   }
   return "unknown";
 }

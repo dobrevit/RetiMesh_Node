@@ -186,4 +186,15 @@ inline uint32_t ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
 }
 
+// The USB link's addressing. The node takes 10.64.<n>.1/24 and serves DHCP
+// on it, as the access point does on its own subnet; <n> is the last octet of
+// the node's factory MAC, so two nodes on one computer land on two subnets
+// without anyone typing anything. The host's static fallback is .2, for a
+// network manager that does not ask. IPv4 link-local alone was rejected:
+// phones and older managers get the probe wrong often enough that a fixed
+// address beside it is worth having.
+inline uint32_t usbNodeAddress(uint8_t macLastOctet) { return ipv4(10, 64, macLastOctet, 1); }
+inline uint32_t usbHostAddress(uint8_t macLastOctet) { return ipv4(10, 64, macLastOctet, 2); }
+constexpr uint32_t kUsbNetmask = 0xFFFFFF00u;
+
 } // namespace LocalLink

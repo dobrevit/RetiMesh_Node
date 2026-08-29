@@ -107,6 +107,30 @@ static void test_the_assembler_delivers_lines_and_tolerates_crlf() {
   TEST_ASSERT_EQUAL(2, lines);
 }
 
+static void test_a_line_that_stalls_is_dropped_not_prepended() {
+  // A port prober wrote "AT" and went away; two seconds later a real command
+  // arrives and must not become "ATVERSION".
+  // The caller asks idle() when the port has nothing to read.
+  LineAssembler a; bool over = false;
+  for (const char* p = "AT"; *p; p++) a.feed(*p, over, 100);
+  TEST_ASSERT_TRUE(a.pending());
+  TEST_ASSERT_FALSE(a.idle(100 + LINE_IDLE_MS));        // not yet
+  TEST_ASSERT_TRUE(a.idle(100 + LINE_IDLE_MS + 1));     // dropped
+  TEST_ASSERT_FALSE(a.pending());
+  uint32_t t = 100 + LINE_IDLE_MS + 2;
+  for (const char* p = "VERSION"; *p; p++) a.feed(*p, over, t++);
+  TEST_ASSERT_TRUE(a.feed('\n', over, t));
+  TEST_ASSERT_EQUAL_STRING("VERSION", a.line());
+  // Bytes still waiting to be read are not a stall, however late the loop
+  // reads them: feed() never drops, only idle() does.
+  LineAssembler b;
+  for (const char* p = "VER"; *p; p++) b.feed(*p, over, 100);
+  for (const char* p = "SION"; *p; p++) b.feed(*p, over, 100 + 3 * LINE_IDLE_MS);
+  TEST_ASSERT_TRUE(b.feed('\n', over, 100 + 3 * LINE_IDLE_MS));
+  TEST_ASSERT_EQUAL_STRING("VERSION", b.line());
+  TEST_ASSERT_FALSE(b.idle(100 + 4 * LINE_IDLE_MS));    // nothing pending, nothing to drop
+}
+
 static void test_an_overlong_line_is_dropped_whole_and_reported_once() {
   // Never truncated into a shorter line that might parse: "BOOTLOADER
   // CONFIRM" followed by 90 bytes of garbage must not become "BOOTLOADER
@@ -181,6 +205,7 @@ int main() {
   RUN_TEST(test_line_noise_is_not_a_command);
   RUN_TEST(test_overlong_tokens_and_lines_are_refused);
   RUN_TEST(test_the_assembler_delivers_lines_and_tolerates_crlf);
+  RUN_TEST(test_a_line_that_stalls_is_dropped_not_prepended);
   RUN_TEST(test_an_overlong_line_is_dropped_whole_and_reported_once);
   RUN_TEST(test_replies_carry_the_prefix_a_host_filters_on);
   RUN_TEST(test_replies_never_overrun_a_small_buffer);

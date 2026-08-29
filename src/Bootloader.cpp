@@ -51,12 +51,45 @@
 #include <esp_system.h>
 #include <soc/rtc_cntl_reg.h>
 #include <soc/soc.h>
+#if HAS_USB_NCM
+  #include "esp32-hal-tinyusb.h"
+  #include "UsbNcm.h"
+#endif
 #include "Config.h"
 #include "Diag.h"
 
 namespace Bootloader {
 
 static Sequencer sSeq;
+
+// Timestamps a restart leaves for the next boot to read, in RTC memory and
+// on the RTC clock, both of which survive every reset short of a power
+// cycle — the ROM session and esptool's reset between the two runs included.
+// Two marks: entering restart(), and handing over to the core's
+// persist-restart on the composite device. No shutdown handler: IDF keeps
+// five slots, Wi-Fi holds one and the core's hand-over needs one, and a
+// diagnostic is not worth making a refused flash more likely.
+#include <esp_attr.h>
+extern "C" uint64_t esp_rtc_get_time_us(void);
+struct RestartMarks { uint32_t magic; uint32_t entryMs, persistMs; };
+static RTC_NOINIT_ATTR RestartMarks sMarks;
+static constexpr uint32_t kMarksMagic = 0x52535452;   // "RSTR"
+static LastRestart sLast = {0, 0, false};
+static inline uint32_t rtcMs() { return (uint32_t)(esp_rtc_get_time_us() / 1000); }
+
+void begin() {
+  if (sMarks.magic == kMarksMagic && sMarks.entryMs) {
+    const uint32_t now  = rtcMs();
+    const uint32_t base = sMarks.persistMs ? sMarks.persistMs : sMarks.entryMs;
+    sLast.toPersistMs = sMarks.persistMs ? sMarks.persistMs - sMarks.entryMs : 0;
+    sLast.toBootMs    = now - base;
+    sLast.known = true;
+    log_i("last restart: %lu ms to the core's persist-restart, %lu ms from there to this boot",
+          (unsigned long)sLast.toPersistMs, (unsigned long)sLast.toBootMs);
+  }
+  sMarks.magic = 0;
+}
+LastRestart lastRestart() { return sLast; }
 static const char kRecovery[] =
   "hold BOOT, press RST (or replug USB while holding BOOT), then flash with esptool";
 
@@ -70,6 +103,7 @@ Caps caps() {
   Caps c;
   c.forceDownloadBoot = HAS_FORCE_DOWNLOAD_BOOT;
   c.nativeUsb         = BOARD_USB_NATIVE;
+  c.otgStack          = HAS_USB_NCM;
   c.bridgeAutoReset   = BOARD_BRIDGE_AUTO_RESET;
   return c;
 }
@@ -84,8 +118,25 @@ static void IRAM_ATTR forceDownloadBootHandler() {
 // in place — including when it already was: IDF refuses a second
 // registration of the same function as an invalid state, which here means
 // the work is done. Nothing caches that; IDF is the record.
+#if HAS_USB_NCM
+static void IRAM_ATTR slotProbe() {}
+#endif
+
 static bool armDownloadBoot() {
-  #if HAS_FORCE_DOWNLOAD_BOOT
+  #if HAS_USB_NCM
+    // The core's persist-restart registers its own shutdown handler at
+    // restart time and returns silently when it cannot. The request is the
+    // moment to find that out — the caller is told 202 on the strength of
+    // this — so a slot is taken and given straight back: the same table,
+    // the same answer, and nothing left behind.
+    const esp_err_t err = esp_register_shutdown_handler(slotProbe);
+    if (err != ESP_OK) {
+      log_e("bootloader: no shutdown-handler slot for the core's persist-restart (%d)", (int)err);
+      return false;
+    }
+    esp_unregister_shutdown_handler(slotProbe);
+    return true;
+  #elif HAS_FORCE_DOWNLOAD_BOOT
     const esp_err_t err = esp_register_shutdown_handler(forceDownloadBootHandler);
     if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) return true;
     log_e("bootloader: esp_register_shutdown_handler failed (%d): the shutdown table is full", (int)err);
@@ -154,10 +205,28 @@ static void quiesce() {
 }
 
 static void restart() {
-  // The download-boot handler, if this restart wants one, was registered
-  // when the request was accepted; a restart into the application makes
-  // sure none is left over from a request that failed to arm.
-  if (sSeq.snapshot().target != Target::Bootloader) disarmDownloadBoot();
+  const Target target = sSeq.snapshot().target;
+  sMarks = { kMarksMagic, rtcMs(), 0 };
+  #if HAS_USB_NCM
+    // The core's own way into the downloader on the composite device: it
+    // registers a shutdown handler that sets the download bit, hands the
+    // USB peripheral back to the serial-JTAG unit, and restarts. Our own
+    // handler stays unarmed on this path — armDownloadBoot() defers to it.
+    if (target == Target::Bootloader) {
+      UsbNcm::detach();
+      sMarks.persistMs = rtcMs();
+      usb_persist_restart(RESTART_BOOTLOADER);
+      // It returns only when it could not register its shutdown handler.
+      // The device is already off the bus, so there is no console left to
+      // report to and nothing to wait for: restart into the application,
+      // where the log and the API will say what happened.
+      log_e("bootloader: the core's persist-restart could not arm; restarting into the application");
+      esp_restart();
+    }
+  #endif
+  // A plain restart must not carry a download flag armed by an earlier
+  // request that was then outranked.
+  if (target != Target::Bootloader) disarmDownloadBoot();
   esp_restart();
 }
 

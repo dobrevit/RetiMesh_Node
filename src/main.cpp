@@ -25,7 +25,6 @@
 //  ┌────────────────────────── CORE 0 ──────────────────────────┐
 //  │  Wi-Fi / LwIP stack (ESP-IDF system tasks)                 │
 //  │  AsyncTCP event task    socket I/O for ports 80 and 4242   │
-//  │  dnsTask                captive-portal DNS polling         │
 //  │  displayTask            OLED status page, 2 Hz             │
 //  └────────────────────────────────────────────────────────────┘
 //  ┌────────────────────────── CORE 1 ──────────────────────────┐
@@ -96,9 +95,13 @@ static RingbufHandle_t tcpInRing = nullptr; // TCP clients -> Transport
 // first request, including the ones this board or build cannot offer.
 static LocalLink::WifiApLink  apLink;
 static LocalLink::WifiStaLink staLink;
+#if HAS_USB_NCM
+static LocalLink::UsbNcmLink usbLink;
+#else
 static LocalLink::UnavailableLink usbLink(LocalLink::Type::UsbNcm, "usb0", BOARD_USB_NCM,
-  BOARD_USB_NCM ? "this build has no USB network stack (the core's TinyUSB carries NCM; the firmware does not drive it yet)"
+  BOARD_USB_NCM ? "this build runs the chip's USB as a serial port, not as the composite device"
                 : "this board's USB is a serial bridge, not the chip's own");
+#endif
 static LocalLink::UnavailableLink pppLink(LocalLink::Type::PppUart, "ppp0", BOARD_UART_NETWORK,
   BOARD_UART_NETWORK ? "this build has no PPP (the core's lwIP has it; the firmware does not drive it yet)"
                      : "this board has no bridge UART to carry PPP");
@@ -110,6 +113,12 @@ void setup() {
   if (psramFound()) heap_caps_malloc_extmem_enable(PSRAM_MALLOC_THRESHOLD);
 
   Serial.begin(115200);
+  #if HAS_USB_NCM
+    // On the composite device the log rides the ACM port with the console,
+    // as it rode the USB-Serial/JTAG port before. The core routes it there
+    // for the JTAG unit on its own and for the OTG CDC only when asked.
+    Serial.setDebugOutput(true);
+  #endif
   delay(300);                              // let the USB CDC host attach
   log_i("%s %s on %s (IDF %s)", FW_NAME, FW_VERSION, BOARD_NAME, esp_get_idf_version());
 
@@ -117,6 +126,7 @@ void setup() {
   // The reset register survives the reboot but not a second one, so it is only
   // ever readable here.
   Diag::begin();
+  Bootloader::begin();                   // the previous run's restart timings, from RTC memory
 
   Leds::begin();                           // claimed and off until the services are up
 
@@ -206,14 +216,6 @@ void setup() {
   #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
-  // The captive-portal DNS only exists to steer phones on the access point.
-  // Without one there is no server to poll — and polling a DNSServer that
-  // was never started costs a malloc and a logged error every ten
-  // milliseconds, on the same port the maintenance console answers on.
-  if (wifiManager.wifiEnabled())
-    xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",
-                            3072, &wifiManager, 1, nullptr, 0);
-
   xTaskCreatePinnedToCore(LoRaRadio::radioTask, "radio",
                           8192, &loraRadio, 5, nullptr, 1);
 

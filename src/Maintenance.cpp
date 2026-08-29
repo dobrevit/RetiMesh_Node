@@ -26,6 +26,8 @@
 #include "Settings.h"
 #include "Bootloader.h"
 #include "LocalLink.h"
+#include "WifiManager.h"
+#include "UsbNcm.h"
 #include "Diag.h"
 
 namespace Maintenance {
@@ -100,16 +102,24 @@ static void doStatus() {
     snprintf(restart, sizeof(restart), " restart_target=%s restart_source=%s restart_in_ms=%lu",
              Bootloader::targetName(p.target), Bootloader::sourceName(p.source),
              (unsigned long)p.dueInMs(millis()));
-  dataf("STATUS", "transport=%s tcp_clients=%lu restart_pending=%s%s",
+  dataf("STATUS", "transport=%s tcp_clients=%lu dns=%s restart_pending=%s%s",
         g_stats.transportOnline ? "online" : "offline", (unsigned long)g_stats.tcpClients,
+        wifiManager.dnsListening() ? "listening" : "down",
         p.armed() ? "true" : "false", restart);
   ok("STATUS");
 }
 
 static void doUsbStatus() {
-  #if BOARD_USB_NATIVE
-    // The S3 runs its fixed USB-Serial/JTAG personality; the composite device
-    // with its own CDC is a build that does not exist yet.
+  #if HAS_USB_NCM
+    // The OTG stack owns the peripheral: this port is the composite device's
+    // ACM function, and usb0 is its NCM function.
+    dataf("USB_STATUS", "native=true personality=usb_otg_composite ncm=driver cdc_acm=composite pid_test_allocation=%s",
+          USB_PID_IS_TEST_ALLOCATION ? "yes" : "no");
+    dataf("USB_STATUS", "ncm_link=%s host_opened=%s ncm_rx=%lu ncm_tx=%lu ncm_tx_dropped=%lu",
+          UsbNcm::linkUp() ? "up" : "down", UsbNcm::hostOpened() ? "yes" : "no", (unsigned long)UsbNcm::rxPackets(),
+          (unsigned long)UsbNcm::txPackets(), (unsigned long)UsbNcm::txDropped());
+  #elif BOARD_USB_NATIVE
+    // The S3's fixed USB-Serial/JTAG personality.
     dataf("USB_STATUS", "native=true personality=usb_serial_jtag ncm=%s cdc_acm=via_serial_jtag",
           BOARD_USB_NCM ? "hardware" : "no");
   #else
@@ -240,12 +250,18 @@ void poll() {
     sLines.reset();
     return;
   }
+  // Nothing to read: the port is silent, which is when a stalled partial
+  // line — a prober's leftovers — expires (MaintenanceProtocol.h).
+  if (sIo->available() <= 0) {
+    if (sLines.idle(millis())) log_d("console: dropped a line the port went silent on");
+    return;
+  }
   size_t budget = kBudget;
   while (budget-- && sIo->available() > 0) {
     const int c = sIo->read();
     if (c < 0) break;
     bool overflowed = false;
-    if (sLines.feed((char)c, overflowed)) dispatch(sLines.line());
+    if (sLines.feed((char)c, overflowed, millis())) dispatch(sLines.line());
     else if (overflowed) err("?", errorCode(ParseError::TooLong), errorText(ParseError::TooLong));
   }
 }

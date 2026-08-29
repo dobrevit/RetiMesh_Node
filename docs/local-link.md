@@ -48,7 +48,7 @@ packager and the flasher never disagree about it.
 
 | Env | MCU | On the USB connector | Bootloader methods, best first | IP local links |
 |---|---|---|---|---|
-| `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi` | ESP32-S3 | the chip's own USB (D+/D− routed): USB-Serial/JTAG today, OTG capable | `auto_reset_dtr_rts`, `manual_recovery` (no software entry: see below) | wifi-ap, wifi-sta; **usb0 hardware-capable, not in this build** |
+| `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi` | ESP32-S3 | the chip's own USB (D+/D− routed), driven by the OTG stack as the composite device below | `software_api` (the core's persist-restart), `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **usb0** |
 | `heltec-v3` | ESP32-S3 | CP2102 bridge on UART0 (the S3's own USB is not on the connector) | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; **ppp0 hardware-capable, not in this build** |
 | `heltec-ws` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; ppp0 as above |
 | `tbeam` | ESP32 | CH9102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta; ppp0 as above |
@@ -56,7 +56,9 @@ packager and the flasher never disagree about it.
 The `heltec-v3` row is the one to read twice: it is an S3, so its firmware can
 put it into the ROM downloader on request, but its USB is a serial bridge, so
 there is no USB networking to be had — CDC-NCM is a property of the connector
-wiring, not of the chip.
+wiring, not of the chip. Its S3 siblings run the OTG stack instead of the
+serial-JTAG unit, which is what makes usb0 possible and what puts software
+entry back on the table for them.
 
 `GET /api/status` reports every link under `local_links` (type, phase,
 address, uptime, a client count where the link can tell, and a `reason` where
@@ -113,7 +115,18 @@ follow the count on the same line. The `HELLO` banner the node prints when
 the console starts says `protocol=2`; protocol 1 had neither.
 
 Errors are `RM ERR <CMD> <code> <text>` with HTTP-style codes (400, 404, 409,
-501); an error never carries data lines. Lines longer than 96 bytes are dropped whole and answered with a 400 —
+501); an error never carries data lines. A partial line the port has been
+silent on for ten seconds is dropped, so bytes a port prober left behind —
+ModemManager writes `AT` to every new CDC-ACM port — cannot be glued onto
+the next command; bytes waiting to be read never count as silence, and ten
+seconds is a typist's pause, not a prober's. The host tool asks once more
+when a first reply names no command. A Linux host
+that runs ModemManager is still better off telling it to leave the node
+alone, because a probe that is still reading the port eats the replies to
+whatever else is asked in those seconds: `tools/udev/60-retimesh-node.rules`
+does that for the composite device and the S3's serial-JTAG unit —
+`sudo cp tools/udev/60-retimesh-node.rules /etc/udev/rules.d/ && sudo
+udevadm control --reload && sudo udevadm trigger`. Lines longer than 96 bytes are dropped whole and answered with a 400 —
 never truncated into something shorter that might parse. Bytes outside
 printable ASCII make a line unusable, so bridge noise at the wrong baud is not
 a command. The console can be switched off (`maintenance.console_enabled`);
@@ -313,79 +326,116 @@ one.
 `links.wifi` off (settings page, `POST /api/settings/links {"wifi":false}`,
 or `WIFI OFF` at the console) restarts the node without its access point or
 station. The web server and the Reticulum TCP server still start, bound to
-every interface, so a USB or PPP link — when a build carries one — serves them
-unchanged; the console always does. `WIFI ON` at the console is the way back.
+every interface, so the USB link — or PPP, when a build carries it — serves
+them unchanged; the console always does. `WIFI ON` at the console is the way
+back, and so is `http://10.64.<n>.1/` over the cable on a native-USB board.
 Turning every link off is allowed and the answer says so in words.
 
 ## Native USB: the composite device
 
-The design, verified against the silicon and waiting on the toolchain.
+On the boards whose own USB reaches the connector — `t3s3`, its SX1280
+variants and `esp32s3-qspi` — the OTG stack owns the peripheral and the node
+enumerates as one device with two functions:
 
 ```
-USB-C
-  ├── CDC-NCM   "RetiMesh Network"      interfaces 0-1, IN×2 OUT×1   → lwIP netif usb0
-  ├── CDC-ACM   "RetiMesh Maintenance"  interfaces 2-3, IN×2 OUT×1   → the console above, + 1200-baud touch
-  └── (bootloader trigger: the touch, or POST /api/system/bootloader over usb0)
+USB-C   1209:0001  RetiMesh / RetiMesh Node / serial = the factory MAC
+  ├── CDC-ACM  (named by the core)     interfaces 0-1  → /dev/ttyACM*: the console and the log
+  └── CDC-NCM  "RetiMesh Network"      interfaces 2-3  → an Ethernet link: usb0 on the node,
+                                                          enx<mac> on a Linux host
 ```
 
-**Endpoint budget.** TinyUSB's ESP32-S3 port (`dcd_esp32sx.c`) has
-`EP_FIFO_NUM 5` with FIFO0 reserved for EP0 — four usable IN endpoints — and
-`EP_MAX 7`, six OUT. Two CDC functions need four IN and two OUT: it fits with
-**no IN endpoint to spare**. A third function (a second ACM port for logs is
-the obvious request) does not fit, and the descriptor that builds the device
-should `static_assert` that budget so it fails to compile rather than
-enumerating with an interface missing. That header lands with the device; a
-design note shipped as firmware source, which is what an earlier version was,
-guarded nothing.
+Linux binds `cdc_acm` and `cdc_ncm` with nothing to install, and
+NetworkManager treats the NCM interface as wired Ethernet and takes a lease
+the moment it appears. macOS carries a CDC-NCM class driver, Windows 10 and
+11 as well; neither has been tried here yet.
 
-**Identity.** Manufacturer `RetiMesh`, product `RetiMesh Node`, serial = the
-factory MAC, interface strings as above. The VID:PID is not ours to choose:
-Espressif allocates PIDs under 0x303A to open-source projects on request
-(github.com/espressif/usb-pids). Until one is granted the header carries
-pid.codes' test allocation 1209:0001, flagged `PID_IS_TEST_ALLOCATION`, which
-their policy permits for development and forbids for anything shipped. Host
-tooling identifies a node by its product string and its `VERSION` reply, never
-by the PID alone.
+**The link.** The node takes `10.64.<n>.1/24` and serves DHCP on it, `<n>`
+the last octet of its MAC, so two nodes on one computer land on two subnets
+without anyone typing anything; the host gets `.2`, which is also the static
+fallback for a network manager that does not ask. The offer carries no
+router: the cable reaches the node and nothing beyond it, so the host keeps
+its default route where it was. It does carry a DNS server — ESP-IDF's DHCP
+server names itself whenever it is told to name nobody — but the node's
+captive-portal resolver answers only on the access point, so a query sent to
+the node over usb0 is refused outright and a resolver that was handed the
+address moves on at once instead of being steered to the portal. Every
+service binds every interface, so `http://10.64.<n>.1/`, the Reticulum TCP
+transport and the console answer over the cable as they do over Wi-Fi, and
+`POST /api/system/bootloader` is allowed from it, a directly attached link.
+The `usb` switch in `links` applies live: off takes the interface down with
+no restart, and the device stays enumerated so the console keeps working.
+`USB_STATUS` says `personality=usb_otg_composite`, whether the link is up,
+whether the host has opened its side, and how many frames have moved.
 
-**Addressing.** The node takes `10.64.<n>.1/24` and runs a DHCP server on the
-link, as the access point does; `<n>` is the last octet of the node's factory
-MAC, so two nodes on one computer land on two subnets without anyone typing
-anything. The static fallback (`10.64.<n>.2` for the host) is there for a
-network manager that does not ask. IPv4 link-local alone was rejected because
-phones and older managers get the probe wrong often enough that a fixed
-address beside it is worth having. That rule lands with the NCM driver,
-tested.
+**Endpoint budget.** TinyUSB's ESP32-S3 port has `EP_FIFO_NUM 5` with FIFO0
+reserved for EP0 — four usable IN endpoints. Two CDC functions need four IN
+and two OUT: it fits with **no IN endpoint to spare**. A third function (a
+second ACM port for the log is the obvious request) does not fit; the core's
+allocator refuses a fifth IN endpoint and the NCM descriptor callback then
+returns nothing, which the core reports as a failed load rather than
+enumerating with an interface missing.
 
-**Logging.** With the OTG stack owning the USB peripheral the fixed
-USB-Serial/JTAG console goes away, and the firmware must not depend on it. The
-strategy: the CDC-ACM function carries the maintenance console and the log on
-one stream with the `RM ` prefix discipline already in place; the log level is
-a build flag as now; crash and boot diagnostics stay in `Diag` (reset reason,
-boot count, previous run length in RTC RAM, reported by `/api/status` and
-`STATUS`), which never needed a console; and the secondary hardware UART
-(`CONFIG_ESP_CONSOLE_UART`, UART0 pins) remains the panic output for anyone
-with a probe. An in-memory log ring served by the API is the natural next
-sink.
+**Identity.** Manufacturer, product, the serial (the MAC) and the network
+interface's string come from `boards.json` (`_usb_identity`), handed to the
+build by `tools/board_caps.py`; the ACM interface is the core's function and
+carries the core's own name for it. `USB_STATUS` says whether the PID is the
+test allocation, and a release refuses it (`tools/check_boards.py
+--release` in the release workflow). The VID:PID is not ours to choose: Espressif
+allocates PIDs under 0x303A to open-source projects on request
+(github.com/espressif/usb-pids), and until one is granted the registry
+carries pid.codes' test allocation 1209:0001, flagged
+`pid_is_test_allocation`, which their policy permits for development and
+forbids for anything shipped. Host tooling recognises a node by that pair
+and by its `VERSION` reply, never by the PID alone. One wrinkle worth
+knowing: the core's variant header defines `USB_VID`/`USB_PID`
+unconditionally, after any flag the build passes, so every S3 build of the
+core would say 303a:1001 — the serial-JTAG unit's identity — whatever
+platformio.ini asked. The firmware therefore supplies the device descriptor
+itself (`tud_descriptor_device_cb` in `UsbNcm.cpp`), the same shape the
+core builds, with the registry's pair in it.
 
-**Why it is not in this build.** For a long time it could not be. The
-official `espressif32` platform is frozen on Arduino core 2.0.17 / ESP-IDF
-4.4.7, whose prebuilt TinyUSB has MSC, DFU, HID, vendor, CDC and MIDI classes
-and **no NCM, ECM or RNDIS**, and whose prebuilt lwIP has
-`CONFIG_LWIP_PPP_SUPPORT` off. The build has since moved to the pioarduino
-platform fork with Arduino core 3.3.x on ESP-IDF 5.5 (`platformio.ini` pins
-the release and says why), and that core's prebuilt libraries have both: its
-`tusb_config.h` takes `CFG_TUD_NCM` from `CONFIG_TINYUSB_NCM_ENABLED`, which
-is on; lwIP is built with `CONFIG_LWIP_PPP_SUPPORT`; and the core ships a
-`PPP` library over `esp_netif` PPP. SoftAP SAE (`WPA3_SOFTAP_SUPPORTED`) came
-with the same move. What the toolchain no longer withholds, the firmware has
-not yet taken up: the composite device and `UsbNcmLink` on the core's
-`esp_tinyusb`/`tinyusb_net`, and `PppLink` below, are the remaining work, and
-each is its own change.
+**Flashing.** The ROM downloader cannot run on the composite device: the
+chip enters it by handing the USB peripheral back to the serial-JTAG unit.
+A flash from the composite port is therefore a two-port affair, and the
+tooling does it: `BOOTLOADER CONFIRM` on the console — software entry is
+offered on these boards again, through the core's `usb_persist_restart`,
+which is not the bare download bit that hung the serial-JTAG-only firmware
+— or, where the console is switched off, the 1200-baud touch on the ACM
+port, which the firmware routes through the same sequencer as a request of
+its own (`source: touch`) rather than letting the core restart from inside
+its USB task — a refused touch is logged, and since the core reports a line
+coding only when it changes, the tool opens the port at another speed before
+touching again; esptool's DTR/RTS pattern on that port is not honoured, since
+the downloader never appears on it. Before the hand-over the firmware takes
+the device off the bus and the link down; then the composite device
+vanishes, a `303a:1001` USB-Serial/JTAG port with
+the same MAC appears, and esptool is pointed at that port **with its own
+reset at connect**. On a root port that takes a second. Behind some hubs it
+takes up to a minute: the chip is in its ROM within two seconds, but the
+hub does not report the full-speed device's departure until a transfer to
+it fails, and only then is the serial-JTAG unit enumerated — measured on
+one bench hub at anything from three seconds to two and a half minutes,
+whatever the device did electrically to announce its going. The tooling
+waits up to three minutes and says so; a node that is flashed often belongs
+on a root port. That last point was measured and matters:
+a downloader entered from software stays in the ROM through esptool's
+closing hard reset unless esptool's connect-time reset sequence ran first,
+and a board left that way looks dead — blank display, no port but the
+downloader's — until the sequence is run (`esptool --before default_reset
+--after hard_reset chip-id`) or RST is pressed. After the flash the
+application comes back as the composite device, and the hook waits for its
+`VERSION` there.
 
-The pieces that never depended on the toolchain are done and tested: the link
-registry and phase machine, the capability model, the descriptor budget, the
-addressing rule, the console protocol the ACM port will speak, the touch
-detector, and the bootloader transition the S3 already performs.
+**Logging.** With the OTG stack owning the peripheral the fixed
+USB-Serial/JTAG console is gone, and the firmware does not depend on it: the
+ACM function carries the console and the log on one stream with the `RM `
+prefix discipline; crash and boot diagnostics stay in `Diag` (reset reason,
+boot count, previous run length), reported by `/api/status` and `STATUS`;
+and the hardware UART0 pins remain the panic output for anyone with a probe.
+
+**Not yet.** macOS and Windows hosts; anything but a link-local address on
+IPv6 over usb0; a lease count (the link reports one client whenever the
+host has the interface up).
 
 ## PPP over the bridge UART — follow-up specification
 

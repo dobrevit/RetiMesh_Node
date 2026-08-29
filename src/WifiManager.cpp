@@ -108,6 +108,12 @@ static void bootloaderJson(JsonObject o) {
     o["due_in_ms"] = r.dueInMs(millis());
   }
   o["primary"]        = Bootloader::methodName(p.primary());
+  const Bootloader::LastRestart lr = Bootloader::lastRestart();
+  if (lr.known) {
+    JsonObject last = o["last_restart"].to<JsonObject>();
+    last["to_persist_ms"] = lr.toPersistMs;
+    last["to_boot_ms"]    = lr.toBootMs;
+  }
   o["recovery"]       = Bootloader::manualRecovery();
   JsonArray methods = o["methods"].to<JsonArray>();
   for (size_t i = 0; i < p.count; i++) methods.add(Bootloader::methodName(p.methods[i]));
@@ -136,12 +142,12 @@ void WifiManager::begin() {
   if (wifiEnabled()) {
     startAccessPoint();
 
-    // Captive portal: answer every DNS query with our own address. The OS
-    // connectivity probes then hit port 80 and get redirected below, which
-    // pops the "sign in to network" sheet on Android/iOS/Windows.
-    _dns.setErrorReplyCode(DNSReplyCode::NoError);
-    _dns.setTTL(60);
-    _dns.start(53, "*", AP_IP);
+    // Captive portal: answer every DNS query on the access point with our
+    // own address. The OS connectivity probes then hit port 80 and get
+    // redirected below, which pops the "sign in to network" sheet on
+    // Android/iOS/Windows. Bound to the AP's address, not to every
+    // interface: a host on the USB link must not have its names steered
+    // here (CaptiveDns.h).
   } else {
     // Wi-Fi off is a configuration, not a failure: the names are still
     // derived (the display and the console show them) and the radio is left
@@ -163,6 +169,11 @@ void WifiManager::begin() {
   }
 
   setupRoutes();
+  // The resolver runs whether or not Wi-Fi does: the USB link's lease names
+  // the node as DNS (CaptiveDns.h), and with the access point off there
+  // would otherwise be nothing on port 53 to refuse the host's queries —
+  // a timeout where a refusal was promised.
+  if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
   _http.begin();
 
   // http://retimesh.local/ (and http://<ssid>.local/) for clients whose
@@ -323,18 +334,8 @@ void WifiManager::tick() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// DNSServer is poll-driven; this task is pinned to CORE 0 by main.cpp so
 // all captive-portal work stays off the radio core.
 // ---------------------------------------------------------------------------
-void WifiManager::dnsTask(void* self) {
-  auto* wm = static_cast<WifiManager*>(self);
-  for (;;) {
-    wm->_dns.processNextRequest();
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-}
-
 // ---------------------------------------------------------------------------
 // HTTP Basic Auth against the admin password. Sends the 401 challenge
 // itself when it fails, so callers just `return`.

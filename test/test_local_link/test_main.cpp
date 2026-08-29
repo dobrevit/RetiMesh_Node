@@ -111,6 +111,17 @@ static void test_only_the_station_uplink_is_not_host_facing() {
   TEST_ASSERT_FALSE(isHostFacing(Type::WifiSta));
 }
 
+static void test_the_usb_link_takes_its_subnet_from_the_mac() {
+  // Two nodes on one computer: two subnets, decided by a byte nobody typed.
+  TEST_ASSERT_EQUAL_UINT32(ipv4(10, 64, 0x54, 1), usbNodeAddress(0x54));
+  TEST_ASSERT_EQUAL_UINT32(ipv4(10, 64, 0x54, 2), usbHostAddress(0x54));
+  TEST_ASSERT_NOT_EQUAL(usbNodeAddress(0x54), usbNodeAddress(0x55));
+  // The two ends share the subnet and nothing else.
+  TEST_ASSERT_EQUAL_UINT32(usbNodeAddress(7) & kUsbNetmask, usbHostAddress(7) & kUsbNetmask);
+  TEST_ASSERT_NOT_EQUAL(usbNodeAddress(7), usbHostAddress(7));
+  TEST_ASSERT_TRUE(isHostFacing(Type::UsbNcm));
+}
+
 static void test_an_address_is_one_number_octets_first() {
   // hostOrder() and the trust rule compare these; the first octet has to be
   // the most significant or two addresses on one link compare unequal.
@@ -130,6 +141,7 @@ int main() {
   RUN_TEST(test_repeated_events_do_not_report_a_change);
   RUN_TEST(test_every_type_and_phase_has_a_name);
   RUN_TEST(test_only_the_station_uplink_is_not_host_facing);
+  RUN_TEST(test_the_usb_link_takes_its_subnet_from_the_mac);
   RUN_TEST(test_an_address_is_one_number_octets_first);
   return UNITY_END();
 }
