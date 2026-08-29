@@ -39,6 +39,8 @@
   #include "boards/heltec_v3.h"
 #elif defined(BOARD_HELTEC_WS)
   #include "boards/heltec_ws.h"
+#elif defined(BOARD_HELTEC_WB)
+  #include "boards/heltec_wb.h"
 #elif defined(BOARD_T3S3_SX1280_PA)
   #include "boards/t3s3_sx1280_pa.h"
 #elif defined(BOARD_T3S3_SX1280)
