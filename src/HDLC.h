@@ -63,8 +63,11 @@ inline size_t frame(const uint8_t* in, size_t len, uint8_t* out, size_t outCap) 
 
 // Streaming deframer — one instance per TCP client, fed a byte at a time.
 // Calls sink(buf, len) for every complete, non-empty, MTU-sized-or-smaller
-// frame. Oversized frames are discarded silently (a desynced or hostile
-// peer must not be able to wedge the parser).
+// frame. Oversized frames are dropped rather than parsed (a desynced or
+// hostile peer must not be able to wedge the parser), and counted: a client
+// speaking a larger MTU than this node's looks exactly like a working one
+// whose messages never arrive, and the count is the only thing that says
+// which of the two is happening.
 class Deframer {
 public:
   template <typename Sink>
@@ -73,6 +76,7 @@ public:
       // A FLAG both terminates a frame and opens the next one, so
       // back-to-back FLAGs (empty frames) are simply ignored.
       if (inFrame && len > 0 && !overflow) sink(buf, len);
+      if (overflow) dropped++;
       inFrame  = true;
       escaped  = false;
       overflow = false;
@@ -88,12 +92,16 @@ public:
 
   void reset() { inFrame = false; escaped = false; overflow = false; len = 0; }
 
+  // Frames dropped for exceeding the MTU, since this deframer was created.
+  uint32_t oversized() const { return dropped; }
+
 private:
-  uint8_t buf[RNS_MTU];
-  size_t  len      = 0;
-  bool    inFrame  = false;
-  bool    escaped  = false;
-  bool    overflow = false;
+  uint8_t  buf[RNS_MTU];
+  size_t   len      = 0;
+  uint32_t dropped  = 0;
+  bool     inFrame  = false;
+  bool     escaped  = false;
+  bool     overflow = false;
 };
 
 } // namespace HDLC

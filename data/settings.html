@@ -136,10 +136,12 @@
       <div></div>
       <div><label>LoRa interface mode</label>
         <select name="lora_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
-      <div><label>Wi-Fi clients mode</label>
+      <div><label>Client interface mode (Sideband, rnsd on :4242)</label>
         <select name="wifi_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
+      <div><label>Peer interface mode (other nodes, AutoInterface)</label>
+        <select name="auto_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
       <div><label>Zero-config peering (AutoInterface)</label>
-        <select name="auto_enabled"><option value="1">Enabled — phones find the node automatically</option><option value="0">Disabled</option></select></div>
+        <select name="auto_enabled"><option value="1">Enabled — phones and other nodes find this one automatically</option><option value="0">Disabled</option></select></div>
       <div><label>AutoInterface group id (blank = reticulum)</label><input name="auto_group_id" maxlength="32" placeholder="reticulum"></div>
       <div><label>Power profile</label>
         <select name="power_profile"><option value="performance">performance (240 MHz)</option><option value="balanced">balanced (160 MHz, Wi-Fi sleep)</option><option value="battery">battery (80 MHz, Wi-Fi sleep, display 20 s)</option></select></div>
@@ -148,6 +150,10 @@
       <div><label>Rate grace (violations)</label><input name="announce_rate_grace" type="number" min="0" max="100" required></div>
       <div><label>Rate penalty (s)</label><input name="announce_rate_penalty" type="number" min="0" max="7200" required></div>
     </div>
+    <div class="note"><b>Interface modes</b> are rnsd's, one per kind of neighbour, and they are not a preference: an interface in
+      <code>access_point</code> is sent no announces at all, so neighbours on it can only discover by path request and Sideband's announce
+      stream stays empty. Use <code>full</code> unless you mean to withhold them &mdash; and note the peer mode governs the other RetiMesh
+      nodes on your LAN, which need announces from each other to route.</div>
     <div class="note">Announce cap limits how much of each interface's airtime announces may use (rnsd default 2 %). The rate target/grace/penalty
       throttle destinations that announce too often — the same knobs as rnsd's <code>announce_rate_*</code>.</div>
     <div class="note">The Reticulum store (path table, announce cache, known destinations) lives in one place at a time: the microSD card when one
@@ -385,7 +391,7 @@ async function load() {
   $("rnsSnippet").textContent = rnsSnippet(r);
 
   fill($("wifiForm"), cfg.wifi);
-  fill($("transportForm"), { enabled: cfg.transport.enabled ? "1" : "0", lora_mode: cfg.transport.lora_mode, wifi_mode: cfg.transport.wifi_mode,
+  fill($("transportForm"), { enabled: cfg.transport.enabled ? "1" : "0", lora_mode: cfg.transport.lora_mode, wifi_mode: cfg.transport.wifi_mode, auto_mode: cfg.transport.auto_mode,
     announce_cap: cfg.transport.announce_cap, announce_rate_target: cfg.transport.announce_rate_target,
     announce_rate_grace: cfg.transport.announce_rate_grace, announce_rate_penalty: cfg.transport.announce_rate_penalty,
     auto_enabled: cfg.transport.auto_enabled ? "1" : "0", auto_group_id: cfg.transport.auto_group_id || "",
@@ -479,7 +485,7 @@ $("transportForm").addEventListener("submit", async ev => {
   ev.preventDefault();
   const f = ev.target.elements;
   try {
-    const res = await api("/api/settings/transport", { enabled: f.enabled.value === "1", lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value,
+    const res = await api("/api/settings/transport", { enabled: f.enabled.value === "1", lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value, auto_mode: +f.auto_mode.value,
       announce_cap: +f.announce_cap.value, announce_rate_target: +f.announce_rate_target.value,
       announce_rate_grace: +f.announce_rate_grace.value, announce_rate_penalty: +f.announce_rate_penalty.value,
       auto_enabled: f.auto_enabled.value === "1", auto_group_id: f.auto_group_id.value, power_profile: f.power_profile.value });

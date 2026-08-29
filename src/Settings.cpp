@@ -93,6 +93,7 @@ void Settings::load() {
   LOAD(_transport.enabled,  "t_en",    getBool ("t_en"));
   LOAD(_transport.loraMode, "t_lmode", getUChar("t_lmode"));
   LOAD(_transport.wifiMode, "t_wmode", getUChar("t_wmode"));
+  LOAD(_transport.autoMode, "t_amode", getUChar("t_amode"));
   LOAD(_transport.announceCap,         "t_acap",  getUChar ("t_acap"));
   LOAD(_transport.announceRateTarget,  "t_art",   getUShort("t_art"));
   LOAD(_transport.announceRateGrace,   "t_arg",   getUChar ("t_arg"));
@@ -160,9 +161,10 @@ bool Settings::saveAdminPassword(const char* password) {
 
 bool Settings::saveTransport(const TransportSettings& t) {
   _transport = t;
-  bool ok = _prefs.putBool ("t_en",    t.enabled)  > 0
-         && _prefs.putUChar("t_lmode", t.loraMode) > 0
-         && _prefs.putUChar("t_wmode", t.wifiMode) > 0
+  bool ok = _prefs.putBool  ("t_en",    t.enabled)  > 0
+         && _prefs.putUChar ("t_lmode", t.loraMode) > 0
+         && _prefs.putUChar ("t_wmode", t.wifiMode) > 0
+         && _prefs.putUChar ("t_amode", t.autoMode) > 0
          && _prefs.putUChar ("t_acap",  t.announceCap) > 0
          && _prefs.putUShort("t_art",   t.announceRateTarget) > 0
          && _prefs.putUChar ("t_arg",   t.announceRateGrace) > 0

@@ -175,7 +175,7 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// RNS AutoInterface (IPv6 link-local multicast peering on the SoftAP)
+// RNS AutoInterface (IPv6 link-local peering on the access point and the LAN)
 // ---------------------------------------------------------------------------
 #ifndef HAS_AUTOINTERFACE
   #define HAS_AUTOINTERFACE 1
@@ -183,7 +183,25 @@
 #ifndef AUTOIF_GROUP_ID
   #define AUTOIF_GROUP_ID   "reticulum"     // RNS default group id
 #endif
-#define AUTOIF_MAX_PEERS    8
+// One slot per peer, and a peer is a link-local address rather than a node: a
+// neighbour reachable both over this node's access point and over the LAN
+// occupies two. Eight was the count of a bench where every node was an AP
+// client of the next; a room of them on one LAN needs a slot each, in both
+// directions, with the phones and laptops that are the point of the exercise.
+#ifndef AUTOIF_MAX_PEERS
+  #define AUTOIF_MAX_PEERS  24
+#endif
+
+// The most interfaces Transport can hold at once: the radio, one per client on
+// :4242, one per AutoInterface peer. Snapshot buffers are sized from this, so
+// a listing shows every interface instead of the first few.
+#define RNS_MAX_INTERFACES  (1 + RNS_MAX_CLIENTS + AUTOIF_MAX_PEERS)
+
+// An interface name has to hold the longest one this node builds,
+// "WiFi/255.255.255.255:65535", with room to spare. RNS derives an
+// interface's identity by hashing its name, so a name that gets truncated
+// is two interfaces that Transport cannot tell apart.
+#define INTERFACE_NAME_MAX  32
 
 // ---------------------------------------------------------------------------
 // Reticulum sizes
@@ -420,6 +438,11 @@
   #define ANNOUNCE_INTERVAL_S 600
 #endif
 #define ANNOUNCE_BOOT_DELAY_MS 6000
+// A neighbour that has just appeared knows nothing about this node, and the
+// periodic announce can be a whole announce_interval away — ten minutes by
+// default, which reads as a dead node. Announce shortly after one registers,
+// with enough of a gap that a handful arriving together share one announce.
+#define ANNOUNCE_ON_PEER_DELAY_MS 2000
 #define ANNOUNCE_MAX_LEN    256
 #define TCP_IN_RING_BYTES   8192          // TCP clients -> Transport
 #define BEACON_MAX_LEN      64            // printable payload bytes

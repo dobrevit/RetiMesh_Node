@@ -95,9 +95,15 @@ void RetiTransportServer::onClient(AsyncClient* client) {
   g_stats.tcpClients = _clients.size();
   xSemaphoreGive(_lock);
 
-  String ip = client->remoteIP().toString();
-  RnsTransport::clientConnected(ctx->id, ip.c_str());
-  log_i("Reticulum peer connected: %s (#%lu, %d total)", ip.c_str(),
+  // Address *and* port, the way RNS's own TCPServerInterface names a spawned
+  // interface. Transport identifies an interface by the hash of its name, so
+  // the port is what keeps a phone that reconnects from the same address from
+  // colliding with the interface its previous socket still holds.
+  char remote[46];
+  snprintf(remote, sizeof(remote), "%s:%u",
+           client->remoteIP().toString().c_str(), (unsigned)client->remotePort());
+  RnsTransport::clientConnected(ctx->id, remote);
+  log_i("Reticulum peer connected: %s (#%lu, %d total)", remote,
         (unsigned long)ctx->id, (int)g_stats.tcpClients);
 }
 
@@ -121,6 +127,7 @@ void RetiTransportServer::onDisconnect(ClientCtx* ctx) {
 // Runs on the AsyncTCP task (core 0); it only copies bytes.
 // ---------------------------------------------------------------------------
 void RetiTransportServer::onData(ClientCtx* ctx, const uint8_t* data, size_t len) {
+  const uint32_t oversizedBefore = ctx->deframer.oversized();
   for (size_t i = 0; i < len; i++) {
     ctx->deframer.feed(data[i], [this, ctx](const uint8_t* pkt, size_t pktLen) {
       g_stats.tcpRxPackets++;
@@ -133,6 +140,15 @@ void RetiTransportServer::onData(ClientCtx* ctx, const uint8_t* data, size_t len
       if (xRingbufferSend(_tcpInRing, item, sizeof(h) + pktLen, pdMS_TO_TICKS(20)) != pdTRUE)
         log_w("TCP-in ring full, dropping %u-byte packet", (unsigned)pktLen);
     });
+  }
+  // A peer framing packets larger than this node's MTU is indistinguishable
+  // from a working one whose traffic never arrives, so say it — once every
+  // OVERSIZE_LOG_MS, because a desynced peer produces a stream of them.
+  const uint32_t oversized = ctx->deframer.oversized();
+  if (oversized != oversizedBefore && millis() - _lastOversizeLogMs >= OVERSIZE_LOG_MS) {
+    _lastOversizeLogMs = millis();
+    log_w("%s framed a packet over the %d-byte MTU (%lu so far); it will not be received",
+          ctx->client->remoteIP().toString().c_str(), RNS_MTU, (unsigned long)oversized);
   }
 }
 
