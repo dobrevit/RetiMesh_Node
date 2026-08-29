@@ -24,6 +24,10 @@ CP2102_B = fake_comport("/dev/ttyUSB1", 0x10C4, 0xEA60, "0001", "CP2102N USB to 
 LEGACY = fake_comport("/dev/ttyS0")
 ARDUINO = fake_comport("/dev/ttyACM1", 0x2341, 0x0043, "555", "Arduino Uno")
 FT2232 = fake_comport("/dev/ttyUSB2", 0x0403, 0x6010, "AB12", "FT2232H Dual UART")   # a known vendor, an unlisted product
+# One chip, two faces: the composite device the application presents, and the
+# serial-JTAG unit the ROM downloader comes up on — same MAC, spelt two ways.
+COMPOSITE = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, "1CDBD4821454", "RetiMesh Node", "1-11")
+S3_ROM = fake_comport("/dev/ttyACM5", 0x303A, 0x1001, "1C:DB:D4:82:14:54", "USB JTAG/serial debug unit", "1-11")
 
 
 class FakeSerial:
@@ -101,6 +105,26 @@ class PortsTest(unittest.TestCase):
         self.assertTrue(ports[0].auto_reset)
         self.assertTrue(ports[1].auto_reset)
         self.assertFalse(ports[2].auto_reset)
+
+    def test_the_composite_device_is_a_node_esptool_must_not_reset(self):
+        ports = list_ports([COMPOSITE, S3])
+        comp = ports[[p.kind for p in ports].index("retimesh_composite")]
+        self.assertTrue(comp.likely_esp)
+        self.assertFalse(comp.auto_reset)
+        # The identity is the registry's, not a second opinion.
+        import json, pathlib
+        ident = json.loads((pathlib.Path(__file__).resolve().parents[3] / "boards.json").read_text())["_usb_identity"]
+        self.assertEqual(device.RETIMESH_COMPOSITE, (int(ident["vid"], 16), int(ident["pid"], 16)))
+        self.assertEqual(comp.product, ident["product"])
+
+    def test_both_faces_of_one_chip_share_a_node_id(self):
+        comp, rom = list_ports([COMPOSITE]), list_ports([S3_ROM])
+        self.assertEqual(comp[0].node_id, rom[0].node_id)
+        self.assertEqual(comp[0].node_id, "1CDBD4821454")
+
+    def test_the_usb_address_follows_the_firmware_rule(self):
+        # LocalLinkState.h: 10.64.<last MAC octet>.1 — 0x54 is 84.
+        self.assertEqual(device.usb_node_url("1CDBD4821454"), "http://10.64.84.1")
 
     def test_a_known_vendor_with_an_unlisted_product_is_still_a_candidate(self):
         # An FT2232 devkit is not in the bridge table, but nobody puts one in
@@ -262,7 +286,9 @@ class HandOffTest(unittest.TestCase):
         self.assertTrue(r.entered)
         self.assertEqual((r.method, r.port), ("console", "/dev/ttyACM0"))
         self.assertEqual(opened, ["/dev/ttyACM0"])            # one session for VERSION and the request
-        self.assertEqual(r.esptool_before, "no_reset")
+        # esptool runs its own reset at connect on any port that can drive one,
+        # even into a downloader that is already up (see HandOff.esptool_before).
+        self.assertEqual(r.esptool_before, "default_reset")
         self.assertTrue(any("accepted BOOTLOADER" in l for l in self.log))
 
     def test_an_s3_that_keeps_answering_did_not_reset(self):
@@ -285,7 +311,9 @@ class HandOffTest(unittest.TestCase):
         info = device.NodeInfo("RetiMesh Node", "v0.2.0", "LilyGO T3-S3", "console:/dev/ttyACM0")
         r = self.run_handoff([[S3]], probe=self.answers(info))
         self.assertTrue(r.entered)
-        self.assertEqual(r.esptool_before, "no_reset")
+        # esptool runs its own reset at connect on any port that can drive one,
+        # even into a downloader that is already up (see HandOff.esptool_before).
+        self.assertEqual(r.esptool_before, "default_reset")
         self.assertIn("confirmed by esptool", r.message)
 
     def test_a_silent_port_where_a_downloader_already_answers(self):
@@ -294,7 +322,7 @@ class HandOffTest(unittest.TestCase):
         # re-enumerates the port under esptool's own open.
         r = self.run_handoff([[S3]], probe=lambda dev, timeout=2.0, console=None: None, rom=True)
         self.assertTrue(r.entered)
-        self.assertEqual((r.method, r.esptool_before), ("downloader", "no_reset"))
+        self.assertEqual((r.method, r.esptool_before), ("downloader", "default_reset"))
 
     def test_a_silent_port_with_no_downloader_is_left_to_esptool(self):
         r = self.run_handoff([[S3]], probe=lambda dev, timeout=2.0, console=None: None, rom=False)
@@ -308,6 +336,33 @@ class HandOffTest(unittest.TestCase):
         r = self.run_handoff([[S3], [], [S3]], probe=self.answers(info), rom=False)
         self.assertFalse(r.entered)
         self.assertIn("no ROM downloader answers", r.message)
+
+    def test_the_composite_device_hands_off_to_its_serial_jtag_downloader(self):
+        # The console accepts; the composite port goes; the ROM comes up on
+        # the serial-JTAG unit of the same chip, where esptool is pointed —
+        # with its own reset at connect, which that downloader needs.
+        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
+        r = self.run_handoff([[COMPOSITE], [COMPOSITE], [], [S3_ROM]], probe=self.answers(info))
+        self.assertTrue(r.entered)
+        self.assertEqual((r.method, r.port, r.esptool_before), ("console", "/dev/ttyACM5", "default_reset"))
+
+    def test_a_composite_device_whose_console_cannot_enter_is_touched(self):
+        touched = []
+        info = device.NodeInfo("RetiMesh Node", "v0.2.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
+        r = hand_off_to_bootloader(port=None, log=self.log.append,
+                                   ports_fn=iter([list_ports([COMPOSITE])] * 2 + [list_ports([S3_ROM])] * 9).__next__,
+                                   probe=self.answers(info),
+                                   open_console=lambda dev, timeout=2.0: Console(FakeSerial(software_entry=False), 1.0, device=dev),
+                                   request_http=lambda *a, **k: (False, "", 0), probe_rom=lambda dev: True,
+                                   sleep=self.clock.sleep, clock=self.clock.now, touch=touched.append)
+        self.assertEqual(touched, ["/dev/ttyACM5"])
+        self.assertTrue(r.entered)
+        self.assertEqual((r.method, r.port), ("touch", "/dev/ttyACM5"))
+
+    def test_a_downloader_already_up_on_a_serial_jtag_unit_still_gets_esptool_reset(self):
+        r = self.run_handoff([[S3_ROM]], probe=lambda dev, timeout=2.0, console=None: None, rom=True)
+        self.assertTrue(r.entered)
+        self.assertEqual((r.method, r.esptool_before), ("downloader", "default_reset"))
 
     def test_a_bridge_that_keeps_answering_did_not_reset(self):
         # On a CP2102 the port is the bridge's and never moves; the proof of a
