@@ -193,6 +193,14 @@ class Console:
         ser.dtr = True
         ser.rts = True
         ser.open()
+        # A moment after opening before anything is sent. The S3's USB CDC
+        # does not count the host as connected until shortly after the port
+        # opens, and a reply written in that window is dropped — measured on
+        # the bench as the first line of a STATUS answer going missing when
+        # the command followed the open immediately, and never once a tenth
+        # of a second had passed. A quarter of a second is margin, not cost.
+        time.sleep(0.25)
+        ser.reset_input_buffer()
         return Console(ser, timeout, device)
 
     def close(self) -> None:
