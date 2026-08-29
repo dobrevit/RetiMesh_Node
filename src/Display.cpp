@@ -21,8 +21,6 @@
 // ============================================================================
 #include "Display.h"
 #include "DisplayLayout.h"
-#include "DisplayIcons.h"
-#include "QrCode.h"
 #include <WiFi.h>
 #include "WifiManager.h"
 #include "Settings.h"
@@ -35,16 +33,16 @@
 
 Display display;
 
-bool Display::ack(uint8_t addr) {
 #if HAS_DISPLAY
+#include "DisplayIcons.h"
+#include "QrCode.h"
+
+
+bool Display::ack(uint8_t addr) {
   Wire.beginTransmission(addr);
   return Wire.endTransmission() == 0;    // 0 = ACK received
-#else
-  return false;
-#endif
 }
 
-#if HAS_DISPLAY
 // A reset that lands in the middle of a transfer — esptool's after a flash,
 // the RST button, a watchdog — leaves the panel holding SDA low, waiting for
 // clocks that never come, and it holds it until it loses power. The probe in
@@ -72,7 +70,6 @@ static void releaseBus(int sda, int scl) {
     log_w("display: the panel was holding SDA low from an interrupted transfer; released after %d clocks", pulses);
   }
 }
-#endif
 
 bool Display::begin() {
 #if HAS_DISPLAY_VEXT
@@ -84,7 +81,6 @@ bool Display::begin() {
   delay(50);
 #endif
 
-#if HAS_DISPLAY
   releaseBus(PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.setTimeOut(50);                   // a missing panel must not stall boot
@@ -130,7 +126,6 @@ bool Display::begin() {
   _oled.print("booting...");
   _oled.display();
   _ok = true;
-#endif
   return _ok;
 }
 
@@ -209,7 +204,6 @@ Display::Page Display::nextPage(Page p) const {
 
 void Display::setBlank(bool blank) {
   _blank = blank;
-#if HAS_DISPLAY
   if (blank) {
     _oled.ssd1306_command(SSD1306_DISPLAYOFF);           // panel + charge pump off
   } else {
@@ -217,11 +211,9 @@ void Display::setBlank(bool blank) {
     _pageChangedMs = millis();
     paint();
   }
-#endif
 }
 
 void Display::paint() {
-#if HAS_DISPLAY
   if (_blank) return;
   _oled.clearDisplay();
   // One PMU read per frame, shared by the header and whichever page is drawn.
@@ -265,10 +257,8 @@ void Display::paint() {
     }
   }
   _oled.display();
-#endif
 }
 
-#if HAS_DISPLAY
 // --- status strip -----------------------------------------------------------
 // A battery outline with a nub, filled in six steps that always show the level
 // the cell actually holds. While charging, one segment travels up the icon
@@ -462,11 +452,9 @@ void Display::meter(uint8_t row, const char* label, const char* value, uint8_t p
   DisplayIcons::bars(_oled, DisplayLayout::active().width - 10, y, 9, 8,
                      pct, SSD1306_WHITE);
 }
-#endif
 
 // 128x64 with the 6x8 built-in font: 21 columns x 8 rows.
 void Display::paintStatus() {
-#if HAS_DISPLAY
   char line[24];
   uint32_t up = millis() / 1000;
 
@@ -586,11 +574,9 @@ void Display::paintStatus() {
              (unsigned)g_stats.tcpClients, (unsigned)WiFi.softAPgetStationNum(),
              (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
   _oled.print(line);
-#endif
 }
 
 void Display::paintNeighbors() {
-#if HAS_DISPLAY
   if (DisplayLayout::compact()) {
     Neighbor snap[MAX_NEIGHBORS];
     const size_t n = neighbors.snapshot(snap, MAX_NEIGHBORS);
@@ -632,11 +618,9 @@ void Display::paintNeighbors() {
     _oled.setCursor(0, DisplayLayout::rowY(i));
     _oled.print(line);
   }
-#endif
 }
 
 void Display::paintTransport() {
-#if HAS_DISPLAY
   if (DisplayLayout::compact()) {
     char l[16];
     RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
@@ -692,11 +676,9 @@ void Display::paintTransport() {
   compactCount(bTx, sizeof(bTx), g_stats.beaconsTx);
   snprintf(line, sizeof(line), "p%u a%s/%s b%s/%s", paths, aRx, aTx, bRx, bTx);
   _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(line);
-#endif
 }
 
 void Display::paintRadio() {
-#if HAS_DISPLAY
   if (DisplayLayout::compact()) {
     const RadioSettings& r = settings.radio();
     char l[16];
@@ -752,14 +734,12 @@ void Display::paintRadio() {
     snprintf(line, sizeof(line), "air %.2f%% nolim cw%u", (double)(g_stats.airtimeLong * 100.0f),
              g_stats.csmaBand);
   _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(line);
-#endif
 }
 
 #if HAS_GPS
 // What the receiver can see. Before a fix the satellite count is the useful
 // number — it is what tells you whether the antenna has a view of the sky.
 void Display::paintGps() {
-#if HAS_DISPLAY
   Gps::Fix g = Gps::fix();
   char line[24];
   header(g.enabled ? (g.valid ? "GNSS fix" : "GNSS scan") : "GNSS off");
@@ -783,7 +763,6 @@ void Display::paintGps() {
   }
   if (g.timeValid) { _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(g.utc + 11); _oled.print(g.clockSet ? " UTC sync" : " UTC"); }
   else             { _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print("no time yet"); }
-#endif
 }
 #endif
 
@@ -793,7 +772,6 @@ void Display::paintGps() {
 // a phone camera reads the OLED like ink on paper.
 #if !DISPLAY_COMPACT
 void Display::paintQr() {
-#if HAS_DISPLAY
   char text[192];
   bool open = settings.wifi().security == ApSecurity::Open;
   if (!Qr::payloadText(Qr::Payload::Wifi, text, sizeof(text))) { _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print("QR: payload too long"); return; }
@@ -828,12 +806,10 @@ void Display::paintQr() {
   _oled.setCursor(tx, 26); _oled.print(line);
   if (len >= sizeof(line)) { _oled.setCursor(tx, 35); _oled.print(ssid + sizeof(line) - 1); }
   _oled.setCursor(tx, 48); _oled.print(open ? "open" : "WPA2");
-#endif
 }
 #endif  // !DISPLAY_COMPACT
 
 void Display::paintNetwork() {
-#if HAS_DISPLAY
   if (DisplayLayout::compact()) {
     char l[16];
     const char* id = wifiManager.ssid();
@@ -903,5 +879,13 @@ void Display::paintNetwork() {
   else              snprintf(line, sizeof(line), "USB power");
 #endif
   _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(line);
-#endif
 }
+
+#else
+// A headless board: the interface stays, so no caller needs a guard of its
+// own, and nothing behind it is compiled — the panel driver, the pages, the
+// icons and the QR page all stay out of the image. main.cpp creates no
+// display task either.
+bool Display::begin() { return false; }
+void Display::notice(const char*, const char*) {}
+#endif

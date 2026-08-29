@@ -39,6 +39,8 @@
   #include "boards/heltec_v3.h"
 #elif defined(BOARD_HELTEC_WS)
   #include "boards/heltec_ws.h"
+#elif defined(BOARD_HELTEC_WB)
+  #include "boards/heltec_wb.h"
 #elif defined(BOARD_T3S3_SX1280_PA)
   #include "boards/t3s3_sx1280_pa.h"
 #elif defined(BOARD_T3S3_SX1280)
@@ -382,8 +384,22 @@
 #endif
 // Boards that wire an indicator LED name it here. Nothing drives it yet; it is
 // claimed at boot and held off so the pin is not left floating.
+// LEDs, where the board has them (Leds.h): -1 for none. Boards whose LEDs
+// light on LOW say so with LED_ACTIVE_HIGH 0.
 #ifndef PIN_STATUS_LED
   #define PIN_STATUS_LED    -1
+#endif
+#ifndef PIN_WIFI_LED
+  #define PIN_WIFI_LED      -1
+#endif
+#ifndef PIN_LORA_LED
+  #define PIN_LORA_LED      -1
+#endif
+#ifndef PIN_BLE_LED
+  #define PIN_BLE_LED       -1               // a lamp labelled for Bluetooth: claimed, kept dark
+#endif
+#ifndef LED_ACTIVE_HIGH
+  #define LED_ACTIVE_HIGH   1
 #endif
 #define BUTTON_POLL_MS      20
 #define BUTTON_LONG_MS      1500

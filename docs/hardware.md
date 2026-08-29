@@ -11,6 +11,7 @@
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | — (no SD, no GNSS) | verified on hardware |
+| `heltec-wb` | Heltec Wireless Bridge | ESP32-D0WDQ6: 8 MB flash, 8 MB PSRAM | SX1276 | — (headless) | front LEDs for Wi-Fi and LoRa (the BLE one stays dark), aluminium shell, two SMA sockets, internal 2-pin battery connector; no SD, no GNSS | verified on hardware |
 | `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | — (no SD, no GNSS) | verified on hardware |
 <!-- boards.json:end -->
 
@@ -24,6 +25,35 @@ USB, so it appears as `/dev/ttyUSB*` and not as an Espressif JTAG device. Every
 CP2102 reports the serial number `0001`, so with more than one attached
 `/dev/serial/by-id/` names only one of them and the rest have to be found by
 path.
+
+### Wireless Bridge: the Stick without the panel
+`heltec-wb` is the Wireless Stick's ESP32 and SX1276 — the same pins, the
+same CP2102, the same 8 MB part and partition table — in an aluminium box with
+two SMA sockets and no display, plus 8 MB of PSRAM, which the build enables
+with the cache workaround the revision-1 silicon needs and `main.cpp` then
+hands the larger allocations to. Nothing that cannot run on it is compiled
+for it: `HAS_DISPLAY` is 0, so the panel driver, the page layouts and the QR
+renderer stay out of the image. Its three front LEDs are what it shows
+instead — see *LEDs* below.
+
+### LEDs
+A board names the LEDs it has in its board header (`PIN_STATUS_LED`,
+`PIN_WIFI_LED`, `PIN_LORA_LED`; the Wireless Bridge has the Wi-Fi and LoRa
+lamps, the Wireless Stick and the Heltec V3 a status LED). Dark is the
+normal state — the service is up and idle. A flicker is traffic. A lamp that
+stays lit says that service is meant to be up and is not, so every LED
+lights at boot and goes out as its service comes up, and a steady lamp
+later is the one worth a look.
+
+| LED | lit | flicker | blink |
+|---|---|---|---|
+| status | the transport is down | — | a restart is on its way |
+| wifi | Wi-Fi is on but no link is ready | a packet from a TCP client | — |
+| lora | the radio is offline | a packet sent or received | — |
+
+The Wireless Bridge's third lamp is labelled BLE; nothing in this firmware
+speaks Bluetooth, so it is claimed and kept dark rather than lit for
+something else. In the Battery power profile every LED stays dark.
 
 ### The PA variant ships untested
 `t3s3-sx1280-pa` is built and published like every other board, but nothing in
