@@ -246,6 +246,13 @@ void WifiManager::startAccessPoint() {
 
   WiFi.persistent(false);
   WiFi.mode(stationConfigured() ? WIFI_AP_STA : WIFI_AP);
+  // IPv6 link-local on both links, asked for before they start: core 3
+  // creates the address when the interface comes up and only then, so a
+  // request made afterwards — which is when AutoInterface used to make it —
+  // waits for a start that has already happened. AutoInterface reads the
+  // addresses; the links are brought up here, so they are enabled here.
+  WiFi.softAPenableIPv6();
+  WiFi.enableIPv6();
   WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
   WiFi.softAP(_ssid, pass, w.channel, w.hidden ? 1 : 0, w.maxStations);
 
