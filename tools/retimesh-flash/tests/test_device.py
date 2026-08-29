@@ -131,6 +131,11 @@ class PortsTest(unittest.TestCase):
     def test_the_usb_address_follows_the_firmware_rule(self):
         # LocalLinkState.h: 10.64.<last MAC octet>.1 — 0x54 is 84.
         self.assertEqual(device.usb_node_url("1CDBD4821454"), "http://10.64.84.1")
+        # Anything that is not a MAC names no chip and no address: not a
+        # crash, and not an address on somebody else's subnet.
+        for bad in ("RETIMESH", "0001", None, "", "1CDBD48214"):
+            self.assertIsNone(device.usb_node_url(bad), bad)
+        self.assertIsNone(list_ports([fake_comport("/dev/ttyACM7", 0x1209, 0x0001, "RETIMESH", "RetiMesh Node")])[0].node_id)
 
     def test_a_known_vendor_with_an_unlisted_product_is_still_a_candidate(self):
         # An FT2232 devkit is not in the bridge table, but nobody puts one in
@@ -358,6 +363,18 @@ class HandOffTest(unittest.TestCase):
         self.assertTrue(r.entered)
         self.assertEqual((r.method, r.port, r.esptool_before), ("console", "/dev/ttyACM5", "default_reset"))
 
+    def test_a_nameless_composite_device_is_followed_only_to_a_new_downloader(self):
+        # No usable serial, so the chip cannot be known by MAC; a serial-JTAG
+        # unit that was already on the bus is another chip's and is left
+        # alone, and the one that appears after the request is taken.
+        nameless = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, None, "RetiMesh Node", "1-11")
+        other = fake_comport("/dev/ttyACM9", 0x303A, 0x1001, "AA:BB:CC:DD:EE:FF", "USB JTAG/serial debug unit", "1-12")
+        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
+        r = self.run_handoff([[nameless, other], [nameless, other], [other], [other], [other, S3_ROM]], probe=self.answers(info),
+                             port="/dev/ttyACM5")
+        self.assertTrue(r.entered)
+        self.assertEqual(r.port, "/dev/ttyACM5")     # S3_ROM's device, the newcomer — not /dev/ttyACM9
+
     def test_a_composite_device_whose_console_cannot_enter_is_touched(self):
         touched = []
         info = device.NodeInfo("RetiMesh Node", "v0.2.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
@@ -561,6 +578,22 @@ class WaitForApplicationTest(unittest.TestCase):
                                         probe=probe, ports_fn=lambda: next(seq), sleep=clock.sleep, clock=clock.now)
         self.assertEqual(r, info)
         self.assertNotIn("/dev/ttyUSB0", asked)
+
+    def test_a_nameless_port_is_still_asked_for_the_flashed_chip(self):
+        # The application came back as a composite device without a usable
+        # serial (routine on Windows); it is asked, while a port naming
+        # another chip is not.
+        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
+        nameless = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, None, "RetiMesh Node", "1-11")
+        other = fake_comport("/dev/ttyACM9", 0x303A, 0x1001, "AA:BB:CC:DD:EE:FF", "USB JTAG/serial debug unit", "1-12")
+        asked = []
+        def probe(dev, timeout=2.0, console=None):
+            asked.append(dev); return info if dev == "/dev/ttyACM5" else None
+        clock = Clock()
+        r = device.wait_for_application("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_1C:DB:D4:82:14:54-if00", 30.0,
+                                        probe=probe, ports_fn=lambda: list_ports([other, nameless]), sleep=clock.sleep, clock=clock.now)
+        self.assertEqual(r, info)
+        self.assertNotIn("/dev/ttyACM9", asked)
 
     def test_the_application_may_come_back_under_another_name(self):
         # The downloader was ttyACM1 because ttyACM0 was briefly held; the

@@ -110,8 +110,10 @@ class Port:
     def node_id(self) -> Optional[str]:
         """The chip's MAC as this port reports it, colons dropped and upper-cased,
         so the composite device (1CDBD4821454) and the serial-JTAG unit
-        (1C:DB:D4:82:14:54) of one chip compare equal."""
-        return self.serial.replace(":", "").upper() if self.serial else None
+        (1C:DB:D4:82:14:54) of one chip compare equal. None unless the serial
+        is a MAC: a port with no serial, or one whose serial is something
+        else, identifies no chip and must not be taken for one."""
+        return mac_node_id(self.serial)
 
     def label(self) -> str:
         bits = [self.device, self.kind]
@@ -175,20 +177,30 @@ def select_port(ports: list[Port], device: Optional[str] = None, serial: Optiona
     return candidates[0] if len(candidates) == 1 else None
 
 
+def mac_node_id(text: Optional[str]) -> Optional[str]:
+    """Twelve hex digits, colons dropped, upper-cased — or None."""
+    if not text:
+        return None
+    t = text.replace(":", "").upper()
+    return t if re.fullmatch(r"[0-9A-F]{12}", t) else None
+
+
 def node_id_from_path(device: str) -> Optional[str]:
     """The MAC a /dev/serial/by-id name carries, colons dropped and upper-cased,
     for either face of the chip: usb-RetiMesh_RetiMesh_Node_1CDBD4821454-if00
     or usb-Espressif_USB_JTAG_serial_debug_unit_1C:DB:D4:82:14:54-if00."""
     m = re.search(r"(?:RetiMesh_Node_|serial_debug_unit_)([0-9A-Fa-f:]{12,17})-if", device)
-    return m.group(1).replace(":", "").upper() if m else None
+    return mac_node_id(m.group(1)) if m else None
 
 
-def usb_node_url(node_id: str) -> str:
+def usb_node_url(node_id: Optional[str]) -> Optional[str]:
     """Where a node answers over its USB link, from its MAC: 10.64.<n>.1 with
     <n> the last octet — the firmware's usbNodeAddress() (LocalLinkState.h),
     written here a second time because this package cannot include that
-    header; the tests hold both to the same vector."""
-    return f"http://10.64.{int(node_id[-2:], 16)}.1"
+    header; the tests hold both to the same vector. None for anything that
+    is not a MAC, rather than an address aimed at the wrong subnet."""
+    node_id = mac_node_id(node_id)
+    return f"http://10.64.{int(node_id[-2:], 16)}.1" if node_id else None
 
 
 def touch_1200(device: str, sleep=time.sleep) -> None:
@@ -197,17 +209,21 @@ def touch_1200(device: str, sleep=time.sleep) -> None:
     (its USBCDC honours the Arduino convention). The port vanishes under the
     open, which pyserial reports as an error that here means success."""
     import serial
-    ser = serial.Serial()
-    ser.port = device
-    ser.baudrate = 1200
-    ser.dtr = False
-    ser.rts = False
-    try:
-        ser.open()
-        sleep(0.2)
-        ser.close()
-    except Exception:
-        pass
+    # The core reports a line coding only when it changes, so a port left at
+    # 1200 by an earlier touch is opened at the console's speed first: the
+    # second touch is then a change too.
+    for baud in (CONSOLE_BAUD, 1200):
+        ser = serial.Serial()
+        ser.port = device
+        ser.baudrate = baud
+        ser.dtr = False
+        ser.rts = False
+        try:
+            ser.open()
+            sleep(0.2)
+            ser.close()
+        except Exception:
+            pass
 
 
 def node_url(text: str) -> str:
@@ -709,7 +725,15 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
     if port.kind == "retimesh_composite":
         # The composite device goes away with the restart and the ROM comes
         # up on the chip's serial-JTAG unit: another port, known to be the
-        # same chip by the MAC both report.
+        # same chip by the MAC both report — or, when this port reported no
+        # MAC, by being new on the bus since the request. A serial-JTAG unit
+        # that was already there is somebody else's chip.
+        before = {p.device for p in ports_fn() if p.kind == "usb_serial_jtag"}
+        def downloader(ps):
+            if port.node_id:
+                return _port_of(ps, "usb_serial_jtag", port.node_id)
+            fresh = [p for p in ps if p.kind == "usb_serial_jtag" and p.device not in before]
+            return fresh[0] if len(fresh) == 1 else None
         log(f"watching for {port.device} to go and the serial-JTAG downloader to come")
         gone = wait_for_port(lambda ps: None if _port_of(ps, "retimesh_composite", port.node_id) else port,
                              window, ports_fn, sleep, clock, interval=0.1)
@@ -723,7 +747,7 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
         started = clock()
         back = None
         while back is None and clock() - started < _COMPOSITE_DOWNLOADER_S:
-            back = wait_for_port(lambda ps: _port_of(ps, "usb_serial_jtag", port.node_id), 15.0, ports_fn, sleep, clock)
+            back = wait_for_port(downloader, 15.0, ports_fn, sleep, clock)
             if back is None:
                 log(f"still waiting for the serial-JTAG downloader ({clock() - started:.0f} s)")
         if back is None:
@@ -810,8 +834,20 @@ def wait_for_application(port: Optional[str], timeout: float, log: Log = _quiet,
     while clock() < deadline:
         ports = ports_fn()
         named = select_port(ports, device=port) if port else None
-        same = [p for p in ports if node_id and p.node_id == node_id]
-        targets = [named] if named else (same or (esp_candidates(ports) if not node_id else []))
+        if named:
+            targets = [named]
+        elif node_id:
+            # This chip by its MAC — and, failing that, any candidate that
+            # names no chip at all (a port without a usable serial), which
+            # may be it; never one that names another chip.
+            same = [p for p in ports if p.node_id == node_id]
+            # A chip known by its MAC is a native-USB chip; it comes back as
+            # the composite device or the serial-JTAG unit, never as a
+            # bridge, so a bridge with no usable serial is not a candidate.
+            targets = same or [p for p in esp_candidates(ports)
+                               if p.node_id is None and p.kind in ("retimesh_composite", "usb_serial_jtag")]
+        else:
+            targets = esp_candidates(ports)
         for target in targets:
             if target.device not in announced:
                 log(f"asking VERSION on {target.device}")
