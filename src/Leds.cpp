@@ -22,15 +22,16 @@
 #include "Bootloader.h"
 #include "LocalLink.h"
 #include "Power.h"
+#include "Settings.h"
 
-#define HAS_LEDS (PIN_STATUS_LED >= 0 || PIN_WIFI_LED >= 0 || PIN_LORA_LED >= 0)
+#define HAS_LEDS (PIN_STATUS_LED >= 0 || PIN_WIFI_LED >= 0 || PIN_LORA_LED >= 0 || PIN_BLE_LED >= 0)
 
 namespace Leds {
 
 #if HAS_LEDS
 // A flicker is the LED inverted for this long after a counter moved: long
 // enough to be seen at the loop's cadence, short enough to read as activity
-// rather than as the service going up and down.
+// rather than as the service going down.
 static constexpr uint32_t kFlickerMs = 150;
 
 static void set(int pin, bool on) {
@@ -55,7 +56,9 @@ static bool wifiReady() {
 }
 
 void begin() {
-  for (int pin : { (int)PIN_STATUS_LED, (int)PIN_WIFI_LED, (int)PIN_LORA_LED }) {
+  // PIN_BLE_LED is claimed with the rest and never set again: dark is its
+  // whole story until the firmware speaks Bluetooth.
+  for (int pin : { (int)PIN_STATUS_LED, (int)PIN_WIFI_LED, (int)PIN_LORA_LED, (int)PIN_BLE_LED }) {
     if (pin < 0) continue;
     pinMode(pin, OUTPUT);
     set(pin, false);
@@ -67,15 +70,16 @@ void tick(uint32_t nowMs) {
     set(PIN_STATUS_LED, false); set(PIN_WIFI_LED, false); set(PIN_LORA_LED, false);
     return;
   }
-  // Status: up when the transport is; a restart on its way blinks it, so a
-  // node that is about to go away says so before it does.
-  bool status = g_stats.transportOnline;
+  // Status: lit while the transport is down; a restart on its way blinks it,
+  // so a node that is about to go away says so before it does.
+  bool status = !g_stats.transportOnline;
   if (Bootloader::pending()) status = (nowMs / 250) & 1;
-  // Wi-Fi: a link ready; traffic from TCP clients flickers it.
-  bool wifi = wifiReady();
+  // Wi-Fi: lit while it is switched on and no link is ready — Wi-Fi off by
+  // choice has nothing to say. Traffic from TCP clients flickers it.
+  bool wifi = settings.links().wifiEnabled && !wifiReady();
   if (sWifi.flicker(g_stats.tcpRxPackets, nowMs)) wifi = !wifi;
-  // LoRa: the radio online; every packet either way flickers it.
-  bool lora = g_stats.radioOnline;
+  // LoRa: lit while the radio is offline; every packet either way flickers it.
+  bool lora = !g_stats.radioOnline;
   if (sLora.flicker(g_stats.loraRxPackets + g_stats.loraTxPackets, nowMs)) lora = !lora;
   set(PIN_STATUS_LED, status);
   set(PIN_WIFI_LED, wifi);

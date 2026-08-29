@@ -50,11 +50,15 @@
 
 #define PIN_BUTTON          0                // KEY, active low, inside the shell
 
-// Three LEDs on the front, named by the core's variant LED/BLE, WIFI and
-// LoRa. They are the whole of what a node in a box can show (Leds.h): the
-// transport up, a Wi-Fi link ready, the radio online, each flickering as its
-// traffic passes.
-#define PIN_STATUS_LED      25
+// Three LEDs on the front, labelled BLE, WiFi and LoRa. The Wi-Fi and LoRa
+// lamps are the whole of what a node in a box can show (Leds.h): lit while
+// their service is meant to be up and is not, a flicker as its traffic
+// passes, dark when all is well. The BLE lamp is not ours to light — nothing
+// here speaks Bluetooth — so it is claimed and kept dark, and there is no
+// status LED on this board: lighting the BLE lamp for the transport would
+// have read as a claim about Bluetooth.
+#define PIN_STATUS_LED      -1
+#define PIN_BLE_LED         25
 #define PIN_WIFI_LED        23
 #define PIN_LORA_LED        22
 

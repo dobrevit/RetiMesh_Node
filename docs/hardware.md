@@ -11,7 +11,7 @@
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | — (no SD, no GNSS) | verified on hardware |
-| `heltec-wb` | Heltec Wireless Bridge | ESP32-D0WDQ6: 8 MB flash, 8 MB PSRAM | SX1276 | — (headless) | three front LEDs (status, Wi-Fi, LoRa), aluminium shell, two SMA sockets, internal 2-pin battery connector; no SD, no GNSS | verified on hardware |
+| `heltec-wb` | Heltec Wireless Bridge | ESP32-D0WDQ6: 8 MB flash, 8 MB PSRAM | SX1276 | — (headless) | front LEDs for Wi-Fi and LoRa (the BLE one stays dark), aluminium shell, two SMA sockets, internal 2-pin battery connector; no SD, no GNSS | verified on hardware |
 | `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | — (no SD, no GNSS) | verified on hardware |
 <!-- boards.json:end -->
 
@@ -38,17 +38,22 @@ instead — see *LEDs* below.
 
 ### LEDs
 A board names the LEDs it has in its board header (`PIN_STATUS_LED`,
-`PIN_WIFI_LED`, `PIN_LORA_LED`; the Wireless Bridge has all three, the
-Wireless Stick and the Heltec V3 a status LED), and each stands for a
-service: steady when it is up, a flicker as its traffic passes.
+`PIN_WIFI_LED`, `PIN_LORA_LED`; the Wireless Bridge has the Wi-Fi and LoRa
+lamps, the Wireless Stick and the Heltec V3 a status LED). Dark is the
+normal state — the service is up and idle. A flicker is traffic. A lamp that
+stays lit says that service is meant to be up and is not, so every LED
+lights at boot and goes out as its service comes up, and a steady lamp
+later is the one worth a look.
 
-| LED | steady | flicker | blink |
+| LED | lit | flicker | blink |
 |---|---|---|---|
-| status | the transport is up | — | a restart is on its way |
-| wifi | the access point or the station is ready | a packet from a TCP client | — |
-| lora | the radio is online | a packet sent or received | — |
+| status | the transport is down | — | a restart is on its way |
+| wifi | Wi-Fi is on but no link is ready | a packet from a TCP client | — |
+| lora | the radio is offline | a packet sent or received | — |
 
-In the Battery power profile every LED stays dark.
+The Wireless Bridge's third lamp is labelled BLE; nothing in this firmware
+speaks Bluetooth, so it is claimed and kept dark rather than lit for
+something else. In the Battery power profile every LED stays dark.
 
 ### The PA variant ships untested
 `t3s3-sx1280-pa` is built and published like every other board, but nothing in

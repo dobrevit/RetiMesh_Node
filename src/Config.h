@@ -386,6 +386,9 @@
 #ifndef PIN_LORA_LED
   #define PIN_LORA_LED      -1
 #endif
+#ifndef PIN_BLE_LED
+  #define PIN_BLE_LED       -1               // a lamp labelled for Bluetooth: claimed, kept dark
+#endif
 #ifndef LED_ACTIVE_HIGH
   #define LED_ACTIVE_HIGH   1
 #endif
