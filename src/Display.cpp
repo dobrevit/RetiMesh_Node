@@ -51,8 +51,10 @@ bool Display::ack(uint8_t addr) {
 // anything else touches it: up to nine pulses on SCL with SDA released, then
 // a STOP, all of which is a no-op on a bus that is idle.
 static void releaseBus(int sda, int scl) {
+  // Open-drain with the internal pull-ups, the same way Wire drives the
+  // lines: a board with no external resistors gets its clocks that way too.
   pinMode(sda, INPUT_PULLUP);
-  pinMode(scl, OUTPUT_OPEN_DRAIN);
+  pinMode(scl, OUTPUT_OPEN_DRAIN | PULLUP);
   digitalWrite(scl, HIGH);
   delayMicroseconds(5);
   int pulses = 0;
@@ -63,7 +65,7 @@ static void releaseBus(int sda, int scl) {
   }
   if (pulses) {
     // STOP: SDA rising while SCL is high.
-    pinMode(sda, OUTPUT_OPEN_DRAIN);
+    pinMode(sda, OUTPUT_OPEN_DRAIN | PULLUP);
     digitalWrite(sda, LOW);  delayMicroseconds(5);
     digitalWrite(scl, HIGH); delayMicroseconds(5);
     digitalWrite(sda, HIGH); delayMicroseconds(5);

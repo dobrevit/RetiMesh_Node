@@ -186,19 +186,18 @@ inline ParseError parse(const char* line, Request& out) {
 // writes a few bytes without a newline — ModemManager probing a new port
 // with AT commands is the usual culprit — would otherwise leave those bytes
 // waiting, and the next real command would be glued onto them and refused.
-// Two seconds is longer than any typist's pause between keystrokes is short.
-constexpr uint32_t LINE_IDLE_MS = 2000;
+// The clock runs only while the port is silent: bytes that are waiting to be
+// read are not a stall, however long the loop took to get to them. Ten
+// seconds is a typist's pause, not a prober's.
+constexpr uint32_t LINE_IDLE_MS = 10000;
 
 class LineAssembler {
 public:
   // Returns true when a complete line is available in line(). `overflowed`
   // is set (once, on the byte that ended the overlong line) so the caller can
-  // answer with a TooLong error. `nowMs` lets a stalled partial line expire
-  // (LINE_IDLE_MS); a caller without a clock passes nothing and gets no
-  // expiry.
+  // answer with a TooLong error. `nowMs` stamps the byte for idle().
   bool feed(char c, bool& overflowed, uint32_t nowMs = 0) {
     overflowed = false;
-    if (pending() && nowMs - _lastByteMs > LINE_IDLE_MS) reset();
     _lastByteMs = nowMs;
     if (c == '\n' || c == '\r') {
       if (_dropping) { _dropping = false; _len = 0; overflowed = true; return false; }
@@ -214,6 +213,13 @@ public:
   const char* line() { _len = 0; return _buf; }
   void reset() { _len = 0; _dropping = false; }
   bool pending() const { return _len > 0 || _dropping; }
+  // Called when the port has nothing to read: drops a partial line the port
+  // has been silent on for LINE_IDLE_MS. True when it dropped one.
+  bool idle(uint32_t nowMs) {
+    if (!pending() || nowMs - _lastByteMs <= LINE_IDLE_MS) return false;
+    reset();
+    return true;
+  }
 
 private:
   char     _buf[MAX_LINE + 1] = {0};

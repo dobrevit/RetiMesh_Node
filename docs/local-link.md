@@ -115,10 +115,12 @@ follow the count on the same line. The `HELLO` banner the node prints when
 the console starts says `protocol=2`; protocol 1 had neither.
 
 Errors are `RM ERR <CMD> <code> <text>` with HTTP-style codes (400, 404, 409,
-501); an error never carries data lines. A partial line that stalls for two
-seconds is dropped, so bytes a port prober left behind — ModemManager writes
-`AT` to every new CDC-ACM port — cannot be glued onto the next command; the
-host tool asks once more when a first reply names no command. A Linux host
+501); an error never carries data lines. A partial line the port has been
+silent on for ten seconds is dropped, so bytes a port prober left behind —
+ModemManager writes `AT` to every new CDC-ACM port — cannot be glued onto
+the next command; bytes waiting to be read never count as silence, and ten
+seconds is a typist's pause, not a prober's. The host tool asks once more
+when a first reply names no command. A Linux host
 that runs ModemManager is still better off telling it to leave the node
 alone, because a probe that is still reading the port eats the replies to
 whatever else is asked in those seconds: `tools/udev/60-retimesh-node.rules`
