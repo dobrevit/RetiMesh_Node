@@ -78,17 +78,16 @@ Caps caps() {
 static void IRAM_ATTR forceDownloadBootHandler() {
   REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
 }
-static bool sHandlerRegistered = false;
 #endif
 
 // Arm the ROM for download mode on the next reset. True when the handler is
-// in place (or already was: a second registration of the same function is
-// refused by IDF as an invalid state, which is not a failure here).
+// in place — including when it already was: IDF refuses a second
+// registration of the same function as an invalid state, which here means
+// the work is done. Nothing caches that; IDF is the record.
 static bool armDownloadBoot() {
   #if HAS_FORCE_DOWNLOAD_BOOT
-    if (sHandlerRegistered) return true;
     const esp_err_t err = esp_register_shutdown_handler(forceDownloadBootHandler);
-    if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) { sHandlerRegistered = true; return true; }
+    if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) return true;
     log_e("bootloader: esp_register_shutdown_handler failed (%d): the shutdown table is full", (int)err);
     return false;
   #else
@@ -96,28 +95,41 @@ static bool armDownloadBoot() {
   #endif
 }
 
+static void disarmDownloadBoot() {
+  #if HAS_FORCE_DOWNLOAD_BOOT
+    esp_unregister_shutdown_handler(forceDownloadBootHandler);
+  #endif
+}
+
 Plan plan() { return Bootloader::plan(caps()); }
 bool canEnterAutomatically() { return Bootloader::canEnterAutomatically(caps()); }
 const char* manualRecovery() { return kRecovery; }
 
-bool request(Target target, Source source, uint32_t delayMs, const char** whyNot) {
+Refusal request(Target target, Source source, uint32_t delayMs, const char** whyNot) {
   if (target == Target::Bootloader && !canEnterAutomatically()) {
-    if (whyNot) *whyNot = BOARD_USB_NATIVE
-      ? "software entry hangs a native-USB board until power is cycled (its USB unit survives the reset); esptool's DTR/RTS handshake does it instead"
-      : "this chip cannot enter its downloader from software; use the bridge's auto-reset or hold BOOT";
-    return false;
+    if (whyNot) *whyNot = whyNotAutomatic(caps());
+    return Refusal::CannotEnter;
   }
-  // Armed before the sequencer accepts, so a refusal here leaves nothing
-  // pending; the bit itself is only consulted by the ROM after a reset.
+  // The sequencer decides first. An earlier version armed the ROM before
+  // asking, and a request the sequencer then refused — because a plain
+  // reboot was already going through — left the handler registered, so that
+  // reboot landed in the downloader with nobody waiting for it. Arming after
+  // acceptance, and disarming if the arming itself fails, leaves a refusal
+  // with nothing behind it.
+  if (!sSeq.request(target, source, delayMs, millis())) {
+    if (whyNot) *whyNot = "a restart is already in progress";
+    return Refusal::Busy;
+  }
   if (target == Target::Bootloader && !armDownloadBoot()) {
-    if (whyNot) *whyNot = "cannot arm the ROM downloader: the shutdown handler table is full; reboot and retry, or hold BOOT";
-    return false;
+    // Accepted a moment ago and now impossible: the armed restart would run
+    // as a plain reboot, which is not what was asked. There is no way to
+    // un-accept, so it is left armed as a reboot and reported honestly.
+    if (whyNot) *whyNot = "cannot arm the ROM downloader: the shutdown handler table is full; the node will restart into the application instead";
+    return Refusal::CannotArm;
   }
-  const bool ok = sSeq.request(target, source, delayMs, millis());
-  if (!ok && whyNot) *whyNot = "a restart is already in progress";
-  if (ok) log_w("restart requested: into the %s, by %s, in %lu ms",
-                targetName(target), sourceName(source), (unsigned long)delayMs);
-  return ok;
+  log_w("restart requested: into the %s, by %s, in %lu ms",
+        targetName(target), sourceName(source), (unsigned long)delayMs);
+  return Refusal::None;
 }
 
 bool   pending() { return sSeq.pending(); }
@@ -143,8 +155,10 @@ static void quiesce() {
 }
 
 static void restart() {
-  // The download-boot handler, if this restart wants one, was registered at
-  // request time (see armDownloadBoot); there is nothing left to arm.
+  // The download-boot handler, if this restart wants one, was registered
+  // when the request was accepted; a restart into the application makes
+  // sure none is left over from a request that failed to arm.
+  if (sSeq.target() != Target::Bootloader) disarmDownloadBoot();
   esp_restart();
 }
 

@@ -128,17 +128,50 @@ static void test_a_second_request_keeps_the_earlier_deadline() {
   TEST_ASSERT_TRUE(u.request(Target::App, Source::Settings, 1500, 0));
   TEST_ASSERT_TRUE(u.request(Target::Bootloader, Source::Console, 300, 100));
   TEST_ASSERT_EQUAL_UINT32(400, u.dueMs());
-  TEST_ASSERT_TRUE(u.request(Target::Bootloader, Source::Http, 600, 200));   // later and longer: ignored
-  TEST_ASSERT_EQUAL_UINT32(400, u.dueMs());
+  // A third request, later and longer, does not push the deadline out to
+  // its own delay — but it does hold it off far enough for its own
+  // acknowledgement to leave, which is the floor and nothing more.
+  TEST_ASSERT_TRUE(u.request(Target::Bootloader, Source::Http, 600, 200));
+  TEST_ASSERT_EQUAL_UINT32(200 + Sequencer::kAckFloorMs, u.dueMs());
+}
+
+static void test_a_request_is_never_answered_after_its_own_restart() {
+  // A plain reboot armed long ago is about to fire; a bootloader request
+  // lands a few milliseconds before it. Keeping the earlier deadline as it
+  // stood would have restarted the node under its own 202. The deadline is
+  // held off by at least the acknowledgement floor.
+  Sequencer s;
+  TEST_ASSERT_TRUE(s.request(Target::App, Source::Settings, 1500, 0));
+  TEST_ASSERT_TRUE(s.request(Target::Bootloader, Source::Http, 600, 1495));
+  TEST_ASSERT_EQUAL_UINT32(1495 + Sequencer::kAckFloorMs, s.dueMs());
+  TEST_ASSERT_EQUAL((int)Step::None, (int)s.tick(1500));
+  TEST_ASSERT_EQUAL((int)Step::Quiesce, (int)s.tick(1495 + Sequencer::kAckFloorMs));
+}
+
+static void test_every_refusal_has_a_status() {
+  TEST_ASSERT_EQUAL(202, httpStatus(Refusal::None));
+  TEST_ASSERT_EQUAL(501, httpStatus(Refusal::CannotEnter));
+  TEST_ASSERT_EQUAL(500, httpStatus(Refusal::CannotArm));
+  TEST_ASSERT_EQUAL(409, httpStatus(Refusal::Busy));
+  // ...and the reason a board cannot enter names the cause the plan used.
+  Caps classic; classic.bridgeAutoReset = true;
+  TEST_ASSERT_NOT_NULL(strstr(whyNotAutomatic(classic), "cannot enter"));
+  Caps s3usb; s3usb.forceDownloadBoot = true; s3usb.nativeUsb = true;
+  TEST_ASSERT_NOT_NULL(strstr(whyNotAutomatic(s3usb), "native-USB"));
+  Caps bridged; bridged.forceDownloadBoot = true; bridged.bridgeAutoReset = true;
+  TEST_ASSERT_EQUAL_STRING("", whyNotAutomatic(bridged));
 }
 
 static void test_nothing_is_accepted_once_quiescing() {
   Sequencer s;
   s.request(Target::App, Source::Http, 0, 0);
-  TEST_ASSERT_EQUAL((int)Step::Quiesce, (int)s.tick(0));
-  TEST_ASSERT_FALSE(s.request(Target::Bootloader, Source::Console, 0, 1));
-  TEST_ASSERT_EQUAL((int)Step::Restart, (int)s.tick(1));
-  TEST_ASSERT_FALSE(s.request(Target::App, Source::Console, 0, 2));
+  // Even a zero delay waits out the acknowledgement floor.
+  TEST_ASSERT_EQUAL((int)Step::None, (int)s.tick(0));
+  const uint32_t t = Sequencer::kAckFloorMs;
+  TEST_ASSERT_EQUAL((int)Step::Quiesce, (int)s.tick(t));
+  TEST_ASSERT_FALSE(s.request(Target::Bootloader, Source::Console, 0, t + 1));
+  TEST_ASSERT_EQUAL((int)Step::Restart, (int)s.tick(t + 1));
+  TEST_ASSERT_FALSE(s.request(Target::App, Source::Console, 0, t + 2));
 }
 
 static void test_the_deadline_survives_millis_wraparound() {
@@ -160,6 +193,8 @@ int main() {
   RUN_TEST(test_a_bootloader_request_outranks_a_pending_reboot);
   RUN_TEST(test_a_reboot_cannot_downgrade_a_pending_bootloader_entry);
   RUN_TEST(test_a_second_request_keeps_the_earlier_deadline);
+  RUN_TEST(test_a_request_is_never_answered_after_its_own_restart);
+  RUN_TEST(test_every_refusal_has_a_status);
   RUN_TEST(test_nothing_is_accepted_once_quiescing);
   RUN_TEST(test_the_deadline_survives_millis_wraparound);
   return UNITY_END();

@@ -54,7 +54,10 @@ static void err(const char* cmd, int code, const char* text) { send(formatErr(sO
 // diagnostics report and the restart sequence, and whose stack is the one
 // nothing in platformio.ini has enlarged.
 static void dataf(const char* cmd, const char* fmt, ...) {
-  const int head = snprintf(sOut, sizeof(sOut), REPLY_PREFIX "%s ", cmd);
+  // The line's shape comes from the protocol header — a data line with
+  // nothing after the command yet — so this file does not carry a second
+  // spelling of it.
+  const int head = (int)formatData(sOut, sizeof(sOut), cmd, "");
   if (head < 0 || (size_t)head >= sizeof(sOut)) { send(sizeof(sOut)); return; }
   va_list ap; va_start(ap, fmt);
   const int body = vsnprintf(sOut + head, sizeof(sOut) - (size_t)head, fmt, ap);
@@ -137,22 +140,24 @@ static void doLinks() {
 }
 
 static void doWifi(const Request& r) {
-  // The same refusal every HTTP write gives while a restart is armed: a
-  // setting saved now might not reach flash before it.
-  if (Bootloader::pending()) { err("WIFI", 409, "a restart is already in progress"); return; }
-  LinkSettings ls = settings.links();
+  // The same rule the HTTP handler applies, in the one place it is written.
   const bool on = strcmp(r.args[0], "ON") == 0;
-  if (ls.wifiEnabled == on) { ok("WIFI", on ? "wifi=on unchanged=true" : "wifi=off unchanged=true"); return; }
-  ls.wifiEnabled = on;
-  if (!settings.saveLinks(ls)) { err("WIFI", 500, "NVS write failed"); return; }
-  // Saved either way; whether a restart follows is the manager's answer — a
-  // bootloader entry already on its way is not downgraded, and the operator
-  // is told the setting takes effect at the next boot instead.
-  const bool restarting = Bootloader::reboot(RESTART_SETTINGS_DELAY_MS, Bootloader::Source::Console);
-  char kv[64];
-  snprintf(kv, sizeof(kv), "wifi=%s restart=%s%s", on ? "on" : "off", restarting ? "true" : "false",
-           restarting ? "" : " note=applies_at_next_boot");
-  ok("WIFI", kv);
+  LinkSettings want = settings.links();
+  want.wifiEnabled = on;
+  bool changed[8] = { true };            // only the first field, wifi, is given
+  const char* detail = "";
+  char kv[96];
+  const char* state = on ? "on" : "off";
+  switch (LocalLink::applyLinks(want, changed, Bootloader::Source::Console, &detail)) {
+    case LocalLink::Apply::Unchanged:        snprintf(kv, sizeof(kv), "wifi=%s unchanged=true", state); ok("WIFI", kv); break;
+    case LocalLink::Apply::Saved:            snprintf(kv, sizeof(kv), "wifi=%s restart=false", state); ok("WIFI", kv); break;
+    case LocalLink::Apply::SavedRestarting:  snprintf(kv, sizeof(kv), "wifi=%s restart=true", state); ok("WIFI", kv); break;
+    case LocalLink::Apply::SavedNextBoot:    snprintf(kv, sizeof(kv), "wifi=%s restart=false note=applies_at_next_boot", state); ok("WIFI", kv); break;
+    case LocalLink::Apply::RefusedUnusable:  err("WIFI", 400, detail); break;
+    case LocalLink::Apply::RefusedLockedOut: err("WIFI", 400, "refused: with the serial console switched off this would leave no way to reach the node"); break;
+    case LocalLink::Apply::RefusedBusy:      err("WIFI", 409, "a restart is already in progress"); break;
+    case LocalLink::Apply::NvsFailed:        err("WIFI", 500, "NVS write failed"); break;
+  }
 }
 
 static void doRestart(const Request& r, Bootloader::Target target) {
@@ -166,10 +171,8 @@ static void doRestart(const Request& r, Bootloader::Target target) {
   const char* why = nullptr;
   // The reply has to leave before the port goes away; the same grace the
   // HTTP path gives its 202, so a host tool can wait on one figure.
-  if (!Bootloader::request(target, Bootloader::Source::Console, RESTART_ACK_DELAY_MS, &why)) {
-    err(name, target == Bootloader::Target::Bootloader && !Bootloader::canEnterAutomatically() ? 501 : 409, why);
-    return;
-  }
+  const Bootloader::Refusal r2 = Bootloader::request(target, Bootloader::Source::Console, RESTART_ACK_DELAY_MS, &why);
+  if (r2 != Bootloader::Refusal::None) { err(name, Bootloader::httpStatus(r2), why); return; }
   char kv[96];
   snprintf(kv, sizeof(kv), "target=%s method=%s delay_ms=%d", Bootloader::targetName(target),
            target == Bootloader::Target::Bootloader ? Bootloader::methodName(Bootloader::Method::SoftwareApi) : "esp_restart",
@@ -206,7 +209,17 @@ void begin(Stream& io) {
 }
 
 void poll() {
-  if (!sIo || !settings.maintenance().consoleEnabled) return;
+  if (!sIo) return;
+  if (!settings.maintenance().consoleEnabled) {
+    // Off means off, not deferred. Bytes that arrive while the console is
+    // disabled are discarded rather than left in the port's buffer, where an
+    // earlier version let them sit until the console was switched back on —
+    // at which point a "BOOTLOADER CONFIRM" typed days before was executed.
+    size_t budget = kBudget;
+    while (budget-- && sIo->available() > 0) sIo->read();
+    sLines.reset();
+    return;
+  }
   size_t budget = kBudget;
   while (budget-- && sIo->available() > 0) {
     const int c = sIo->read();

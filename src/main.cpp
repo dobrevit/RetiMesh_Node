@@ -234,8 +234,8 @@ void setup() {
   }, "rns", 16384, nullptr, 3, nullptr, 1);
 
   if (settings.links().wifiEnabled)
-    log_i("RetiMesh Node up — join \"%s\", portal http://10.42.0.1, RNS TCP :%d",
-          wifiManager.ssid(), RNS_TCP_PORT);
+    log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",
+          wifiManager.ssid(), AP_IP.toString().c_str(), RNS_TCP_PORT);
   else
     log_i("RetiMesh Node up — Wi-Fi is off; HTTP :%d and RNS TCP :%d answer on any other local link, "
           "and WIFI ON at the console turns the access point back on", HTTP_PORT, RNS_TCP_PORT);

@@ -35,6 +35,7 @@
 
 #include <Arduino.h>
 #include "BootloaderPlan.h"
+#include "Config.h"
 
 namespace Bootloader {
 
@@ -43,14 +44,17 @@ Caps caps();
 Plan plan();
 bool canEnterAutomatically();
 
-// Ask for a restart `delayMs` from now. Returns false and sets *whyNot when
-// it cannot be honoured: a bootloader request on silicon without the bit, or
-// a request that arrives while one is already going through.
-bool request(Target target, Source source, uint32_t delayMs, const char** whyNot = nullptr);
+// Ask for a restart `delayMs` from now. Returns Refusal::None when armed;
+// otherwise why not, with *whyNot set to the words for it. httpStatus() in
+// BootloaderPlan.h maps the refusal to a status, so the console and the API
+// answer alike.
+Refusal request(Target target, Source source, uint32_t delayMs, const char** whyNot = nullptr);
 
-// Convenience for the paths that already existed: settings saves and moves.
-inline bool reboot(uint32_t delayMs, Source source = Source::Settings) {
-  return request(Target::App, source, delayMs);
+// The restart every settings save and store move asks for. The delay is the
+// one Config.h documents for that case and is folded in here so no caller
+// can quietly shorten the window the reply needs to leave.
+inline bool reboot(Source source = Source::Settings) {
+  return request(Target::App, source, RESTART_SETTINGS_DELAY_MS) == Refusal::None;
 }
 
 // Once a request is in, services should refuse new work.

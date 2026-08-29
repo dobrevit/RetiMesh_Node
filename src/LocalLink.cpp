@@ -23,6 +23,7 @@
 #include "LocalLink.h"
 #include <WiFi.h>
 #include "WifiManager.h"
+#include "Bootloader.h"
 
 namespace LocalLink {
 
@@ -51,9 +52,11 @@ Link* serving(uint32_t localIp) {
   return nullptr;
 }
 
-bool requestIsHostFacing(uint32_t localIp) {
+bool requestIsHostFacing(uint32_t localIp, uint32_t remoteIp) {
   const Link* l = serving(localIp);
-  return l && isHostFacing(l->type());
+  if (!l || !isHostFacing(l->type())) return false;
+  const uint32_t mask = l->netmask();
+  return mask != 0 && (remoteIp & mask) == (l->address() & mask);
 }
 
 uint32_t hostOrder(const IPAddress& a) { return ipv4(a[0], a[1], a[2], a[3]); }
@@ -89,11 +92,43 @@ bool lockedOut(const LinkSettings& l, bool consoleEnabled) {
   return !consoleEnabled && !anySwitchOn(l);
 }
 
+Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Source source, const char** detail) {
+  if (detail) *detail = "";
+  // The same refusal every HTTP write gives while a restart is armed: a
+  // setting saved now might not reach flash before it.
+  if (Bootloader::pending()) return Apply::RefusedBusy;
+  LinkSettings next = settings.links();
+  size_t n = 0;
+  const Field* f = fields(n);
+  for (size_t i = 0; i < n; i++) {
+    if (!changed[i]) continue;
+    const bool on = want.*(f[i].on);
+    const Link* link = find(f[i].type);
+    if (on && (!link || !link->usable())) {
+      if (detail) *detail = link ? link->reason() : "no such link on this board";
+      return Apply::RefusedUnusable;
+    }
+    next.*(f[i].on) = on;
+  }
+  if (lockedOut(next, settings.maintenance().consoleEnabled)) return Apply::RefusedLockedOut;
+  const bool wifiChanged = next.wifiEnabled != settings.links().wifiEnabled;
+  bool same = true;
+  for (size_t i = 0; i < n; i++) if (next.*(f[i].on) != settings.links().*(f[i].on)) same = false;
+  if (same) return Apply::Unchanged;
+  if (!settings.saveLinks(next)) return Apply::NvsFailed;
+  if (!wifiChanged) return Apply::Saved;
+  // The access point cannot be torn down under the request that asked, so a
+  // Wi-Fi change takes effect at a restart; whether one is granted now is the
+  // bootloader manager's answer.
+  return Bootloader::reboot(source) ? Apply::SavedRestarting : Apply::SavedNextBoot;
+}
+
 // ---------------------------------------------------------------------------
 // Wi-Fi adapters
 // ---------------------------------------------------------------------------
 void WifiLink::begin() {
-  _m = Machine(enabled());
+  _applied = wanted();
+  _m = Machine(_applied);
   poll(millis());
 }
 
@@ -124,14 +159,20 @@ uint32_t WifiLink::address() const {
   return _m.phase() == Phase::Ready ? hostOrder(ip()) : 0;
 }
 
-bool      WifiApLink::enabled() const { return settings.links().wifiEnabled; }
+uint32_t WifiLink::netmask() const {
+  return _m.phase() == Phase::Ready ? hostOrder(mask()) : 0;
+}
+
+bool      WifiApLink::wanted() const  { return settings.links().wifiEnabled; }
 bool      WifiApLink::carrier() const { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
 IPAddress WifiApLink::ip() const      { return WiFi.softAPIP(); }
+IPAddress WifiApLink::mask() const    { return WiFi.softAPSubnetMask(); }
 uint8_t   WifiApLink::clients() const { return WiFi.softAPgetStationNum(); }
 
-bool      WifiStaLink::enabled() const { return settings.links().wifiEnabled && wifiManager.stationConfigured(); }
+bool      WifiStaLink::wanted() const  { return settings.links().wifiEnabled && wifiManager.stationConfigured(); }
 bool      WifiStaLink::carrier() const { return wifiManager.stationConnected(); }
 IPAddress WifiStaLink::ip() const      { return WiFi.localIP(); }
+IPAddress WifiStaLink::mask() const    { return WiFi.subnetMask(); }
 
 // ---------------------------------------------------------------------------
 Snapshot UnavailableLink::snapshot() const {

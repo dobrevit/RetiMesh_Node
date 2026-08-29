@@ -124,6 +124,33 @@ struct Plan {
 // bit, and a console that is not the S3's own USB unit — see the header.
 inline bool canEnterAutomatically(const Caps& c) { return c.forceDownloadBoot && !c.nativeUsb; }
 
+// Why not, in the operator's words, from the same facts the decision used.
+// An earlier version derived the text from a board macro one line after the
+// decision had been made from Caps, and the two could name different causes.
+inline const char* whyNotAutomatic(const Caps& c) {
+  if (!c.forceDownloadBoot)
+    return "this chip cannot enter its downloader from software; use the bridge's auto-reset or hold BOOT";
+  if (c.nativeUsb)
+    return "software entry hangs a native-USB board until power is cycled (its USB unit survives the reset); esptool's DTR/RTS handshake does it instead";
+  return "";
+}
+
+// Every way a request can be turned down, and the HTTP status each maps to.
+// One mapping, because the console and the HTTP handler each used to work
+// the status out from a side query, in opposite polarity, and a third reason
+// fell into whichever bucket the ternary happened to land it in.
+enum class Refusal : uint8_t { None = 0, CannotEnter, CannotArm, Busy };
+
+inline int httpStatus(Refusal r) {
+  switch (r) {
+    case Refusal::None:        return 202;   // accepted: the restart is armed
+    case Refusal::CannotEnter: return 501;   // this board cannot, ever
+    case Refusal::CannotArm:   return 500;   // this board could, and something in the system stopped it
+    case Refusal::Busy:        return 409;   // a restart is already in progress
+  }
+  return 500;
+}
+
 // Best first. The API first because it works over any local link; the bridge
 // reset next because esptool does it on its own; and recovery is always
 // there, last, because it always works.
@@ -142,16 +169,14 @@ inline Plan plan(const Caps& c) {
 // The request sequence
 // ---------------------------------------------------------------------------
 enum class Target : uint8_t { App = 0, Bootloader = 1 };
-enum class Source : uint8_t { Http = 0, Console, UsbTouch, Settings, Button };
+enum class Source : uint8_t { Http = 0, Console, Settings };
 
 inline const char* targetName(Target t) { return t == Target::Bootloader ? "bootloader" : "app"; }
 inline const char* sourceName(Source s) {
   switch (s) {
     case Source::Http:     return "http";
     case Source::Console:  return "console";
-    case Source::UsbTouch: return "usb_touch";
     case Source::Settings: return "settings";
-    case Source::Button:   return "button";
   }
   return "unknown";
 }
@@ -193,19 +218,26 @@ enum class Step : uint8_t { None = 0, Quiesce, Restart };
 // acknowledgement had left. The critical sections are a few instructions.
 class Sequencer {
 public:
+  // The least a restart may be from any accepted request: one pass of the
+  // loop that sends the acknowledgement, with margin.
+  static constexpr uint32_t kAckFloorMs = 250;
+
   bool request(Target target, Source source, uint32_t delayMs, uint32_t nowMs) {
     Guard g(_lock);
     const State st = _state.load(std::memory_order_relaxed);
     if (st == State::Quiescing || st == State::Restarting) return false;
     if (st == State::Armed && _target == Target::Bootloader && target == Target::App) return false;
-    const uint32_t due = nowMs + delayMs;
+    uint32_t due = nowMs + delayMs;
     // A second request while one is armed keeps the earlier of the two
     // deadlines. Two callers were each told their own delay; honouring the
     // later one would push the restart past what the first was promised, and
     // a page that re-posts on every retry would keep a reboot from ever
-    // firing at all.
-    if (st == State::Armed && (int32_t)(_dueMs - due) < 0) { _target = target; _source = source; }
-    else { _dueMs = due; _target = target; _source = source; }
+    // firing at all. But never so early that this request's own answer
+    // cannot leave: a request landing a few milliseconds before an old
+    // deadline was being restarted under, its 202 still queued.
+    if (st == State::Armed && (int32_t)(_dueMs - due) < 0) due = _dueMs;
+    if ((int32_t)(due - (nowMs + kAckFloorMs)) < 0) due = nowMs + kAckFloorMs;
+    _dueMs = due; _target = target; _source = source;
     _state.store(State::Armed, std::memory_order_release);
     return true;
   }

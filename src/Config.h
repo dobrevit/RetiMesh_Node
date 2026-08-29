@@ -80,16 +80,6 @@
 #ifndef BOARD_UART_MAX_BAUD
   #define BOARD_UART_MAX_BAUD     115200
 #endif
-// Whether this build carries the drivers. Both are 0 on the pinned Arduino
-// core 2.0.17, whose prebuilt TinyUSB has no NCM class and whose lwIP has no
-// PPP — see docs/local-link.md. The board flags above say what the hardware
-// could do; these say what the firmware does.
-#ifndef LOCAL_LINK_USB_NCM
-  #define LOCAL_LINK_USB_NCM      0
-#endif
-#ifndef LOCAL_LINK_PPP
-  #define LOCAL_LINK_PPP          0
-#endif
 
 // ---------------------------------------------------------------------------
 // Firmware version — single-sourced from the git tag by CI

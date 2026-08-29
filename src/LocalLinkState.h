@@ -55,7 +55,7 @@ namespace LocalLink {
 enum class Type : uint8_t { WifiAp = 0, WifiSta, UsbNcm, PppUart };
 
 // How the node's address on the link was decided.
-enum class Addressing : uint8_t { None = 0, Static, Dhcp, LinkLocal };
+enum class Addressing : uint8_t { None = 0, Static, Dhcp };
 
 // The phase machine. Ready is the only phase in which a service can be
 // reached over the link; everything else is a reason it cannot.
@@ -97,7 +97,6 @@ inline const char* addressingName(Addressing a) {
     case Addressing::None:      return "none";
     case Addressing::Static:    return "static";
     case Addressing::Dhcp:      return "dhcp";
-    case Addressing::LinkLocal: return "link_local";
   }
   return "unknown";
 }
@@ -125,33 +124,38 @@ public:
 
   bool apply(Event e, uint32_t nowMs) {
     const Phase before = _phase;
+    Phase next = before;
     switch (e) {
       case Event::Enable:
-        if (_phase == Phase::Disabled) _phase = Phase::Down;
+        if (before == Phase::Disabled) next = Phase::Down;
         break;
       case Event::Disable:
-        _phase = Phase::Disabled;
+        next = Phase::Disabled;
         break;
       case Event::CarrierUp:
-        if (_phase == Phase::Down) _phase = Phase::Up;
+        if (before == Phase::Down) next = Phase::Up;
         break;
       case Event::CarrierDown:
         // Losing carrier loses the address with it: an address on a link with
         // no carrier is a number nobody can reach.
-        if (_phase == Phase::Up || _phase == Phase::Ready) _phase = Phase::Down;
+        if (before == Phase::Up || before == Phase::Ready) next = Phase::Down;
         break;
       case Event::AddressUp:
         // A link may learn its address in the same breath as its carrier —
         // a static address is configured before the cable is in — so Down
         // goes straight to Ready rather than insisting on an Up in between.
-        if (_phase == Phase::Down || _phase == Phase::Up) _phase = Phase::Ready;
+        if (before == Phase::Down || before == Phase::Up) next = Phase::Ready;
         break;
       case Event::AddressDown:
-        if (_phase == Phase::Ready) _phase = Phase::Up;
+        if (before == Phase::Ready) next = Phase::Up;
         break;
     }
-    if (_phase == Phase::Ready && before != Phase::Ready) _readySinceMs = nowMs;
-    return _phase != before;
+    // The timestamp is settled before the phase is published, because a
+    // reader on another task copies phase first and then asks for uptime: the
+    // other order let it see Ready with the previous epoch's start.
+    if (next == Phase::Ready && before != Phase::Ready) _readySinceMs = nowMs;
+    _phase = next;
+    return next != before;
   }
 
   // Seconds the link has been reachable for; 0 unless Ready.
