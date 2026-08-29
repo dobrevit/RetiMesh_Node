@@ -37,6 +37,12 @@ for env, meta in boards.items():
         problems.append(f"{env}: a classic ESP32 has no USB unit to put on the connector")
     if usb.get("native") and not on_connector:
         problems.append(f"{env}: usb.native without serial_jtag or otg on the connector")
+    # NCM is presented by the OTG stack, and a device the host is to
+    # recognise needs an identity to present.
+    if usb.get("ncm") and not usb.get("otg"):
+        problems.append(f"{env}: usb.ncm without usb.otg — the OTG stack is what presents it")
+    if usb.get("ncm") and not isinstance(boards.get("_usb_identity"), dict):
+        problems.append(f"{env}: usb.ncm but boards.json has no _usb_identity block")
     if usb.get("native") and usb.get("bridge", "none") != "none":
         problems.append(f"{env}: native USB and a bridge cannot both be on the connector")
     if not usb.get("native") and usb.get("bridge", "none") == "none":
@@ -50,6 +56,14 @@ for env, meta in boards.items():
     # that the env exists at all.
     if f"env:{env}" not in ini:
         problems.append(f"{env}: no [env:{env}] in platformio.ini")
+
+ident = boards.get("_usb_identity")
+if isinstance(ident, dict):
+    for key in ("vid", "pid", "manufacturer", "product", "network_interface", "console_interface"):
+        if not ident.get(key):
+            problems.append(f"_usb_identity.{key} missing")
+    if ident.get("pid_is_test_allocation") is None:
+        problems.append("_usb_identity.pid_is_test_allocation missing — say whether the PID may ship")
 
 for p in problems:
     print("boards.json:", p)

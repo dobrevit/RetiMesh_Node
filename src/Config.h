@@ -80,6 +80,15 @@
 #ifndef BOARD_UART_MAX_BAUD
   #define BOARD_UART_MAX_BAUD     115200
 #endif
+// Whether this build drives USB networking: the board can present NCM and
+// the OTG stack owns the peripheral (ARDUINO_USB_MODE 0, set by
+// tools/board_caps.py from the same registry facts). One derived fact, so no
+// file has to know both halves. See docs/local-link.md and UsbNcm.h.
+#if BOARD_USB_NCM && defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 0)
+  #define HAS_USB_NCM 1
+#else
+  #define HAS_USB_NCM 0
+#endif
 
 // ---------------------------------------------------------------------------
 // Firmware version — single-sourced from the git tag by CI

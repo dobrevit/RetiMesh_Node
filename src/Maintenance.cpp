@@ -26,6 +26,7 @@
 #include "Settings.h"
 #include "Bootloader.h"
 #include "LocalLink.h"
+#include "UsbNcm.h"
 #include "Diag.h"
 
 namespace Maintenance {
@@ -107,9 +108,15 @@ static void doStatus() {
 }
 
 static void doUsbStatus() {
-  #if BOARD_USB_NATIVE
-    // The S3 runs its fixed USB-Serial/JTAG personality; the composite device
-    // with its own CDC is a build that does not exist yet.
+  #if HAS_USB_NCM
+    // The OTG stack owns the peripheral: this port is the composite device's
+    // ACM function, and usb0 is its NCM function.
+    dataf("USB_STATUS", "native=true personality=usb_otg_composite ncm=driver cdc_acm=composite");
+    dataf("USB_STATUS", "ncm_link=%s host_opened=%s ncm_rx=%lu ncm_tx=%lu ncm_tx_dropped=%lu",
+          UsbNcm::linkUp() ? "up" : "down", UsbNcm::hostOpened() ? "yes" : "no", (unsigned long)UsbNcm::rxPackets(),
+          (unsigned long)UsbNcm::txPackets(), (unsigned long)UsbNcm::txDropped());
+  #elif BOARD_USB_NATIVE
+    // The S3's fixed USB-Serial/JTAG personality.
     dataf("USB_STATUS", "native=true personality=usb_serial_jtag ncm=%s cdc_acm=via_serial_jtag",
           BOARD_USB_NCM ? "hardware" : "no");
   #else

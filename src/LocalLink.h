@@ -227,6 +227,28 @@ protected:
 // registry so the API lists them with hardware=true, firmware=false and a
 // reason, and the settings page can show the switch greyed out rather than
 // absent. Nothing else about them runs.
+// The S3's USB network link: CDC-NCM on the composite device (UsbNcm.h).
+// The device itself is composed before setup() runs; what this link brings up
+// and down is the network interface behind it, so the switch applies live —
+// no restart, unlike Wi-Fi.
+#if HAS_USB_NCM
+class UsbNcmLink : public Link {
+public:
+  Type type() const override { return Type::UsbNcm; }
+  const char* name() const override { return "usb0"; }
+  bool hardware() const override { return true; }
+  bool firmware() const override { return true; }
+  bool enabled()  const override;
+  void begin() override;
+  void poll(uint32_t nowMs) override;
+  Snapshot snapshot() const override;
+  uint32_t address() const override;
+  uint32_t netmask() const override;
+private:
+  Machine _m;
+};
+#endif
+
 class UnavailableLink : public Link {
 public:
   UnavailableLink(Type t, const char* name, bool hardware, const char* reason)
