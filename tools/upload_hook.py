@@ -90,11 +90,15 @@ def after_upload(source, target, env):  # noqa: ARG001
     if device is None or os.environ.get("RETIMESH_NO_AUTO_BOOTLOADER") == "1":
         return
     port = env.subst("$UPLOAD_PORT") or None
-    info = device.wait_for_application(port=port, timeout=20.0, log=_log)
+    # The same patience as the hand-off: on a native-USB board the way back
+    # from the ROM is a new device on the bus, and a hub that was slow to
+    # report the chip leaving is as slow to report it returning.
+    wait = 90.0
+    info = device.wait_for_application(port=port, timeout=wait, log=_log)
     if info:
         _log(f"application is back: {info}")
     else:
-        _log("the application did not announce itself within 20 s; if the board is still in the "
+        _log(f"the application did not announce itself within {wait:.0f} s; if the board is still in the "
              "downloader, press RST — and if it stays silent, see docs/local-link.md#recovery")
 
 
