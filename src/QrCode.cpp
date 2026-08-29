@@ -6,6 +6,7 @@
 #include "QrCode.h"
 #include "Settings.h"
 #include "WifiManager.h"
+#include "LocalLink.h"
 #include "RnsAnnounce.h"
 #include <WiFi.h>
 
@@ -43,8 +44,15 @@ bool payloadText(Payload what, char* text, size_t cap) {
     }
     case Payload::Portal: {
       // The address a phone should open: the LAN one when the node joined a
-      // network (that is where the operator's browser is), the AP otherwise.
-      IPAddress ip = wifiManager.stationConnected() ? WiFi.localIP() : WiFi.softAPIP();
+      // network (that is where the operator's browser is), otherwise whatever
+      // link is up. With nothing up there is no address, and the honest
+      // answer is no code at all — the earlier version encoded 0.0.0.0 when
+      // Wi-Fi was off, which scans fine and opens nothing.
+      const LocalLink::Link* sta = LocalLink::find(LocalLink::Type::WifiSta);
+      uint32_t a = sta ? sta->address() : 0;
+      for (size_t i = 0; i < LocalLink::count() && !a; i++) a = LocalLink::at(i)->address();
+      if (!a) return false;
+      const IPAddress ip((uint8_t)(a >> 24), (uint8_t)(a >> 16), (uint8_t)(a >> 8), (uint8_t)a);
       s = "http://" + ip.toString() + "/";
       break;
     }

@@ -201,6 +201,42 @@
       the store means copying it &mdash; which is what the SD card actions above do.</div>
   </div>
 
+  <h2>Local links</h2>
+  <form class="card" id="linksForm">
+    <div class="note">The ways a computer or phone reaches this node directly. Every service &mdash; this page, the API, Reticulum TCP on
+      :4242 &mdash; answers on whichever of them is up; LoRa is not one of them and never carries IP. A switch that is greyed out names
+      the reason: the board lacks the hardware, or this firmware build has no driver for it.</div>
+    <div class="row" id="linkFields"></div>
+    <div id="linksStatus" class="note"></div>
+    <button type="submit">Save links</button>
+    <div class="msg" id="linksMsg"></div>
+    <div class="note">Switching Wi-Fi off restarts the node without its access point. It stays reachable over USB or PPP where the board
+      has them, and always through the serial maintenance console: <code>WIFI ON</code> there turns the access point back on.</div>
+  </form>
+
+  <h2>Maintenance</h2>
+  <form class="card" id="maintForm">
+    <div class="row">
+      <div><label>Bootloader API (<code>POST /api/system/bootloader</code>)</label>
+        <select name="bootloader_api"><option value="1">On &mdash; flashing tools may ask</option><option value="0">Off &mdash; flash by hand only</option></select></div>
+      <div><label>...also from the station network</label>
+        <select name="bootloader_from_lan"><option value="0">No &mdash; directly attached links only</option><option value="1">Yes &mdash; any host on the LAN</option></select></div>
+      <div><label>Serial maintenance console</label>
+        <select name="console_enabled"><option value="1">On</option><option value="0">Off &mdash; log only</option></select></div>
+    </div>
+    <button type="submit">Save maintenance settings</button>
+    <div class="msg" id="maintMsg"></div>
+    <div class="note" id="maintNote"></div>
+    <div class="row">
+      <div><button type="button" id="rebootBtn">Restart node</button></div>
+      <div><button class="danger" type="button" id="bootloaderBtn" disabled>Enter bootloader (for flashing)</button></div>
+    </div>
+    <div class="msg" id="sysMsg"></div>
+    <div class="note">Entering the bootloader stops the node &mdash; no LoRa, no Wi-Fi, no this page &mdash; until it is flashed or reset. It needs the
+      admin password, this switch on, and a request from a directly attached link. If anything goes wrong: hold <b>BOOT</b>, press <b>RST</b>,
+      and flash with esptool; a power cycle always boots the firmware that is there.</div>
+  </form>
+
   <h2>Danger zone</h2>
   <div class="card">
     <button class="danger" id="resetBtn">Factory reset settings &amp; restart</button>
@@ -360,6 +396,46 @@ async function load() {
       if (o.value.includes("wpa3")) { o.disabled = true; o.textContent += " — needs an ESP-IDF 5 build"; }
     }
   }
+  // Local links: the switch is shown for what the board has; whether it can be
+  // turned on is the node's answer, with its reason, not the page's guess.
+  // The switches are drawn from what the node reports, so a link the
+  // firmware learns to offer appears here without an edit. The only thing
+  // this page adds is the human wording for each key.
+  const LINK_LABELS = {
+    wifi: ["Wi-Fi (access point & station)", "Off — USB/PPP or the serial console only"],
+    usb:  ["USB networking (CDC-NCM)", "Off"],
+    ppp:  ["PPP over the serial bridge", "Off"],
+  };
+  const lk = cfg.links || {};
+  const fields = $("linkFields"); fields.replaceChildren();
+  for (const [key, l] of Object.entries(lk)) {
+    const [label, offText] = LINK_LABELS[key] || [key, "Off"];
+    const div = document.createElement("div");
+    const lab = document.createElement("label"); lab.textContent = label + " ";
+    const hint = document.createElement("span"); hint.className = "hint";
+    hint.textContent = l.supported ? "" : (l.hardware ? "— not in this build" : "— not on this board");
+    lab.appendChild(hint);
+    const sel = document.createElement("select"); sel.name = key;
+    for (const [v, t] of [["1", "On"], ["0", offText]]) { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.appendChild(o); }
+    sel.value = l.enabled ? "1" : "0";
+    if (!l.supported) { sel.disabled = true; sel.value = "0"; }
+    if (!l.hardware) div.title = l.reason || "";
+    div.append(lab, sel); fields.appendChild(div);
+  }
+  const reasons = ["usb", "ppp"].filter(k => lk[k] && !lk[k].supported && lk[k].hardware).map(k => k + ": " + lk[k].reason);
+  $("linksStatus").textContent = reasons.length ? reasons.join(" · ") : "";
+
+  // Settings are `maintenance`; what the board can do is `bootloader`, the
+  // same object GET /api/system/bootloader returns.
+  const mt = cfg.maintenance || {}, bl = cfg.bootloader || {};
+  fill($("maintForm"), { bootloader_api: mt.bootloader_api ? "1" : "0", bootloader_from_lan: mt.bootloader_from_lan ? "1" : "0",
+    console_enabled: mt.console_enabled ? "1" : "0" });
+  $("bootloaderBtn").disabled = !(bl.software_entry && mt.bootloader_api);
+  $("maintNote").textContent = (bl.software_entry
+      ? "This board can restart into its ROM downloader from software."
+      : "This board cannot enter its downloader from software; esptool resets it through DTR/RTS instead.")
+    + " Bootloader methods, best first: " + (bl.methods || []).join(", ") + ". Recovery: " + (bl.recovery || "") + ".";
+
   $("wifiNote").textContent = "Currently: " + cfg.wifi.ssid_active + " (" + cfg.wifi.security_active + "). " +
     "Saving restarts the node — reconnect to the new network afterwards." +
     (cfg.wifi.has_password ? " A password is stored; leave the field blank to keep it." : "") +
@@ -418,6 +494,48 @@ $("adminForm").addEventListener("submit", async ev => {
     setMsg("adminMsg", "Changed. Reload and sign in with the new password.", "ok");
     ev.target.reset();
   } catch (e) { setMsg("adminMsg", e.message, "bad"); }
+});
+
+$("linksForm").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const body = {};
+  for (const sel of ev.target.querySelectorAll("#linkFields select"))
+    if (!sel.disabled) body[sel.name] = sel.value === "1";
+  if (body.wifi === false && !confirm("Turn Wi-Fi off? The access point and this page go away until it is turned back on over USB, PPP or the serial console (WIFI ON).")) return;
+  try {
+    const r = await api("/api/settings/links", body);
+    setMsg("linksMsg", (r.restart ? "Saved. Restarting… " : "Saved. ") + (r.note || ""), r.restart ? "warn" : "ok");
+  } catch (e) { setMsg("linksMsg", e.message, "bad"); }
+});
+
+$("maintForm").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const f = ev.target.elements;
+  try {
+    await api("/api/settings/maintenance", { bootloader_api: f.bootloader_api.value === "1",
+      bootloader_from_lan: f.bootloader_from_lan.value === "1", console_enabled: f.console_enabled.value === "1" });
+    setMsg("maintMsg", "Saved.", "ok");
+    setTimeout(load, 500);
+  } catch (e) { setMsg("maintMsg", e.message, "bad"); }
+});
+
+$("rebootBtn").addEventListener("click", async () => {
+  if (!confirm("Restart the node now?")) return;
+  try {
+    await api("/api/system/reboot", { confirm: "REBOOT" });
+    setMsg("sysMsg", "Restarting…", "warn");
+  } catch (e) { setMsg("sysMsg", e.message, "bad"); }
+});
+
+// Two steps on purpose: a confirm dialog and a typed word. This is the one
+// button on the page that leaves the node running nothing.
+$("bootloaderBtn").addEventListener("click", async () => {
+  if (!confirm("Restart into the ROM bootloader? The node stops routing until it is flashed or reset.")) return;
+  if (prompt("Type BOOTLOADER to continue.") !== "BOOTLOADER") return;
+  try {
+    const r = await api("/api/system/bootloader", { confirm: "BOOTLOADER" });
+    setMsg("sysMsg", "Entering the bootloader in " + r.delay_ms + " ms — expect " + r.expect + ". Recovery: " + r.recovery, "warn");
+  } catch (e) { setMsg("sysMsg", e.message, "bad"); }
 });
 
 $("exportBtn").addEventListener("click", () => { window.location.href = "/api/settings/export"; });

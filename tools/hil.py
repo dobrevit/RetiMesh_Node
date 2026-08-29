@@ -15,6 +15,9 @@ Checks (each prints PASS/FAIL, exit code = number of failures):
 Usage: hil.py --port /dev/serial/by-id/... [--rns-bin ~/venv/bin] [--reset]
 """
 import argparse, re, subprocess, sys, time, serial
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hilreport import Reporter  # noqa: E402
 
 def run(cmd, timeout=60):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
@@ -38,12 +41,7 @@ def main():
     ap.add_argument("--boot-seconds", type=int, default=40)
     a = ap.parse_args()
     rns = a.rns_bin.rstrip("/") + "/" if a.rns_bin else ""
-    fails = 0
-
-    def report(name, ok, detail=""):
-        nonlocal fails
-        fails += 0 if ok else 1
-        print(f"{'PASS' if ok else 'FAIL'}  {name}  {detail}")
+    report = Reporter()
 
     # ---- boot -------------------------------------------------------------
     with serial.Serial(a.port, 115200, timeout=1) as s:
@@ -63,7 +61,7 @@ def main():
 
         if not rns:
             print("(no --rns-bin: skipping rnsd-side checks)")
-            sys.exit(fails)
+            sys.exit(report.fails)
 
         # ---- announce accepted by rnsd ----------------------------------------
         paths = run([f"{rns}rnpath", "-t"])
@@ -87,7 +85,7 @@ def main():
         report("tx: RNode heard the node since start", before is not None and after is not None and after >= before,
                f"↓ {before} -> {after} B" if before is not None else "rnstatus has no RNode interface")
 
-    sys.exit(fails)
+    sys.exit(report.fails)
 
 if __name__ == "__main__":
     main()

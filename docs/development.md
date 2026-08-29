@@ -4,7 +4,7 @@
 ```sh
 pipx install platformio
 pio run -e t3s3                       # compile
-pio run -e t3s3 -t upload             # flash firmware
+pio run -e t3s3 -t upload             # flash firmware (asks a running node for its bootloader first)
 pio run -e t3s3 -t uploadfs           # flash the web app (data/ → LittleFS)
 pio device monitor                    # console, 115200
 ```
@@ -40,6 +40,15 @@ checkouts (`../microReticulum`, `../microStore`) instead of git:
 pio run -e t3s3-local -t upload --upload-port /dev/serial/by-id/<node>
 ```
 
+### Uploading
+`-t upload` runs `tools/upload_hook.py`: it asks the running node for its
+bootloader over the maintenance console (or `POST /api/system/bootloader` at
+`$RETIMESH_NODE_URL`), waits for the port to come back, lets esptool flash,
+and waits for the application to answer `VERSION` again. Every step is bounded
+and every failure is a message; esptool's own DTR/RTS reset remains the
+fallback and `RETIMESH_NO_AUTO_BOOTLOADER=1` skips the hand-off. With several
+boards attached pass `--upload-port`. See [local-link.md](local-link.md#flashing).
+
 ## Hardware-in-the-loop checks
 With the node on USB and a local `rnsd` + RNode on the same channel:
 ```sh
@@ -48,6 +57,12 @@ python tools/hil.py --port /dev/serial/by-id/<node> --rns-bin ~/venv/bin --reset
 Checks boot (identity, radio, transport, no error lines), that rnsd holds a
 path to the node, that plain packets sent through rnsd arrive on LoRa, and
 that the RNode hears the node. Exit code = number of failures.
+
+`tools/hil_bootloader.py --port … [--ip …] [--firmware …]` exercises the
+maintenance console, the link listing, the bootloader transition, esptool
+reaching the ROM, a flash and the application's return. Both run from
+`.github/workflows/hil.yml` on a self-hosted runner labelled `retimesh-hil`
+(dispatch only; ordinary CI never touches hardware).
 
 ## Soak testing
 A soak is only worth running if someone reads the result, and a week of JSON is
@@ -88,6 +103,17 @@ them on every push.
 | `test_airtime` | duty cycle, dwell budget, CSMA accounting |
 | `test_radio_plan` | per-chip radio limits, regional regimes, node naming |
 | `test_store_home` | where the Reticulum store belongs, card ownership, what a move does |
+| `test_local_link` | the local-link phase machine and the host-facing trust rule |
+| `test_bootloader` | which bootloader methods a board offers, the restart sequence and its re-arm rule |
+| `test_maintenance` | the console protocol: parsing, malformed and overlong lines, noise, replies |
+
+The host tooling has its own suite, run by CI too:
+```sh
+cd tools/retimesh-flash && python -m unittest discover -s tests -t .
+```
+It drives `retimesh_flash.device` — port discovery, the console protocol, the
+bootloader hand-off in every outcome, HTTP probing — against fake ports and a
+fake node, so the flashing workflow is tested without a board.
 
 The pattern worth keeping: a rule that decides something consequential is
 written as a pure function in a header with no Arduino dependency, so it can be
@@ -103,9 +129,14 @@ web/            GitHub Pages web flasher (ESP Web Tools)
 test/           host-side unit tests (see above)
 partitions/     huge_app_8mb.csv, for the 8 MB boards with no SD slot
 tools/          make_manifest.py (release bundles), build_site.py (Pages),
-                bump_deps.py (PlatformIO dependency PRs), retimesh-flash/ (CLI),
-                hil.py (hardware-in-the-loop), soak.py (fleet sampler and
-                summariser), asset_stamp.py (build-time web asset hash)
+                bump_deps.py (PlatformIO dependency PRs), retimesh-flash/ (CLI
+                and the shared device/bootloader module), hil.py and
+                hil_bootloader.py (hardware-in-the-loop), soak.py (fleet
+                sampler and summariser), asset_stamp.py (build-time web asset
+                hash), board_caps.py (boards.json -> BOARD_* flags),
+                check_boards.py (boards.json consistency, CI),
+                board_docs.py (boards.json -> the board matrix in docs/hardware.md, CI checks it),
+                upload_hook.py (bootloader hand-off around `-t upload`)
 boards.json     board registry used by CI, packaging, flasher and CLI
 docs/           this documentation
 .github/        CI, Release Drafter, tag-driven releases, Pages, Dependabot
@@ -120,7 +151,11 @@ docs/           this documentation
 - On the RNS side: `rnstatus` (interface counters, violations), `rnpath -t`
   (path table — the node and its clients should appear with hop counts),
   `rnid -i <identity> -a <aspect>` to emit test announces.
-- Serial ports swap on replug: use `/dev/serial/by-id/…`.
+- Serial ports swap on replug: use `/dev/serial/by-id/…` (CP2102 boards all
+  report serial `0001`, so `/dev/serial/by-path/…` for those).
+- The serial port answers commands as well as printing the log: `VERSION`,
+  `STATUS`, `NETWORK_STATUS`, `BOOTLOADER CONFIRM` — replies start with `RM `.
+  See [local-link.md](local-link.md#the-maintenance-console).
 
 ## Threading rules
 - Only the **rns task** calls into microReticulum.

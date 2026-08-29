@@ -21,6 +21,7 @@
 // ============================================================================
 #include "RetiTransportServer.h"
 #include "RnsTransport.h"
+#include "Bootloader.h"
 
 RetiTransportServer transportServer;
 
@@ -49,13 +50,26 @@ size_t RetiTransportServer::clientCount() {
 // ---------------------------------------------------------------------------
 // Connection lifecycle (all callbacks run on the AsyncTCP event task).
 // ---------------------------------------------------------------------------
+// The server hands over a client it allocated; one that is turned away has
+// to be freed by whoever turned it away, once the close has gone through.
+// Closing alone leaked it — both the limit branch and the restart branch
+// did — one per connection attempt, for as long as the condition held.
+static void refuse(AsyncClient* client) {
+  client->onDisconnect([](void*, AsyncClient* c) { delete c; }, nullptr);
+  client->close();
+}
+
 void RetiTransportServer::onClient(AsyncClient* client) {
   if (client == nullptr) return;
+
+  // A restart is seconds away: a peer accepted now would be registered with
+  // Transport and torn down before it exchanged a packet.
+  if (Bootloader::pending()) { refuse(client); return; }
 
   if (clientCount() >= RNS_MAX_CLIENTS) {
     log_w("Rejecting %s: client limit (%d) reached",
           client->remoteIP().toString().c_str(), RNS_MAX_CLIENTS);
-    client->close();
+    refuse(client);
     return;
   }
 

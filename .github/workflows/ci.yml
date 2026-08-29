@@ -52,5 +52,11 @@ jobs:
       - run: python -m pip install --upgrade pip && python -m pip install ./tools/retimesh-flash
       - run: python -m py_compile tools/*.py
       - run: retimesh-flash --help && retimesh-flash ports
+      - name: host flashing-tool tests (mocked ports, console and HTTP)
+        run: cd tools/retimesh-flash && python -m unittest discover -s tests -t . -v
+      - name: boards.json local_link blocks are complete
+        run: python tools/check_boards.py
+      - name: docs/hardware.md board matrix matches boards.json
+        run: python tools/board_docs.py --check
       - name: bump_deps dry run
         run: python tools/bump_deps.py --dry-run

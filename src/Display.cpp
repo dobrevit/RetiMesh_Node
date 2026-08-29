@@ -158,10 +158,22 @@ void Display::pollButton() {
   if (!down && _pressedAtMs != 0) {
     if (!_longFired && now - _pressedAtMs >= 30) {          // short press
       if (_blank) setBlank(false);                           // wake only
-      else { _page = (Page)((_page + 1) % PAGE_COUNT); _pageChangedMs = now; paint(); }
+      else { _page = nextPage(_page); _pageChangedMs = now; paint(); }
     }
     _pressedAtMs = 0;
   }
+}
+
+// The page after this one. The QR page shows a code for joining the access
+// point, and with Wi-Fi off there is no access point to join: a panel that
+// still offered it would send someone hunting for a network that is not on
+// the air. It is skipped rather than drawn empty.
+Display::Page Display::nextPage(Page p) const {
+  Page n = (Page)((p + 1) % PAGE_COUNT);
+#if !DISPLAY_COMPACT
+  if (n == QR && !wifiManager.wifiEnabled()) n = (Page)((n + 1) % PAGE_COUNT);
+#endif
+  return n;
 }
 
 void Display::setBlank(bool blank) {
@@ -475,9 +487,11 @@ void Display::paintStatus() {
   { const char* id = wifiManager.ssid(); const size_t n = strlen(id);
     header(n > 6 ? id + n - 6 : id); }
 
-  // Row 1 — portal address / version
+  // Row 1 — portal address / version. The address is the access point's,
+  // and with Wi-Fi off there is none to give: say that, rather than print a
+  // number nobody can reach.
   _oled.setCursor(0, DisplayLayout::rowY(0));
-  snprintf(line, sizeof(line), "10.42.0.1  %s", FW_VERSION);
+  snprintf(line, sizeof(line), "%s  %s", wifiManager.wifiEnabled() ? AP_IP.toString().c_str() : "wifi off", FW_VERSION);
   _oled.print(line);
 
   // Row 2 — radio model + channel
@@ -794,13 +808,20 @@ void Display::paintNetwork() {
     const char* id = wifiManager.ssid();
     const size_t idn = strlen(id);
     _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(idn > 10 ? id + idn - 10 : id);
+    if (!wifiManager.wifiEnabled()) {
+      _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print("wifi off");
+      snprintf(l, sizeof(l), "rns%u", (unsigned)g_stats.tcpClients);
+      _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(l);
+      _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print("console:ON");
+      return;
+    }
     snprintf(l, sizeof(l), "ch%u %s", settings.wifi().channel, wifiManager.securityName());
     _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(l);
     snprintf(l, sizeof(l), "cli%u rns%u", (unsigned)WiFi.softAPgetStationNum(),
              (unsigned)g_stats.tcpClients);
     _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(l);
     _oled.setCursor(0, DisplayLayout::rowY(3));
-    _oled.print(wifiManager.stationConnected() ? WiFi.localIP().toString().c_str() : "10.42.0.1");
+    _oled.print((wifiManager.stationConnected() ? WiFi.localIP() : AP_IP).toString().c_str());
     return;
   }
   char line[24];
@@ -813,6 +834,15 @@ void Display::paintNetwork() {
   // 12 for the name, not 15: the longest security label is "wpa2wpa3" at eight
   // characters, and 15 + 1 + 8 overruns the 21 columns — clipping away the
   // security this row is here to report.
+  if (!wifiManager.wifiEnabled()) {
+    // No access point and no station: the panel says so in the rows that
+    // would otherwise describe a network that is not on the air, and names
+    // the way back, since the console is then the only one.
+    _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print("Wi-Fi off");
+    snprintf(line, sizeof(line), "rns %u  console on", (unsigned)g_stats.tcpClients);
+    _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(line);
+    _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print("up   WIFI ON @console");
+  } else {
   snprintf(line, sizeof(line), "%-12.12s %s", wifiManager.ssid(), wifiManager.securityName());
   _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(line);
   snprintf(line, sizeof(line), "ch%-2u cli %u  rns %u", settings.wifi().channel,
@@ -829,6 +859,7 @@ void Display::paintNetwork() {
     meter(2, "up", line, wifiPercent((float)rssi));
   } else {
     _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print("up   not joined");
+  }
   }
   _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print("dest ");
   _oled.print(String(nodeIdentity.destHex()).substring(0, 16));

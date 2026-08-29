@@ -277,6 +277,10 @@ void begin(RingbufHandle_t inRing) {
   memset(sPeers, 0, sizeof(sPeers));
   strlcpy(kGroupId, settings.transport().autoGroupId[0] ? settings.transport().autoGroupId : AUTOIF_GROUP_ID, sizeof(kGroupId));
   if (!settings.transport().autoEnabled) { log_i("AutoInterface disabled in settings"); return; }
+  // The multicast group lives on the Wi-Fi netifs, which do not exist with
+  // Wi-Fi off. The lock above is created regardless, because the readers
+  // below run whether or not peering does.
+  if (!settings.links().wifiEnabled) { log_i("AutoInterface: Wi-Fi is off, nothing to peer on"); return; }
   xTaskCreatePinnedToCore(task, "autoif", 6144, nullptr, 2, nullptr, 0);
 }
 
@@ -284,6 +288,7 @@ bool enabled() { return sEnabled; }
 
 size_t peerCount() {
   size_t k = 0;
+  if (!sLock) return 0;
   xSemaphoreTake(sLock, portMAX_DELAY);
   for (auto& p : sPeers) if (p.addr[0]) k++;
   xSemaphoreGive(sLock);
@@ -300,6 +305,7 @@ bool sendTo(uint32_t peerId, const uint8_t* packet, size_t len) {
 }
 
 size_t peers(Peer* out, size_t max) {
+  if (!sLock) return 0;
   size_t k = 0;
   xSemaphoreTake(sLock, portMAX_DELAY);
   for (auto& p : sPeers) if (p.addr[0] && k < max) out[k++] = p;

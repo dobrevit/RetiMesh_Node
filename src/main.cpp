@@ -69,6 +69,9 @@
 #include "Pmu.h"
 #include "Gps.h"
 #include "Diag.h"
+#include "LocalLink.h"
+#include "Bootloader.h"
+#include "Maintenance.h"
 
 NodeStats g_stats;
 
@@ -86,6 +89,18 @@ static RingbufHandle_t psramRing(size_t bytes) {
 static RingbufHandle_t txRing = nullptr;   // TCP  -> LoRa
 static RingbufHandle_t rxRing = nullptr;   // LoRa -> Transport
 static RingbufHandle_t tcpInRing = nullptr; // TCP clients -> Transport
+
+// The ways a host reaches this node (LocalLink.h). Registered before the
+// services start so /api/status and the console can list every one from the
+// first request, including the ones this board or build cannot offer.
+static LocalLink::WifiApLink  apLink;
+static LocalLink::WifiStaLink staLink;
+static LocalLink::UnavailableLink usbLink(LocalLink::Type::UsbNcm, "usb0", BOARD_USB_NCM,
+  BOARD_USB_NCM ? "this build has no USB network stack (Arduino core 2.x TinyUSB carries no NCM)"
+                : "this board's USB is a serial bridge, not the chip's own");
+static LocalLink::UnavailableLink pppLink(LocalLink::Type::PppUart, "ppp0", BOARD_UART_NETWORK,
+  BOARD_UART_NETWORK ? "this build has no PPP (the core's lwIP is built without it)"
+                     : "this board has no bridge UART to carry PPP");
 
 void setup() {
   // Prefer PSRAM for anything larger than a few hundred bytes — packet
@@ -173,17 +188,35 @@ void setup() {
   #if HAS_GPS
     Gps::begin();                          // NMEA reader task; powers the receiver rail
   #endif
-  wifiManager.begin();
+  LocalLink::add(&apLink);
+  LocalLink::add(&staLink);
+  LocalLink::add(&usbLink);
+  LocalLink::add(&pppLink);
+  wifiManager.begin();                     // radio + web server, or web server alone with Wi-Fi off
+  LocalLink::begin();
+  // The maintenance console on the port the host already has. Its HELLO is
+  // the line a flashing tool looks for, so it goes out before the services
+  // that make the log busy.
+  Maintenance::begin(Serial);
   transportServer.begin(tcpInRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
   g_stats.transportOnline = RnsTransport::begin(txRing, rxRing, tcpInRing);
   #if HAS_AUTOINTERFACE
-    AutoInterface::begin(tcpInRing);       // zero-config peering on the AP (RNS AutoInterface)
+    // Zero-config peering on the AP (RNS AutoInterface). Always begun, even
+    // with Wi-Fi off: the heartbeat and /api/status ask it for a peer count,
+    // and the lock they take exists only once begin() has run. It decides
+    // for itself whether there is a netif worth joining.
+    AutoInterface::begin(tcpInRing);
   #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
-  xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",
-                          3072, &wifiManager, 1, nullptr, 0);
+  // The captive-portal DNS only exists to steer phones on the access point.
+  // Without one there is no server to poll — and polling a DNSServer that
+  // was never started costs a malloc and a logged error every ten
+  // milliseconds, on the same port the maintenance console answers on.
+  if (wifiManager.wifiEnabled())
+    xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",
+                            3072, &wifiManager, 1, nullptr, 0);
 
   xTaskCreatePinnedToCore(LoRaRadio::radioTask, "radio",
                           8192, &loraRadio, 5, nullptr, 1);
@@ -200,14 +233,22 @@ void setup() {
     for (;;) { RnsTransport::loop(); vTaskDelay(pdMS_TO_TICKS(10)); }
   }, "rns", 16384, nullptr, 3, nullptr, 1);
 
-  log_i("RetiMesh Node up — join \"%s\", portal http://10.42.0.1, RNS TCP :%d",
-        wifiManager.ssid(), RNS_TCP_PORT);
+  if (settings.links().wifiEnabled)
+    log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",
+          wifiManager.ssid(), AP_IP.toString().c_str(), RNS_TCP_PORT);
+  else
+    log_i("RetiMesh Node up — Wi-Fi is off; HTTP :%d and RNS TCP :%d answer on any other local link, "
+          "and WIFI ON at the console turns the access point back on", HTTP_PORT, RNS_TCP_PORT);
 }
 
-// Arduino's loopTask (core 1, prio 1): scheduled restarts + a heartbeat.
+// Arduino's loopTask (core 1, prio 1): scheduled restarts, the maintenance
+// console, link bookkeeping and a heartbeat.
 void loop() {
   static uint32_t lastBeat = 0;
   wifiManager.tick();
+  Bootloader::tick();                      // may not return: this is where restarts happen
+  Maintenance::poll();
+  LocalLink::poll(millis());
   // Every pass, not on the heartbeat: a crash 29 s after the last beat would
   // otherwise be recorded as having happened 29 s earlier, and a node stuck in
   // a restart loop would report every run as zero seconds — indistinguishable

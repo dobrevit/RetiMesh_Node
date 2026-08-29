@@ -102,6 +102,12 @@ void Settings::load() {
   LOAD(_transport.sdStore,             "t_sdst",  getBool  ("t_sdst"));
   if (_prefs.isKey("t_smov")) _transport.pendingMove = (StoreHome::Move)_prefs.getUChar("t_smov");
   if (_prefs.isKey("t_agrp")) _prefs.getString("t_agrp", _transport.autoGroupId, sizeof(_transport.autoGroupId));
+  LOAD(_links.wifiEnabled,  "l_wifi", getBool("l_wifi"));
+  LOAD(_links.usbEnabled,   "l_usb",  getBool("l_usb"));
+  LOAD(_links.pppEnabled,   "l_ppp",  getBool("l_ppp"));
+  LOAD(_maintenance.bootloaderApi,     "m_bapi", getBool("m_bapi"));
+  LOAD(_maintenance.bootloaderFromLan, "m_blan", getBool("m_blan"));
+  LOAD(_maintenance.consoleEnabled,    "m_con",  getBool("m_con"));
   if (_admin.password[0] == '\0') strlcpy(_admin.password, ADMIN_PASSWORD_DEFAULT, sizeof(_admin.password));
   #undef LOAD
 
@@ -170,11 +176,31 @@ bool Settings::saveTransport(const TransportSettings& t) {
   return ok;
 }
 
+bool Settings::saveLinks(const LinkSettings& l) {
+  _links = l;
+  bool ok = _prefs.putBool("l_wifi", l.wifiEnabled) > 0
+         && _prefs.putBool("l_usb",  l.usbEnabled)  > 0
+         && _prefs.putBool("l_ppp",  l.pppEnabled)  > 0;
+  if (!ok) log_e("NVS write failed (links)");
+  return ok;
+}
+
+bool Settings::saveMaintenance(const MaintenanceSettings& m) {
+  _maintenance = m;
+  bool ok = _prefs.putBool("m_bapi", m.bootloaderApi)     > 0
+         && _prefs.putBool("m_blan", m.bootloaderFromLan) > 0
+         && _prefs.putBool("m_con",  m.consoleEnabled)    > 0;
+  if (!ok) log_e("NVS write failed (maintenance)");
+  return ok;
+}
+
 void Settings::factoryReset() {
   _prefs.clear();
   _radio = RadioSettings();
   _wifi  = WifiSettings();
   _admin = AdminSettings();
   _transport = TransportSettings();
+  _links = LinkSettings();
+  _maintenance = MaintenanceSettings();
   log_w("settings: factory reset");
 }

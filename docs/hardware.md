@@ -1,15 +1,18 @@
 # Hardware
 
 ## Supported boards
-| Env | Board | Radio | Display | Extras | Status |
-|---|---|---|---|---|---|
-| `t3s3` | LilyGO T3-S3 v1.2/v1.3 (ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM) | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
-| `tbeam` | LilyGO T-Beam v1.1/v1.2 (ESP32, 4 MB flash, no PSRAM) | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS; **no SD slot** | see below |
-| `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
-| `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
-| `heltec-v3` | Heltec WiFi LoRa 32 V3 (ESP32-S3, 8 MB flash, no PSRAM) | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | — (no SD, no GNSS) | verified on hardware |
-| `heltec-ws` | Heltec Wireless Stick V2/V2.1 (ESP32, 8 MB flash) | SX1276 | 0.49" 64x32 SSD1306 on Vext | — (no SD, no GNSS) | verified on hardware |
-| `esp32s3-qspi` | ESP32-S3 DevKitC-1 (8 MB) + SX1262 module | SX1262 | optional SSD1306 | — | builds; wire per flags |
+<!-- boards.json:begin -->
+<!-- Rendered by tools/board_docs.py from boards.json. Edit the registry, not this table. -->
+| Env | Board | MCU | Radio | Display | Extras | Status |
+|---|---|---|---|---|---|---|
+| `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
+| `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
+| `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, no PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS; **no SD slot** | verified on hardware — see the T-Beam notes below |
+| `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
+| `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
+| `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | — (no SD, no GNSS) | verified on hardware |
+| `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | — (no SD, no GNSS) | verified on hardware |
+<!-- boards.json:end -->
 
 Both Heltec boards use `partitions/huge_app_8mb.csv` rather than the stock
 table, which maps only the first 4 MB of an 8 MB part. Neither has an SD slot,
@@ -163,18 +166,34 @@ against the SX127x demodulation floor for the current spreading factor
 (-7.5 dB at SF7 to -20 dB at SF12), because the same SNR means something
 different at SF7 and SF12.
 
+## Host connectivity and flashing
+What each board puts on its USB connector, which bootloader-entry methods it
+offers and which IP local links it could carry are in the capability matrix in
+[local-link.md](local-link.md#board-capability-matrix). In short: the four
+native-USB S3 boards and the Heltec V3 can restart into their ROM downloader on
+request (`BOOTLOADER CONFIRM` on the console, `POST /api/system/bootloader`);
+the classic-ESP32 boards rely on the bridge's DTR/RTS reset, which esptool
+performs; and BOOT + RST recovers any of them.
+
 ## Adding a board
 1. `src/boards/<name>.h`: the pin map and the capability flags (`HAS_SD`,
    `HAS_PMU`, `HAS_GPS`, `HAS_DISPLAY`, `HAS_BATTERY_ADC`, `BOARD_NAME`).
    Everything in `Config.h` is `#ifndef`-guarded, so the board header wins and
-   anything it omits falls back to a sensible default.
+   anything it omits falls back to a sensible default. Host connectivity is
+   **not** declared here — it comes from `boards.json` (next step).
 2. `src/Config.h`: one line in the board-selection block mapping `-DBOARD_<X>`
    to the header.
 3. `platformio.ini`: a new `[env:<name>]` (board, partitions, `-DBOARD_<X>`,
    and `build_unflags` for anything the base env sets that the board lacks —
    PSRAM and native-USB CDC are the usual ones).
-4. `boards.json`: name, chip family, notes — drives CI, release packaging, the
-   web flasher and the CLI.
+4. `boards.json`: name, chip family, notes, and the `local_link` block — what
+   is on the USB connector (`usb.native` or `usb.bridge`), whether the bridge's
+   DTR/RTS reset the chip, whether the UART may carry PPP and the highest baud
+   qualified. `tools/board_caps.py` turns it into `BOARD_*` flags at build time
+   and `tools/check_boards.py` (CI) refuses a board without one, one whose
+   connector facts contradict its chip, or one that
+   contradicts the framework's USB flags in `platformio.ini`. Drives CI,
+   release packaging, the web flasher and the CLI.
 5. Workflow matrices in `.github/workflows/ci.yml` and `release.yml`.
 6. If the display or radio differ: `Display.*` / `LoRaRadio.*` (probe order,
    TCXO, RF switch). Keep board specifics behind the capability flags.

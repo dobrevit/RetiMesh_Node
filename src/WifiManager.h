@@ -30,7 +30,14 @@
 //        /api/board        GET list / POST new post — public bulletin board
 //        /settings.html    admin page (HTTP Basic Auth, user "admin")
 //        /api/settings     GET all / POST radio|wifi|admin|reset (auth)
+//        /api/system/*     bootloader and reboot (auth, local links only)
 //        (unknown host)    302 -> portal, which triggers the OS sign-in UI
+//
+//  The HTTP server binds 0.0.0.0, so it answers on every lwIP interface —
+//  the access point and station today, USB or PPP links when a build carries
+//  them — and with Wi-Fi switched off (settings.links) it still starts, for
+//  whichever of those is there. Wi-Fi is one local link among several; see
+//  LocalLink.h.
 //
 //  Radio changes apply live through LoRaRadio::requestReconfigure();
 //  Wi-Fi changes are saved and followed by a scheduled restart, because
@@ -63,10 +70,10 @@ public:
   bool stationConnected() const { return WiFi.status() == WL_CONNECTED; }
   const char* securityName() const { return _securityName; }
 
-  // Called from loop(): performs a restart scheduled by a settings change
-  // once the HTTP response has had time to leave.
+  // Called from loop(): station watchdog. Restarts go through Bootloader
+  // (Bootloader.h), which answers whether it will honour one.
   void tick();
-  void scheduleRestart(uint32_t delayMs) { _restartAt = millis() + delayMs; }
+  bool wifiEnabled() const;
 
   // FreeRTOS entry point — created pinned to core 0 from main.cpp.
   // DNSServer has no async mode; it needs a polling loop.
@@ -92,6 +99,11 @@ private:
   void handleExport(AsyncWebServerRequest* request);
   void handleImport(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleReset(AsyncWebServerRequest* request);
+  void handleLinksPost(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleMaintenancePost(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleBootloaderGet(AsyncWebServerRequest* request);
+  void handleBootloaderPost(AsyncWebServerRequest* request, const char* body, size_t len);
+  void handleRebootPost(AsyncWebServerRequest* request, const char* body, size_t len);
 
   DNSServer       _dns;
   AsyncWebServer  _http{HTTP_PORT};
@@ -102,7 +114,6 @@ private:
   // Read once from /assets.json at begin(). "" when the file is absent, which
   // means a filesystem written before stamping existed.
   String          _assetStamp;
-  uint32_t        _restartAt = 0;
   uint32_t        _staRetryAt = 0;
 };
 
