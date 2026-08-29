@@ -22,7 +22,13 @@ retimesh-flash devices                    # every node that answers: serial cons
 retimesh-flash bootloader --port /dev/ttyACM0   # restart a running node into its ROM downloader (exit 0 only once it is there)
 retimesh-flash bootloader --ip 10.42.0.1        # ...over HTTP (admin password with --password)
 retimesh-flash install --serial 7C:DF:A1:12:34:56   # pick the port by USB serial number
+retimesh-flash ppp --port /dev/ttyUSB0          # PPP on a bridged board: what is up, and the pppd command to run (as root)
 ```
+
+On a CP2102/CH9102 board with `pppd` running on its port, `install` and
+`bootloader` ask the node over the PPP link instead of the console, wait for
+pppd to exit as the node restarts, and point esptool at the freed port; they
+never start or stop pppd themselves (it needs root) but print the commands.
 
 `install` asks a running node for its bootloader first (the maintenance
 console on the port, `BOOTLOADER CONFIRM`), so no BOOT button; esptool's own

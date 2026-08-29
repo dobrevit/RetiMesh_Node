@@ -7,6 +7,7 @@ retimesh-flash — install RetiMesh Node firmware from GitHub releases.
     retimesh-flash ports
     retimesh-flash devices [--ip URL ...]
     retimesh-flash bootloader [--port DEV | --serial SN | --ip URL] [--password PW]
+    retimesh-flash ppp [--port DEV | --serial SN]
     retimesh-flash install [--board ENV] [--port DEV | --serial SN] [--version vX.Y.Z]
                            [--mode full|app|fs] [--file bundle.zip] [--yes] [--no-handoff]
 
@@ -206,6 +207,53 @@ def cmd_bootloader(args):
     sys.exit(0 if r.entered else 1)
 
 
+def cmd_ppp(args):
+    """PPP over a bridged node's serial port: what is up, and the pppd command
+    to bring it up. pppd needs root on most distributions, so the command
+    is printed for the operator to run, never run with sudo from here."""
+    ports = dev.list_ports()
+    port = dev.select_port(ports, device=args.port, serial=args.serial)
+    if port is None:
+        sys.exit(dev.ambiguous_ports_message(ports, "--port or --serial") if dev.esp_candidates(ports)
+                 else "no ESP32 port found")
+    holders = dev.find_pppd(port.device)
+    if holders:
+        h = holders[0]
+        print(f"pppd (pid {h.pid}) holds {port.device}" + (f" at {h.baud} baud" if h.baud else ""))
+        links = dev.ppp_links()
+        for l in links:
+            print(f"  {l.ifname}: node {l.node_ip}, this host {l.host_ip or '?'} — {l.url}/")
+        if not links:
+            print("  no ppp interface has a route up yet; pppd is still negotiating, or the node has PPP switched off")
+        print(f"  the console on {port.device} is PPP's while pppd runs; stop it with: sudo kill {h.pid}")
+        return
+    # The console is reachable: ask the node what it will ask pppd for.
+    try:
+        con = dev.Console.open(port.device, timeout=3.0)
+    except Exception as exc:
+        sys.exit(f"could not open {port.device}: {exc}")
+    try:
+        info = dev.probe_console(port.device, console=con)
+        if not info:
+            sys.exit(f"no RetiMesh console on {port.device}")
+        status, _, data = con.command("LINKS")
+    finally:
+        con.close()
+    if status != "OK":
+        sys.exit(f"LINKS answered {status}")
+    addresses = dev.ppp_addresses(data)
+    if addresses is None:
+        sys.exit(f"{info}: this board or build has no PPP link")
+    node_ip, host_ip, baud, enabled = addresses
+    print(f"{info}")
+    print(f"  ppp0 is {'on' if enabled else 'off'}; the node asks for {node_ip} and expects this host at {host_ip}, {baud} baud")
+    if not enabled:
+        print("  switch it on first: PPP ON at the console, or the settings page")
+    print("  then, as root (the ppp package's pppd):")
+    print("    sudo " + dev.shell_words(dev.pppd_command(port.device, node_ip, host_ip, baud)))
+    print(f"  and the node answers at http://{node_ip}/ — while it does, the console on {port.device} is PPP's")
+
+
 def cmd_install(args):
     with tempfile.TemporaryDirectory(prefix="retimesh-") as tmp:
         tmp = Path(tmp)
@@ -254,6 +302,9 @@ def cmd_install(args):
         # A running node is asked politely for its downloader first; esptool's
         # own reset remains the fallback, and BOOT+RST the one after that.
         before, node_id = None, None
+        # A pppd on the port before the flash is one to bring back after it:
+        # the hand-off waits for it to exit, and nothing here may start it.
+        pppd = dev.find_pppd(port)
         if not args.no_handoff:
             r = dev.hand_off_to_bootloader(port=port, log=lambda m: print("  " + m), port_hint="--port")
             before, port, node_id = r.esptool_before, r.port or port, r.node_id
@@ -265,11 +316,15 @@ def cmd_install(args):
                 # error that reads like a different fault altogether.
                 if r.port is None and not dev.select_port(dev.list_ports(), device=port):
                     sys.exit(f"  {port} is no longer there; nothing to flash")
+                if pppd and dev.find_pppd(port):
+                    sys.exit("pppd still holds the port; esptool cannot use it")
         flash(board, tmp, port, args.mode, args.baud, before=before)
         wait = dev.application_wait_s(node_id, port)
         info = dev.wait_for_application(port, timeout=wait, node_id=node_id, log=lambda m: print("  " + m))
         print(f"\nBack up: {info}" if info else
               f"\nThe node did not answer within {wait:.0f} s; press RST if it stays quiet.")
+        if pppd:
+            print("\nPPP was up before the flash; to bring it back, as root:\n    sudo " + dev.shell_words(pppd[0].argv))
         print("\nDone. Join the Wi-Fi network \"retimesh-XXXXXX\" (last six hex digits of the board MAC)\n"
               "and open http://10.42.0.1/")
 
@@ -299,6 +354,11 @@ def main(argv=None):
     p.add_argument("--ip", help="node URL/address: ask over HTTP instead of the console")
     p.add_argument("--password", default=DEFAULT_ADMIN[1], help="admin password for the HTTP path")
     p.set_defaults(func=cmd_bootloader)
+
+    p = sub.add_parser("ppp", help="PPP over a bridged node's serial port: what is up, and the pppd command to run")
+    p.add_argument("--port", help="serial port of the node")
+    p.add_argument("--serial", help="USB serial number of the node's port")
+    p.set_defaults(func=cmd_ppp)
 
     p = sub.add_parser("install", help="download and flash")
     p.add_argument("--board", help="board env name (see `list`)")

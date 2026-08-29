@@ -134,8 +134,10 @@ class PortsTest(unittest.TestCase):
         self.assertEqual(comp[0].node_id, "1CDBD4821454")
 
     def test_the_usb_address_follows_the_firmware_rule(self):
-        # LocalLinkState.h: 10.64.<last MAC octet>.1 — 0x54 is 84.
+        # LocalLinkState.h: 10.64.<last MAC octet>.1 — 0x54 is 84 — and the
+        # PPP link one subnet over, 10.65, from the same byte.
         self.assertEqual(device.usb_node_url("1CDBD4821454"), "http://10.64.84.1")
+        self.assertEqual(device.ppp_node_url("1C:DB:D4:82:14:54"), "http://10.65.84.1")
         # Anything that is not a MAC names no chip and no address: not a
         # crash, and not an address on somebody else's subnet.
         for bad in ("RETIMESH", "0001", None, "", "1CDBD48214"):
@@ -506,6 +508,112 @@ class HandOffTest(unittest.TestCase):
         r = self.run_handoff([[LEGACY]], probe=lambda dev, timeout=2.0, console=None: None, rom=False)
         self.assertEqual(r.method, "none")
         self.assertIn("no ESP32 serial port", r.message)
+
+
+PPPD_ARGV = ["pppd", "/dev/ttyUSB0", "115200", "noauth", "local", "nodetach",
+             "lcp-echo-interval", "5", "lcp-echo-failure", "4", "10.65.84.2:10.65.84.1"]
+PPP_ROUTE = "10.65.84.1 dev ppp0 proto kernel scope link src 10.65.84.2"
+
+
+class PppTest(unittest.TestCase):
+    def test_links_come_from_the_routing_table(self):
+        # A host route through a pppN device is a PPP link; the node is the
+        # far end and our own address the source. Everything else on the
+        # table — the LAN, the default route, the USB link — is not one.
+        routes = ["default via 192.168.1.1 dev wlan0 proto dhcp metric 600",
+                  "10.64.84.0/24 dev enx02dbd4821455 proto kernel scope link src 10.64.84.2",
+                  PPP_ROUTE,
+                  "192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.10 metric 600"]
+        links = device.ppp_links(routes)
+        self.assertEqual([(l.ifname, l.node_ip, l.host_ip) for l in links], [("ppp0", "10.65.84.1", "10.65.84.2")])
+        self.assertEqual(links[0].url, "http://10.65.84.1")
+        self.assertEqual(device.ppp_links([]), [])
+
+    def test_pppd_is_found_by_the_port_on_its_command_line(self):
+        # Root's process, but its command line is everyone's to read; the
+        # port is the /dev argument and the speed the bare number. A pppd
+        # on another port, and a process that merely mentions pppd, are not
+        # holders of this one. (A by-path name and the tty it points at are
+        # one port: same_device, tested above.)
+        procs = [(1, ["/sbin/init"]), (4242, ["/usr/sbin/pppd", *PPPD_ARGV[1:]]),
+                 (4300, ["pppd", "/dev/ttyUSB1", "921600", "noauth"]), (5000, ["python3", "pppd", "notes.txt"])]
+        held = device.find_pppd("/dev/ttyUSB0", cmdlines=procs)
+        self.assertEqual([(p.pid, p.port, p.baud) for p in held], [(4242, "/dev/ttyUSB0", 115200)])
+        self.assertEqual([p.pid for p in device.find_pppd(cmdlines=procs)], [4242, 4300])
+        self.assertEqual(device.find_pppd("/dev/ttyACM0", cmdlines=procs), [])
+
+    def test_the_pppd_command_is_built_from_what_the_node_asks_for(self):
+        # The console's LINKS line for ppp0 carries the addresses the node
+        # will ask for in IPCP and the port's speed; pppd is told the same,
+        # host first in its local:remote pair.
+        data = [{"link": "wifi-ap", "type": "wifi_ap", "hardware": "yes", "firmware": "yes", "enabled": "yes"},
+                {"link": "ppp0", "type": "ppp_uart", "hardware": "yes", "firmware": "yes", "enabled": "no",
+                 "baud": "115200", "asks": "10.65.84.1", "peer": "10.65.84.2"}]
+        node, host, baud, enabled = device.ppp_addresses(data)
+        self.assertEqual((node, host, baud, enabled), ("10.65.84.1", "10.65.84.2", 115200, False))
+        self.assertEqual(device.pppd_command("/dev/ttyUSB0", node, host, baud), PPPD_ARGV)
+        self.assertIn("10.65.84.2:10.65.84.1", device.shell_words(PPPD_ARGV))
+        # A board with no PPP names no addresses.
+        no_ppp = [{"link": "ppp0", "type": "ppp_uart", "hardware": "no", "firmware": "no", "enabled": "no"}]
+        self.assertIsNone(device.ppp_addresses(no_ppp))
+
+
+class PppHandOffTest(unittest.TestCase):
+    """The hand-off while pppd holds the port: the console is not opened,
+    the node is asked over ppp0, and esptool waits for the port."""
+
+    def setUp(self):
+        self.clock = Clock()
+        self.log = []
+        self.opened = []
+
+    def run_handoff(self, request_http, pppd_exits_after=None, links=(PPP_ROUTE,), rom=True):
+        # pppd holds the port until `pppd_exits_after` seconds have passed on
+        # the injected clock; never, when None.
+        started = self.clock.now()
+        def pppd_fn(port=None):
+            gone = pppd_exits_after is not None and self.clock.now() - started >= pppd_exits_after
+            return [] if gone else device.find_pppd(port, cmdlines=[(4242, PPPD_ARGV)])
+        return hand_off_to_bootloader(port="/dev/ttyUSB0", log=self.log.append,
+                                      ports_fn=lambda: list_ports([CP2102]),
+                                      probe=lambda dev, timeout=2.0, console=None: None,
+                                      open_console=lambda dev, timeout=2.0: (self.opened.append(dev), Console(FakeSerial(), 1.0, device=dev))[1],
+                                      request_http=request_http, probe_rom=lambda dev: rom,
+                                      sleep=self.clock.sleep, clock=self.clock.now,
+                                      pppd_fn=pppd_fn, ppp_links_fn=lambda: device.ppp_links(links))
+
+    def test_an_s3_behind_a_bridge_is_asked_over_ppp_and_waited_for(self):
+        asked = []
+        r = self.run_handoff(lambda url, auth: (asked.append(url), (True, "accepted (software_api, 600 ms)", 600))[1],
+                             pppd_exits_after=12.0)
+        self.assertEqual(asked, ["http://10.65.84.1"])           # the far end of the link, not a guess
+        self.assertEqual(self.opened, [])                        # the port was never opened under pppd
+        self.assertTrue(r.entered)
+        self.assertEqual((r.method, r.port, r.esptool_before), ("http", "/dev/ttyUSB0", "default_reset"))
+        self.assertTrue(any("let go" in l for l in self.log))
+
+    def test_a_classic_esp32_says_how_to_stop_pppd(self):
+        # 501: esptool has to reset it, and cannot while pppd has the port.
+        # Nothing here kills a root process; the message names the command.
+        r = self.run_handoff(lambda url, auth: (False, "HTTP 501: this chip cannot enter its downloader from software", 0))
+        self.assertFalse(r.entered)
+        self.assertEqual(r.method, "none")
+        self.assertIn("sudo kill 4242", r.message)
+        self.assertIn("501", r.message)
+
+    def test_a_pppd_that_never_lets_go_is_a_bounded_failure(self):
+        r = self.run_handoff(lambda url, auth: (True, "accepted", 600), pppd_exits_after=None)
+        self.assertFalse(r.entered)
+        self.assertIn("still holds /dev/ttyUSB0", r.message)
+        self.assertIn("sudo kill 4242", r.message)
+        self.assertLess(self.clock.t, 60.0)
+
+    def test_pppd_without_a_link_up_is_reported_not_guessed(self):
+        # pppd is dialling (or stuck): no route yet, so no address to ask at.
+        r = self.run_handoff(lambda url, auth: (True, "accepted", 600), links=())
+        self.assertFalse(r.entered)
+        self.assertIn("no ppp interface", r.message)
+        self.assertEqual(self.opened, [])
 
 
 class HttpTest(unittest.TestCase):
