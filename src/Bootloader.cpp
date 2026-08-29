@@ -53,6 +53,7 @@
 #include <soc/soc.h>
 #if HAS_USB_NCM
   #include "esp32-hal-tinyusb.h"
+  #include "UsbNcm.h"
 #endif
 #include "Config.h"
 #include "Diag.h"
@@ -60,6 +61,35 @@
 namespace Bootloader {
 
 static Sequencer sSeq;
+
+// Timestamps a restart leaves for the next boot to read, in RTC memory and
+// on the RTC clock, both of which survive every reset short of a power
+// cycle — the ROM session and esptool's reset between the two runs included.
+#include <esp_attr.h>
+#include <esp_private/esp_clk.h>
+extern "C" uint64_t esp_rtc_get_time_us(void);
+struct RestartMarks { uint32_t magic; uint32_t entryMs, persistMs, handlersMs; };
+static RTC_NOINIT_ATTR RestartMarks sMarks;
+static constexpr uint32_t kMarksMagic = 0x52535452;   // "RSTR"
+static LastRestart sLast = {0, 0, 0, false};
+static inline uint32_t rtcMs() { return (uint32_t)(esp_rtc_get_time_us() / 1000); }
+static void IRAM_ATTR markHandlers() { if (sMarks.magic == kMarksMagic) sMarks.handlersMs = rtcMs(); }
+
+void begin() {
+  if (sMarks.magic == kMarksMagic && sMarks.entryMs) {
+    const uint32_t now = rtcMs();
+    sLast.toPersistMs  = sMarks.persistMs  ? sMarks.persistMs - sMarks.entryMs : 0;
+    sLast.toHandlersMs = sMarks.handlersMs ? sMarks.handlersMs - (sMarks.persistMs ? sMarks.persistMs : sMarks.entryMs) : 0;
+    sLast.toBootMs     = now - (sMarks.handlersMs ? sMarks.handlersMs : sMarks.entryMs);
+    sLast.known = true;
+    log_i("last restart: %lu ms to the core's persist-restart, %lu ms to the last shutdown handler, %lu ms to this boot",
+          (unsigned long)sLast.toPersistMs, (unsigned long)sLast.toHandlersMs, (unsigned long)sLast.toBootMs);
+  }
+  sMarks.magic = 0;
+  // Registered first, so it runs last: shutdown handlers run in reverse order.
+  esp_register_shutdown_handler(markHandlers);
+}
+LastRestart lastRestart() { return sLast; }
 static const char kRecovery[] =
   "hold BOOT, press RST (or replug USB while holding BOOT), then flash with esptool";
 
@@ -161,12 +191,18 @@ static void quiesce() {
 
 static void restart() {
   const Target target = sSeq.snapshot().target;
+  sMarks = { kMarksMagic, rtcMs(), 0, 0 };
   #if HAS_USB_NCM
     // The core's own way into the downloader on the composite device: it
     // registers a shutdown handler that sets the download bit, hands the
     // USB peripheral back to the serial-JTAG unit, and restarts. Our own
     // handler stays unarmed on this path — armDownloadBoot() defers to it.
-    if (target == Target::Bootloader) { usb_persist_restart(RESTART_BOOTLOADER); return; }
+    if (target == Target::Bootloader) {
+      UsbNcm::detach();
+      sMarks.persistMs = rtcMs();
+      usb_persist_restart(RESTART_BOOTLOADER);
+      return;
+    }
   #endif
   // A plain restart must not carry a download flag armed by an earlier
   // request that was then outranked.

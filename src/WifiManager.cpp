@@ -108,6 +108,13 @@ static void bootloaderJson(JsonObject o) {
     o["due_in_ms"] = r.dueInMs(millis());
   }
   o["primary"]        = Bootloader::methodName(p.primary());
+  const Bootloader::LastRestart lr = Bootloader::lastRestart();
+  if (lr.known) {
+    JsonObject last = o["last_restart"].to<JsonObject>();
+    last["to_persist_ms"]  = lr.toPersistMs;
+    last["to_handlers_ms"] = lr.toHandlersMs;
+    last["to_boot_ms"]     = lr.toBootMs;
+  }
   o["recovery"]       = Bootloader::manualRecovery();
   JsonArray methods = o["methods"].to<JsonArray>();
   for (size_t i = 0; i < p.count; i++) methods.add(Bootloader::methodName(p.methods[i]));

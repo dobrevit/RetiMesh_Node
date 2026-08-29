@@ -61,6 +61,14 @@ void begin();
 // the loop task only.
 void poll(bool enabled);
 
+// Takes the device off the bus — the network interface down, the
+// controller disconnected, the wire pulled to a single-ended zero — before
+// the restart into the ROM downloader, so that the host has every chance
+// to see one device go before the serial-JTAG unit appears on the same
+// pins. The core's own hand-over swaps the two pull-ups within
+// microseconds. See detach() for what a hub makes of that.
+void detach();
+
 // Whether the interface is up: the device is mounted and the switch is on.
 bool linkUp();
 

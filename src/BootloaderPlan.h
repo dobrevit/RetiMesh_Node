@@ -176,7 +176,7 @@ inline Plan plan(const Caps& c) {
 // The request sequence
 // ---------------------------------------------------------------------------
 enum class Target : uint8_t { App = 0, Bootloader = 1 };
-enum class Source : uint8_t { Http = 0, Console, Settings };
+enum class Source : uint8_t { Http = 0, Console, Settings, Touch };   // Touch: the 1200-baud touch on the USB console port
 
 inline const char* targetName(Target t) { return t == Target::Bootloader ? "bootloader" : "app"; }
 inline const char* sourceName(Source s) {
@@ -184,6 +184,7 @@ inline const char* sourceName(Source s) {
     case Source::Http:     return "http";
     case Source::Console:  return "console";
     case Source::Settings: return "settings";
+    case Source::Touch:    return "touch";
   }
   return "unknown";
 }

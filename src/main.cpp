@@ -125,6 +125,7 @@ void setup() {
   // The reset register survives the reboot but not a second one, so it is only
   // ever readable here.
   Diag::begin();
+  Bootloader::begin();                   // the previous run's restart timings, from RTC memory
 
   #if PIN_STATUS_LED >= 0
     // Claimed and held off. No feature drives it yet, but leaving a wired pin

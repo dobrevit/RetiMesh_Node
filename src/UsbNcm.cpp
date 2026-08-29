@@ -36,7 +36,11 @@
 #include <dhcpserver/dhcpserver.h>
 #include "esp32-hal-tinyusb.h"
 #include "tusb.h"
+#include <hal/usb_wrap_ll.h>
+#include <hal/usb_serial_jtag_ll.h>
+#include <soc/usb_wrap_struct.h>
 #include "LocalLinkState.h"
+#include "Bootloader.h"
 
 using LocalLink::usbNodeAddress;
 using LocalLink::kUsbNetmask;
@@ -192,8 +196,24 @@ static esp_err_t postAttach(esp_netif_t* netif, esp_netif_iodriver_handle h) {
 
 static Driver sDriver = { { postAttach, nullptr } };
 
+// The 1200-baud touch, through the sequencer. The core would restart into
+// the ROM by itself from inside the USB task the moment the host set that
+// baud rate, skipping the quiesce and the detach above; with its own reboot
+// disabled the line-coding event still arrives, and the request joins the
+// queue like one from the console or the API. esptool's DTR/RTS pattern on
+// this port, which the core's reboot also honoured, is not offered: the
+// host tool never uses it here, since the downloader appears on another
+// port.
+static void onLineCoding(void*, esp_event_base_t, int32_t, void* data) {
+  const auto* d = static_cast<arduino_usb_cdc_event_data_t*>(data);
+  if (d && d->line_coding.bit_rate == 1200)
+    Bootloader::request(Bootloader::Target::Bootloader, Bootloader::Source::Touch, 0);
+}
+
 void begin() {
   if (sNetif) return;
+  Serial.enableReboot(false);
+  Serial.onEvent(ARDUINO_USB_CDC_LINE_CODING_EVENT, onLineCoding);
   uint8_t o[4];
   octets(usbNodeAddress(sMacLastOctet), o);
   esp_netif_set_ip4_addr(&sIpInfo.ip, o[0], o[1], o[2], o[3]);
@@ -230,6 +250,30 @@ void begin() {
 // 3. The state machine
 // ---------------------------------------------------------------------------
 bool linkUp() { return sUp; }
+
+void detach() {
+  if (sUp) {
+    esp_netif_action_disconnected(sNetif, nullptr, 0, nullptr);
+    esp_netif_action_stop(sNetif, nullptr, 0, nullptr);
+    sUp = false;
+  }
+  tud_disconnect();
+  // The soft disconnect alone leaves the PHY's pull-up on D+, and the core's
+  // hand-over raises the serial-JTAG unit's pull-up on the same line within
+  // microseconds of dropping this one. So the wire is made unambiguous:
+  // pull-ups off and pull-downs on through the PHY's override, both units'
+  // pads off the pins, and a moment for a hub to see it. A root port
+  // notices the change with or without this. One bench hub did not notice
+  // it either way — it reported the departure only when a transfer to the
+  // vanished device failed, twenty seconds and more later, whatever the
+  // device did — which is why the host tool waits rather than gives up
+  // (device.py, _COMPOSITE_DOWNLOADER_S).
+  const usb_wrap_pull_override_vals_t se0 = { .dp_pu = false, .dm_pu = false, .dp_pd = true, .dm_pd = true };
+  usb_wrap_ll_phy_enable_pull_override(&USB_WRAP, &se0);
+  usb_wrap_ll_phy_enable_pad(&USB_WRAP, false);
+  usb_serial_jtag_ll_phy_enable_pad(false);
+  delay(300);
+}
 bool hostOpened() { return sHostOpened; }
 uint32_t rxPackets() { return sRx; }
 uint32_t txPackets() { return sTx; }
