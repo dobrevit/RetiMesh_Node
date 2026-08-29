@@ -120,8 +120,11 @@ seconds is dropped, so bytes a port prober left behind — ModemManager writes
 `AT` to every new CDC-ACM port — cannot be glued onto the next command; the
 host tool asks once more when a first reply names no command. A Linux host
 that runs ModemManager is still better off telling it to leave the node
-alone: `ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001",
-ENV{ID_MM_DEVICE_IGNORE}="1"` in a udev rule. Lines longer than 96 bytes are dropped whole and answered with a 400 —
+alone, because a probe that is still reading the port eats the replies to
+whatever else is asked in those seconds: `tools/udev/60-retimesh-node.rules`
+does that for the composite device and the S3's serial-JTAG unit —
+`sudo cp tools/udev/60-retimesh-node.rules /etc/udev/rules.d/ && sudo
+udevadm control --reload && sudo udevadm trigger`. Lines longer than 96 bytes are dropped whole and answered with a 400 —
 never truncated into something shorter that might parse. Bytes outside
 printable ASCII make a line unusable, so bridge noise at the wrong baud is not
 a command. The console can be switched off (`maintenance.console_enabled`);

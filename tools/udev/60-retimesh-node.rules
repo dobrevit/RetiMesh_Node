@@ -1,0 +1,15 @@
+# RetiMesh Node — keep ModemManager off the node's serial ports.
+#
+# The composite device (1209:0001) presents a CDC-ACM port that carries the
+# maintenance console and the log. ModemManager treats every new CDC-ACM
+# port as a possible modem and probes it with AT commands for some seconds
+# after it appears, reading whatever the port says meanwhile — which eats
+# the console's replies and leaves stray bytes in its line buffer. The
+# firmware and the host tool cope, but a node that is never probed flashes
+# first time, every time. The ESP32-S3's own USB-Serial/JTAG unit
+# (303a:1001), which the ROM downloader appears on, gets the same courtesy.
+#
+# Install:  sudo cp tools/udev/60-retimesh-node.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload && sudo udevadm trigger
+ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001", ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ENV{ID_MM_DEVICE_IGNORE}="1"
