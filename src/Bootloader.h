@@ -63,10 +63,10 @@ Pending snapshot();
 
 // How the previous run's restart went, in milliseconds between its steps:
 // entering restart(), handing over to the core's persist-restart (composite
-// device only), the last shutdown handler running, and this boot. Zero
-// where no restart preceded this boot. Kept in RTC memory across the ROM
-// session, so a restart that took a long way round can say where.
-struct LastRestart { uint32_t toPersistMs, toHandlersMs, toBootMs; bool known; };
+// device only), and this boot. Zero where no restart preceded this boot.
+// Kept in RTC memory across the ROM session, so a restart that took a long
+// way round can say where.
+struct LastRestart { uint32_t toPersistMs, toBootMs; bool known; };
 LastRestart lastRestart();
 void begin();      // reads the markers left by the previous run; once, early
 

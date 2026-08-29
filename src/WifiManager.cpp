@@ -111,9 +111,8 @@ static void bootloaderJson(JsonObject o) {
   const Bootloader::LastRestart lr = Bootloader::lastRestart();
   if (lr.known) {
     JsonObject last = o["last_restart"].to<JsonObject>();
-    last["to_persist_ms"]  = lr.toPersistMs;
-    last["to_handlers_ms"] = lr.toHandlersMs;
-    last["to_boot_ms"]     = lr.toBootMs;
+    last["to_persist_ms"] = lr.toPersistMs;
+    last["to_boot_ms"]    = lr.toBootMs;
   }
   o["recovery"]       = Bootloader::manualRecovery();
   JsonArray methods = o["methods"].to<JsonArray>();
