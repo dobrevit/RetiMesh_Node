@@ -17,11 +17,11 @@
 // with RetiMesh Node. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================================
-//  LocalLink.cpp — the registry and the Wi-Fi adapters. See LocalLink.h.
+//  LocalLink.cpp — the registry, the settings table and the Wi-Fi adapters.
+//  See LocalLink.h.
 // ============================================================================
 #include "LocalLink.h"
 #include <WiFi.h>
-#include "Settings.h"
 #include "WifiManager.h"
 
 namespace LocalLink {
@@ -29,11 +29,11 @@ namespace LocalLink {
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
-static Link*  sLinks[6];
+static Link*  sLinks[kMaxLinks];
 static size_t sCount = 0;
 
 void add(Link* link) {
-  if (link && sCount < sizeof(sLinks) / sizeof(sLinks[0])) sLinks[sCount++] = link;
+  if (link && sCount < kMaxLinks) sLinks[sCount++] = link;
 }
 size_t count() { return sCount; }
 Link*  at(size_t i) { return i < sCount ? sLinks[i] : nullptr; }
@@ -44,128 +44,94 @@ Link*  find(Type t) {
 void begin() { for (size_t i = 0; i < sCount; i++) sLinks[i]->begin(); }
 void poll(uint32_t nowMs) { for (size_t i = 0; i < sCount; i++) sLinks[i]->poll(nowMs); }
 
-size_t snapshots(Snapshot* out, size_t max) {
-  size_t n = 0;
-  for (size_t i = 0; i < sCount && n < max; i++) out[n++] = sLinks[i]->snapshot();
-  return n;
+Link* serving(uint32_t localIp) {
+  if (!localIp) return nullptr;
+  for (size_t i = 0; i < sCount; i++)
+    if (sLinks[i]->address() == localIp) return sLinks[i];
+  return nullptr;
 }
 
-bool isHostFacingAddress(uint32_t ip) {
-  bool hostFacing = false;
-  for (size_t i = 0; i < sCount; i++) {
-    const Link* l = sLinks[i];
-    uint32_t net, mask;
-    if (!l->subnet(net, mask) || !inSubnet(ip, net, mask)) continue;   // subnet() is false unless Ready
-    if (!isHostFacing(l->type())) return false;          // also reachable from the uplink: refuse
-    hostFacing = true;
-  }
-  return hostFacing;
+bool requestIsHostFacing(uint32_t localIp) {
+  const Link* l = serving(localIp);
+  return l && isHostFacing(l->type());
 }
 
 uint32_t hostOrder(const IPAddress& a) { return ipv4(a[0], a[1], a[2], a[3]); }
 
-const char* unavailableReason(const Link& link) {
-  if (link.firmware()) return "";
-  const UnavailableLink* u = static_cast<const UnavailableLink*>(&link);
-  return u->reason();
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+const Field* fields(size_t& n) {
+  static const Field kFields[] = {
+    { "wifi", Type::WifiAp,  &LinkSettings::wifiEnabled },
+    { "usb",  Type::UsbNcm,  &LinkSettings::usbEnabled  },
+    { "ppp",  Type::PppUart, &LinkSettings::pppEnabled  },
+  };
+  n = sizeof(kFields) / sizeof(kFields[0]);
+  return kFields;
+}
+
+bool switchOn(const Link& l, const LinkSettings& s) {
+  if (!l.usable()) return false;
+  size_t n = 0;
+  const Field* f = fields(n);
+  for (size_t i = 0; i < n; i++) if (f[i].type == l.type()) return s.*(f[i].on);
+  return false;
+}
+
+bool anySwitchOn(const LinkSettings& l) {
+  for (size_t i = 0; i < sCount; i++)
+    if (switchOn(*sLinks[i], l)) return true;
+  return false;
+}
+
+bool lockedOut(const LinkSettings& l, bool consoleEnabled) {
+  return !consoleEnabled && !anySwitchOn(l);
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Wi-Fi adapters
 // ---------------------------------------------------------------------------
-static void fillCommon(Snapshot& s, const Link& l, const Machine& m, uint32_t nowMs) {
-  s.type = l.type();
-  strlcpy(s.name, l.name(), sizeof(s.name));
-  s.phase = m.phase();
-  s.uptimeS = m.uptimeS(nowMs);
-  // The Wi-Fi stack keeps no per-interface byte totals the application can
-  // read without LWIP_STATS, which the prebuilt core leaves off. Saying so
-  // beats printing zeros next to a link that is plainly carrying traffic.
-  s.counters.known = false;
-  s.mtu = 1500;
-}
-
-// ---------------------------------------------------------------------------
-// Access point
-// ---------------------------------------------------------------------------
-bool WifiApLink::enabled() const { return settings.links().wifiEnabled; }
-
-void WifiApLink::begin() {
+void WifiLink::begin() {
   _m = Machine(enabled());
   poll(millis());
 }
 
-void WifiApLink::poll(uint32_t nowMs) {
-  _nowMs = nowMs;
+void WifiLink::poll(uint32_t nowMs) {
   if (!enabled()) { _m.apply(Event::Disable, nowMs); return; }
   _m.apply(Event::Enable, nowMs);
-  const bool apUp = (WiFi.getMode() & WIFI_MODE_AP) != 0;
-  _m.apply(apUp ? Event::CarrierUp : Event::CarrierDown, nowMs);
-  if (apUp) {
-    const bool addressed = (uint32_t)WiFi.softAPIP() != 0;
-    _m.apply(addressed ? Event::AddressUp : Event::AddressDown, nowMs);
-  }
+  const bool up = carrier();
+  _m.apply(up ? Event::CarrierUp : Event::CarrierDown, nowMs);
+  if (up) _m.apply((uint32_t)ip() != 0 ? Event::AddressUp : Event::AddressDown, nowMs);
 }
 
-Snapshot WifiApLink::snapshot() const {
+Snapshot WifiLink::snapshot() const {
   Snapshot s;
-  fillCommon(s, *this, _m, _nowMs);
+  s.type = type();
+  strlcpy(s.name, name(), sizeof(s.name));
+  s.phase = _m.phase();
+  s.uptimeS = _m.uptimeS(millis());
   if (s.phase == Phase::Ready) {
-    s.addressing = Addressing::Static;
-    strlcpy(s.ip, WiFi.softAPIP().toString().c_str(), sizeof(s.ip));
-    s.clientKnown = true;
-    s.clients = WiFi.softAPgetStationNum();
+    s.addressing = addressing();
+    strlcpy(s.ip, ip().toString().c_str(), sizeof(s.ip));
+    s.clientKnown = clientsKnown();
+    s.clients = clients();
   }
   return s;
 }
 
-bool WifiApLink::subnet(uint32_t& network, uint32_t& mask) const {
-  if (_m.phase() != Phase::Ready) return false;
-  network = hostOrder(WiFi.softAPIP());
-  mask    = hostOrder(WiFi.softAPSubnetMask());
-  return true;
+uint32_t WifiLink::address() const {
+  return _m.phase() == Phase::Ready ? hostOrder(ip()) : 0;
 }
 
-// ---------------------------------------------------------------------------
-// Station
-// ---------------------------------------------------------------------------
-bool WifiStaLink::enabled() const {
-  return settings.links().wifiEnabled && wifiManager.stationConfigured();
-}
+bool      WifiApLink::enabled() const { return settings.links().wifiEnabled; }
+bool      WifiApLink::carrier() const { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
+IPAddress WifiApLink::ip() const      { return WiFi.softAPIP(); }
+uint8_t   WifiApLink::clients() const { return WiFi.softAPgetStationNum(); }
 
-void WifiStaLink::begin() {
-  _m = Machine(enabled());
-  poll(millis());
-}
-
-void WifiStaLink::poll(uint32_t nowMs) {
-  _nowMs = nowMs;
-  if (!enabled()) { _m.apply(Event::Disable, nowMs); return; }
-  _m.apply(Event::Enable, nowMs);
-  const bool connected = wifiManager.stationConnected();
-  _m.apply(connected ? Event::CarrierUp : Event::CarrierDown, nowMs);
-  if (connected) {
-    const bool addressed = (uint32_t)WiFi.localIP() != 0;
-    _m.apply(addressed ? Event::AddressUp : Event::AddressDown, nowMs);
-  }
-}
-
-Snapshot WifiStaLink::snapshot() const {
-  Snapshot s;
-  fillCommon(s, *this, _m, _nowMs);
-  if (s.phase == Phase::Ready) {
-    s.addressing = Addressing::Dhcp;
-    strlcpy(s.ip, WiFi.localIP().toString().c_str(), sizeof(s.ip));
-  }
-  return s;
-}
-
-bool WifiStaLink::subnet(uint32_t& network, uint32_t& mask) const {
-  if (_m.phase() != Phase::Ready) return false;
-  network = hostOrder(WiFi.localIP());
-  mask    = hostOrder(WiFi.subnetMask());
-  return true;
-}
+bool      WifiStaLink::enabled() const { return settings.links().wifiEnabled && wifiManager.stationConfigured(); }
+bool      WifiStaLink::carrier() const { return wifiManager.stationConnected(); }
+IPAddress WifiStaLink::ip() const      { return WiFi.localIP(); }
 
 // ---------------------------------------------------------------------------
 Snapshot UnavailableLink::snapshot() const {

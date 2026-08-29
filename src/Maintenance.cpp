@@ -22,13 +22,11 @@
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
 
-#include <esp_heap_caps.h>
 #include "Config.h"
 #include "Settings.h"
 #include "Bootloader.h"
 #include "LocalLink.h"
 #include "Diag.h"
-#include "RnsTransport.h"
 
 namespace Maintenance {
 
@@ -47,18 +45,21 @@ static void send(size_t n) {
   sIo->write((const uint8_t*)sOut, n < sizeof(sOut) ? n : sizeof(sOut) - 1);
   sIo->write('\n');
 }
-static void data(const char* cmd, const char* kv) { send(formatData(sOut, sizeof(sOut), cmd, kv)); }
 static void ok(const char* cmd, const char* kv = nullptr) { send(formatOk(sOut, sizeof(sOut), cmd, kv)); }
 static void err(const char* cmd, int code, const char* text) { send(formatErr(sOut, sizeof(sOut), cmd, code, text)); }
 
+// A data line, formatted straight into the output buffer after its prefix.
+// The earlier version formatted into a second buffer on the stack and then
+// copied it in here — on the loop task, which also carries the console, the
+// diagnostics report and the restart sequence, and whose stack is the one
+// nothing in platformio.ini has enlarged.
 static void dataf(const char* cmd, const char* fmt, ...) {
-  // Room for the longest line: LINKS with a quoted reason runs to ~150 bytes,
-  // and a truncated reply loses the closing quote a host parser keys on.
-  char kv[192];
+  const int head = snprintf(sOut, sizeof(sOut), REPLY_PREFIX "%s ", cmd);
+  if (head < 0 || (size_t)head >= sizeof(sOut)) { send(sizeof(sOut)); return; }
   va_list ap; va_start(ap, fmt);
-  vsnprintf(kv, sizeof(kv), fmt, ap);
+  const int body = vsnprintf(sOut + head, sizeof(sOut) - (size_t)head, fmt, ap);
   va_end(ap);
-  data(cmd, kv);
+  send((size_t)head + (body < 0 ? 0 : (size_t)body));
 }
 
 // --- handlers ---------------------------------------------------------------
@@ -94,40 +95,31 @@ static void doStatus() {
 
 static void doUsbStatus() {
   #if BOARD_USB_NATIVE
-    dataf("USB_STATUS", "native=true personality=%s ncm=%s cdc_acm=%s",
-          BOARD_USB_CDC_OTG ? "otg_composite" : "usb_serial_jtag",
-          BOARD_USB_NCM ? "hardware" : "no", BOARD_USB_CDC_OTG ? "yes" : "via_serial_jtag");
+    // The S3 runs its fixed USB-Serial/JTAG personality; the composite device
+    // with its own CDC is a build that does not exist yet.
+    dataf("USB_STATUS", "native=true personality=usb_serial_jtag ncm=%s cdc_acm=via_serial_jtag",
+          BOARD_USB_NCM ? "hardware" : "no");
   #else
     dataf("USB_STATUS", "native=false bridge=%s uart_network=%s auto_reset=%s",
           BOARD_USB_BRIDGE, BOARD_UART_NETWORK ? "hardware" : "no", BOARD_BRIDGE_AUTO_RESET ? "yes" : "no");
   #endif
-  const Bootloader::Plan p = Bootloader::plan();
-  char methods[96] = "";
-  for (size_t i = 0; i < p.count; i++) {
-    if (i) strlcat(methods, ",", sizeof(methods));
-    strlcat(methods, Bootloader::methodName(p.methods[i]), sizeof(methods));
-  }
-  dataf("USB_STATUS", "bootloader_methods=%s software_entry=%s", methods,
+  char methods[64];
+  dataf("USB_STATUS", "bootloader_methods=%s software_entry=%s",
+        Bootloader::plan().names(methods, sizeof(methods)),
         Bootloader::canEnterAutomatically() ? "yes" : "no");
   ok("USB_STATUS");
 }
 
 static void doNetworkStatus() {
-  LocalLink::Snapshot snaps[6];
-  const size_t n = LocalLink::snapshots(snaps, 6);
-  for (size_t i = 0; i < n; i++) {
-    const LocalLink::Snapshot& s = snaps[i];
+  // One snapshot live at a time, not the whole registry on the stack.
+  for (size_t i = 0; i < LocalLink::count(); i++) {
+    const LocalLink::Snapshot s = LocalLink::at(i)->snapshot();
     char clients[24] = "";
     if (s.clientKnown) snprintf(clients, sizeof(clients), " clients=%u", (unsigned)s.clients);
-    char counters[80] = "";
-    if (s.counters.known)
-      snprintf(counters, sizeof(counters), " rx_bytes=%lu tx_bytes=%lu errors=%lu",
-               (unsigned long)s.counters.rxBytes, (unsigned long)s.counters.txBytes,
-               (unsigned long)s.counters.errors);
-    dataf("NETWORK_STATUS", "link=%s type=%s phase=%s ip=%s addressing=%s uptime_s=%lu%s%s",
+    dataf("NETWORK_STATUS", "link=%s type=%s phase=%s ip=%s addressing=%s uptime_s=%lu%s",
           s.name, LocalLink::typeName(s.type), LocalLink::phaseName(s.phase),
           s.ip[0] ? s.ip : "-", LocalLink::addressingName(s.addressing),
-          (unsigned long)s.uptimeS, clients, counters);
+          (unsigned long)s.uptimeS, clients);
   }
   ok("NETWORK_STATUS");
 }
@@ -135,7 +127,7 @@ static void doNetworkStatus() {
 static void doLinks() {
   for (size_t i = 0; i < LocalLink::count(); i++) {
     const LocalLink::Link* l = LocalLink::at(i);
-    const char* why = LocalLink::unavailableReason(*l);
+    const char* why = l->reason();
     dataf("LINKS", "link=%s type=%s hardware=%s firmware=%s enabled=%s%s%s%s",
           l->name(), LocalLink::typeName(l->type()), l->hardware() ? "yes" : "no",
           l->firmware() ? "yes" : "no", l->enabled() ? "yes" : "no",
@@ -145,6 +137,9 @@ static void doLinks() {
 }
 
 static void doWifi(const Request& r) {
+  // The same refusal every HTTP write gives while a restart is armed: a
+  // setting saved now might not reach flash before it.
+  if (Bootloader::pending()) { err("WIFI", 409, "a restart is already in progress"); return; }
   LinkSettings ls = settings.links();
   const bool on = strcmp(r.args[0], "ON") == 0;
   if (ls.wifiEnabled == on) { ok("WIFI", on ? "wifi=on unchanged=true" : "wifi=off unchanged=true"); return; }
@@ -199,7 +194,7 @@ static void dispatch(const char* line) {
     case Cmd::Wifi:          doWifi(r); break;
     case Cmd::Reset:         doRestart(r, Bootloader::Target::App); break;
     case Cmd::Bootloader:    doRestart(r, Bootloader::Target::Bootloader); break;
-    case Cmd::Unknown:       err(r.word, 404, errorText(ParseError::Unknown)); break;
+    default:                 break;      // Unknown never reaches here: parse() refused it
   }
 }
 

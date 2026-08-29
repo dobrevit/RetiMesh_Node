@@ -21,10 +21,10 @@
 //
 //  A local link is one of the ways a host computer reaches this node
 //  directly: the Wi-Fi access point, the station uplink, native USB
-//  networking (CDC-NCM), PPP over a USB-UART bridge, or a wire in the
-//  future. They differ in every physical detail and in nothing that matters
-//  above lwIP: each one is a network interface that is either usable or not,
-//  carries an address or does not, and moves some number of bytes.
+//  networking (CDC-NCM) or PPP over a USB-UART bridge. They differ in every
+//  physical detail and in nothing that matters above lwIP: each one is a
+//  network interface that is either usable or not, and carries an address or
+//  does not.
 //
 //  This header is the part that is pure. The phase machine below is the
 //  rule every link follows, whatever the hardware underneath, and it is here
@@ -33,6 +33,11 @@
 //  (LocalLink.h) feed it events; nothing in here touches a radio, a USB
 //  peripheral or a UART.
 //
+//  What is deliberately not here: byte counters, an MTU, and the addressing
+//  plan for USB networking. An earlier version carried all three as fields
+//  that no driver could fill in, and every reader then grew an "unknown"
+//  branch around them. They arrive with the driver that produces the numbers.
+//
 //  Deliberately free of Arduino.h. Only the ESP side includes that.
 // ============================================================================
 #pragma once
@@ -40,13 +45,14 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include <stdio.h>
 
 namespace LocalLink {
 
-// What carries the link. USB_NCM and PPP_UART are the two this work exists
-// for; ETHERNET is reserved so a wired board does not need a new vocabulary.
-enum class Type : uint8_t { WifiAp = 0, WifiSta, UsbNcm, PppUart, RnsSerial, Ethernet };
+// What carries the link. The two beyond Wi-Fi are the ones this work exists
+// for; nothing is reserved for hardware that does not exist yet, because a
+// name with no implementation behind it is one more case every switch has
+// to mention and no test can exercise.
+enum class Type : uint8_t { WifiAp = 0, WifiSta, UsbNcm, PppUart };
 
 // How the node's address on the link was decided.
 enum class Addressing : uint8_t { None = 0, Static, Dhcp, LinkLocal };
@@ -72,8 +78,6 @@ inline const char* typeName(Type t) {
     case Type::WifiSta:   return "wifi_sta";
     case Type::UsbNcm:    return "usb_ncm";
     case Type::PppUart:   return "ppp_uart";
-    case Type::RnsSerial: return "rns_serial";
-    case Type::Ethernet:  return "ethernet";
   }
   return "unknown";
 }
@@ -104,25 +108,12 @@ inline const char* addressingName(Addressing a) {
 inline bool isHostFacing(Type t) {
   switch (t) {
     case Type::WifiAp: case Type::UsbNcm: case Type::PppUart:
-    case Type::RnsSerial: case Type::Ethernet:
       return true;
     case Type::WifiSta:
       return false;
   }
   return false;
 }
-
-// Byte and packet counters. A driver that cannot count (the Wi-Fi stack does
-// not expose per-interface totals cheaply) leaves `known` false rather than
-// reporting zeros that look like silence.
-struct Counters {
-  uint32_t rxBytes   = 0;
-  uint32_t txBytes   = 0;
-  uint32_t rxPackets = 0;
-  uint32_t txPackets = 0;
-  uint32_t errors    = 0;
-  bool     known     = false;
-};
 
 // The phase machine proper. One per link. `apply` returns true when the
 // phase changed, so a driver can log transitions and nothing else.
@@ -183,46 +174,12 @@ struct Snapshot {
   char       ip[40]     = "";            // text; "" when none
   bool       clientKnown = false;        // whether `clients` means anything
   uint8_t    clients    = 0;             // hosts attached, where the link can tell
-  Counters   counters;
   uint32_t   uptimeS    = 0;
-  uint16_t   mtu        = 0;             // 0 = not applicable / unknown
 };
 
-// Address arithmetic for policy decisions, in host order. Kept here so the
-// rule "is this peer on a link we trust" is a function of numbers and can be
-// tested without an IPAddress.
-inline bool inSubnet(uint32_t ip, uint32_t network, uint32_t mask) {
-  return (ip & mask) == (network & mask);
-}
-
+// An IPv4 address as one host-order number, so two of them can be compared.
 inline uint32_t ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | d;
 }
-
-inline void ipv4Text(uint32_t ip, char* out, size_t len) {
-  snprintf(out, len, "%u.%u.%u.%u", (unsigned)(ip >> 24) & 255, (unsigned)(ip >> 16) & 255,
-           (unsigned)(ip >> 8) & 255, (unsigned)ip & 255);
-}
-
-// ---------------------------------------------------------------------------
-// USB networking addressing — the decision, written down once.
-//
-// The node takes 10.64.<n>.1/24 and the host is expected at 10.64.<n>.2, where
-// <n> is derived from the node's own identity (the last octet of its factory
-// MAC) rather than fixed. Two nodes on one computer then land on two subnets
-// and Linux routes both without argument; with a fixed 10.64.0.0/24 the second
-// one would have collided with the first. The host side is configured by the
-// node — it runs a DHCP server on the link, as the Wi-Fi access point already
-// does — so nothing has to be typed on the computer; the static fallback is
-// there for hosts whose network manager does not ask.
-//
-// Why not link-local only: IPv4 link-local (169.254/16) needs the host to
-// probe and the node to answer, and phones and older network managers get
-// that wrong often enough that a fixed address beside it is worth having.
-// ---------------------------------------------------------------------------
-inline uint32_t usbSubnetFor(uint8_t macTail) { return ipv4(10, 64, macTail, 0); }
-inline uint32_t usbNodeAddress(uint8_t macTail) { return ipv4(10, 64, macTail, 1); }
-inline uint32_t usbHostAddress(uint8_t macTail) { return ipv4(10, 64, macTail, 2); }
-constexpr uint32_t USB_SUBNET_MASK = 0xFFFFFF00u;
 
 } // namespace LocalLink

@@ -33,10 +33,11 @@
 //              wifi_ap       wifi_sta       usb_ncm       ppp_uart
 //
 //  This is the ESP side: a Link interface each driver implements, a registry
-//  the API and the display read snapshots from, the Wi-Fi adapters, and the
-//  one policy question the bootloader API needs answered — "did this request
-//  arrive over a link a host is plugged into". The phase machine and the
-//  vocabulary are in LocalLinkState.h, which has no Arduino in it.
+//  the API and the display read snapshots from, the Wi-Fi adapters, the one
+//  table that binds a link to its settings key, and the one policy question
+//  the bootloader API needs answered — "did this request arrive over a link
+//  a host is plugged into". The phase machine and the vocabulary are in
+//  LocalLinkState.h, which has no Arduino in it.
 //
 //  What this is not: LoRa. The radio is a Reticulum transport, and nothing
 //  here bridges Ethernet or IP onto it.
@@ -45,9 +46,14 @@
 
 #include <Arduino.h>
 #include "Config.h"
+#include "Settings.h"
 #include "LocalLinkState.h"
 
 namespace LocalLink {
+
+// The registry holds at most this many. One constant, because the console
+// once sized its own copy of the snapshot array from a second literal.
+constexpr size_t kMaxLinks = 6;
 
 class Link {
 public:
@@ -63,8 +69,16 @@ public:
   virtual void begin() = 0;                      // bring up, if enabled and possible
   virtual void poll(uint32_t nowMs) = 0;         // refresh the phase machine from the driver
   virtual Snapshot snapshot() const = 0;
-  // Host-order IPv4 network and mask the link serves; false when it has none.
-  virtual bool subnet(uint32_t& network, uint32_t& mask) const = 0;
+  // The node's own IPv4 address on this link, host order; 0 unless Ready.
+  virtual uint32_t address() const = 0;
+  // Why a link the board has cannot run in this build. Empty for links that
+  // can. A virtual, because the alternative — casting on the strength of
+  // firmware() being false — was sound only while one class answered false.
+  virtual const char* reason() const { return ""; }
+
+  // The board has it and this build can drive it: the one predicate every
+  // settings handler asks before it will save a switch as "on".
+  bool usable() const { return hardware() && firmware(); }
 };
 
 // The registry. Links are added once at boot in main.cpp; nothing removes
@@ -76,52 +90,92 @@ Link*  find(Type t);
 void   begin();                                  // begin() on every registered link
 void   poll(uint32_t nowMs);                     // from loop()
 
-// Copies out every link's snapshot; returns how many were written.
-size_t snapshots(Snapshot* out, size_t max);
+// The link a connection was accepted on, found by the local address it was
+// accepted at — which the TCP stack knows exactly, unlike the remote address,
+// which only hints. nullptr when no Ready link holds that address.
+Link* serving(uint32_t localIpHostOrder);
 
-// True when `ipHostOrder` is on the subnet of a Ready, host-facing link and
-// on no other link's. The bootloader API accepts requests from those links by
-// default and from no other address, so a relay on somebody's LAN cannot be
-// put into its downloader from across that LAN unless the operator says so —
-// and a LAN that happens to be numbered like the access point is refused too,
-// because an address alone cannot say which side it came in on.
-bool isHostFacingAddress(uint32_t ipHostOrder);
+// True when a request that arrived at `localIpHostOrder` came in over a
+// host-facing link. The bootloader API accepts requests from those and from
+// no other, so a relay on somebody's LAN cannot be put into its downloader
+// from across that LAN unless the operator says so. Deciding by the local
+// address rather than the remote one means a LAN that happens to be numbered
+// like the access point neither gets in nor locks the operator out.
+bool requestIsHostFacing(uint32_t localIpHostOrder);
 
-// An IPAddress as a host-order number, for inSubnet() and friends.
+// An IPAddress as a host-order number, for comparing with address().
 uint32_t hostOrder(const IPAddress& a);
 
-// The Wi-Fi adapters. Constructed in main.cpp so the boot order is visible
-// in one place; WifiManager still owns the radio, and these only observe it.
-class WifiApLink : public Link {
+// --- settings ---------------------------------------------------------------
+// One table binding the API key, the link type and the stored switch. Four
+// handlers used to spell this mapping out separately, and adding a link
+// meant four edits with the fourth the one that got missed.
+struct Field {
+  const char*        key;        // "wifi", "usb", "ppp" — the JSON and export key
+  Type               type;
+  bool LinkSettings::*on;        // the switch in LinkSettings
+};
+const Field* fields(size_t& count);
+
+// The switch as the API reports and exports it: the stored flag for a link
+// this build can run, false for one it cannot. A default of "on" for a
+// driver that does not exist yet is invisible until it does, and a restore
+// onto a build that has it gets that build's own default rather than a
+// stale "off" written by a node that never had the choice.
+bool switchOn(const Link& l, const LinkSettings& s);
+
+// Whether any link this build can run is switched on in these settings.
+bool anySwitchOn(const LinkSettings& l);
+
+// Whether these settings would leave the node with no way in at all: no
+// usable link switched on, and the console off. Refused wherever settings are
+// written, because a node in that state can only be recovered by erasing it.
+bool lockedOut(const LinkSettings& l, bool consoleEnabled);
+
+// --- the Wi-Fi adapters -----------------------------------------------------
+// One body for both. They differ in the carrier probe and where the address
+// comes from, and a phase-machine fix made twice is a phase-machine fix made
+// once. WifiManager still owns the radio; these only observe it.
+class WifiLink : public Link {
+public:
+  bool hardware() const override { return true; }
+  bool firmware() const override { return true; }
+  void begin() override;
+  void poll(uint32_t nowMs) override;
+  Snapshot snapshot() const override;
+  uint32_t address() const override;
+protected:
+  virtual bool       carrier() const = 0;
+  virtual IPAddress  ip() const = 0;
+  virtual Addressing addressing() const = 0;
+  virtual bool       clientsKnown() const { return false; }
+  virtual uint8_t    clients() const { return 0; }
+private:
+  Machine _m;
+};
+
+class WifiApLink : public WifiLink {
 public:
   Type type() const override { return Type::WifiAp; }
   const char* name() const override { return "wifi-ap"; }
-  bool hardware() const override { return true; }
-  bool firmware() const override { return true; }
-  bool enabled()  const override;
-  void begin() override;
-  void poll(uint32_t nowMs) override;
-  Snapshot snapshot() const override;
-  bool subnet(uint32_t& network, uint32_t& mask) const override;
-private:
-  Machine  _m;
-  uint32_t _nowMs = 0;
+  bool enabled() const override;
+protected:
+  bool       carrier() const override;
+  IPAddress  ip() const override;
+  Addressing addressing() const override { return Addressing::Static; }
+  bool       clientsKnown() const override { return true; }
+  uint8_t    clients() const override;
 };
 
-class WifiStaLink : public Link {
+class WifiStaLink : public WifiLink {
 public:
   Type type() const override { return Type::WifiSta; }
   const char* name() const override { return "wifi-sta"; }
-  bool hardware() const override { return true; }
-  bool firmware() const override { return true; }
-  bool enabled()  const override;
-  void begin() override;
-  void poll(uint32_t nowMs) override;
-  Snapshot snapshot() const override;
-  bool subnet(uint32_t& network, uint32_t& mask) const override;
-private:
-  Machine  _m;
-  uint32_t _nowMs = 0;
+  bool enabled() const override;
+protected:
+  bool       carrier() const override;
+  IPAddress  ip() const override;
+  Addressing addressing() const override { return Addressing::Dhcp; }
 };
 
 // Links this board could carry but this build does not: they appear in the
@@ -140,17 +194,13 @@ public:
   void begin() override {}
   void poll(uint32_t) override {}
   Snapshot snapshot() const override;
-  bool subnet(uint32_t&, uint32_t&) const override { return false; }
-  const char* reason() const { return _reason; }
+  uint32_t address() const override { return 0; }
+  const char* reason() const override { return _reason; }
 private:
   Type        _type;
   const char* _name;
   bool        _hardware;
   const char* _reason;
 };
-
-// Why a link the board has cannot be used in this build, for the API. Empty
-// for links that work.
-const char* unavailableReason(const Link& link);
 
 } // namespace LocalLink

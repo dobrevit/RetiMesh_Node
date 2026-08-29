@@ -59,8 +59,8 @@ there is no USB networking to be had — CDC-NCM is a property of the connector
 wiring, not of the chip.
 
 `GET /api/status` reports every link under `local_links` (type, phase,
-address, uptime, clients and byte counters where the driver can count, and a
-`reason` where the board has the hardware but the build lacks the driver).
+address, uptime, a client count where the link can tell, and a `reason` where
+the board has the hardware but the build lacks the driver).
 `GET /api/settings` reports the same three facts per link — `hardware`,
 `supported`, `enabled` — so the settings page shows a greyed-out switch with
 the reason rather than no switch.
@@ -163,6 +163,18 @@ wired to EN and IO0. `POST /api/system/bootloader` answers `501` there and
 `BOOTLOADER CONFIRM` answers `RM ERR BOOTLOADER 501`, and the flashing tools
 fall through to esptool's own reset, which is what always worked.
 
+**A native-USB S3 (`t3s3` and its variants) answers `501` too**, and this
+was learned on the bench rather than read anywhere. Its console is the
+chip's own USB-Serial/JTAG unit, and that unit is not reset by the software
+reset `esp_restart()` performs: the host keeps its old enumeration while the
+ROM downloader comes up behind it expecting a fresh one, and the chip sits
+hung — no console, no downloader, no port drop — until the RESET button is
+pressed. The same unit implements esptool's DTR/RTS handshake in hardware,
+which works unaided and is what those boards offer. The software entry
+remains for the S3 behind a UART bridge (`heltec-v3`), where the downloader
+talks on UART0 and the bridge is untouched by the chip resetting; that path
+has not yet been exercised on hardware.
+
 ### `POST /api/system/bootloader`
 
 Admin credentials, `{"confirm":"BOOTLOADER"}`, and three guards:
@@ -188,25 +200,22 @@ destination carries no such request.
 
 ### The 1200-baud touch
 
-Defined, tested and waiting for the CDC-ACM port that will carry it. What the
-host does, in USB CDC terms: `SET_LINE_CODING` with a bit rate of 1200, then
-`SET_CONTROL_LINE_STATE` with DTR asserted (the port is open), then DTR
-deasserted (the port is closed). That is `stty -F /dev/ttyACM0 1200 hupcl`, a
-Python `serial.Serial(port, 1200)` immediately closed, or what the Arduino IDE
-has sent to reset boards since the Leonardo.
+Not implemented, on purpose. The touch — a host opening the CDC port at 1200
+baud and closing it, which is what the Arduino IDE has sent to reset boards
+since the Leonardo — needs a CDC-ACM port the firmware owns, so it can see the
+line coding. No board has one: the S3 runs its fixed USB-Serial/JTAG
+personality, which implements esptool's DTR/RTS handshake in hardware and
+never shows the firmware a line coding. A detector with nothing to feed it was
+a method the API listed that nothing could perform, and it was removed. It
+comes back with the composite device (below), which is the first thing that
+can drive it.
 
-What fires (`Bootloader::TouchDetector`): DTR going from asserted to
-deasserted while the line coding is at the magic rate, within 5 s of that rate
-being set. A console opened at 115200 can be opened and closed all day. A rate
-of 1200 never followed by a close does nothing. A rate set and then changed
-before the close disarms. No payload byte is ever looked at, so no data
-pattern can trigger it. The magic rate is a constructor argument.
-
-Today the S3 runs the fixed USB-Serial/JTAG personality, which implements
-esptool's DTR/RTS handshake in hardware and never shows the firmware a line
-coding, so the touch has nothing to attach to yet — and does not need to: the
-hardware handshake already does the job without BOOT being held. The detector
-is wired in with the composite device (below).
+What the firmware *does* guarantee about the request path: the shutdown
+handler that arms the ROM's download mode is registered when the request is
+accepted, not when the restart runs, so a full handler table is a `409` with a
+reason rather than a `202` followed by a plain reboot. And a second request
+while one is armed keeps the earlier of the two deadlines, so a page that
+re-posts on retry cannot push a promised restart out indefinitely.
 
 ## Flashing
 
@@ -264,6 +273,10 @@ ppp0             (follow-up) PPP over that port, node at 10.65.<n>.1
 
 Nothing in the design can lock a node out. The bootloader bit is cleared by
 the ROM; a failed flash leaves whatever was in flash; a power cycle boots it.
+And the settings refuse the one combination that would: switching the serial
+console off while no local link is enabled, or the last link off while the
+console is off, answers `400` rather than saving — a node in that state could
+only be recovered by erasing it.
 When the firmware is broken enough that neither the console nor the API
 answers:
 
@@ -300,10 +313,12 @@ USB-C
 **Endpoint budget.** TinyUSB's ESP32-S3 port (`dcd_esp32sx.c`) has
 `EP_FIFO_NUM 5` with FIFO0 reserved for EP0 — four usable IN endpoints — and
 `EP_MAX 7`, six OUT. Two CDC functions need four IN and two OUT: it fits with
-**no IN endpoint to spare**. `src/UsbDescriptorPlan.h` encodes the budget and
-`static_assert`s it, so a third function (a second ACM port for logs is the
-obvious request) fails to compile rather than enumerating with an interface
-missing.
+**no IN endpoint to spare**. A third function (a second ACM port for logs is
+the obvious request) does not fit, and the descriptor that builds the device
+should `static_assert` that budget so it fails to compile rather than
+enumerating with an interface missing. That header lands with the device; a
+design note shipped as firmware source, which is what an earlier version was,
+guarded nothing.
 
 **Identity.** Manufacturer `RetiMesh`, product `RetiMesh Node`, serial = the
 factory MAC, interface strings as above. The VID:PID is not ours to choose:

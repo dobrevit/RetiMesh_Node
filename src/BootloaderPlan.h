@@ -28,30 +28,50 @@
 //  and the PCB, and the rules that turn those facts into a plan live here,
 //  where they can be tested without a board.
 //
-//  Three pieces, all pure:
+//  Two pieces, both pure:
 //    plan()         which methods a board offers, best first
 //    Sequencer      the request -> quiesce -> restart steps, with the delay
 //                   that lets an acknowledgement leave before the link dies
-//    TouchDetector  the 1200-baud CDC trigger, with the debounce that keeps a
-//                   console opened at any other rate from rebooting the node
+//
+//  The 1200-baud CDC touch is deliberately not here. It needs a CDC-ACM port
+//  the firmware owns, so it can see the line coding, and no board runs one:
+//  the S3 sits on its fixed USB-Serial/JTAG personality, which does the
+//  DTR/RTS handshake in hardware and shows the firmware nothing. A detector
+//  with no caller was sixty lines of header and seven tests exercising a path
+//  the node could not take, and a method the API listed that nothing could
+//  perform. It comes back with the composite device that can feed it.
 //
 //  The mechanism the software path relies on is documented rather than
 //  guessed: ESP32-S2/S3/C3 carry RTC_CNTL_FORCE_DOWNLOAD_BOOT in
 //  RTC_CNTL_OPTION1_REG, and writing it in a shutdown handler before
-//  esp_restart() is exactly what the Arduino core's usb_persist_restart()
-//  does for its own 1200-baud touch. The classic ESP32 has no such bit, so a
-//  running node there cannot put itself into the downloader; only the bridge
-//  or a finger can. Bootloader.cpp is where the register is actually written.
+//  esp_restart() is what the Arduino core's usb_persist_restart() does for
+//  its own 1200-baud touch — on the OTG controller. The classic ESP32 has no
+//  such bit, so a running node there cannot put itself into the downloader;
+//  only the bridge or a finger can. Bootloader.cpp is where the register is
+//  actually written.
+//
+//  And a board whose console is the S3's own USB-Serial/JTAG unit cannot use
+//  it either, which was learned on a T3-S3 rather than read anywhere: that
+//  unit is not reset by the software reset esp_restart() performs, so the
+//  host keeps its old enumeration while the ROM downloader comes up behind
+//  it expecting a fresh one. The chip sits there hung — no console, no
+//  downloader, no port drop — until EN is pulled by hand. The unit does the
+//  DTR/RTS handshake in hardware, which esptool performs unaided and which
+//  works, so that is the method those boards offer. The software entry is
+//  kept for the S3 behind a UART bridge, where the downloader talks on UART0
+//  and the bridge is untouched by the chip resetting.
 // ============================================================================
 #pragma once
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
+#include <stdio.h>
+#include <atomic>
 
 namespace Bootloader {
 
 enum class Method : uint8_t {
-  Usb1200Touch,     // host opens the CDC-ACM port at the magic baud and closes it
   SoftwareApi,      // firmware sets FORCE_DOWNLOAD_BOOT and restarts (HTTP or console)
   AutoResetDtrRts,  // esptool drives EN/IO0 through the bridge or USB-Serial/JTAG
   ManualRecovery,   // hold BOOT, press RESET
@@ -59,7 +79,6 @@ enum class Method : uint8_t {
 
 inline const char* methodName(Method m) {
   switch (m) {
-    case Method::Usb1200Touch:    return "usb_1200_touch";
     case Method::SoftwareApi:     return "software_api";
     case Method::AutoResetDtrRts: return "auto_reset_dtr_rts";
     case Method::ManualRecovery:  return "manual_recovery";
@@ -72,39 +91,50 @@ inline const char* methodName(Method m) {
 struct Caps {
   bool forceDownloadBoot = false;   // silicon has RTC_CNTL_FORCE_DOWNLOAD_BOOT (S2/S3/C3)
   bool nativeUsb         = false;   // the chip's own USB is on the connector
-  bool usbCdcOtg         = false;   // firmware runs a TinyUSB CDC-ACM that sees line coding
   bool bridgeAutoReset   = false;   // a USB-UART bridge with DTR/RTS wired to EN/IO0
 };
 
 struct Plan {
-  Method methods[4];
+  Method methods[3];
   size_t count = 0;
   bool has(Method m) const {
     for (size_t i = 0; i < count; i++) if (methods[i] == m) return true;
     return false;
   }
   Method primary() const { return methods[0]; }
+
+  // The names, comma-joined, for the console and any other single-line
+  // reader. One place, because the console had grown its own strlcat loop
+  // beside the three JSON writers.
+  const char* names(char* out, size_t len) const {
+    if (len) out[0] = '\0';
+    for (size_t i = 0; i < count; i++) {
+      const size_t used = strlen(out);
+      if (used >= len) break;
+      snprintf(out + used, len - used, "%s%s", i ? "," : "", methodName(methods[i]));
+    }
+    return out;
+  }
 };
 
-// Best first. The touch is preferred because it needs no credentials and no
-// address; the API second because it works over any local link; the bridge
-// reset third because esptool does it on its own; and recovery is always
+// Whether firmware can get the chip into the downloader on its own, which is
+// what the HTTP endpoint and the console command promise. Silicon with the
+// bit, and a console that is not the S3's own USB unit — see the header.
+inline bool canEnterAutomatically(const Caps& c) { return c.forceDownloadBoot && !c.nativeUsb; }
+
+// Best first. The API first because it works over any local link; the bridge
+// reset next because esptool does it on its own; and recovery is always
 // there, last, because it always works.
 inline Plan plan(const Caps& c) {
   Plan p;
-  if (c.usbCdcOtg && c.nativeUsb)      p.methods[p.count++] = Method::Usb1200Touch;
-  if (c.forceDownloadBoot)             p.methods[p.count++] = Method::SoftwareApi;
+  if (canEnterAutomatically(c))        p.methods[p.count++] = Method::SoftwareApi;
   // The S3's USB-Serial/JTAG implements the same DTR/RTS handshake in
-  // hardware, so native USB without an OTG stack counts as a bridge here.
-  if (c.bridgeAutoReset || (c.nativeUsb && !c.usbCdcOtg))
-                                       p.methods[p.count++] = Method::AutoResetDtrRts;
+  // hardware, so native USB counts as a bridge here.
+  if (c.bridgeAutoReset || c.nativeUsb) p.methods[p.count++] = Method::AutoResetDtrRts;
   p.methods[p.count++] = Method::ManualRecovery;
   return p;
 }
 
-// Whether firmware can get the chip into the downloader on its own, which is
-// what the HTTP endpoint and the console command promise.
-inline bool canEnterAutomatically(const Caps& c) { return c.forceDownloadBoot; }
 
 // ---------------------------------------------------------------------------
 // The request sequence
@@ -150,33 +180,45 @@ enum class Step : uint8_t { None = 0, Quiesce, Restart };
 // already armed: the operator who asked for the loader means it. The other
 // way round is refused — a reboot request cannot quietly downgrade a pending
 // bootloader entry that a flashing tool is already waiting on.
+//
+// request() runs on whichever task took the HTTP request or the console
+// line; tick() runs on the loop task; and two requests can race each other
+// from two tasks. The fields are therefore guarded by a spinlock rather than
+// by a comment about store ordering, which is what an earlier version had,
+// and which the compiler was under no obligation to honour: had it sunk the
+// deadline store below the state store, a tick landing between them would
+// have seen Armed with last time's deadline and restarted at once, before the
+// acknowledgement had left. The critical sections are a few instructions.
 class Sequencer {
 public:
   bool request(Target target, Source source, uint32_t delayMs, uint32_t nowMs) {
-    if (_state == State::Quiescing || _state == State::Restarting) return false;
-    if (_state == State::Armed && _target == Target::Bootloader && target == Target::App) return false;
-    // Everything the tick reads is written before the state that tells it to
-    // read: request() runs on the task that took the HTTP request or the
-    // console line, tick() on the loop task, and there is no lock between
-    // them. A tick that saw Armed with last time's deadline would restart at
-    // once, before the acknowledgement had left.
-    _dueMs  = nowMs + delayMs;
-    _target = target;
-    _source = source;
-    _state  = State::Armed;
+    Guard g(_lock);
+    const State st = _state.load(std::memory_order_relaxed);
+    if (st == State::Quiescing || st == State::Restarting) return false;
+    if (st == State::Armed && _target == Target::Bootloader && target == Target::App) return false;
+    const uint32_t due = nowMs + delayMs;
+    // A second request while one is armed keeps the earlier of the two
+    // deadlines. Two callers were each told their own delay; honouring the
+    // later one would push the restart past what the first was promised, and
+    // a page that re-posts on every retry would keep a reboot from ever
+    // firing at all.
+    if (st == State::Armed && (int32_t)(_dueMs - due) < 0) { _target = target; _source = source; }
+    else { _dueMs = due; _target = target; _source = source; }
+    _state.store(State::Armed, std::memory_order_release);
     return true;
   }
 
   Step tick(uint32_t nowMs) {
-    switch (_state) {
+    Guard g(_lock);
+    switch (_state.load(std::memory_order_acquire)) {
       case State::Idle:
         return Step::None;
       case State::Armed:
         if ((int32_t)(nowMs - _dueMs) < 0) return Step::None;
-        _state = State::Quiescing;
+        _state.store(State::Quiescing, std::memory_order_release);
         return Step::Quiesce;
       case State::Quiescing:
-        _state = State::Restarting;
+        _state.store(State::Restarting, std::memory_order_release);
         return Step::Restart;
       case State::Restarting:
         return Step::Restart;             // the caller did not manage to; ask again
@@ -186,69 +228,23 @@ public:
 
   // Once armed, services should refuse new work: a request accepted now is a
   // request that will not be answered.
-  bool pending() const { return _state != State::Idle; }
-  State  state()  const { return _state; }
-  Target target() const { return _target; }
-  Source source() const { return _source; }
-  uint32_t dueMs() const { return _dueMs; }
+  bool pending() const { return _state.load(std::memory_order_acquire) != State::Idle; }
+  State  state()  const { return _state.load(std::memory_order_acquire); }
+  Target target() const { Guard g(_lock); return _target; }
+  Source source() const { Guard g(_lock); return _source; }
+  uint32_t dueMs() const { Guard g(_lock); return _dueMs; }
 
 private:
-  State    _state  = State::Idle;
+  struct Guard {
+    std::atomic_flag& f;
+    explicit Guard(std::atomic_flag& flag) : f(flag) { while (f.test_and_set(std::memory_order_acquire)) {} }
+    ~Guard() { f.clear(std::memory_order_release); }
+  };
+  mutable std::atomic_flag _lock = ATOMIC_FLAG_INIT;
+  std::atomic<State> _state{State::Idle};
   Target   _target = Target::App;
   Source   _source = Source::Http;
   uint32_t _dueMs  = 0;
-};
-
-// ---------------------------------------------------------------------------
-// The 1200-baud touch
-//
-// What the host does, in USB CDC terms: SET_LINE_CODING with a bit rate of
-// 1200, then SET_CONTROL_LINE_STATE with DTR asserted (the port is open), and
-// then DTR deasserted (the port is closed). That is what `stty -F
-// /dev/ttyACM0 1200 hupcl` followed by nothing, or a Python
-// `serial.Serial(port, 1200)` immediately closed, produces — and what the
-// Arduino IDE has sent to reset boards since the Leonardo.
-//
-// What fires: DTR going from asserted to deasserted while the port's line
-// coding is at the magic rate, within `windowMs` of that rate being set. A
-// port opened at 115200 for a console can be opened and closed all day. A
-// line coding at 1200 that is never followed by a close does nothing. A rate
-// set and then changed before the close disarms. No payload byte is ever
-// looked at, so no data pattern can trigger it.
-// ---------------------------------------------------------------------------
-class TouchDetector {
-public:
-  explicit TouchDetector(uint32_t magicBaud = 1200, uint32_t windowMs = 5000)
-    : _magic(magicBaud), _windowMs(windowMs) {}
-
-  void onLineCoding(uint32_t baud, uint32_t nowMs) {
-    if (baud == _magic) { _armed = true; _armedAtMs = nowMs; _dtrSeen = false; }
-    else                { _armed = false; }
-  }
-
-  // Returns true exactly once per touch: the bootloader should be entered.
-  bool onLineState(bool dtr, bool rts, uint32_t nowMs) {
-    (void)rts;                            // the touch is defined on DTR alone
-    if (_armed && (uint32_t)(nowMs - _armedAtMs) > _windowMs) _armed = false;
-    if (!_armed) { _dtrSeen = false; return false; }
-    if (dtr) { _dtrSeen = true; return false; }
-    // DTR fell while armed. Only a close that follows an open counts: a host
-    // that sets 1200 with DTR already low never opened the port at all.
-    if (!_dtrSeen) return false;
-    _armed = false;
-    _dtrSeen = false;
-    return true;
-  }
-
-  bool armed() const { return _armed; }
-  uint32_t magicBaud() const { return _magic; }
-
-private:
-  uint32_t _magic;
-  uint32_t _windowMs;
-  bool     _armed = false;
-  bool     _dtrSeen = false;
-  uint32_t _armedAtMs = 0;
 };
 
 } // namespace Bootloader

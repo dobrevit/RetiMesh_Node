@@ -23,11 +23,21 @@
 //  RTC_CNTL_OPTION1_REG, FORCE_DOWNLOAD_BOOT, that the ROM reads after a
 //  reset in place of the strapping pins: set, the ROM goes into its serial
 //  downloader as if BOOT had been held. It is written from a shutdown
-//  handler so that it is the last thing done before the reset, after every
-//  other handler has run, and it is exactly the sequence the Arduino core's
-//  usb_persist_restart(RESTART_BOOTLOADER) performs for its own 1200-baud
-//  touch. The register name is the SoC header's, so a chip without the bit
-//  does not compile the path at all rather than writing something else.
+//  handler, which is the sequence the Arduino core's own
+//  usb_persist_restart(RESTART_BOOTLOADER) performs. Note the order the
+//  handlers run in: esp_restart() walks the table from the last slot down,
+//  so a handler registered late runs *early* — before esp_wifi_stop, not
+//  after it. That is harmless for a register write nothing later touches,
+//  but it is the opposite of what an earlier comment here claimed. The
+//  register name is the SoC header's, so a chip without the bit does not
+//  compile the path at all rather than writing something else.
+//
+//  The handler is registered when the request is accepted, not when the
+//  restart happens, because registration can fail: IDF keeps five slots and
+//  Wi-Fi already holds one. A failure at restart time could only be logged,
+//  by which time the host tool had already been told 202 and was waiting for
+//  a downloader that would never appear. At request time it is a refusal
+//  with a reason.
 //
 //  The downloader that comes up talks on whichever port the ROM uses: the
 //  USB-Serial/JTAG peripheral on a native-USB S3, UART0 through the CP2102
@@ -60,9 +70,30 @@ Caps caps() {
   Caps c;
   c.forceDownloadBoot = HAS_FORCE_DOWNLOAD_BOOT;
   c.nativeUsb         = BOARD_USB_NATIVE;
-  c.usbCdcOtg         = BOARD_USB_CDC_OTG;       // the firmware-owned CDC; 0 until the composite device exists
   c.bridgeAutoReset   = BOARD_BRIDGE_AUTO_RESET;
   return c;
+}
+
+#if HAS_FORCE_DOWNLOAD_BOOT
+static void IRAM_ATTR forceDownloadBootHandler() {
+  REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+}
+static bool sHandlerRegistered = false;
+#endif
+
+// Arm the ROM for download mode on the next reset. True when the handler is
+// in place (or already was: a second registration of the same function is
+// refused by IDF as an invalid state, which is not a failure here).
+static bool armDownloadBoot() {
+  #if HAS_FORCE_DOWNLOAD_BOOT
+    if (sHandlerRegistered) return true;
+    const esp_err_t err = esp_register_shutdown_handler(forceDownloadBootHandler);
+    if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) { sHandlerRegistered = true; return true; }
+    log_e("bootloader: esp_register_shutdown_handler failed (%d): the shutdown table is full", (int)err);
+    return false;
+  #else
+    return false;
+  #endif
 }
 
 Plan plan() { return Bootloader::plan(caps()); }
@@ -71,7 +102,15 @@ const char* manualRecovery() { return kRecovery; }
 
 bool request(Target target, Source source, uint32_t delayMs, const char** whyNot) {
   if (target == Target::Bootloader && !canEnterAutomatically()) {
-    if (whyNot) *whyNot = "this chip cannot enter its downloader from software; use the bridge's auto-reset or hold BOOT";
+    if (whyNot) *whyNot = BOARD_USB_NATIVE
+      ? "software entry hangs a native-USB board (its USB unit survives the reset); esptool's DTR/RTS handshake does it instead"
+      : "this chip cannot enter its downloader from software; use the bridge's auto-reset or hold BOOT";
+    return false;
+  }
+  // Armed before the sequencer accepts, so a refusal here leaves nothing
+  // pending; the bit itself is only consulted by the ROM after a reset.
+  if (target == Target::Bootloader && !armDownloadBoot()) {
+    if (whyNot) *whyNot = "cannot arm the ROM downloader: the shutdown handler table is full; reboot and retry, or hold BOOT";
     return false;
   }
   const bool ok = sSeq.request(target, source, delayMs, millis());
@@ -84,12 +123,6 @@ bool request(Target target, Source source, uint32_t delayMs, const char** whyNot
 bool   pending() { return sSeq.pending(); }
 State  state()   { return sSeq.state(); }
 Target target()  { return sSeq.target(); }
-
-#if HAS_FORCE_DOWNLOAD_BOOT
-static void IRAM_ATTR forceDownloadBootHandler() {
-  REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
-}
-#endif
 
 static void quiesce() {
   // From here on RetiTransportServer refuses connections and the settings
@@ -110,11 +143,8 @@ static void quiesce() {
 }
 
 static void restart() {
-  if (sSeq.target() == Target::Bootloader) {
-    #if HAS_FORCE_DOWNLOAD_BOOT
-      esp_register_shutdown_handler(forceDownloadBootHandler);
-    #endif
-  }
+  // The download-boot handler, if this restart wants one, was registered at
+  // request time (see armDownloadBoot); there is nothing left to arm.
   esp_restart();
 }
 

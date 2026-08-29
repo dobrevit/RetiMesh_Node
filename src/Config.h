@@ -57,9 +57,6 @@
 //
 //   BOARD_USB_NATIVE        the MCU's own USB D+/D- reach the connector
 //   BOARD_USB_NCM           ...and the silicon can present CDC-NCM there
-//   BOARD_USB_CDC_OTG       this firmware runs its own CDC-ACM on that USB
-//                           (TinyUSB OTG); 0 while the S3 stays on the fixed
-//                           USB-Serial/JTAG personality
 //   BOARD_USB_BRIDGE        "CP2102", "CH9102", ... or "none"
 //   BOARD_BRIDGE_AUTO_RESET the bridge's DTR/RTS reach EN/IO0 (esptool resets it)
 //   BOARD_UART_NETWORK      the UART behind the bridge may carry PPP
@@ -70,9 +67,6 @@
 #endif
 #ifndef BOARD_USB_NCM
   #define BOARD_USB_NCM           0
-#endif
-#ifndef BOARD_USB_CDC_OTG
-  #define BOARD_USB_CDC_OTG       0
 #endif
 #ifndef BOARD_USB_BRIDGE
   #define BOARD_USB_BRIDGE        "none"

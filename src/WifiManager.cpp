@@ -44,6 +44,17 @@
 
 WifiManager wifiManager;
 
+// The core's own stack bring-up (esp_netif_init, the default event loop, the
+// Arduino event handler), defined in WiFiGeneric.cpp and declared in no
+// header. It is what WiFi.mode() calls first; with Wi-Fi off it is the only
+// part of that call the node needs.
+bool tcpipInit();
+
+// One answer for every write path that has to refuse while a restart is on
+// its way: a write accepted now may or may not reach NVS before it, and the
+// caller could not tell which.
+static const char kRestartingMsg[] = "the node is restarting";
+
 static const char PORTAL_URL[] = "http://10.42.0.1/";
 static const char ADMIN_USER[] = "admin";
 
@@ -85,6 +96,31 @@ static void sendError(AsyncWebServerRequest* r, int code, const char* msg) {
 // ---------------------------------------------------------------------------
 bool WifiManager::wifiEnabled() const { return settings.links().wifiEnabled; }
 
+// The bootloader plan and state, written once. Three handlers used to spell
+// this out separately and had already drifted: the same fact was api_enabled
+// in two of them and bootloader_api in the others, methods in one and
+// bootloader_methods in another, so a tool reading two endpoints needed two
+// parsers for one thing.
+static void bootloaderJson(JsonObject o) {
+  const Bootloader::Plan p = Bootloader::plan();
+  o["software_entry"] = Bootloader::canEnterAutomatically();
+  o["api_enabled"]    = settings.maintenance().bootloaderApi;
+  o["pending"]        = Bootloader::pending();
+  o["state"]          = Bootloader::stateName(Bootloader::state());
+  o["primary"]        = Bootloader::methodName(p.primary());
+  o["recovery"]       = Bootloader::manualRecovery();
+  JsonArray methods = o["methods"].to<JsonArray>();
+  for (size_t i = 0; i < p.count; i++) methods.add(Bootloader::methodName(p.methods[i]));
+}
+
+// The address this request was accepted *at*, which the TCP stack knows
+// exactly: 10.42.0.1 for the access point, the DHCP address for the station,
+// 10.64.n.1 for USB. The remote address, which an earlier version reasoned
+// from, only hints — a LAN numbered like the access point looked local.
+static uint32_t localHostOrder(AsyncWebServerRequest* r) {
+  return LocalLink::hostOrder(r->client()->localIP());
+}
+
 void WifiManager::begin() {
   if (wifiEnabled()) {
     startAccessPoint();
@@ -101,14 +137,13 @@ void WifiManager::begin() {
     // down. The web server below starts regardless, bound to every interface,
     // so a USB or PPP link — or WIFI ON at the console — reaches it.
     resolveNames();
-    WiFi.persistent(false);
-    // lwIP and the netif layer are brought up inside the Wi-Fi driver's own
-    // initialisation, and mode(WIFI_OFF) on a driver that was never started
-    // returns before doing any of it — the servers below would then bind into
-    // a TCP/IP stack that does not exist. So the driver is started and the
-    // radio stopped again: the stack stays, the radio does not.
-    WiFi.mode(WIFI_STA);
-    WiFi.mode(WIFI_OFF);
+    // lwIP and the netif layer have to exist for the servers below to bind,
+    // and the Wi-Fi driver is where the core normally brings them up. Asking
+    // the driver for that directly is better than the earlier trick of
+    // starting the radio in station mode and stopping it again: that paid
+    // for a driver initialisation nobody wanted, and it stops working the
+    // day the netif comes from TinyUSB rather than from Wi-Fi at all.
+    tcpipInit();
     log_w("Wi-Fi is switched off in settings; the access point will not start");
   }
 
@@ -248,10 +283,6 @@ void WifiManager::startAccessPoint() {
   }
 }
 
-void WifiManager::scheduleRestart(uint32_t delayMs) {
-  Bootloader::reboot(delayMs, Bootloader::Source::Settings);
-}
-
 void WifiManager::tick() {
   // Station watchdog: log transitions, kick a reconnect if auto-reconnect
   // gave up (e.g. the LAN was down at boot).
@@ -329,7 +360,7 @@ void WifiManager::setupRoutes() {
   _http.on("/api/settings", HTTP_GET,
            [this](AsyncWebServerRequest* r) { if (authed(r)) handleSettingsGet(r); });
 
-  struct Route { const char* path; void (WifiManager::*fn)(AsyncWebServerRequest*, const char*, size_t); };
+  struct Route { const char* path; void (WifiManager::*fn)(AsyncWebServerRequest*, const char*, size_t); bool ungated; };   // trailing member: rows that omit it are gated (value-initialised false)
   static const Route posts[] = {
     { "/api/settings/radio", &WifiManager::handleRadioPost },
     { "/api/settings/wifi",  &WifiManager::handleWifiPost  },
@@ -343,21 +374,24 @@ void WifiManager::setupRoutes() {
     { "/api/settings/maintenance", &WifiManager::handleMaintenancePost },
     // System: privileged, POST only, and — unlike the settings above — also
     // gated on which link the request came over. See handleBootloaderPost.
-    { "/api/system/bootloader", &WifiManager::handleBootloaderPost },
+    // The bootloader request is the one POST the restart gate does not
+    // cover: the sequencer lets it outrank a plain reboot already armed (a
+    // flashing tool that asks during a settings save means it), and a 503
+    // here would have contradicted that.
+    { "/api/system/bootloader", &WifiManager::handleBootloaderPost, true },
     { "/api/system/reboot",     &WifiManager::handleRebootPost },
   };
   for (const Route& rt : posts) {
     auto fn = rt.fn;
+    const bool gated = !rt.ungated;
     _http.on(rt.path, HTTP_POST,
              [this](AsyncWebServerRequest* r) {
                if (r->contentLength() == 0 && authed(r)) sendError(r, 400, "empty");
              }, nullptr,
-             [this, fn](AsyncWebServerRequest* r, uint8_t* d, size_t l, size_t i, size_t t) {
+             [this, fn, gated](AsyncWebServerRequest* r, uint8_t* d, size_t l, size_t i, size_t t) {
                const char* body = collectBody(r, d, l, i, t);
                if (!body || !authed(r)) return;
-               // A restart is already on its way: a write accepted now may or
-               // may not reach NVS before it, and the caller could not tell.
-               if (Bootloader::pending()) { sendError(r, 503, "the node is restarting"); return; }
+               if (gated && Bootloader::pending()) { sendError(r, 503, kRestartingMsg); return; }
                (this->*fn)(r, body, t);
              });
   }
@@ -378,16 +412,26 @@ void WifiManager::setupRoutes() {
 
   _http.on("/api/settings/export", HTTP_GET,
            [this](AsyncWebServerRequest* r) { if (authed(r)) handleExport(r); });
+  // Takes no body, so it is not in the table above — but it writes NVS,
+  // so it stands behind the same gate.
   _http.on("/api/settings/reset", HTTP_POST,
-           [this](AsyncWebServerRequest* r) { if (authed(r)) handleReset(r); });
+           [this](AsyncWebServerRequest* r) {
+             if (!authed(r)) return;
+             if (Bootloader::pending()) { sendError(r, 503, kRestartingMsg); return; }
+             handleReset(r);
+           });
 
   // OS connectivity probes — a redirect (any non-204/200 answer) is what
-  // makes the client OS open its captive-portal browser.
-  for (const char* probe : { "/generate_204", "/gen_204",
-                             "/hotspot-detect.html", "/connecttest.txt",
-                             "/ncsi.txt", "/canonical.html", "/success.txt" }) {
-    _http.on(probe, HTTP_GET,
-             [](AsyncWebServerRequest* r) { r->redirect(PORTAL_URL); });
+  // makes the client OS open its captive-portal browser. Only where there
+  // is an access point to be captive on: with Wi-Fi off a host on any other
+  // link would be sent to an address that does not exist.
+  if (wifiEnabled()) {
+    for (const char* probe : { "/generate_204", "/gen_204",
+                               "/hotspot-detect.html", "/connecttest.txt",
+                               "/ncsi.txt", "/canonical.html", "/success.txt" }) {
+      _http.on(probe, HTTP_GET,
+               [](AsyncWebServerRequest* r) { r->redirect(PORTAL_URL); });
+    }
   }
 
   // The single-page app lives in LittleFS (data/ -> `pio run -t uploadfs`).
@@ -398,8 +442,9 @@ void WifiManager::setupRoutes() {
   _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
   // Everything else (arbitrary hostnames typed by the user, probe paths
-  // not listed above) also lands on the portal.
-  _http.onNotFound([](AsyncWebServerRequest* r) { r->redirect(PORTAL_URL); });
+  // not listed above) also lands on the portal — when there is one.
+  if (wifiEnabled()) _http.onNotFound([](AsyncWebServerRequest* r) { r->redirect(PORTAL_URL); });
+  else               _http.onNotFound([](AsyncWebServerRequest* r) { r->send(404, "text/plain", "not found"); });
 }
 
 // ---------------------------------------------------------------------------
@@ -557,32 +602,20 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
       o["enabled"]    = l->enabled();
       o["phase"]      = LocalLink::phaseName(sn.phase);
       o["up"]         = sn.phase == LocalLink::Phase::Ready;
-      o["ip"]         = sn.ip;
+      // JsonString copies. ArduinoJson stores a const char array by address —
+      // it reads as a string literal, which lives for ever — and sn is a
+      // local that dies at the end of this iteration, long before the
+      // document is serialised. What went out as the address was whatever the
+      // stack held by then.
+      o["ip"]         = JsonString(sn.ip);
       o["addressing"] = LocalLink::addressingName(sn.addressing);
       o["uptime_s"]   = sn.uptimeS;
-      o["mtu"]        = sn.mtu;
-      if (sn.clientKnown) o["clients"] = sn.clients; else o["clients"] = nullptr;
-      // Null rather than zero where the driver cannot count: a link plainly
-      // carrying traffic must not read as silent.
-      if (sn.counters.known) {
-        o["rx_bytes"] = sn.counters.rxBytes;   o["tx_bytes"] = sn.counters.txBytes;
-        o["rx_packets"] = sn.counters.rxPackets; o["tx_packets"] = sn.counters.txPackets;
-        o["errors"] = sn.counters.errors;
-      } else {
-        o["rx_bytes"] = nullptr; o["tx_bytes"] = nullptr;
-        o["rx_packets"] = nullptr; o["tx_packets"] = nullptr; o["errors"] = nullptr;
-      }
-      const char* why = LocalLink::unavailableReason(*l);
-      if (why[0]) o["reason"] = why;
+      // Absent, not null, where the link cannot count its hosts: the page
+      // treats the two the same, and this document is polled every two
+      // seconds by every open tab.
+      if (sn.clientKnown) o["clients"] = sn.clients;
+      if (l->reason()[0]) o["reason"] = l->reason();
     }
-  }
-  {
-    JsonObject bl = doc["bootloader"].to<JsonObject>();
-    bl["software_entry"] = Bootloader::canEnterAutomatically();
-    bl["api_enabled"]    = settings.maintenance().bootloaderApi;
-    bl["pending"]        = Bootloader::pending();
-    bl["state"]          = Bootloader::stateName(Bootloader::state());
-    bl["primary"]        = Bootloader::methodName(Bootloader::plan().primary());
   }
 
 #if HAS_SD
@@ -774,7 +807,7 @@ static bool littleFsHas(const char* path) {
 // GET /api/qr?what=wifi|portal|address -> image/svg+xml
 void WifiManager::handleQrFor(AsyncWebServerRequest* request, Qr::Payload what) {
   char text[192];
-  if (!Qr::payloadText(what, text, sizeof(text))) { sendError(request, 500, "payload too long"); return; }
+  if (!Qr::payloadText(what, text, sizeof(text))) { sendError(request, 503, "nothing to encode: no link is up, or the payload does not fit"); return; }
   QRCode qr;
   uint8_t buffer[Qr::MAX_BUFFER];
   if (!Qr::encode(text, qr, buffer)) { sendError(request, 500, "does not fit in a QR code"); return; }
@@ -958,21 +991,16 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   // off, a switch that cannot be turned on, and no switch as different things.
   {
     JsonObject links = doc["links"].to<JsonObject>();
-    const LinkSettings& ls = settings.links();
-    for (size_t i = 0; i < LocalLink::count(); i++) {
-      const LocalLink::Link* l = LocalLink::at(i);
-      const char* key = l->type() == LocalLink::Type::WifiAp  ? "wifi"
-                      : l->type() == LocalLink::Type::WifiSta ? nullptr
-                      : l->type() == LocalLink::Type::UsbNcm  ? "usb"
-                      : l->type() == LocalLink::Type::PppUart ? "ppp" : nullptr;
-      if (!key) continue;                 // the station is part of "wifi"
-      JsonObject o = links[key].to<JsonObject>();
+    size_t n = 0;
+    const LocalLink::Field* f = LocalLink::fields(n);
+    for (size_t i = 0; i < n; i++) {
+      const LocalLink::Link* l = LocalLink::find(f[i].type);
+      if (!l) continue;
+      JsonObject o = links[f[i].key].to<JsonObject>();
       o["hardware"]  = l->hardware();
-      o["supported"] = l->hardware() && l->firmware();
-      o["enabled"]   = l->type() == LocalLink::Type::WifiAp ? ls.wifiEnabled
-                     : l->type() == LocalLink::Type::UsbNcm ? ls.usbEnabled : ls.pppEnabled;
-      const char* why = LocalLink::unavailableReason(*l);
-      if (why[0]) o["reason"] = why;
+      o["supported"] = l->usable();
+      o["enabled"]   = LocalLink::switchOn(*l, settings.links());
+      if (l->reason()[0]) o["reason"] = l->reason();
     }
   }
   {
@@ -980,12 +1008,8 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
     m["bootloader_api"]      = settings.maintenance().bootloaderApi;
     m["bootloader_from_lan"] = settings.maintenance().bootloaderFromLan;
     m["console_enabled"]     = settings.maintenance().consoleEnabled;
-    m["software_entry"]      = Bootloader::canEnterAutomatically();
-    m["recovery"]            = Bootloader::manualRecovery();
-    JsonArray methods = m["bootloader_methods"].to<JsonArray>();
-    const Bootloader::Plan p = Bootloader::plan();
-    for (size_t i = 0; i < p.count; i++) methods.add(Bootloader::methodName(p.methods[i]));
   }
+  bootloaderJson(doc["bootloader"].to<JsonObject>());
 
   doc["admin"]["user"] = ADMIN_USER;
   doc["admin"]["default_password"] = strcmp(settings.admin().password, ADMIN_PASSWORD_DEFAULT) == 0;
@@ -1005,36 +1029,38 @@ void WifiManager::handleLinksPost(AsyncWebServerRequest* request, const char* bo
   JsonDocument in;
   if (deserializeJson(in, body, len) != DeserializationError::Ok) { sendError(request, 400, "bad json"); return; }
   LinkSettings l = settings.links();
-  struct Field { const char* key; LocalLink::Type type; bool* value; };
-  Field fields[] = {
-    { "wifi", LocalLink::Type::WifiAp,  &l.wifiEnabled },
-    { "usb",  LocalLink::Type::UsbNcm,  &l.usbEnabled  },
-    { "ppp",  LocalLink::Type::PppUart, &l.pppEnabled  },
-  };
-  for (Field& f : fields) {
-    if (!in[f.key].is<bool>()) continue;
-    const bool want = in[f.key];
-    const LocalLink::Link* link = LocalLink::find(f.type);
-    if (want && (!link || !link->hardware() || !link->firmware())) {
+  size_t n = 0;
+  const LocalLink::Field* f = LocalLink::fields(n);
+  for (size_t i = 0; i < n; i++) {
+    if (!in[f[i].key].is<bool>()) continue;
+    const bool want = in[f[i].key];
+    const LocalLink::Link* link = LocalLink::find(f[i].type);
+    if (want && (!link || !link->usable())) {
       char msg[160];
-      snprintf(msg, sizeof(msg), "%s cannot be enabled: %s", f.key,
-               link ? LocalLink::unavailableReason(*link) : "no such link on this board");
+      snprintf(msg, sizeof(msg), "%s cannot be enabled: %s", f[i].key,
+               link ? link->reason() : "no such link on this board");
       sendError(request, 400, msg); return;
     }
-    *f.value = want;
+    l.*(f[i].on) = want;
   }
-  // Turning every host-facing link off would leave the node reachable only
-  // through the console. Allowed — that is what the console is for — but the
-  // answer says so in words.
+  // Turning every host-facing link off is allowed — the console is the way
+  // back — unless the console is off too, in which case there is no way back
+  // short of erasing the flash. That is refused, not warned about.
+  if (LocalLink::lockedOut(l, settings.maintenance().consoleEnabled)) {
+    sendError(request, 400, "refused: with the serial console switched off this would leave no way to reach the node; turn the console on first");
+    return;
+  }
   const bool wifiChanged = l.wifiEnabled != settings.links().wifiEnabled;
   if (!settings.saveLinks(l)) { sendError(request, 500, "nvs"); return; }
+  const bool restarting = wifiChanged && Bootloader::reboot(RESTART_SETTINGS_DELAY_MS);
   JsonDocument out;
   out["ok"] = true;
-  out["restart"] = wifiChanged;
-  if (!l.wifiEnabled && !l.usbEnabled && !l.pppEnabled)
+  out["restart"] = restarting;
+  if (wifiChanged && !restarting)
+    out["note"] = "saved; a restart is already in progress, so the change applies at the next boot";
+  else if (!LocalLink::anySwitchOn(l))
     out["note"] = "no local link is enabled; the node answers only on the serial maintenance console (WIFI ON restores the access point)";
   sendJson(request, 200, out);
-  if (wifiChanged) scheduleRestart(RESTART_SETTINGS_DELAY_MS);
 }
 
 // POST /api/settings/maintenance {"bootloader_api":bool,"bootloader_from_lan":bool,"console_enabled":bool}
@@ -1045,6 +1071,10 @@ void WifiManager::handleMaintenancePost(AsyncWebServerRequest* request, const ch
   if (in["bootloader_api"].is<bool>())      m.bootloaderApi     = in["bootloader_api"];
   if (in["bootloader_from_lan"].is<bool>()) m.bootloaderFromLan = in["bootloader_from_lan"];
   if (in["console_enabled"].is<bool>())     m.consoleEnabled    = in["console_enabled"];
+  if (LocalLink::lockedOut(settings.links(), m.consoleEnabled)) {
+    sendError(request, 400, "refused: no local link is enabled, so switching the console off would leave no way to reach the node");
+    return;
+  }
   if (!settings.saveMaintenance(m)) { sendError(request, 500, "nvs"); return; }
   request->send(200, "application/json", "{\"ok\":true}");
 }
@@ -1061,25 +1091,13 @@ void WifiManager::handleMaintenancePost(AsyncWebServerRequest* request, const ch
 // Nothing here is reachable through Reticulum: the API is HTTP on lwIP, and
 // the node's Reticulum destination carries no such request.
 // ---------------------------------------------------------------------------
-static uint32_t remoteHostOrder(AsyncWebServerRequest* r) {
-  return LocalLink::hostOrder(r->client()->remoteIP());
-}
-
 void WifiManager::handleBootloaderGet(AsyncWebServerRequest* request) {
   JsonDocument doc;
-  doc["api_enabled"]    = settings.maintenance().bootloaderApi;
-  doc["software_entry"] = Bootloader::canEnterAutomatically();
-  doc["pending"]        = Bootloader::pending();
-  doc["state"]          = Bootloader::stateName(Bootloader::state());
-  doc["board"]          = BOARD_NAME;
-  doc["recovery"]       = Bootloader::manualRecovery();
-  doc["confirm"]        = "BOOTLOADER";
-  const Bootloader::Plan p = Bootloader::plan();
-  doc["primary"] = Bootloader::methodName(p.primary());
-  JsonArray methods = doc["methods"].to<JsonArray>();
-  for (size_t i = 0; i < p.count; i++) methods.add(Bootloader::methodName(p.methods[i]));
+  bootloaderJson(doc.to<JsonObject>());
+  doc["board"]   = BOARD_NAME;
+  doc["confirm"] = "BOOTLOADER";
   // Whether *this* request would be allowed, so a tool can tell before it asks.
-  doc["allowed_from_here"] = LocalLink::isHostFacingAddress(remoteHostOrder(request)) ||
+  doc["allowed_from_here"] = LocalLink::requestIsHostFacing(localHostOrder(request)) ||
                              settings.maintenance().bootloaderFromLan;
   sendJson(request, 200, doc);
 }
@@ -1094,7 +1112,7 @@ void WifiManager::handleBootloaderPost(AsyncWebServerRequest* request, const cha
   if (deserializeJson(in, body, len) != DeserializationError::Ok || strcmp(in["confirm"] | "", "BOOTLOADER") != 0) {
     sendError(request, 400, "send {\"confirm\":\"BOOTLOADER\"} to restart into the ROM downloader"); return;
   }
-  if (!LocalLink::isHostFacingAddress(remoteHostOrder(request)) && !settings.maintenance().bootloaderFromLan) {
+  if (!LocalLink::requestIsHostFacing(localHostOrder(request)) && !settings.maintenance().bootloaderFromLan) {
     sendError(request, 403, "only from a directly attached link (access point, USB, PPP); "
                             "set bootloader_from_lan to allow it from the station network"); return;
   }
@@ -1264,8 +1282,10 @@ void WifiManager::handleWifiPost(AsyncWebServerRequest* request, const char* bod
   out["restart"] = true;
   out["ssid"] = w.ssid[0] ? w.ssid : _ssid;   // auto-derived name does not change
   out["security"] = Settings::securityName(w.security);
+  // Asked before the answer is sent, so the answer can say whether it was
+  // granted; the delay is what lets the reply leave, not the order here.
+  out["restart"] = Bootloader::reboot(RESTART_SETTINGS_DELAY_MS);
   sendJson(request, 200, out);
-  scheduleRestart(1500);                 // let the response leave first
 }
 
 void WifiManager::handleAdminPost(AsyncWebServerRequest* request, const char* body, size_t len) {
@@ -1320,9 +1340,9 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
                   || before.autoEnabled != t.autoEnabled || strcmp(before.autoGroupId, t.autoGroupId) != 0
                   || before.announceCap != t.announceCap;
   JsonDocument out;
-  out["ok"] = true; out["restart"] = needRestart;
+  out["ok"] = true;
+  out["restart"] = needRestart && Bootloader::reboot(RESTART_SETTINGS_DELAY_MS);   // interfaces are registered at boot
   sendJson(request, 200, out);
-  if (needRestart) scheduleRestart(1500);   // interfaces are registered at boot
 }
 
 // GET /api/settings/export — everything needed to clone a node's
@@ -1349,8 +1369,18 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   t["announce_rate_grace"] = ts.announceRateGrace; t["announce_rate_penalty"] = ts.announceRatePenalty;
   t["auto_enabled"] = ts.autoEnabled; t["auto_group_id"] = ts.autoGroupId;
   t["power_profile"] = ts.powerProfile; t["sd_store"] = ts.sdStore;
-  JsonObject l = doc["links"].to<JsonObject>();
-  l["wifi"] = settings.links().wifiEnabled; l["usb"] = settings.links().usbEnabled; l["ppp"] = settings.links().pppEnabled;
+  {
+    // Only the links this build can run: an export describes what the node
+    // does, and a switch for a driver that does not exist here would carry a
+    // meaningless value onto a node where it means something.
+    JsonObject l = doc["links"].to<JsonObject>();
+    size_t n = 0;
+    const LocalLink::Field* f = LocalLink::fields(n);
+    for (size_t i = 0; i < n; i++) {
+      const LocalLink::Link* link = LocalLink::find(f[i].type);
+      if (link && link->usable()) l[f[i].key] = LocalLink::switchOn(*link, settings.links());
+    }
+  }
   JsonObject m = doc["maintenance"].to<JsonObject>();
   m["bootloader_api"] = settings.maintenance().bootloaderApi;
   m["bootloader_from_lan"] = settings.maintenance().bootloaderFromLan;
@@ -1435,33 +1465,50 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     if (ts.loraMode < 1 || ts.loraMode > 5 || ts.wifiMode < 1 || ts.wifiMode > 5 || ts.announceCap < 1 || ts.announceCap > 100) { sendError(request, 400, "transport section invalid"); return; }
     settings.saveTransport(ts);
   }
-  if (in["links"].is<JsonObject>()) {
-    // A link this board cannot run is dropped rather than refused, for the
-    // same reason as the store's home: the file describes the node it came
-    // from, and restoring a T3-S3's export onto a Heltec is the normal case.
-    JsonObject lk = in["links"]; LinkSettings ls = settings.links();
-    ls.wifiEnabled = lk["wifi"] | ls.wifiEnabled;
-    const LocalLink::Link* usb = LocalLink::find(LocalLink::Type::UsbNcm);
-    const LocalLink::Link* ppp = LocalLink::find(LocalLink::Type::PppUart);
-    if (usb && usb->hardware() && usb->firmware()) ls.usbEnabled = lk["usb"] | ls.usbEnabled;
-    if (ppp && ppp->hardware() && ppp->firmware()) ls.pppEnabled = lk["ppp"] | ls.pppEnabled;
-    settings.saveLinks(ls);
-  }
-  if (in["maintenance"].is<JsonObject>()) {
-    JsonObject mt = in["maintenance"]; MaintenanceSettings ms = settings.maintenance();
-    ms.bootloaderApi = mt["bootloader_api"] | ms.bootloaderApi;
-    ms.bootloaderFromLan = mt["bootloader_from_lan"] | ms.bootloaderFromLan;
-    ms.consoleEnabled = mt["console_enabled"] | ms.consoleEnabled;
-    settings.saveMaintenance(ms);
+  {
+    // Links and maintenance together, because the one rule that spans them —
+    // a node must keep some way in — has to be checked on the pair before
+    // either half is saved. A link this board cannot run is dropped rather
+    // than refused: the file describes the node it came from, and restoring
+    // a T3-S3's export onto a Heltec is the normal case.
+    LinkSettings ls = settings.links();
+    MaintenanceSettings ms = settings.maintenance();
+    const bool haveLinks = in["links"].is<JsonObject>();
+    const bool haveMaint = in["maintenance"].is<JsonObject>();
+    if (haveLinks) {
+      JsonObject lk = in["links"];
+      size_t n = 0;
+      const LocalLink::Field* f = LocalLink::fields(n);
+      for (size_t i = 0; i < n; i++) {
+        if (!lk[f[i].key].is<bool>()) continue;
+        const bool want = lk[f[i].key];
+        const LocalLink::Link* link = LocalLink::find(f[i].type);
+        if (want && (!link || !link->usable())) continue;
+        ls.*(f[i].on) = want;
+      }
+    }
+    if (haveMaint) {
+      JsonObject mt = in["maintenance"];
+      ms.bootloaderApi     = mt["bootloader_api"]      | ms.bootloaderApi;
+      ms.bootloaderFromLan = mt["bootloader_from_lan"] | ms.bootloaderFromLan;
+      ms.consoleEnabled    = mt["console_enabled"]     | ms.consoleEnabled;
+    }
+    if ((haveLinks || haveMaint) && LocalLink::lockedOut(ls, ms.consoleEnabled)) {
+      sendError(request, 400, "refused: this file would leave the node with every local link off and the console off, and no way back in");
+      return;
+    }
+    if (haveLinks) settings.saveLinks(ls);
+    if (haveMaint) settings.saveMaintenance(ms);
   }
   if (in["admin"]["password"].is<const char*>()) {
     const char* p = in["admin"]["password"];
     if (strlen(p) >= 4 && strlen(p) <= 32) settings.saveAdminPassword(p);
   }
-  request->send(200, "application/json", storeHomeIgnored
-    ? "{\"ok\":true,\"restart\":true,\"note\":\"the store's location was not imported; move it with the SD card actions\"}"
-    : "{\"ok\":true,\"restart\":true}");
-  scheduleRestart(1500);
+  JsonDocument out;
+  out["ok"] = true;
+  out["restart"] = Bootloader::reboot(RESTART_SETTINGS_DELAY_MS);
+  if (storeHomeIgnored) out["note"] = "the store's location was not imported; move it with the SD card actions";
+  sendJson(request, 200, out);
 }
 
 // POST /api/settings/sd/format {"confirm":"FORMAT"} — wipes the whole card.
@@ -1507,6 +1554,8 @@ void WifiManager::handleSdEject(AsyncWebServerRequest* request, const char* body
 
 void WifiManager::handleReset(AsyncWebServerRequest* request) {
   settings.factoryReset();
-  request->send(200, "application/json", "{\"ok\":true,\"restart\":true}");
-  scheduleRestart(1500);
+  JsonDocument out;
+  out["ok"] = true;
+  out["restart"] = Bootloader::reboot(RESTART_SETTINGS_DELAY_MS);
+  sendJson(request, 200, out);
 }

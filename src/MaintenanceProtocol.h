@@ -57,7 +57,11 @@
 
 namespace Maintenance {
 
-static const char REPLY_PREFIX[] = "RM ";
+// A macro rather than a static array: the formatters below are inline and
+// odr-use it, and a static in a header gives every translation unit its own
+// object — a different definition of the same inline function per file. A
+// literal also concatenates into the format strings.
+#define REPLY_PREFIX "RM "
 constexpr size_t MAX_LINE = 96;           // request line, bytes, excluding the newline
 constexpr size_t MAX_ARGS = 3;
 constexpr size_t MAX_ARG  = 24;
@@ -187,7 +191,6 @@ public:
       if (_dropping) { _dropping = false; _len = 0; overflowed = true; return false; }
       if (_len == 0) return false;        // bare newline, or the LF of a CRLF
       _buf[_len] = '\0';
-      _ready = true;
       return true;
     }
     if (_dropping) return false;
@@ -195,27 +198,26 @@ public:
     _buf[_len++] = c;
     return false;
   }
-  const char* line() { _ready = false; const char* l = _buf; _len = 0; return l; }
-  void reset() { _len = 0; _dropping = false; _ready = false; }
+  const char* line() { _len = 0; return _buf; }
+  void reset() { _len = 0; _dropping = false; }
 
 private:
   char   _buf[MAX_LINE + 1] = {0};
   size_t _len = 0;
   bool   _dropping = false;
-  bool   _ready = false;
 };
 
 // Reply formatting into a caller-supplied buffer. Every function returns the
 // length written (without the newline) and never overruns.
 inline size_t formatData(char* out, size_t len, const char* cmd, const char* kv) {
-  return (size_t)snprintf(out, len, "%s%s %s", REPLY_PREFIX, cmd, kv);
+  return (size_t)snprintf(out, len, REPLY_PREFIX "%s %s", cmd, kv);
 }
 inline size_t formatOk(char* out, size_t len, const char* cmd, const char* kv = nullptr) {
-  if (kv && *kv) return (size_t)snprintf(out, len, "%sOK %s %s", REPLY_PREFIX, cmd, kv);
-  return (size_t)snprintf(out, len, "%sOK %s", REPLY_PREFIX, cmd);
+  if (kv && *kv) return (size_t)snprintf(out, len, REPLY_PREFIX "OK %s %s", cmd, kv);
+  return (size_t)snprintf(out, len, REPLY_PREFIX "OK %s", cmd);
 }
 inline size_t formatErr(char* out, size_t len, const char* cmd, int code, const char* text) {
-  return (size_t)snprintf(out, len, "%sERR %s %d %s", REPLY_PREFIX, cmd, code, text);
+  return (size_t)snprintf(out, len, REPLY_PREFIX "ERR %s %d %s", cmd, code, text);
 }
 
 inline int errorCode(ParseError e) {
@@ -238,11 +240,6 @@ inline const char* errorText(ParseError e) {
     case ParseError::BadArgument: return "bad argument, try HELP";
   }
   return "";
-}
-
-// Host-side helper, also used by the tests: is this line a reply at all?
-inline bool isReply(const char* line) {
-  return line && strncmp(line, REPLY_PREFIX, sizeof(REPLY_PREFIX) - 1) == 0;
 }
 
 } // namespace Maintenance

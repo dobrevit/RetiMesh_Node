@@ -70,11 +70,9 @@ public:
   bool stationConnected() const { return WiFi.status() == WL_CONNECTED; }
   const char* securityName() const { return _securityName; }
 
-  // Called from loop(): station watchdog. Restarts themselves go through
-  // Bootloader (Bootloader.h); this only forwards so existing callers keep
-  // their one-line request.
+  // Called from loop(): station watchdog. Restarts go through Bootloader
+  // (Bootloader.h), which answers whether it will honour one.
   void tick();
-  void scheduleRestart(uint32_t delayMs);
   bool wifiEnabled() const;
 
   // FreeRTOS entry point — created pinned to core 0 from main.cpp.

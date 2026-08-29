@@ -103,10 +103,9 @@ them on every push.
 | `test_airtime` | duty cycle, dwell budget, CSMA accounting |
 | `test_radio_plan` | per-chip radio limits, regional regimes, node naming |
 | `test_store_home` | where the Reticulum store belongs, card ownership, what a move does |
-| `test_local_link` | the local-link phase machine, host-facing address policy, the per-device USB subnet |
-| `test_bootloader` | which bootloader methods a board offers, the restart sequence, the 1200-baud touch |
+| `test_local_link` | the local-link phase machine and the host-facing trust rule |
+| `test_bootloader` | which bootloader methods a board offers, the restart sequence and its re-arm rule |
 | `test_maintenance` | the console protocol: parsing, malformed and overlong lines, noise, replies |
-| `test_usb_plan` | the composite USB device fits the S3's endpoints |
 
 The host tooling has its own suite, run by CI too:
 ```sh

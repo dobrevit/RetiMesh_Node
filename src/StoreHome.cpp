@@ -20,6 +20,7 @@
 #endif
 #include "RnsAnnounce.h"
 #include "WifiManager.h"
+#include "Bootloader.h"
 #include "Display.h"
 
 namespace StoreHome {
@@ -342,7 +343,7 @@ static bool queue(Move m, const char* said) {
   if (!remember(m)) { strlcpy(sResult, "failed: the request could not be saved", sizeof(sResult)); return false; }
   strlcpy(sResult, said, sizeof(sResult));
   log_w("store: %s", sResult);
-  wifiManager.scheduleRestart(1200);
+  Bootloader::reboot(RESTART_SETTINGS_DELAY_MS, Bootloader::Source::Settings);
   return true;
 }
 

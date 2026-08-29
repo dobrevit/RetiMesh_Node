@@ -97,6 +97,7 @@ private:
 #endif
   // Typed, so paint()'s switch can list every page and let the compiler
   // object when one is added without being drawn (-Werror=switch).
+  Page nextPage(Page p) const;           // the button's next stop; skips pages that mean nothing right now
   Page     _page = STATUS;
   uint8_t  _chargeSweep = 0;             // animates the battery fill while charging
   // Sampled once per frame in paint(). Reading the PMU costs four I2C

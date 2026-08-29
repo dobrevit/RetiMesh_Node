@@ -95,7 +95,6 @@ sequenceDiagram
 | `LocalLinkState.h`, `LocalLink.*` | the ways a host reaches the node: phase machine (pure), registry, Wi-Fi adapters, local-address policy |
 | `BootloaderPlan.h`, `Bootloader.*` | every restart: request → quiesce → restart; software entry into the ROM downloader on S2/S3/C3; the 1200-baud touch detector (pure) |
 | `MaintenanceProtocol.h`, `Maintenance.*` | the serial maintenance console: line protocol (pure), commands |
-| `UsbDescriptorPlan.h` | the composite USB device's endpoint budget and identity (pure, static-asserted) |
 | `Display.*` | SSD1306 pages, button navigation, sleep |
 | `HDLC.h` | RNS TCP framing |
 | `data/` | web app (LittleFS): status page, settings page |

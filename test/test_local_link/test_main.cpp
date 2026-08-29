@@ -3,7 +3,7 @@
 //
 // This file is part of RetiMesh Node. See LICENSE.
 //
-// The local-link phase machine and the address rules the bootloader policy
+// The local-link phase machine and the trust rule the bootloader policy
 // rests on. Every link driver — Wi-Fi today, USB and PPP later — feeds the
 // same machine, so the machine is the thing to test: a driver that reports
 // "ready" with no address, or that keeps an address after losing carrier,
@@ -93,7 +93,7 @@ static void test_repeated_events_do_not_report_a_change() {
 // --- names: the API vocabulary must never print "unknown" for a real value --
 
 static void test_every_type_and_phase_has_a_name() {
-  const Type types[] = { Type::WifiAp, Type::WifiSta, Type::UsbNcm, Type::PppUart, Type::RnsSerial, Type::Ethernet };
+  const Type types[] = { Type::WifiAp, Type::WifiSta, Type::UsbNcm, Type::PppUart };
   for (Type t : types) TEST_ASSERT_NOT_EQUAL(0, strcmp(typeName(t), "unknown"));
   const Phase phases[] = { Phase::Disabled, Phase::Down, Phase::Up, Phase::Ready };
   for (Phase p : phases) TEST_ASSERT_NOT_EQUAL(0, strcmp(phaseName(p), "unknown"));
@@ -111,27 +111,11 @@ static void test_only_the_station_uplink_is_not_host_facing() {
   TEST_ASSERT_FALSE(isHostFacing(Type::WifiSta));
 }
 
-// --- address arithmetic ---------------------------------------------------
-
-static void test_subnet_membership() {
-  const uint32_t net = ipv4(10, 42, 0, 0), mask = 0xFFFFFF00u;
-  TEST_ASSERT_TRUE(inSubnet(ipv4(10, 42, 0, 7), net, mask));
-  TEST_ASSERT_FALSE(inSubnet(ipv4(10, 42, 1, 7), net, mask));
-  TEST_ASSERT_FALSE(inSubnet(ipv4(192, 168, 1, 7), net, mask));
-}
-
-static void test_usb_subnet_is_per_device() {
-  // Two nodes on one computer must not both claim 10.64.0.1; the subnet
-  // follows the node's MAC so they land apart without anyone configuring it.
-  TEST_ASSERT_NOT_EQUAL(usbSubnetFor(0x12), usbSubnetFor(0x34));
-  TEST_ASSERT_TRUE(inSubnet(usbHostAddress(0x12), usbSubnetFor(0x12), USB_SUBNET_MASK));
-  TEST_ASSERT_TRUE(inSubnet(usbNodeAddress(0x12), usbSubnetFor(0x12), USB_SUBNET_MASK));
-  TEST_ASSERT_FALSE(inSubnet(usbHostAddress(0x34), usbSubnetFor(0x12), USB_SUBNET_MASK));
-  char text[16];
-  ipv4Text(usbNodeAddress(0x00), text, sizeof(text));
-  TEST_ASSERT_EQUAL_STRING("10.64.0.1", text);
-  ipv4Text(usbHostAddress(0xA1), text, sizeof(text));
-  TEST_ASSERT_EQUAL_STRING("10.64.161.2", text);
+static void test_an_address_is_one_number_octets_first() {
+  // hostOrder() and the trust rule compare these; the first octet has to be
+  // the most significant or two addresses on one link compare unequal.
+  TEST_ASSERT_EQUAL_UINT32(0x0A2A0001u, ipv4(10, 42, 0, 1));
+  TEST_ASSERT_NOT_EQUAL(ipv4(10, 42, 0, 1), ipv4(1, 0, 42, 10));
 }
 
 int main() {
@@ -146,7 +130,6 @@ int main() {
   RUN_TEST(test_repeated_events_do_not_report_a_change);
   RUN_TEST(test_every_type_and_phase_has_a_name);
   RUN_TEST(test_only_the_station_uplink_is_not_host_facing);
-  RUN_TEST(test_subnet_membership);
-  RUN_TEST(test_usb_subnet_is_per_device);
+  RUN_TEST(test_an_address_is_one_number_octets_first);
   return UNITY_END();
 }

@@ -202,15 +202,21 @@ void setup() {
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
   g_stats.transportOnline = RnsTransport::begin(txRing, rxRing, tcpInRing);
   #if HAS_AUTOINTERFACE
-    // Zero-config peering on the AP (RNS AutoInterface). It joins a multicast
-    // group on the Wi-Fi netifs, which do not exist with Wi-Fi off; it will
-    // want the USB/PPP netifs once a build carries those.
-    if (settings.links().wifiEnabled) AutoInterface::begin(tcpInRing);
+    // Zero-config peering on the AP (RNS AutoInterface). Always begun, even
+    // with Wi-Fi off: the heartbeat and /api/status ask it for a peer count,
+    // and the lock they take exists only once begin() has run. It decides
+    // for itself whether there is a netif worth joining.
+    AutoInterface::begin(tcpInRing);
   #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
-  xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",
-                          3072, &wifiManager, 1, nullptr, 0);
+  // The captive-portal DNS only exists to steer phones on the access point.
+  // Without one there is no server to poll — and polling a DNSServer that
+  // was never started costs a malloc and a logged error every ten
+  // milliseconds, on the same port the maintenance console answers on.
+  if (wifiManager.wifiEnabled())
+    xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",
+                            3072, &wifiManager, 1, nullptr, 0);
 
   xTaskCreatePinnedToCore(LoRaRadio::radioTask, "radio",
                           8192, &loraRadio, 5, nullptr, 1);

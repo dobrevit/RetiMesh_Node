@@ -209,8 +209,7 @@ async function refreshStatus() {
       else if (!l.firmware)  text = "not in this build — " + (l.reason || "");
       else if (!l.enabled)   text = "switched off";
       else if (l.up)         text = "up · " + l.ip + " (" + l.addressing + ") · " + fmtUptime(l.uptime_s)
-                                  + (l.clients !== null && l.clients !== undefined ? " · " + l.clients + " client" + (l.clients === 1 ? "" : "s") : "")
-                                  + (l.rx_bytes !== null && l.rx_bytes !== undefined ? " · rx " + l.rx_bytes + " B / tx " + l.tx_bytes + " B" : "");
+                                  + (l.clients !== undefined ? " · " + l.clients + " client" + (l.clients === 1 ? "" : "s") : "");
       else                   text = l.phase;
       t.textContent = text;
       if (l.hardware && l.firmware && l.enabled && !l.up) t.classList.add("offline");

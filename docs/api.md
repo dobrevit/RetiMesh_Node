@@ -85,16 +85,14 @@ past the checks on the way in.
   "wifi_enabled": true,
   "local_links": [
     { "name": "wifi-ap",  "type": "wifi_ap",  "hardware": true, "firmware": true, "enabled": true,
-      "phase": "ready", "up": true, "ip": "10.42.0.1", "addressing": "static", "uptime_s": 1234, "mtu": 1500,
-      "clients": 1, "rx_bytes": null, "tx_bytes": null, "rx_packets": null, "tx_packets": null, "errors": null },
+      "phase": "ready", "up": true, "ip": "10.42.0.1", "addressing": "static", "uptime_s": 1234, "clients": 1 },
     { "name": "wifi-sta", "type": "wifi_sta", "hardware": true, "firmware": true, "enabled": true,
-      "phase": "ready", "up": true, "ip": "192.168.1.42", "addressing": "dhcp", "uptime_s": 1200, "mtu": 1500, "clients": null },
+      "phase": "ready", "up": true, "ip": "192.168.1.42", "addressing": "dhcp", "uptime_s": 1200 },
     { "name": "usb0", "type": "usb_ncm",  "hardware": true,  "firmware": false, "enabled": false, "phase": "disabled",
       "reason": "this build has no USB network stack (Arduino core 2.x TinyUSB carries no NCM)" },
     { "name": "ppp0", "type": "ppp_uart", "hardware": false, "firmware": false, "enabled": false, "phase": "disabled",
       "reason": "this board has no bridge UART to carry PPP" }
   ],
-  "bootloader": { "software_entry": true, "api_enabled": true, "pending": false, "state": "idle", "primary": "software_api" },
   "sd": { "state": "partial", "type": "SDHC", "card_bytes": 15931539456, "volume_bytes": 268435456,
           "used_bytes": 60000000, "last_format": "" },
   "transport": { "enabled": true, "online": true, "lora_mode": "full", "wifi_mode": "access_point",
@@ -259,14 +257,14 @@ buttons from those rather than working the rule out again from the fields above.
 
 ### Local links
 `local_links` lists every way a host can reach the node — see
-[local-link.md](local-link.md). `type` is `wifi_ap`, `wifi_sta`, `usb_ncm`,
-`ppp_uart`, `rns_serial` or `ethernet`; `phase` is `disabled`, `down`, `up`
-(carrier, no address) or `ready`; `addressing` is `static`, `dhcp`,
-`link_local` or `none`. `hardware` says the board has it, `firmware` that this
-build can run it, `enabled` that the operator has it on; when the first is
-true and the second false, `reason` says why. Counters are `null` where the
-driver cannot count — the Wi-Fi stack keeps no per-interface totals — never
-zero. `bootloader` summarises what `GET /api/system/bootloader` says in full.
+[local-link.md](local-link.md). `type` is `wifi_ap`, `wifi_sta`, `usb_ncm` or
+`ppp_uart`; `phase` is `disabled`, `down`, `up` (carrier, no address) or
+`ready`; `addressing` is `static`, `dhcp`, `link_local` or `none`. `hardware`
+says the board has it, `firmware` that this build can run it, `enabled` that
+the operator has it on; when the first is true and the second false, `reason`
+says why. `clients` is present only where the link can count its hosts.
+Byte counters will appear with a driver that can produce them; the Wi-Fi
+stack cannot, and a field that is always null is not worth polling.
 
 ## System (auth, POST only, local links only)
 The privileged operations, guarded by the admin password, the
@@ -276,12 +274,15 @@ accepted, and a request from the station network answers `403` unless
 `maintenance.bootloader_from_lan` is set. Nothing here is reachable through
 Reticulum. Details and the recovery procedure: [local-link.md](local-link.md#the-bootloader-manager).
 
-- `GET /api/system/bootloader` (public) → `{ "api_enabled", "software_entry", "pending", "state", "board", "primary", "methods": ["software_api","auto_reset_dtr_rts","manual_recovery"], "allowed_from_here", "recovery", "confirm": "BOOTLOADER" }` — what this board can do and whether a request from the caller's address would be accepted
+- `GET /api/system/bootloader` (public) → `{ "software_entry", "api_enabled", "pending", "state", "primary", "methods": ["software_api","auto_reset_dtr_rts","manual_recovery"], "recovery", "board", "confirm": "BOOTLOADER", "allowed_from_here" }` — what this board can do and whether a request from the caller's link would be accepted. The first seven fields are the same object `GET /api/settings` returns as `bootloader`; "from here" is decided by the link the request arrived on, not by the caller's address
 - `POST /api/system/bootloader` `{"confirm":"BOOTLOADER"}` → `202 { "ok":true, "restart":true, "target":"bootloader", "method":"software_api", "delay_ms":600, "expect":"…", "recovery":"…" }`; the node restarts into the ROM downloader 600 ms later. `400` without the confirm word, `403` when switched off or from a non-local link, `409` while a restart is already in progress, `501` on a classic ESP32 (it cannot; use esptool's DTR/RTS reset)
 - `POST /api/system/reboot` `{"confirm":"REBOOT"}` → `202 { "ok":true, "restart":true, "target":"app" }`
 
-While a restart is pending every settings `POST` answers `503` and new
-Reticulum TCP connections are refused.
+While a restart is pending every settings `POST` (including `reset`) answers
+`503` and new Reticulum TCP connections are refused. `POST /api/system/bootloader`
+is the exception: a bootloader request may outrank a plain reboot that is
+already armed, and the earlier of the two deadlines is kept. Every reply that
+says `"restart"` says whether the restart was actually granted.
 
 ## Bulletin board (public)
 - `GET /api/board` → `[{"id":1,"author":"…","text":"…"}]` (ordered, no timestamps — no RTC)
@@ -305,15 +306,15 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 ```
 
 ## Settings (auth)
-- `GET /api/settings` → `{ radio, wifi, transport, links, maintenance, admin }` (password never returned; `has_password`, `default_password` flags). `links` is `{ wifi: {hardware, supported, enabled}, usb: {…, reason}, ppp: {…, reason} }`; `maintenance` is `{ bootloader_api, bootloader_from_lan, console_enabled, software_entry, bootloader_methods, recovery }`
+- `GET /api/settings` → `{ radio, wifi, transport, links, maintenance, bootloader, admin }` (password never returned; `has_password`, `default_password` flags). `links` is `{ wifi: {hardware, supported, enabled}, usb: {…, reason}, ppp: {…, reason} }` — `enabled` is false for a link this build cannot run, whatever is stored; `maintenance` is `{ bootloader_api, bootloader_from_lan, console_enabled }`; `bootloader` is what the board can do, the same object as `GET /api/system/bootloader`
 - `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct,gps_enabled,gps_share_position}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,sta_ssid,sta_password}` → saves, restarts (`"restart":true`); `sta_ssid` blank = station mode off
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text
-- `GET /api/settings/export` → downloadable JSON of all settings (no identity keys)
+- `GET /api/settings/export` → downloadable JSON of all settings (no identity keys). `links` carries only the links this build can run: a switch for a driver that does not exist here would carry a meaningless value onto a node where it means something
 - `POST /api/settings/import` (a settings export; sections optional) → applies, restarts
-- `POST /api/settings/links` `{wifi,usb,ppp}` (any subset, booleans) → saves; `"restart":true` when Wi-Fi changed. A link the board lacks or the build cannot run is refused by name with the reason (`400`) rather than saved
-- `POST /api/settings/maintenance` `{bootloader_api,bootloader_from_lan,console_enabled}` → saves, applies live
+- `POST /api/settings/links` `{wifi,usb,ppp}` (any subset, booleans) → saves; `"restart":true` when Wi-Fi changed and the restart was granted. A link the board lacks or the build cannot run is refused by name with the reason (`400`) rather than saved; so is a combination that, with the console off, would leave no way to reach the node
+- `POST /api/settings/maintenance` `{bootloader_api,bootloader_from_lan,console_enabled}` → saves, applies live; turning the console off is refused (`400`) while no local link is enabled, for the same reason
 - `POST /api/settings/admin` `{password}`
 - `POST /api/settings/reset` → factory defaults, restarts (identity kept)
 - `POST /api/settings/sd/format` `{"confirm":"FORMAT"}` → erases the SD card and creates one FAT32 volume; poll `sd.state`/`sd.last_format` in `/api/status` (409 if no card or already formatting)

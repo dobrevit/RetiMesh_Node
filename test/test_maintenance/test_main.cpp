@@ -134,15 +134,15 @@ static void test_replies_carry_the_prefix_a_host_filters_on() {
   char buf[128];
   formatOk(buf, sizeof(buf), "VERSION");
   TEST_ASSERT_EQUAL_STRING("RM OK VERSION", buf);
-  TEST_ASSERT_TRUE(isReply(buf));
   formatOk(buf, sizeof(buf), "BOOTLOADER", "method=software_api delay_ms=300");
   TEST_ASSERT_EQUAL_STRING("RM OK BOOTLOADER method=software_api delay_ms=300", buf);
   formatData(buf, sizeof(buf), "VERSION", "version=v1.0.0");
   TEST_ASSERT_EQUAL_STRING("RM VERSION version=v1.0.0", buf);
   formatErr(buf, sizeof(buf), "FLASH", 404, "unknown command, try HELP");
   TEST_ASSERT_EQUAL_STRING("RM ERR FLASH 404 unknown command, try HELP", buf);
-  TEST_ASSERT_FALSE(isReply("[I][main.cpp:98] RetiMesh Node dev"));
-  TEST_ASSERT_FALSE(isReply("RMX"));
+  // Every reply begins with the prefix the host filters on, and the prefix
+  // ends in the space that keeps "RMX" from matching.
+  TEST_ASSERT_EQUAL_STRING_LEN("RM ", buf, 3);
 }
 
 static void test_replies_never_overrun_a_small_buffer() {
