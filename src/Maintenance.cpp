@@ -252,7 +252,7 @@ void poll() {
     const int c = sIo->read();
     if (c < 0) break;
     bool overflowed = false;
-    if (sLines.feed((char)c, overflowed)) dispatch(sLines.line());
+    if (sLines.feed((char)c, overflowed, millis())) dispatch(sLines.line());
     else if (overflowed) err("?", errorCode(ParseError::TooLong), errorText(ParseError::TooLong));
   }
 }

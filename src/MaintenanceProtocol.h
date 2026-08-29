@@ -182,13 +182,24 @@ inline ParseError parse(const char* line, Request& out) {
 // Bytes -> lines, with a hard cap. An overlong line is not truncated into a
 // shorter, plausible one; it is dropped whole, reported once, and the
 // assembler resynchronises at the next newline.
+// A partial line that stalls is dropped. Anything that opens the port and
+// writes a few bytes without a newline — ModemManager probing a new port
+// with AT commands is the usual culprit — would otherwise leave those bytes
+// waiting, and the next real command would be glued onto them and refused.
+// Two seconds is longer than any typist's pause between keystrokes is short.
+constexpr uint32_t LINE_IDLE_MS = 2000;
+
 class LineAssembler {
 public:
   // Returns true when a complete line is available in line(). `overflowed`
   // is set (once, on the byte that ended the overlong line) so the caller can
-  // answer with a TooLong error.
-  bool feed(char c, bool& overflowed) {
+  // answer with a TooLong error. `nowMs` lets a stalled partial line expire
+  // (LINE_IDLE_MS); a caller without a clock passes nothing and gets no
+  // expiry.
+  bool feed(char c, bool& overflowed, uint32_t nowMs = 0) {
     overflowed = false;
+    if (pending() && nowMs - _lastByteMs > LINE_IDLE_MS) reset();
+    _lastByteMs = nowMs;
     if (c == '\n' || c == '\r') {
       if (_dropping) { _dropping = false; _len = 0; overflowed = true; return false; }
       if (_len == 0) return false;        // bare newline, or the LF of a CRLF
@@ -202,11 +213,13 @@ public:
   }
   const char* line() { _len = 0; return _buf; }
   void reset() { _len = 0; _dropping = false; }
+  bool pending() const { return _len > 0 || _dropping; }
 
 private:
-  char   _buf[MAX_LINE + 1] = {0};
-  size_t _len = 0;
-  bool   _dropping = false;
+  char     _buf[MAX_LINE + 1] = {0};
+  size_t   _len = 0;
+  bool     _dropping = false;
+  uint32_t _lastByteMs = 0;
 };
 
 // Reply formatting into a caller-supplied buffer. Every function returns the

@@ -115,7 +115,13 @@ follow the count on the same line. The `HELLO` banner the node prints when
 the console starts says `protocol=2`; protocol 1 had neither.
 
 Errors are `RM ERR <CMD> <code> <text>` with HTTP-style codes (400, 404, 409,
-501); an error never carries data lines. Lines longer than 96 bytes are dropped whole and answered with a 400 —
+501); an error never carries data lines. A partial line that stalls for two
+seconds is dropped, so bytes a port prober left behind — ModemManager writes
+`AT` to every new CDC-ACM port — cannot be glued onto the next command; the
+host tool asks once more when a first reply names no command. A Linux host
+that runs ModemManager is still better off telling it to leave the node
+alone: `ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001",
+ENV{ID_MM_DEVICE_IGNORE}="1"` in a udev rule. Lines longer than 96 bytes are dropped whole and answered with a 400 —
 never truncated into something shorter that might parse. Bytes outside
 printable ASCII make a line unusable, so bridge noise at the wrong baud is not
 a command. The console can be switched off (`maintenance.console_enabled`);

@@ -34,7 +34,7 @@ class FakeSerial:
     """Answers like the firmware's Maintenance.cpp, log lines included."""
 
     def __init__(self, board="LilyGO T3-S3", software_entry=True, silent=False,
-                 drop_first=False, drop_always=False, counts=True):
+                 drop_first=False, drop_always=False, counts=True, stale_prefix=False):
         self.board = board
         self.software_entry = software_entry
         self.silent = silent
@@ -44,6 +44,9 @@ class FakeSerial:
         self.drop_first = drop_first
         self.drop_always = drop_always
         self.counts = counts
+        # Bytes a port prober left in the node's line buffer: the first
+        # command arrives glued to them and is refused under no name.
+        self.stale_prefix = stale_prefix
         self.out = bytearray()
         self.sent = []
         self.dtr = self.rts = None
@@ -58,7 +61,10 @@ class FakeSerial:
             return
         line = data.decode().strip().upper()
         reply = ["[I][main.cpp:200] heartbeat line that shares the port"]
-        if line == "VERSION":
+        if self.stale_prefix:
+            self.stale_prefix = False
+            reply += ["RM ERR ? 400 bad argument, try HELP"]
+        elif line == "VERSION":
             reply += [f'RM VERSION firmware="RetiMesh Node" version=v0.2.0 board="{self.board}" idf=v4.4.7',
                       self._ok("VERSION", 1)]
         elif line == "BOOTLOADER CONFIRM":
@@ -189,6 +195,12 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual((status, data[0]["board"]), ("OK", "LilyGO T3-S3"))
         self.assertEqual(ser.sent.count("VERSION\n"), 2)
         self.assertNotIn("lines", kv)
+
+    def test_a_command_glued_onto_stale_bytes_is_asked_again(self):
+        ser = FakeSerial(stale_prefix=True)
+        status, _, data = Console(ser, timeout=1.0).command("VERSION")
+        self.assertEqual((status, data[0]["board"]), ("OK", "LilyGO T3-S3"))
+        self.assertEqual(ser.sent.count("VERSION\n"), 2)
 
     def test_a_reply_that_stays_short_is_reported_not_trusted(self):
         ser = FakeSerial(drop_always=True)

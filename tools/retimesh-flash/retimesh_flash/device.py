@@ -300,6 +300,11 @@ class Console:
         its word."""
         for attempt in (1, 2):
             status, kv, data = self._exchange(line)
+            if status == "ERR" and kv.get("cmd") == "?" and attempt == 1:
+                # The node refused a line it could not even name: ours, glued
+                # onto bytes a port prober left in its buffer. The node has
+                # discarded them with that reply; once more and it is clean.
+                continue
             if status != "OK":
                 return status, kv, data
             expected = kv.pop("lines", None)
@@ -325,7 +330,7 @@ class Console:
             if words.startswith("ERR "):
                 m = re.match(r"ERR (\S+) (\d+) ?(.*)", words)
                 if m and (m.group(1) == cmd or m.group(1) == "?"):
-                    return "ERR", {"code": int(m.group(2)), "text": m.group(3)}, data
+                    return "ERR", {"cmd": m.group(1), "code": int(m.group(2)), "text": m.group(3)}, data
                 continue
             if words.startswith(cmd + " "):
                 data.append(parse_kv(words[len(cmd) + 1:]))
