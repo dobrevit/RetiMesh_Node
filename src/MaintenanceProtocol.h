@@ -33,7 +33,7 @@
 //      RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 //
 //      > BOOTLOADER CONFIRM
-//      RM OK BOOTLOADER method=software_api delay_ms=300
+//      RM OK BOOTLOADER method=software_api delay_ms=600
 //
 //  Replies: zero or more "RM <CMD> key=value ..." data lines, then exactly
 //  one "RM OK <CMD> [key=value ...]" or "RM ERR <CMD> <code> <text>". Codes

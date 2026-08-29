@@ -13,6 +13,8 @@ retimesh-flash — install RetiMesh Node firmware from GitHub releases.
 Discovery: <repo>/releases/latest (or /tags/<version>) -> release.json ->
 board archive. Every part is SHA-256 checked before esptool runs.
 """
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
@@ -27,7 +29,6 @@ from pathlib import Path
 from . import device as dev
 
 DEFAULT_REPO = os.environ.get("RETIMESH_REPO", "dobrevit/RetiMesh_Node")
-ESP_USB_VIDS = {0x303A, 0x10C4, 0x1A86, 0x0403}   # Espressif, CP210x, CH34x, FTDI
 
 
 # ---------------------------------------------------------------------------
@@ -86,18 +87,9 @@ def choose(prompt: str, options: list[tuple[str, str]]) -> str:
 
 
 def esp_ports(show_all: bool = False) -> list[tuple[str, str]]:
-    """USB serial ports, ESP-looking vendor IDs first. Legacy ttyS*/COM
-    ports without a USB id are hidden unless show_all is set."""
-    from serial.tools import list_ports
-    found = []
-    for p in list_ports.comports():
-        if p.vid is None and not show_all:
-            continue
-        likely = p.vid in ESP_USB_VIDS
-        tag = "" if likely else "  (unknown USB vendor)" if p.vid is not None else "  (no USB id)"
-        found.append((p.device, f"{p.device} — {p.description}{tag}", likely))
-    found.sort(key=lambda t: not t[2])
-    return [(d, l) for d, l, _ in found]
+    """USB serial ports, ESP-looking ones first (one table: device.list_ports).
+    Legacy ttyS*/COM ports without a USB id are hidden unless show_all is set."""
+    return [(p.device, p.label()) for p in dev.list_ports() if show_all or p.kind != "legacy"]
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +192,7 @@ def cmd_bootloader(args):
     """Put one node into its ROM downloader and say where esptool should point."""
     if args.ip:
         url = args.ip if args.ip.startswith("http") else "http://" + args.ip
-        ok, msg = dev.request_bootloader_http(url, ("admin", args.password))
+        ok, msg, _ = dev.request_bootloader_http(url, ("admin", args.password))
         print(("Requested: " if ok else "Refused: ") + msg)
         sys.exit(0 if ok else 1)
     ports = dev.list_ports()
@@ -264,9 +256,9 @@ def cmd_install(args):
         before = None
         if not args.no_handoff:
             r = dev.hand_off_to_bootloader(port=port, log=lambda m: print("  " + m))
-            if r.entered and r.method != "auto_reset_dtr_rts":
+            if r.entered:
                 before, port = "no_reset", r.port or port
-            elif not r.entered:
+            else:
                 print("  " + r.message)
         flash(board, tmp, port, args.mode, args.baud, before=before)
         info = dev.wait_for_application(port, timeout=20.0)

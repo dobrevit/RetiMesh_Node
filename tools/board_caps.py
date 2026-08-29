@@ -29,6 +29,7 @@ Config.h's defaults apply.
 
 import json
 from pathlib import Path
+from typing import Optional
 
 Import("env")  # noqa: F821  (injected by PlatformIO)
 
@@ -40,7 +41,7 @@ BOARDS = json.loads((ROOT / "boards.json").read_text())
 ALIASES = {"t3s3-local": "t3s3"}
 
 
-def caps_for(env_name: str) -> dict | None:
+def caps_for(env_name: str) -> Optional[dict]:
     entry = BOARDS.get(ALIASES.get(env_name, env_name))
     return entry.get("local_link") if entry else None
 

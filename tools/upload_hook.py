@@ -55,19 +55,21 @@ def before_upload(source, target, env):  # noqa: ARG001
     port = env.subst("$UPLOAD_PORT") or None
     node_url = os.environ.get("RETIMESH_NODE_URL")
     result = device.hand_off_to_bootloader(port=port, node_url=node_url, log=_log)
-    if result.port and not port:
-        # Discovery found the node: tell esptool which port to use.
+    if result.port and (not port or not device.same_device(result.port, port)):
+        # Discovery found the node, or the downloader came back under a new
+        # name (ttyACM0 -> ttyACM1 on a busy host): point esptool at it.
+        _log(f"using {result.port}" + (f" instead of {port}" if port else ""))
         env.Replace(UPLOAD_PORT=result.port)
     if result.entered:
+        # entered is only ever true after a console or HTTP request: the chip
+        # is already in download mode, and a DTR/RTS reset on top would kick
+        # it back to the application on a USB-Serial/JTAG port.
         _log(f"downloader ready on {result.port} via {result.method}")
-        if result.method != "auto_reset_dtr_rts":
-            # The chip is already in download mode; a DTR/RTS reset on top would
-            # kick it back to the application on a USB-Serial/JTAG port.
-            flags = list(env.get("UPLOADERFLAGS", []))
-            if "--before" in flags:
-                i = flags.index("--before")
-                flags[i + 1] = "no_reset"
-                env.Replace(UPLOADERFLAGS=flags)
+        flags = list(env.get("UPLOADERFLAGS", []))
+        if "--before" in flags:
+            i = flags.index("--before")
+            flags[i + 1] = "no_reset"
+            env.Replace(UPLOADERFLAGS=flags)
     else:
         _log(result.message)
 

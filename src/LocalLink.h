@@ -79,11 +79,16 @@ void   poll(uint32_t nowMs);                     // from loop()
 // Copies out every link's snapshot; returns how many were written.
 size_t snapshots(Snapshot* out, size_t max);
 
-// True when `ipHostOrder` is on the subnet of a Ready, host-facing link. The
-// bootloader API accepts requests from those links by default and from no
-// other address, so a relay on somebody's LAN cannot be put into its
-// downloader from across that LAN unless the operator says so.
+// True when `ipHostOrder` is on the subnet of a Ready, host-facing link and
+// on no other link's. The bootloader API accepts requests from those links by
+// default and from no other address, so a relay on somebody's LAN cannot be
+// put into its downloader from across that LAN unless the operator says so —
+// and a LAN that happens to be numbered like the access point is refused too,
+// because an address alone cannot say which side it came in on.
 bool isHostFacingAddress(uint32_t ipHostOrder);
+
+// An IPAddress as a host-order number, for inSubnet() and friends.
+uint32_t hostOrder(const IPAddress& a);
 
 // The Wi-Fi adapters. Constructed in main.cpp so the boot order is visible
 // in one place; WifiManager still owns the radio, and these only observe it.

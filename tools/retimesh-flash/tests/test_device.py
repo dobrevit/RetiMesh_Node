@@ -106,6 +106,15 @@ class PortsTest(unittest.TestCase):
     def test_explicit_device_that_is_absent(self):
         self.assertIsNone(select_port(list_ports([S3]), device="/dev/ttyUSB9"))
 
+    def test_a_symlink_path_names_the_same_port(self):
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, "ttyACM0"); open(real, "w").close()
+            link = os.path.join(d, "by-id-link"); os.symlink(real, link)
+            ports = list_ports([fake_comport(real, 0x303A, 0x1001, "X", "USB JTAG/serial debug unit")])
+            self.assertIsNotNone(select_port(ports, device=link))
+            self.assertTrue(device.same_device(link, real))
+
 
 class ConsoleTest(unittest.TestCase):
     def test_version_reply_is_parsed_past_log_lines(self):
@@ -150,7 +159,7 @@ class HandOffTest(unittest.TestCase):
             return list_ports(ports_seq[i])
         return hand_off_to_bootloader(port=port, node_url=node_url, log=self.log.append,
                                       ports_fn=ports_fn, probe=probe,
-                                      request_http=request_http or (lambda *a, **k: (False, "no HTTP answer")),
+                                      request_http=request_http or (lambda *a, **k: (False, "no HTTP answer", 0)),
                                       sleep=self.clock.sleep, clock=self.clock.now, reappear_timeout=8.0)
 
     def test_console_path_on_an_s3(self):
@@ -181,14 +190,14 @@ class HandOffTest(unittest.TestCase):
 
     def test_no_console_falls_back_to_http(self):
         r = self.run_handoff([[S3]], probe=lambda dev: None, node_url="http://10.42.0.1",
-                             request_http=lambda url, auth: (True, "accepted"))
+                             request_http=lambda url, auth: (True, "accepted", 600))
         self.assertTrue(r.entered)
         self.assertEqual(r.method, "http")
         self.assertEqual(r.tried, ["console on /dev/ttyACM0", "http http://10.42.0.1"])
 
     def test_http_refused_leaves_reset_to_esptool(self):
         r = self.run_handoff([[S3]], probe=lambda dev: None, node_url="http://10.42.0.1",
-                             request_http=lambda url, auth: (False, "HTTP 403: only from a directly attached link"))
+                             request_http=lambda url, auth: (False, "HTTP 403: only from a directly attached link", 0))
         self.assertFalse(r.entered)
         self.assertEqual(r.method, "auto_reset_dtr_rts")
 
@@ -234,8 +243,9 @@ class HttpTest(unittest.TestCase):
     def test_bootloader_request_outcomes(self):
         ok = lambda url, body=None, auth=None, timeout=3.0: (202, {"method": "software_api", "delay_ms": 600})
         self.assertEqual(request_bootloader_http("http://x", fetch=ok)[0], True)
+        self.assertEqual(request_bootloader_http("http://x", fetch=ok)[2], 600)
         refused = lambda url, body=None, auth=None, timeout=3.0: (403, {"error": "switched off"})
-        self.assertEqual(request_bootloader_http("http://x", fetch=refused), (False, "HTTP 403: switched off"))
+        self.assertEqual(request_bootloader_http("http://x", fetch=refused), (False, "HTTP 403: switched off", 0))
         dead = lambda url, body=None, auth=None, timeout=3.0: (0, {})
         self.assertEqual(request_bootloader_http("http://x", fetch=dead)[1], "no HTTP answer")
 
@@ -244,14 +254,18 @@ class WaitForApplicationTest(unittest.TestCase):
     def test_returns_when_version_answers(self):
         clock = Clock()
         answers = iter([None, None, device.NodeInfo("RetiMesh Node", "v2", "T3-S3", "console:/dev/ttyACM0")])
+        hellos = []
         info = wait_for_application("/dev/ttyACM0", 10.0, probe=lambda d: next(answers),
-                                    ports_fn=lambda: list_ports([S3]), sleep=clock.sleep, clock=clock.now)
+                                    ports_fn=lambda: list_ports([S3]), sleep=clock.sleep, clock=clock.now,
+                                    hello=lambda d, t: (hellos.append(d), True)[1])
         self.assertEqual(info.version, "v2")
+        self.assertTrue(all(d == "/dev/ttyACM0" for d in hellos))
 
     def test_gives_up_on_time(self):
         clock = Clock()
         info = wait_for_application("/dev/ttyACM0", 5.0, probe=lambda d: None,
-                                    ports_fn=lambda: list_ports([S3]), sleep=clock.sleep, clock=clock.now)
+                                    ports_fn=lambda: list_ports([S3]), sleep=clock.sleep, clock=clock.now,
+                                    hello=lambda d, t: (clock.sleep(t), False)[1])
         self.assertIsNone(info)
         self.assertGreaterEqual(clock.t, 5.0)
 

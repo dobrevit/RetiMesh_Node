@@ -34,7 +34,7 @@ namespace Maintenance {
 
 static Stream*       sIo = nullptr;
 static LineAssembler sLines;
-static char          sOut[160];
+static char          sOut[224];
 
 // Bytes read per poll. The loop task runs every 200 ms and a typed command is
 // a dozen bytes; a host script pasting a line is under a hundred. Anything
@@ -52,7 +52,9 @@ static void ok(const char* cmd, const char* kv = nullptr) { send(formatOk(sOut, 
 static void err(const char* cmd, int code, const char* text) { send(formatErr(sOut, sizeof(sOut), cmd, code, text)); }
 
 static void dataf(const char* cmd, const char* fmt, ...) {
-  char kv[128];
+  // Room for the longest line: LINKS with a quoted reason runs to ~150 bytes,
+  // and a truncated reply loses the closing quote a host parser keys on.
+  char kv[192];
   va_list ap; va_start(ap, fmt);
   vsnprintf(kv, sizeof(kv), fmt, ap);
   va_end(ap);
@@ -148,8 +150,14 @@ static void doWifi(const Request& r) {
   if (ls.wifiEnabled == on) { ok("WIFI", on ? "wifi=on unchanged=true" : "wifi=off unchanged=true"); return; }
   ls.wifiEnabled = on;
   if (!settings.saveLinks(ls)) { err("WIFI", 500, "NVS write failed"); return; }
-  ok("WIFI", on ? "wifi=on restart=true" : "wifi=off restart=true");
-  Bootloader::reboot(500, Bootloader::Source::Console);
+  // Saved either way; whether a restart follows is the manager's answer — a
+  // bootloader entry already on its way is not downgraded, and the operator
+  // is told the setting takes effect at the next boot instead.
+  const bool restarting = Bootloader::reboot(RESTART_SETTINGS_DELAY_MS, Bootloader::Source::Console);
+  char kv[64];
+  snprintf(kv, sizeof(kv), "wifi=%s restart=%s%s", on ? "on" : "off", restarting ? "true" : "false",
+           restarting ? "" : " note=applies_at_next_boot");
+  ok("WIFI", kv);
 }
 
 static void doRestart(const Request& r, Bootloader::Target target) {
@@ -161,16 +169,16 @@ static void doRestart(const Request& r, Bootloader::Target target) {
     return;
   }
   const char* why = nullptr;
-  // The reply has to leave before the port goes away. 300 ms is generous for
-  // a few hundred bytes on any of these ports and short enough that a script
-  // waiting for the downloader is not kept guessing.
-  if (!Bootloader::request(target, Bootloader::Source::Console, 300, &why)) {
+  // The reply has to leave before the port goes away; the same grace the
+  // HTTP path gives its 202, so a host tool can wait on one figure.
+  if (!Bootloader::request(target, Bootloader::Source::Console, RESTART_ACK_DELAY_MS, &why)) {
     err(name, target == Bootloader::Target::Bootloader && !Bootloader::canEnterAutomatically() ? 501 : 409, why);
     return;
   }
   char kv[96];
-  snprintf(kv, sizeof(kv), "target=%s method=%s delay_ms=300", Bootloader::targetName(target),
-           target == Bootloader::Target::Bootloader ? Bootloader::methodName(Bootloader::Method::SoftwareApi) : "esp_restart");
+  snprintf(kv, sizeof(kv), "target=%s method=%s delay_ms=%d", Bootloader::targetName(target),
+           target == Bootloader::Target::Bootloader ? Bootloader::methodName(Bootloader::Method::SoftwareApi) : "esp_restart",
+           RESTART_ACK_DELAY_MS);
   ok(name, kv);
 }
 

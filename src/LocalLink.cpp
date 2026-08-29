@@ -51,15 +51,18 @@ size_t snapshots(Snapshot* out, size_t max) {
 }
 
 bool isHostFacingAddress(uint32_t ip) {
+  bool hostFacing = false;
   for (size_t i = 0; i < sCount; i++) {
     const Link* l = sLinks[i];
-    if (!isHostFacing(l->type())) continue;
-    if (l->snapshot().phase != Phase::Ready) continue;
     uint32_t net, mask;
-    if (l->subnet(net, mask) && inSubnet(ip, net, mask)) return true;
+    if (!l->subnet(net, mask) || !inSubnet(ip, net, mask)) continue;   // subnet() is false unless Ready
+    if (!isHostFacing(l->type())) return false;          // also reachable from the uplink: refuse
+    hostFacing = true;
   }
-  return false;
+  return hostFacing;
 }
+
+uint32_t hostOrder(const IPAddress& a) { return ipv4(a[0], a[1], a[2], a[3]); }
 
 const char* unavailableReason(const Link& link) {
   if (link.firmware()) return "";
@@ -70,8 +73,6 @@ const char* unavailableReason(const Link& link) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-static uint32_t hostOrder(const IPAddress& a) { return ipv4(a[0], a[1], a[2], a[3]); }
-
 static void fillCommon(Snapshot& s, const Link& l, const Machine& m, uint32_t nowMs) {
   s.type = l.type();
   strlcpy(s.name, l.name(), sizeof(s.name));
@@ -129,7 +130,7 @@ bool WifiApLink::subnet(uint32_t& network, uint32_t& mask) const {
 // Station
 // ---------------------------------------------------------------------------
 bool WifiStaLink::enabled() const {
-  return settings.links().wifiEnabled && settings.wifi().staSsid[0] != '\0';
+  return settings.links().wifiEnabled && wifiManager.stationConfigured();
 }
 
 void WifiStaLink::begin() {
@@ -141,7 +142,7 @@ void WifiStaLink::poll(uint32_t nowMs) {
   _nowMs = nowMs;
   if (!enabled()) { _m.apply(Event::Disable, nowMs); return; }
   _m.apply(Event::Enable, nowMs);
-  const bool connected = WiFi.status() == WL_CONNECTED;
+  const bool connected = wifiManager.stationConnected();
   _m.apply(connected ? Event::CarrierUp : Event::CarrierDown, nowMs);
   if (connected) {
     const bool addressed = (uint32_t)WiFi.localIP() != 0;

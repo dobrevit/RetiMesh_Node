@@ -27,6 +27,7 @@ because the PlatformIO hook and the CLI both want to explain, not crash.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import urllib.error
@@ -104,11 +105,17 @@ def list_ports(comports: Optional[Iterable] = None) -> list[Port]:
     return out
 
 
+def same_device(a: str, b: str) -> bool:
+    """/dev/serial/by-id/... and /dev/ttyACM0 are one port; pyserial reports the
+    latter and people rightly pass the former."""
+    return a == b or os.path.realpath(a) == os.path.realpath(b)
+
+
 def select_port(ports: list[Port], device: Optional[str] = None, serial: Optional[str] = None) -> Optional[Port]:
     """Pick one port by path or by USB serial number; None when ambiguous or absent."""
     if device:
         for p in ports:
-            if p.device == device:
+            if same_device(p.device, device):
                 return p
         return None
     if serial:
@@ -132,15 +139,19 @@ class Console:
     @staticmethod
     def open(device: str, timeout: float = 2.0) -> "Console":
         import serial
-        # No DTR/RTS toggling: on a USB-Serial/JTAG port that is the reset
-        # handshake, and on a bridge it pulls EN. Opening with them left alone
-        # keeps the node running, which is the point of talking to it.
+        # The lines are left asserted, deliberately. The kernel raises DTR and
+        # RTS together when the port opens, and pyserial then applies whatever
+        # was asked for — DTR first, RTS second. Asking for both low therefore
+        # passes through DTR low with RTS still high, which is precisely the
+        # reset state esptool uses (RTS -> EN, DTR -> BOOT on a bridge, and the
+        # USB-Serial/JTAG unit emulates the same). Both high is "running", and
+        # on close the kernel drops both at once. So: touch neither.
         ser = serial.Serial()
         ser.port = device
         ser.baudrate = CONSOLE_BAUD
         ser.timeout = 0.2
-        ser.dtr = False
-        ser.rts = False
+        ser.dtr = True
+        ser.rts = True
         ser.open()
         return Console(ser, timeout)
 
@@ -259,14 +270,22 @@ def probe_http(base_url: str, timeout: float = 3.0, fetch=_http) -> Optional[Nod
     return NodeInfo(doc["firmware"], doc.get("version", "?"), (doc.get("power") or {}).get("board", "?"), base_url)
 
 
+def _int(v, default: int) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def request_bootloader_http(base_url: str, auth: tuple[str, str] = ("admin", "retimesh"),
-                            fetch=_http) -> tuple[bool, str]:
+                            fetch=_http) -> tuple[bool, str, int]:
+    """(accepted, message, delay_ms the node said it would wait)."""
     code, doc = fetch(base_url.rstrip("/") + "/api/system/bootloader", {"confirm": "BOOTLOADER"}, auth)
     if code == 202:
-        return True, f"accepted ({doc.get('method')}, {doc.get('delay_ms')} ms)"
+        return True, f"accepted ({doc.get('method')}, {doc.get('delay_ms')} ms)", _int(doc.get("delay_ms"), 600)
     if code == 0:
-        return False, "no HTTP answer"
-    return False, f"HTTP {code}: {doc.get('error', 'refused')}"
+        return False, "no HTTP answer", 0
+    return False, f"HTTP {code}: {doc.get('error', 'refused')}", 0
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +349,8 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url: Optional[str] =
                 status, kv = "ERR", {"code": 0, "text": str(exc)}
             if status == "OK":
                 log(f"node accepted BOOTLOADER ({kv.get('method')}, {kv.get('delay_ms')} ms)")
-                return _await_downloader(chosen, "console", log, ports_fn, sleep, clock, reappear_timeout, tried)
+                return _await_downloader(chosen, "console", log, ports_fn, sleep, clock, reappear_timeout, tried,
+                                         delay_ms=_int(kv.get("delay_ms"), 600))
             if status == "ERR" and kv.get("code") == 501:
                 log(f"this board cannot enter its downloader from software: {kv.get('text')}")
                 return HandOff(False, "auto_reset_dtr_rts", chosen.device,
@@ -342,13 +362,14 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url: Optional[str] =
     # 2. HTTP, when a URL is known.
     if node_url:
         tried.append(f"http {node_url}")
-        ok, msg = request_http(node_url, auth)
+        ok, msg, delay_ms = request_http(node_url, auth)
         log(f"HTTP bootloader request: {msg}")
         if ok:
             target = chosen or wait_for_port(
                 lambda ps: select_port(ps), reappear_timeout, ports_fn, sleep, clock)
             if target:
-                return _await_downloader(target, "http", log, ports_fn, sleep, clock, reappear_timeout, tried)
+                return _await_downloader(target, "http", log, ports_fn, sleep, clock, reappear_timeout, tried,
+                                         delay_ms=delay_ms)
             return HandOff(True, "http", None, "downloader requested but no serial port appeared", tried)
 
     # 3. Nothing worked, or nothing needed to: esptool resets what it can.
@@ -361,12 +382,12 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url: Optional[str] =
 
 
 def _await_downloader(port: Port, method: str, log: Log, ports_fn, sleep, clock, timeout: float,
-                      tried: list[str]) -> HandOff:
+                      tried: list[str], delay_ms: int = 600) -> HandOff:
     """After a software request the S3's USB-Serial/JTAG unit disappears for a
     moment and comes back as the same VID:PID; a bridge port never goes away.
     Either way the port has to be present and quiet, and there is no
     device-side signal beyond that — esptool's sync is the real test."""
-    sleep(0.8)                                              # the node's ack delay + reset
+    sleep(delay_ms / 1000.0 + 0.3)                          # the node's own ack delay, then the reset
     back = wait_for_port(lambda ps: select_port(ps, device=port.device), timeout, ports_fn, sleep, clock)
     if back is None:
         # It may have come back under a new name (ttyACM0 -> ttyACM1 on a
@@ -384,17 +405,39 @@ def _same_kind(ports: list[Port], like: Port) -> Optional[Port]:
     return hits[0] if len(hits) == 1 else None
 
 
+def listen_for_hello(device: str, timeout: float) -> bool:
+    """Hold the port open and wait for the firmware's boot banner ("RM HELLO",
+    or any reply line). One open, one wait: re-opening every second would
+    re-raise the modem lines on a node that is still booting."""
+    try:
+        con = Console.open(device, timeout)
+    except Exception:
+        return False
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            line = con._readline(deadline)
+            if line is None:
+                return False
+            if line.startswith(REPLY_PREFIX):
+                return True
+    finally:
+        con.close()
+
+
 def wait_for_application(port: Optional[str], timeout: float, log: Log = _quiet,
                          probe=probe_console, ports_fn=list_ports, sleep=time.sleep,
-                         clock=time.monotonic) -> Optional[NodeInfo]:
-    """After a flash: the port comes back and VERSION answers."""
+                         clock=time.monotonic, hello=listen_for_hello) -> Optional[NodeInfo]:
+    """After a flash: the port comes back, the banner appears, VERSION answers."""
     deadline = clock() + timeout
     while clock() < deadline:
         ports = ports_fn()
         target = select_port(ports, device=port) if port else select_port(ports)
         if target:
-            info = probe(target.device)
-            if info:
-                return info
+            remaining = max(1.0, deadline - clock())
+            if hello(target.device, remaining):
+                info = probe(target.device)
+                if info:
+                    return info
         sleep(1.0)
     return None

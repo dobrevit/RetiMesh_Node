@@ -102,6 +102,12 @@ void WifiManager::begin() {
     // so a USB or PPP link — or WIFI ON at the console — reaches it.
     resolveNames();
     WiFi.persistent(false);
+    // lwIP and the netif layer are brought up inside the Wi-Fi driver's own
+    // initialisation, and mode(WIFI_OFF) on a driver that was never started
+    // returns before doing any of it — the servers below would then bind into
+    // a TCP/IP stack that does not exist. So the driver is started and the
+    // radio stopped again: the stack stays, the radio does not.
+    WiFi.mode(WIFI_STA);
     WiFi.mode(WIFI_OFF);
     log_w("Wi-Fi is switched off in settings; the access point will not start");
   }
@@ -1056,8 +1062,7 @@ void WifiManager::handleMaintenancePost(AsyncWebServerRequest* request, const ch
 // the node's Reticulum destination carries no such request.
 // ---------------------------------------------------------------------------
 static uint32_t remoteHostOrder(AsyncWebServerRequest* r) {
-  const IPAddress ip = r->client()->remoteIP();
-  return LocalLink::ipv4(ip[0], ip[1], ip[2], ip[3]);
+  return LocalLink::hostOrder(r->client()->remoteIP());
 }
 
 void WifiManager::handleBootloaderGet(AsyncWebServerRequest* request) {

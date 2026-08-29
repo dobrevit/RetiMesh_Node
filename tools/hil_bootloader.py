@@ -28,6 +28,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "retimesh-flash"))
 from retimesh_flash import device as dev  # noqa: E402
+from retimesh_flash.cli import opt  # noqa: E402  (esptool 4/5 spelling)
+
+
+def esptool(chip, port, before, after, *cmd, timeout=60):
+    return subprocess.run([sys.executable, "-m", "esptool", "--chip", chip, "--port", port,
+                           "--before", opt(before), "--after", opt(after), opt(cmd[0]), *cmd[1:]],
+                          capture_output=True, text=True, timeout=timeout)
 
 
 def main():
@@ -72,19 +79,14 @@ def main():
 
     port = r.port or a.port
     before = "no_reset" if r.entered else "default_reset"
-    rc = subprocess.run([sys.executable, "-m", "esptool", "--chip", a.chip, "--port", port,
-                         "--before", before, "--after", "no_reset", "chip_id"],
-                        capture_output=True, text=True, timeout=60)
+    rc = esptool(a.chip, port, before, "no_reset", "chip_id")
     report("rom: esptool reaches the downloader", rc.returncode == 0, (rc.stdout + rc.stderr).strip().splitlines()[-1] if (rc.stdout + rc.stderr).strip() else "")
 
     if a.firmware:
-        rc = subprocess.run([sys.executable, "-m", "esptool", "--chip", a.chip, "--port", port,
-                             "--before", "no_reset", "--after", "hard_reset", "write_flash", "0x10000", a.firmware],
-                            capture_output=True, text=True, timeout=300)
+        rc = esptool(a.chip, port, "no_reset", "hard_reset", "write_flash", "0x10000", a.firmware, timeout=300)
         report("flash: esptool wrote the application", rc.returncode == 0)
     else:
-        subprocess.run([sys.executable, "-m", "esptool", "--chip", a.chip, "--port", port,
-                        "--before", "no_reset", "--after", "hard_reset", "chip_id"], capture_output=True, timeout=60)
+        esptool(a.chip, port, "no_reset", "hard_reset", "chip_id")
 
     time.sleep(2.0)
     back = dev.wait_for_application(port, timeout=40.0)

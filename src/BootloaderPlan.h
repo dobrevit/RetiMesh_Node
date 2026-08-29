@@ -155,10 +155,15 @@ public:
   bool request(Target target, Source source, uint32_t delayMs, uint32_t nowMs) {
     if (_state == State::Quiescing || _state == State::Restarting) return false;
     if (_state == State::Armed && _target == Target::Bootloader && target == Target::App) return false;
+    // Everything the tick reads is written before the state that tells it to
+    // read: request() runs on the task that took the HTTP request or the
+    // console line, tick() on the loop task, and there is no lock between
+    // them. A tick that saw Armed with last time's deadline would restart at
+    // once, before the acknowledgement had left.
+    _dueMs  = nowMs + delayMs;
     _target = target;
     _source = source;
     _state  = State::Armed;
-    _dueMs  = nowMs + delayMs;
     return true;
   }
 
