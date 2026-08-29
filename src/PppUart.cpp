@@ -194,6 +194,11 @@ static size_t  sFrameLen = 0;
 static bool    sFrameOverflow = false;
 static constexpr uint8_t kFlag = 0x7E;
 
+// How long a frame may wait for room in the UART's transmit ring before it
+// is dropped: two frames' worth at the slowest speed, in small steps.
+static constexpr uint32_t kTxWaitMs     = 300;
+static constexpr uint32_t kTxWaitStepMs = 5;
+
 static esp_err_t transmit(void*, void* buffer, size_t len) {
   if (!sStarted || !len) return ESP_FAIL;
   const uint8_t* b = static_cast<const uint8_t*>(buffer);
@@ -205,13 +210,27 @@ static esp_err_t transmit(void*, void* buffer, size_t len) {
   // flag on its own, which no piece from lwIP is, but is cheap to rule out.
   const bool ends = b[len - 1] == kFlag && (sFrameLen > 1 || sFrameOverflow);
   if (!ends) return ESP_OK;
+  // The line is slow — a frame takes 130 ms at 115200 — and lwIP hands
+  // frames over faster than that during any transfer. Dropping the moment
+  // the ring is full cost seven frames in a 40 KB page and TCP paid for each
+  // with a retransmission timeout: 22 kbit/s on a 115 kbit/s line. So a full
+  // ring is waited on, briefly and on this task (the TCP/IP task, which is
+  // where PPP's own backpressure belongs), and only a ring that stays full
+  // for kTxWaitMs — a host that has stopped reading — drops the frame.
   size_t room = 0;
-  if (sFrameOverflow || uart_get_tx_buffer_free_size(kUart, &room) != ESP_OK || room < sFrameLen) {
-    sTxDropped++;
-  } else {
-    uart_write_bytes(kUart, sFrame, sFrameLen);
-    sTx += sFrameLen;
+  bool sent = false;
+  if (!sFrameOverflow) {
+    for (uint32_t waited = 0; waited <= kTxWaitMs; waited += kTxWaitStepMs) {
+      if (uart_get_tx_buffer_free_size(kUart, &room) == ESP_OK && room >= sFrameLen) {
+        uart_write_bytes(kUart, sFrame, sFrameLen);
+        sTx += sFrameLen;
+        sent = true;
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(kTxWaitStepMs));
+    }
   }
+  if (!sent) sTxDropped++;
   sFrameLen = 0;
   sFrameOverflow = false;
   return ESP_OK;

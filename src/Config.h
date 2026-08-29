@@ -119,7 +119,7 @@
   #define PPP_RX_RING_BYTES   4096
 #endif
 #ifndef PPP_TX_QUEUE_BYTES
-  #define PPP_TX_QUEUE_BYTES  4096
+  #define PPP_TX_QUEUE_BYTES  8192          // five frames at PPP's MTU; internal RAM
 #endif
 #ifndef PPP_BAUD_DEFAULT
   #define PPP_BAUD_DEFAULT    115200
