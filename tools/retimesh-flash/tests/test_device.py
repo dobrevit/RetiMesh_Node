@@ -371,6 +371,17 @@ class HandOffTest(unittest.TestCase):
         self.assertTrue(r.entered)
         self.assertEqual((r.method, r.port), ("touch", "/dev/ttyACM5"))
 
+    def test_a_gone_composite_port_is_followed_to_its_downloader(self):
+        # The by-id name of the composite port carries the MAC; the ROM is on
+        # the serial-JTAG unit with the same MAC, so a hand-off asked for the
+        # absent port lands on the downloader instead of giving up.
+        by_id = "/dev/serial/by-id/usb-RetiMesh_RetiMesh_Node_1CDBD4821454-if00"
+        self.assertEqual(device.node_id_from_path(by_id), "1CDBD4821454")
+        self.assertEqual(device.node_id_from_path("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_1C:DB:D4:82:14:54-if00"), "1CDBD4821454")
+        r = self.run_handoff([[S3_ROM]], probe=lambda dev, timeout=2.0, console=None: None, port=by_id, rom=True)
+        self.assertTrue(r.entered)
+        self.assertEqual((r.method, r.port, r.esptool_before), ("downloader", "/dev/ttyACM5", "default_reset"))
+
     def test_a_downloader_already_up_on_a_serial_jtag_unit_still_gets_esptool_reset(self):
         r = self.run_handoff([[S3_ROM]], probe=lambda dev, timeout=2.0, console=None: None, rom=True)
         self.assertTrue(r.entered)
@@ -536,6 +547,20 @@ class WaitForApplicationTest(unittest.TestCase):
                                         device.NodeInfo("RetiMesh Node", "v2", "T3-S3", f"console:{d}") if d == "/dev/ttyACM0" else None,
                                     ports_fn=lambda: list_ports([rnode, S3]), sleep=clock.sleep, clock=clock.now)
         self.assertEqual(info.via, "console:/dev/ttyACM0")
+
+    def test_only_the_flashed_chip_is_asked_when_its_name_is_known(self):
+        # The downloader was on the serial-JTAG unit of one chip; a soak node
+        # on the bench must not be taken for the application coming back.
+        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
+        asked = []
+        def probe(dev, timeout=2.0, console=None):
+            asked.append(dev); return info if dev == "/dev/ttyACM5" else None
+        clock = Clock()
+        seq = iter([list_ports([CP2102]), list_ports([CP2102]), list_ports([CP2102, COMPOSITE])] + [list_ports([CP2102, COMPOSITE])] * 20)
+        r = device.wait_for_application("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_1C:DB:D4:82:14:54-if00", 30.0,
+                                        probe=probe, ports_fn=lambda: next(seq), sleep=clock.sleep, clock=clock.now)
+        self.assertEqual(r, info)
+        self.assertNotIn("/dev/ttyUSB0", asked)
 
     def test_the_application_may_come_back_under_another_name(self):
         # The downloader was ttyACM1 because ttyACM0 was briefly held; the

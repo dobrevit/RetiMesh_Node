@@ -175,6 +175,14 @@ def select_port(ports: list[Port], device: Optional[str] = None, serial: Optiona
     return candidates[0] if len(candidates) == 1 else None
 
 
+def node_id_from_path(device: str) -> Optional[str]:
+    """The MAC a /dev/serial/by-id name carries, colons dropped and upper-cased,
+    for either face of the chip: usb-RetiMesh_RetiMesh_Node_1CDBD4821454-if00
+    or usb-Espressif_USB_JTAG_serial_debug_unit_1C:DB:D4:82:14:54-if00."""
+    m = re.search(r"(?:RetiMesh_Node_|serial_debug_unit_)([0-9A-Fa-f:]{12,17})-if", device)
+    return m.group(1).replace(":", "").upper() if m else None
+
+
 def usb_node_url(node_id: str) -> str:
     """Where a node answers over its USB link, from its MAC: 10.64.<n>.1 with
     <n> the last octet — the firmware's usbNodeAddress() (LocalLinkState.h),
@@ -560,10 +568,20 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
     ports = ports_fn()
     chosen = select_port(ports, device=port)
     if port and chosen is None:
-        # The named port is not there — mid-re-enumeration, or a by-id link
-        # that is momentarily gone. That is no reason to skip the HTTP path,
-        # which is precisely the one that does not need the port; an earlier
-        # version gave up here with RETIMESH_NODE_URL unread.
+        # The named port is not there. If it was the composite device and the
+        # chip is already in its ROM — an earlier attempt got it there and
+        # then lost track — its serial-JTAG downloader is on the bus under
+        # the same MAC, which the by-id name carries.
+        node_id = node_id_from_path(port)
+        rom = _port_of(ports, "usb_serial_jtag", node_id) if node_id else None
+        if rom and probe_rom(rom.device):
+            log(f"{port} is gone, but the chip's serial-JTAG downloader answers on {rom.device}")
+            return HandOff(True, "downloader", rom.device, "the downloader is already on the port",
+                           reset_capable=rom.auto_reset)
+        # Otherwise: mid-re-enumeration, or a by-id link that is momentarily
+        # gone. That is no reason to skip the HTTP path, which is precisely
+        # the one that does not need the port; an earlier version gave up
+        # here with RETIMESH_NODE_URL unread.
         if not node_url_text:
             return HandOff(False, "none", port, f"{port} is not present; nothing to hand off")
         log(f"{port} is not present; trying HTTP")
@@ -657,6 +675,16 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
 # is telling esptool to reset a chip that is already in its downloader.
 _RESTART_SLACK_S = 1.5
 
+# How long a composite device's downloader may take to show up. The chip is
+# in its ROM within two seconds of the request; whether the host learns of
+# it is another matter. A root port notices the change at once. Some hubs
+# do not report a full-speed device's departure until a transfer to it
+# fails, which can be minutes later — one bench hub took anything from
+# three seconds to two and a half minutes, whatever the device did on the
+# wire — and the serial-JTAG unit is only enumerated after that. Waiting
+# is the whole cure: the ROM sits there for as long as it takes.
+_COMPOSITE_DOWNLOADER_S = 180.0
+
 
 def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_rom, sleep, clock,
                       timeout: float, delay_ms: int = 600) -> HandOff:
@@ -689,10 +717,18 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
             return HandOff(False, "none", port.device,
                            "the console still answers after the request, so the node did not reset; "
                            "hold BOOT, press RST, then retry")
-        back = wait_for_port(lambda ps: _port_of(ps, "usb_serial_jtag", port.node_id), timeout, ports_fn, sleep, clock)
+        if gone is None:
+            log("the node has stopped answering; its port will drop when the host notices — "
+                "at once on a root port, up to a minute behind some hubs")
+        started = clock()
+        back = None
+        while back is None and clock() - started < _COMPOSITE_DOWNLOADER_S:
+            back = wait_for_port(lambda ps: _port_of(ps, "usb_serial_jtag", port.node_id), 15.0, ports_fn, sleep, clock)
+            if back is None:
+                log(f"still waiting for the serial-JTAG downloader ({clock() - started:.0f} s)")
         if back is None:
             return HandOff(False, method, None,
-                           f"the serial-JTAG downloader did not appear within {timeout:.0f} s after the request; "
+                           f"the serial-JTAG downloader did not appear within {_COMPOSITE_DOWNLOADER_S:.0f} s after the request; "
                            "hold BOOT, press RST, then retry")
         log(f"the downloader is on {back.device}")
         return _confirm_downloader(back.device, method, log, probe_rom, reset_capable=back.auto_reset)
@@ -765,10 +801,17 @@ def wait_for_application(port: Optional[str], timeout: float, log: Log = _quiet,
     candidate is asked, since VERSION is what tells a node from the rest."""
     deadline = clock() + timeout
     announced = set()
+    # The chip that was flashed is known by the MAC in the port's name, on a
+    # native-USB board; when its port comes back under another face (the
+    # composite device after the serial-JTAG downloader), only that chip is
+    # asked. Without it, a bench with several nodes answered with whichever
+    # was first, and once reported a soak node as the application coming back.
+    node_id = node_id_from_path(port) if port else None
     while clock() < deadline:
         ports = ports_fn()
         named = select_port(ports, device=port) if port else None
-        targets = [named] if named else esp_candidates(ports)
+        same = [p for p in ports if node_id and p.node_id == node_id]
+        targets = [named] if named else (same or (esp_candidates(ports) if not node_id else []))
         for target in targets:
             if target.device not in announced:
                 log(f"asking VERSION on {target.device}")
