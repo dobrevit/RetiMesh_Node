@@ -135,6 +135,7 @@ tools/          make_manifest.py (release bundles), build_site.py (Pages),
                 sampler and summariser), asset_stamp.py (build-time web asset
                 hash), board_caps.py (boards.json -> BOARD_* flags),
                 check_boards.py (boards.json consistency, CI),
+                board_docs.py (boards.json -> the board matrix in docs/hardware.md, CI checks it),
                 upload_hook.py (bootloader hand-off around `-t upload`)
 boards.json     board registry used by CI, packaging, flasher and CLI
 docs/           this documentation
