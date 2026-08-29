@@ -27,6 +27,7 @@ import zipfile
 from pathlib import Path
 
 from . import device as dev
+from .device import esptool_args, opt  # noqa: F401  (one builder, one esptool 4/5 spelling rule)
 
 DEFAULT_REPO = os.environ.get("RETIMESH_REPO", "dobrevit/RetiMesh_Node")
 
@@ -92,6 +93,7 @@ def esp_ports(show_all: bool = False) -> list[tuple[str, str]]:
     return [(p.device, p.label()) for p in dev.list_ports() if show_all or p.kind != "legacy"]
 
 
+
 # ---------------------------------------------------------------------------
 # Flashing
 # ---------------------------------------------------------------------------
@@ -102,11 +104,6 @@ def esptool_major() -> int:
     except Exception:
         return 4
 
-
-def opt(name: str) -> str:
-    """esptool >= 5 spells options and commands with dashes; 4.x only
-    accepts underscores. Emit whichever the installed version wants."""
-    return name.replace("_", "-") if esptool_major() >= 5 else name
 
 
 def esptool(args: list[str]) -> None:
@@ -133,8 +130,7 @@ def flash(board: dict, bundle: Path, port: str, mode: str, baud: int, before: st
             sys.exit(f"checksum mismatch for {p['file']}: expected {p['sha256']}, got {actual}")
     print(f"Verified {len(parts)} part(s).")
 
-    args = ["--chip", board["chip"], "--port", port, "--baud", str(baud),
-            "--before", opt(before or "default_reset"), "--after", opt("hard_reset"), opt("write_flash")]
+    args = esptool_args(board["chip"], port, before or "default_reset", "hard_reset", "write_flash", baud=baud)
     if mode == "full":
         args.append("--erase-all")
     args += [opt("--flash_mode"), board["flash_mode"], opt("--flash_size"), board["flash_size"],
@@ -169,16 +165,26 @@ def cmd_ports(args):
 def cmd_devices(args):
     """Every RetiMesh node the host can see: serial ports that answer VERSION,
     and any URLs given (or the two well-known addresses) that answer /api/status."""
+    from concurrent.futures import ThreadPoolExecutor
     found = 0
-    for p in dev.list_ports():
-        if p.kind in ("unknown", "legacy") and not args.all:
-            continue
-        info = dev.probe_console(p.device, timeout=1.5)
-        print(f"  {p.label()}" + (f"\n      {info}" if info else "      (no RetiMesh console)"))
-        found += bool(info)
-    for url in args.ip or ["http://10.42.0.1", "http://retimesh.local"]:
-        if not url.startswith("http"):
-            url = "http://" + url
+    # Ports are independent and a port that is not a node never answers, so
+    # each one costs its full timeout: ask them all at once rather than in
+    # turn, and print as the answers land.
+    ports = [p for p in dev.list_ports() if p.likely_esp or args.all]
+    with ThreadPoolExecutor(max_workers=max(1, len(ports))) as pool:
+        for p, info in zip(ports, pool.map(lambda p: dev.probe_console(p.device, timeout=1.5), ports)):
+            print(f"  {p.label()}" + (f"\n      {info}" if info else "      (no RetiMesh console)"))
+            found += bool(info)
+    if args.ip:
+        urls = [dev.node_url(u) for u in args.ip]
+    else:
+        # The name is tried only if the address did not answer: resolving
+        # retimesh.local on a host with no mDNS resolver can stall for longer
+        # than the whole probe, and it can only find the same node.
+        urls = ["http://10.42.0.1"]
+        if not dev.probe_http(urls[0], timeout=2.0):
+            urls = ["http://retimesh.local"]
+    for url in urls:
         info = dev.probe_http(url, timeout=2.0)
         if info:
             print(f"  {info}")
@@ -191,19 +197,21 @@ def cmd_devices(args):
 def cmd_bootloader(args):
     """Put one node into its ROM downloader and say where esptool should point."""
     if args.ip:
-        url = args.ip if args.ip.startswith("http") else "http://" + args.ip
-        ok, msg, _ = dev.request_bootloader_http(url, ("admin", args.password))
+        ok, msg, _ = dev.request_bootloader_http(dev.node_url(args.ip), ("admin", args.password))
         print(("Requested: " if ok else "Refused: ") + msg)
         sys.exit(0 if ok else 1)
     ports = dev.list_ports()
     port = dev.select_port(ports, device=args.port, serial=args.serial)
     if port is None:
-        candidates = [p for p in ports if p.kind not in ("unknown", "legacy")]
-        sys.exit("Which port? " + ("; ".join(p.label() for p in candidates) or "no ESP32 port found")
-                 + " — pass --port or --serial.")
-    r = dev.hand_off_to_bootloader(port=port.device, log=lambda m: print("  " + m))
+        sys.exit(dev.ambiguous_ports_message(ports, "--port or --serial") if dev.esp_candidates(ports)
+                 else "no ESP32 port found")
+    r = dev.hand_off_to_bootloader(port=port.device, log=lambda m: print("  " + m), port_hint="--port")
     print(("Downloader ready on " + r.port + f" ({r.method})") if r.entered else r.message)
-    sys.exit(0 if r.entered or r.method == "auto_reset_dtr_rts" else 1)
+    # This command promises a downloader. "esptool will reset it" is a fine
+    # outcome for `install`, where esptool follows — but nothing follows here,
+    # and a script chaining esptool after an exit code of 0 would find the
+    # application still running.
+    sys.exit(0 if r.entered else 1)
 
 
 def cmd_install(args):
@@ -255,10 +263,9 @@ def cmd_install(args):
         # own reset remains the fallback, and BOOT+RST the one after that.
         before = None
         if not args.no_handoff:
-            r = dev.hand_off_to_bootloader(port=port, log=lambda m: print("  " + m))
-            if r.entered:
-                before, port = "no_reset", r.port or port
-            else:
+            r = dev.hand_off_to_bootloader(port=port, log=lambda m: print("  " + m), port_hint="--port")
+            before, port = r.esptool_before, r.port or port
+            if not r.entered:
                 print("  " + r.message)
         flash(board, tmp, port, args.mode, args.baud, before=before)
         info = dev.wait_for_application(port, timeout=20.0)

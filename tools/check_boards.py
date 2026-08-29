@@ -37,18 +37,11 @@ for env, meta in boards.items():
         problems.append(f"{env}: a bridged board should say whether its UART may carry PPP")
     if uart.get("network") and "tested_max_baud" not in uart:
         problems.append(f"{env}: uart.tested_max_baud missing")
-    section = f"env:{env}"
-    if section not in ini:
+    # The framework's USB flags are derived from this block by board_caps.py,
+    # so there is nothing in platformio.ini to cross-check them against; only
+    # that the env exists at all.
+    if f"env:{env}" not in ini:
         problems.append(f"{env}: no [env:{env}] in platformio.ini")
-    else:
-        flags = ini[section].get("build_flags", "")
-        # The same rule board_caps.py enforces at build time, checked here
-        # without a toolchain: native USB <=> the framework's CDC-on-boot flag
-        # (directly or through the shared [esp32s3_psram_usb] section).
-        cdc = "ARDUINO_USB_CDC_ON_BOOT=1" in flags or "esp32s3_psram_usb" in flags
-        if bool(usb.get("native")) != cdc:
-            problems.append(f"{env}: usb.native={usb.get('native')} but ARDUINO_USB_CDC_ON_BOOT "
-                            f"{'is' if cdc else 'is not'} set in platformio.ini")
 
 for p in problems:
     print("boards.json:", p)

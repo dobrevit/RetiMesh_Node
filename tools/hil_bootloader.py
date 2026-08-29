@@ -23,17 +23,19 @@ Usage:
 import argparse
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "retimesh-flash"))
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "retimesh-flash"))
+from hilreport import Reporter  # noqa: E402
 from retimesh_flash import device as dev  # noqa: E402
-from retimesh_flash.cli import opt  # noqa: E402  (esptool 4/5 spelling)
+# One argument builder, so the esptool 4/5 spelling rule is applied in one place.
+from retimesh_flash.device import esptool_args  # noqa: E402
 
 
 def esptool(chip, port, before, after, *cmd, timeout=60):
-    return subprocess.run([sys.executable, "-m", "esptool", "--chip", chip, "--port", port,
-                           "--before", opt(before), "--after", opt(after), opt(cmd[0]), *cmd[1:]],
+    return subprocess.run([sys.executable, "-m", "esptool", *esptool_args(chip, port, before, after, *cmd)],
                           capture_output=True, text=True, timeout=timeout)
 
 
@@ -44,25 +46,29 @@ def main():
     ap.add_argument("--firmware", help="firmware.bin to flash once in the downloader")
     ap.add_argument("--chip", default="esp32s3")
     a = ap.parse_args()
-    fails = 0
+    report = Reporter()
 
-    def report(name, ok, detail=""):
-        nonlocal fails
-        fails += 0 if ok else 1
-        print(f"{'PASS' if ok else 'FAIL'}  {name}  {detail}")
-
-    info = dev.probe_console(a.port, timeout=3.0)
+    # One session for every question: reopening the port re-raises the modem
+    # lines, which is the one thing Console.open() takes care not to do.
+    try:
+        con = dev.Console.open(a.port, timeout=3.0)
+    except Exception as exc:
+        report("console: VERSION answers", False, f"could not open {a.port}: {exc}")
+        sys.exit(report.fails)
+    info = dev.probe_console(a.port, timeout=3.0, console=con)
     report("console: VERSION answers", info is not None, str(info) if info else "no RM reply")
     if not info:
-        sys.exit(fails)
+        con.close()
+        sys.exit(report.fails)
 
-    con = dev.Console.open(a.port, timeout=3.0)
     status, _, data = con.command("NETWORK_STATUS")
     names = [d.get("link") for d in data]
     report("links: NETWORK_STATUS lists wifi-ap", status == "OK" and "wifi-ap" in names, ", ".join(
         f"{d.get('link')}={d.get('phase')}" for d in data))
-    status, kv, data = con.command("USB_STATUS")
-    software = kv.get("software_entry") == "yes" or any(d.get("software_entry") == "yes" for d in data)
+    status, _, data = con.command("USB_STATUS")
+    # software_entry only ever arrives on a data line; the OK line carries no
+    # key-value pairs for this command.
+    software = any(d.get("software_entry") == "yes" for d in data)
     report("usb: USB_STATUS answers", status == "OK", " ".join(f"{k}={v}" for d in data for k, v in d.items()))
     con.close()
 
@@ -75,12 +81,12 @@ def main():
     if software:
         report("bootloader: software entry accepted", r.entered and r.method == "console", r.message)
     else:
-        report("bootloader: classic ESP32 refuses politely", r.method == "auto_reset_dtr_rts", r.message)
+        report("bootloader: software entry refused politely, esptool's reset offered", r.method == "auto_reset_dtr_rts", r.message)
 
     port = r.port or a.port
-    before = "no_reset" if r.entered else "default_reset"
-    rc = esptool(a.chip, port, before, "no_reset", "chip_id")
-    report("rom: esptool reaches the downloader", rc.returncode == 0, (rc.stdout + rc.stderr).strip().splitlines()[-1] if (rc.stdout + rc.stderr).strip() else "")
+    rc = esptool(a.chip, port, r.esptool_before, "no_reset", "chip_id")
+    tail = (rc.stdout + rc.stderr).strip().splitlines()
+    report("rom: esptool reaches the downloader", rc.returncode == 0, tail[-1] if tail else "")
 
     if a.firmware:
         rc = esptool(a.chip, port, "no_reset", "hard_reset", "write_flash", "0x10000", a.firmware, timeout=300)
@@ -88,10 +94,11 @@ def main():
     else:
         esptool(a.chip, port, "no_reset", "hard_reset", "chip_id")
 
-    time.sleep(2.0)
+    # No pause first: wait_for_application asks VERSION rather than waiting
+    # for a banner, so it is bounded by the node answering, not by a guess.
     back = dev.wait_for_application(port, timeout=40.0)
     report("return: application is back", back is not None, str(back) if back else "no VERSION within 40 s")
-    sys.exit(fails)
+    sys.exit(report.fails)
 
 
 if __name__ == "__main__":

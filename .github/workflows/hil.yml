@@ -28,13 +28,18 @@ jobs:
       fail-fast: false
       matrix:
         env: [t3s3, heltec-v3]
-    if: contains(inputs.boards, matrix.env)
+    # `matrix` is not a context a job-level `if` may use — GitHub rejects the
+    # workflow outright — so the board filter is on every step instead.
     steps:
       - uses: actions/checkout@v7
+        if: contains(inputs.boards, matrix.env)
       - run: python3 -m pip install --upgrade platformio esptool pyserial
+        if: contains(inputs.boards, matrix.env)
       - name: Build ${{ matrix.env }}
+        if: contains(inputs.boards, matrix.env)
         run: pio run -e ${{ matrix.env }}
       - name: Port for this board
+        if: contains(inputs.boards, matrix.env)
         id: port
         run: |
           case "${{ matrix.env }}" in
@@ -42,11 +47,14 @@ jobs:
             heltec-v3) echo "port=${{ vars.HIL_HELTEC_V3_PORT }}" >> "$GITHUB_OUTPUT" ;;
           esac
       - name: Flash through the PlatformIO hook (console hand-off, esptool, return)
+        if: contains(inputs.boards, matrix.env)
         run: pio run -e ${{ matrix.env }} -t upload --upload-port "${{ steps.port.outputs.port }}"
       - name: Console, links, bootloader, ROM, flash, return
+        if: contains(inputs.boards, matrix.env)
         run: |
           python3 tools/hil_bootloader.py --port "${{ steps.port.outputs.port }}" \
             --firmware .pio/build/${{ matrix.env }}/firmware.bin \
             --chip $(python3 -c "import json;print(json.load(open('boards.json'))['${{ matrix.env }}']['chip'])")
       - name: Boot, radio, transport (existing checks)
+        if: contains(inputs.boards, matrix.env)
         run: python3 tools/hil.py --port "${{ steps.port.outputs.port }}" --reset

@@ -19,7 +19,7 @@ retimesh-flash install --mode app         # firmware only, keeps settings + web 
 retimesh-flash install --mode fs          # web app only
 retimesh-flash install --file bundle.zip  # offline, from a downloaded release archive
 retimesh-flash devices                    # every node that answers: serial consoles and /api/status
-retimesh-flash bootloader --port /dev/ttyACM0   # restart a running node into its ROM downloader
+retimesh-flash bootloader --port /dev/ttyACM0   # restart a running node into its ROM downloader (exit 0 only once it is there)
 retimesh-flash bootloader --ip 10.42.0.1        # ...over HTTP (admin password with --password)
 retimesh-flash install --serial 7C:DF:A1:12:34:56   # pick the port by USB serial number
 ```
