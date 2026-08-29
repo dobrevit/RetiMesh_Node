@@ -22,7 +22,7 @@
 //  Runs entirely on core 0 (next to the ESP32 Wi-Fi/LwIP stack):
 //    - SoftAP "retimesh-XXXXXX" (prefix + last 3 MAC octets, or a custom
 //      SSID from settings) at 10.42.0.1 — open, WPA2, WPA2/WPA3 or WPA3
-//    - DNSServer answering every A query with 10.42.0.1 (captive portal);
+//    - a resolver bound to 10.42.0.1 answering every A query with it (captive portal);
 //      polled from a small task pinned to core 0
 //    - AsyncWebServer on port 80:
 //        /                 single-page app from LittleFS (data/index.html)
@@ -47,7 +47,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <DNSServer.h>
+#include "CaptiveDns.h"
 #include <ESPAsyncWebServer.h>
 #include "Config.h"
 #include "Settings.h"
@@ -75,10 +75,6 @@ public:
   void tick();
   bool wifiEnabled() const;
 
-  // FreeRTOS entry point — created pinned to core 0 from main.cpp.
-  // DNSServer has no async mode; it needs a polling loop.
-  static void dnsTask(void* self);
-
 private:
   void startAccessPoint();
   void setupRoutes();
@@ -105,7 +101,7 @@ private:
   void handleBootloaderPost(AsyncWebServerRequest* request, const char* body, size_t len);
   void handleRebootPost(AsyncWebServerRequest* request, const char* body, size_t len);
 
-  DNSServer       _dns;
+  CaptiveDns      _dns;                  // the access point's resolver, bound to its address
   AsyncWebServer  _http{HTTP_PORT};
   char            _ssid[33] = {0};       // 32 chars max + NUL
   const char*     _securityName = "open";

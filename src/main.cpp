@@ -25,7 +25,6 @@
 //  ┌────────────────────────── CORE 0 ──────────────────────────┐
 //  │  Wi-Fi / LwIP stack (ESP-IDF system tasks)                 │
 //  │  AsyncTCP event task    socket I/O for ports 80 and 4242   │
-//  │  dnsTask                captive-portal DNS polling         │
 //  │  displayTask            OLED status page, 2 Hz             │
 //  └────────────────────────────────────────────────────────────┘
 //  ┌────────────────────────── CORE 1 ──────────────────────────┐
@@ -220,14 +219,6 @@ void setup() {
   #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
-  // The captive-portal DNS only exists to steer phones on the access point.
-  // Without one there is no server to poll — and polling a DNSServer that
-  // was never started costs a malloc and a logged error every ten
-  // milliseconds, on the same port the maintenance console answers on.
-  if (wifiManager.wifiEnabled())
-    xTaskCreatePinnedToCore(WifiManager::dnsTask, "dns",
-                            3072, &wifiManager, 1, nullptr, 0);
-
   xTaskCreatePinnedToCore(LoRaRadio::radioTask, "radio",
                           8192, &loraRadio, 5, nullptr, 1);
 

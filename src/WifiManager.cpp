@@ -136,12 +136,13 @@ void WifiManager::begin() {
   if (wifiEnabled()) {
     startAccessPoint();
 
-    // Captive portal: answer every DNS query with our own address. The OS
-    // connectivity probes then hit port 80 and get redirected below, which
-    // pops the "sign in to network" sheet on Android/iOS/Windows.
-    _dns.setErrorReplyCode(DNSReplyCode::NoError);
-    _dns.setTTL(60);
-    _dns.start(53, "*", AP_IP);
+    // Captive portal: answer every DNS query on the access point with our
+    // own address. The OS connectivity probes then hit port 80 and get
+    // redirected below, which pops the "sign in to network" sheet on
+    // Android/iOS/Windows. Bound to the AP's address, not to every
+    // interface: a host on the USB link must not have its names steered
+    // here (CaptiveDns.h).
+    if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind %s:53", AP_IP.toString().c_str());
   } else {
     // Wi-Fi off is a configuration, not a failure: the names are still
     // derived (the display and the console show them) and the radio is left
@@ -323,18 +324,8 @@ void WifiManager::tick() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// DNSServer is poll-driven; this task is pinned to CORE 0 by main.cpp so
 // all captive-portal work stays off the radio core.
 // ---------------------------------------------------------------------------
-void WifiManager::dnsTask(void* self) {
-  auto* wm = static_cast<WifiManager*>(self);
-  for (;;) {
-    wm->_dns.processNextRequest();
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-}
-
 // ---------------------------------------------------------------------------
 // HTTP Basic Auth against the admin password. Sends the 401 challenge
 // itself when it fails, so callers just `return`.
