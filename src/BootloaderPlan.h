@@ -55,7 +55,9 @@
 //  unit is not reset by the software reset esp_restart() performs, so the
 //  host keeps its old enumeration while the ROM downloader comes up behind
 //  it expecting a fresh one. The chip sits there hung — no console, no
-//  downloader, no port drop — until EN is pulled by hand. The unit does the
+//  downloader, no port drop — and not even EN recovers it: only removing
+//  power did, on the bench, which says the state lives in a domain the
+//  reset button does not reach. The unit does the
 //  DTR/RTS handshake in hardware, which esptool performs unaided and which
 //  works, so that is the method those boards offer. The software entry is
 //  kept for the S3 behind a UART bridge, where the downloader talks on UART0

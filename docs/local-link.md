@@ -168,8 +168,9 @@ was learned on the bench rather than read anywhere. Its console is the
 chip's own USB-Serial/JTAG unit, and that unit is not reset by the software
 reset `esp_restart()` performs: the host keeps its old enumeration while the
 ROM downloader comes up behind it expecting a fresh one, and the chip sits
-hung — no console, no downloader, no port drop — until the RESET button is
-pressed. The same unit implements esptool's DTR/RTS handshake in hardware,
+hung — no console, no downloader, no port drop. The RESET button did not
+recover it on the bench; only removing power did, so whatever is stuck lives
+in a domain EN does not reach. The same unit implements esptool's DTR/RTS handshake in hardware,
 which works unaided and is what those boards offer. The software entry
 remains for the S3 behind a UART bridge (`heltec-v3`), where the downloader
 talks on UART0 and the bridge is untouched by the chip resetting; that path
@@ -272,7 +273,10 @@ ppp0             (follow-up) PPP over that port, node at 10.65.<n>.1
 ## Recovery
 
 Nothing in the design can lock a node out. The bootloader bit is cleared by
-the ROM; a failed flash leaves whatever was in flash; a power cycle boots it.
+the ROM; a failed flash leaves whatever was in flash; a power cycle boots it —
+and on a native-USB S3 it has to be a power cycle, not the RESET button, if
+the node was ever put into its downloader by software (which the firmware
+now refuses to do there, for that reason).
 And the settings refuse the one combination that would: switching the serial
 console off while no local link is enabled, or the last link off while the
 console is off, answers `400` rather than saving — a node in that state could

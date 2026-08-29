@@ -103,7 +103,7 @@ const char* manualRecovery() { return kRecovery; }
 bool request(Target target, Source source, uint32_t delayMs, const char** whyNot) {
   if (target == Target::Bootloader && !canEnterAutomatically()) {
     if (whyNot) *whyNot = BOARD_USB_NATIVE
-      ? "software entry hangs a native-USB board (its USB unit survives the reset); esptool's DTR/RTS handshake does it instead"
+      ? "software entry hangs a native-USB board until power is cycled (its USB unit survives the reset); esptool's DTR/RTS handshake does it instead"
       : "this chip cannot enter its downloader from software; use the bridge's auto-reset or hold BOOT";
     return false;
   }
