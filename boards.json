@@ -186,7 +186,7 @@
     "mcu": "ESP32-D0WDQ6: 8 MB flash, 8 MB PSRAM",
     "radio": "SX1276",
     "display": "— (headless)",
-    "extras": "aluminium shell, two SMA sockets, internal 2-pin battery connector; no SD, no GNSS",
+    "extras": "three front LEDs (status, Wi-Fi, LoRa), aluminium shell, two SMA sockets, internal 2-pin battery connector; no SD, no GNSS",
     "status": "verified on hardware",
     "notes": "The Wireless Stick's ESP32 and SX1276 in an aluminium box with two SMA antenna sockets, 8 MB flash and 8 MB PSRAM, no display, no SD slot and no GNSS: a headless relay. Serial is a CP2102 bridge on the micro-USB socket, and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. Uses the 8 MB partition table: no SD card, so the filesystem is the only storage the transport store has.",
     "local_link": {

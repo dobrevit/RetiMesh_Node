@@ -67,12 +67,9 @@
 
 #define PIN_BUTTON          0                // PRG, active low
 
-// The white LED. Nothing in this firmware drives an LED, and an undriven pin
-// on a board that has one wired is left floating — so it is claimed and held
-// off here rather than left to pick up whatever is on the rail. If it still
-// blinks after this, it is the charging circuit rather than the GPIO: these
-// boards blink the charge indicator when no cell is fitted, which is exactly
-// the state this one is in.
+// The white LED: the status LED (Leds.h). If it blinks on its own while the
+// node is idle, that is the charging circuit rather than the GPIO: these
+// boards blink the charge indicator when no cell is fitted.
 #define PIN_STATUS_LED      25
 
 #define HAS_SD              0

@@ -50,10 +50,13 @@
 
 #define PIN_BUTTON          0                // KEY, active low, inside the shell
 
-// Three LEDs sit on the front: the variant calls them LED/BLE (25), WIFI (23)
-// and LoRa (22). The firmware drives only the status LED; the other two are
-// left as they are.
+// Three LEDs on the front, named by the core's variant LED/BLE, WIFI and
+// LoRa. They are the whole of what a node in a box can show (Leds.h): the
+// transport up, a Wi-Fi link ready, the radio online, each flickering as its
+// traffic passes.
 #define PIN_STATUS_LED      25
+#define PIN_WIFI_LED        23
+#define PIN_LORA_LED        22
 
 #define HAS_SD              0
 #define HAS_GPS             0
