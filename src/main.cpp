@@ -224,8 +224,10 @@ void setup() {
   // 6 KB: the panel driver and the I2C stack are deep enough that 4 KB left
   // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
   // transaction to every network page.
-  xTaskCreatePinnedToCore(Display::displayTask, "display",
-                          6144, &display, 1, nullptr, 0);
+  #if HAS_DISPLAY
+    xTaskCreatePinnedToCore(Display::displayTask, "display",
+                            6144, &display, 1, nullptr, 0);
+  #endif
 
   // The RNS task owns every call into microReticulum (Transport is
   // single-threaded): interface loops, forwarding, announces, persistence.
