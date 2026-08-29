@@ -80,10 +80,10 @@
 #ifndef BOARD_UART_MAX_BAUD
   #define BOARD_UART_MAX_BAUD     115200
 #endif
-// Whether this build carries the drivers. Both are 0 on the pinned Arduino
-// core 2.0.17, whose prebuilt TinyUSB has no NCM class and whose lwIP has no
-// PPP — see docs/local-link.md. The board flags above say what the hardware
-// could do; these say what the firmware does.
+// Whether this build carries the drivers. Both are 0: the core's prebuilt
+// TinyUSB now carries the NCM class and its lwIP is built with PPP, but the
+// firmware drives neither yet — see docs/local-link.md. The board flags above
+// say what the hardware could do; these say what the firmware does.
 #ifndef LOCAL_LINK_USB_NCM
   #define LOCAL_LINK_USB_NCM      0
 #endif
@@ -112,9 +112,11 @@
 #ifndef AP_PASSWORD
   #define AP_PASSWORD       ""              // empty = open network
 #endif
-// SoftAP WPA3 (SAE) needs ESP-IDF 5; the pinned Arduino core 2.x (IDF 4.4)
-// rejects the auth mode (verified: esp_wifi_set_config -> ESP_ERR_INVALID_ARG,
-// AP stays WPA2). The code path is kept for an IDF 5 core.
+// SoftAP WPA3 (SAE) needs ESP-IDF 5, which the core 3.x toolchain brings. The
+// gate stays on the IDF version rather than being assumed true because the
+// earlier core 2.x (IDF 4.4) rejected the auth mode outright (verified:
+// esp_wifi_set_config -> ESP_ERR_INVALID_ARG, AP stays WPA2), and a build on
+// such a core must go on saying so rather than offering what it cannot do.
 #include <esp_idf_version.h>
 #define WPA3_SOFTAP_SUPPORTED (ESP_IDF_VERSION_MAJOR >= 5)
 

@@ -44,12 +44,6 @@
 
 WifiManager wifiManager;
 
-// The core's own stack bring-up (esp_netif_init, the default event loop, the
-// Arduino event handler), defined in WiFiGeneric.cpp and declared in no
-// header. It is what WiFi.mode() calls first; with Wi-Fi off it is the only
-// part of that call the node needs.
-bool tcpipInit();
-
 // One answer for every write path that has to refuse while a restart is on
 // its way: a write accepted now may or may not reach NVS before it, and the
 // caller could not tell which.
@@ -137,17 +131,17 @@ void WifiManager::begin() {
     // down. The web server below starts regardless, bound to every interface,
     // so a USB or PPP link — or WIFI ON at the console — reaches it.
     resolveNames();
-    // lwIP and the netif layer have to exist for the servers below to bind,
-    // and the Wi-Fi driver is where the core brings them up. The driver is
-    // started and stopped again for that — a version that called the stack
-    // initialisation on its own, and skipped the driver, overflowed the IPC
-    // task on core 1 the moment the radio attached its receive interrupt.
-    // Something the driver's start-up does leaves that task able to carry
-    // the GPIO interrupt registration it is later asked to run, and until
-    // that something is named the sequence that works is the one kept.
-    WiFi.persistent(false);
-    WiFi.mode(WIFI_STA);
-    WiFi.mode(WIFI_OFF);
+    // lwIP and the netif layer have to exist for the servers below to bind.
+    // Network.begin() is the core's own stack bring-up — esp_netif, the
+    // default event loop and the event task — and the first thing
+    // WiFi.mode() does before it touches the driver. On core 2 that step had
+    // no public name; calling the private one on its own overflowed the IPC
+    // task on core 1 once the radio attached its receive interrupt, and the
+    // driver was started and stopped again just to get past it. Core 3
+    // publishes the step, so the node asks for it and leaves the radio down.
+    // What the driver's start-up did for the IPC task was never named, so
+    // this path stands on a real boot with Wi-Fi off and not on an argument.
+    Network.begin();
     log_w("Wi-Fi is switched off in settings; the access point will not start");
   }
 

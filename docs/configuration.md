@@ -25,7 +25,7 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 | Setting | Default | Notes |
 |---|---|---|
 | SSID | `retimesh-XXXXXX` (MAC-derived) | custom ≤ 32 chars |
-| Security | open | `wpa2`; `wpa2wpa3`/`wpa3` need an ESP-IDF 5 core (greyed out) |
+| Security | open | `wpa2`, `wpa2wpa3`, `wpa3`; the WPA3 modes need an ESP-IDF 5 core, which the current toolchain is — a build on an older core greys them out |
 | Password | — | 8–63 chars when secured |
 | Channel | 6 | 1–13 |
 | Max clients | 8 | 1–10 |

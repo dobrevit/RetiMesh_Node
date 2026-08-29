@@ -200,16 +200,19 @@ env name in the two workflow matrices.
   password `retimesh` — change it). Radio changes apply live; Wi-Fi changes
   restart the node.
 - **USB networking (CDC-NCM) and PPP are designed and tested down to the
-  toolchain and no further.** The pinned Arduino core 2.0.17 ships TinyUSB
-  without the NCM class and lwIP without PPP; both arrive with the core-3
-  migration. What works today on every board: the maintenance console, the
+  toolchain and no further.** The toolchain now has what they need — the
+  Arduino core 3.x (ESP-IDF 5.x, via the pioarduino platform) ships TinyUSB
+  with the NCM class and lwIP with PPP — but the firmware does not drive
+  either yet. What works today on every board: the maintenance console, the
   bootloader manager, `POST /api/system/bootloader`, Wi-Fi-optional
   operation and hands-free flashing. [docs/local-link.md](docs/local-link.md)
   has the full account.
-- **WPA3 on the access point is not available on this build.** SoftAP-side
-  SAE requires ESP-IDF 5; the pinned Arduino core (2.0.17 / IDF 4.4.7)
-  rejects the mode, so the node runs WPA2 and greys out the WPA3 options.
-  The code path is in place for a core-3 migration.
+- **WPA3 on the access point is offered but not yet validated.** SoftAP-side
+  SAE requires ESP-IDF 5, which the core 3.x toolchain brings, so the settings
+  page no longer greys out the WPA3 modes. The earlier core (2.0.17 / IDF
+  4.4.7) rejected the mode, and a build on such a core still runs WPA2 and
+  says so. Until a WPA3 join has been checked on hardware, treat it as
+  experimental.
 
 - Max `RNS_MAX_CLIENTS` (4) simultaneous TCP peers; slow consumers get
   packets dropped, not queued forever.
