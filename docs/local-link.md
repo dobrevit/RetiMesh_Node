@@ -485,7 +485,7 @@ the last octet of its MAC exactly as for usb0 (`pppNodeAddress` in
 `.2` and offer `.1`:
 
 ```sh
-sudo pppd /dev/ttyUSB0 115200 noauth local nodetach \
+sudo pppd /dev/ttyUSB0 115200 noauth local nodetach nocrtscts \
      lcp-echo-interval 5 lcp-echo-failure 4 10.65.<n>.2:10.65.<n>.1
 ```
 
@@ -496,7 +496,7 @@ member of the group pppd is setuid for (`dip` on Debian and its
 descendants) may run without sudo:
 
 ```sh
-printf 'noauth\nlocal\nnodetach\nlcp-echo-interval 5\nlcp-echo-failure 4\n' | sudo tee /etc/ppp/peers/retimesh
+printf 'noauth\nlocal\nnodetach\nnocrtscts\nlcp-echo-interval 5\nlcp-echo-failure 4\n' | sudo tee /etc/ppp/peers/retimesh
 pppd /dev/ttyUSB0 115200 call retimesh 10.65.<n>.2:10.65.<n>.1
 ```
 
@@ -511,7 +511,11 @@ the speed — and prints both forms with the octet filled in; the tool
 prints commands and never runs them with sudo. `local` is there because a USB bridge has no carrier to watch,
 and the LCP echoes because they are how the node tells a dead host from an
 idle one (below) and how pppd notices the node restarting into its
-downloader. No `persist`: the flashing tool waits for pppd to exit.
+downloader. `nocrtscts` is not optional: Debian's `/etc/ppp/options`
+switches hardware flow control on, and a CP2102 told to wait for CTS waits
+for a signal no board here drives — pppd's frames never leave the bridge
+and nothing answers, which is exactly how the first attempt on the bench
+went. No `persist`: the flashing tool waits for pppd to exit.
 
 **One port, one owner.** UART0 carries the log, the maintenance console and
 PPP, and a log line inside an HDLC frame is a corrupt frame. So the port has

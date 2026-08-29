@@ -510,7 +510,12 @@ PPP_DEFAULT_BAUD = 115200
 # watch, and the LCP echoes because they are how the node tells a dead host
 # from an idle one (it hands its port back to the console after 30 s of
 # silence) and how pppd notices the node restarting into its downloader.
-PPPD_OPTIONS = ["noauth", "local", "nodetach", "lcp-echo-interval", "5", "lcp-echo-failure", "4"]
+# nocrtscts is not decoration: Debian's /etc/ppp/options switches hardware
+# flow control on, and a CP2102 with CRTSCTS waits for a CTS the board never
+# drives — pppd's frames then never leave the bridge, and nothing answers.
+# Measured on the Wireless Bridge; the spec's "no board exposes RTS/CTS" is
+# why the option must be explicit.
+PPPD_OPTIONS = ["noauth", "local", "nodetach", "nocrtscts", "lcp-echo-interval", "5", "lcp-echo-failure", "4"]
 # The same options as a peers file. `noauth` is a privileged pppd option, so
 # the command line above needs root every time; the options in
 # /etc/ppp/peers/<name> are trusted, so once that file is there any member

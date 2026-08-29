@@ -510,7 +510,7 @@ class HandOffTest(unittest.TestCase):
         self.assertIn("no ESP32 serial port", r.message)
 
 
-PPPD_ARGV = ["pppd", "/dev/ttyUSB0", "115200", "noauth", "local", "nodetach",
+PPPD_ARGV = ["pppd", "/dev/ttyUSB0", "115200", "noauth", "local", "nodetach", "nocrtscts",
              "lcp-echo-interval", "5", "lcp-echo-failure", "4", "10.65.84.2:10.65.84.1"]
 PPP_ROUTE = "10.65.84.1 dev ppp0 proto kernel scope link src 10.65.84.2"
 
@@ -555,7 +555,7 @@ class PppTest(unittest.TestCase):
         # The unprivileged form takes the same options from the peers file.
         self.assertEqual(device.pppd_command("/dev/ttyUSB0", node, host, baud, peers=True),
                          ["pppd", "/dev/ttyUSB0", str(baud), "call", "retimesh", f"{host}:{node}"])
-        self.assertEqual(device.pppd_peers_file(), "noauth\nlocal\nnodetach\nlcp-echo-interval 5\nlcp-echo-failure 4\n")
+        self.assertEqual(device.pppd_peers_file(), "noauth\nlocal\nnodetach\nnocrtscts\nlcp-echo-interval 5\nlcp-echo-failure 4\n")
         self.assertIn("10.65.84.2:10.65.84.1", device.shell_words(PPPD_ARGV))
         # A board with no PPP names no addresses.
         no_ppp = [{"link": "ppp0", "type": "ppp_uart", "hardware": "no", "firmware": "no", "enabled": "no"}]
