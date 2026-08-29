@@ -193,15 +193,19 @@ class Console:
         ser.dtr = True
         ser.rts = True
         ser.open()
-        # A moment after opening before anything is sent. The S3's USB CDC
-        # does not count the host as connected until shortly after the port
-        # opens, and a reply written in that window is dropped — measured on
-        # the bench as the first line of a STATUS answer going missing when
-        # the command followed the open immediately, and never once a tenth
-        # of a second had passed. A quarter of a second is margin, not cost.
-        time.sleep(0.25)
-        ser.reset_input_buffer()
-        return Console(ser, timeout, device)
+        # The S3's USB CDC loses the first line the node writes after a fresh
+        # open, and a pause does not change that — measured on the bench as
+        # the first line of a STATUS answer going missing on the first open
+        # of a session, with or without a delay, and never afterwards. So
+        # the session is warmed with an exchange nobody needs: HELP, read
+        # through to its OK. Whatever is lost is lost from that.
+        time.sleep(0.1)
+        con = Console(ser, timeout, device)
+        try:
+            con.command("HELP")
+        except Exception:
+            pass
+        return con
 
     def close(self) -> None:
         try:
