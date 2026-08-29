@@ -92,9 +92,17 @@ static void doStatus() {
         (unsigned long)h.largestBlock, (unsigned long)h.freePsram);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
-  dataf("STATUS", "transport=%s tcp_clients=%lu restart_pending=%s",
+  // The armed restart, in the same words /api/status uses: what it is for,
+  // who asked, and how long until it fires.
+  const Bootloader::Pending p = Bootloader::snapshot();
+  char restart[96] = "";
+  if (p.armed())
+    snprintf(restart, sizeof(restart), " restart_target=%s restart_source=%s restart_in_ms=%lu",
+             Bootloader::targetName(p.target), Bootloader::sourceName(p.source),
+             (unsigned long)p.dueInMs(millis()));
+  dataf("STATUS", "transport=%s tcp_clients=%lu restart_pending=%s%s",
         g_stats.transportOnline ? "online" : "offline", (unsigned long)g_stats.tcpClients,
-        Bootloader::pending() ? "true" : "false");
+        p.armed() ? "true" : "false", restart);
   ok("STATUS");
 }
 
@@ -108,10 +116,12 @@ static void doUsbStatus() {
     dataf("USB_STATUS", "native=false bridge=%s uart_network=%s auto_reset=%s",
           BOARD_USB_BRIDGE, BOARD_UART_NETWORK ? "hardware" : "no", BOARD_BRIDGE_AUTO_RESET ? "yes" : "no");
   #endif
+  // Software entry is offered exactly when the plan lists it; the plan is
+  // built from the same facts the request path decides on.
+  const Bootloader::Plan p = Bootloader::plan();
   char methods[64];
   dataf("USB_STATUS", "bootloader_methods=%s software_entry=%s",
-        Bootloader::plan().names(methods, sizeof(methods)),
-        Bootloader::canEnterAutomatically() ? "yes" : "no");
+        p.names(methods, sizeof(methods)), p.has(Bootloader::Method::SoftwareApi) ? "yes" : "no");
   ok("USB_STATUS");
 }
 

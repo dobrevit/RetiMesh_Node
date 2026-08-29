@@ -58,9 +58,8 @@ inline bool reboot(Source source = Source::Settings) {
 }
 
 // Once a request is in, services should refuse new work.
-bool   pending();
-State  state();
-Target target();
+bool    pending();
+Pending snapshot();
 
 // From loop(): runs the sequence. Never returns from the Restart step.
 void tick();

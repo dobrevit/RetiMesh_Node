@@ -90,16 +90,16 @@ static void test_a_request_waits_out_its_delay_then_quiesces_then_restarts() {
   // If the restart somehow returned, the next tick asks again rather than
   // pretending the node is idle.
   TEST_ASSERT_EQUAL((int)Step::Restart, (int)s.tick(1600));
-  TEST_ASSERT_EQUAL((int)Target::Bootloader, (int)s.target());
-  TEST_ASSERT_EQUAL((int)Source::Http, (int)s.source());
+  TEST_ASSERT_EQUAL((int)Target::Bootloader, (int)s.snapshot().target);
+  TEST_ASSERT_EQUAL((int)Source::Http, (int)s.snapshot().source);
 }
 
 static void test_a_bootloader_request_outranks_a_pending_reboot() {
   Sequencer s;
   TEST_ASSERT_TRUE(s.request(Target::App, Source::Settings, 1500, 0));
   TEST_ASSERT_TRUE(s.request(Target::Bootloader, Source::Console, 300, 100));
-  TEST_ASSERT_EQUAL((int)Target::Bootloader, (int)s.target());
-  TEST_ASSERT_EQUAL_UINT32(400, s.dueMs());
+  TEST_ASSERT_EQUAL((int)Target::Bootloader, (int)s.snapshot().target);
+  TEST_ASSERT_EQUAL_UINT32(400, s.snapshot().dueMs);
 }
 
 static void test_a_reboot_cannot_downgrade_a_pending_bootloader_entry() {
@@ -109,8 +109,8 @@ static void test_a_reboot_cannot_downgrade_a_pending_bootloader_entry() {
   Sequencer s;
   TEST_ASSERT_TRUE(s.request(Target::Bootloader, Source::Http, 300, 0));
   TEST_ASSERT_FALSE(s.request(Target::App, Source::Settings, 1500, 10));
-  TEST_ASSERT_EQUAL((int)Target::Bootloader, (int)s.target());
-  TEST_ASSERT_EQUAL_UINT32(300, s.dueMs());
+  TEST_ASSERT_EQUAL((int)Target::Bootloader, (int)s.snapshot().target);
+  TEST_ASSERT_EQUAL_UINT32(300, s.snapshot().dueMs);
 }
 
 static void test_a_second_request_keeps_the_earlier_deadline() {
@@ -120,19 +120,34 @@ static void test_a_second_request_keeps_the_earlier_deadline() {
   Sequencer s;
   TEST_ASSERT_TRUE(s.request(Target::App, Source::Settings, 1500, 0));
   TEST_ASSERT_TRUE(s.request(Target::App, Source::Http, 1500, 1000));
-  TEST_ASSERT_EQUAL_UINT32(1500, s.dueMs());
-  TEST_ASSERT_EQUAL((int)Source::Http, (int)s.source());     // the latest asker is still on record
+  TEST_ASSERT_EQUAL_UINT32(1500, s.snapshot().dueMs);
+  TEST_ASSERT_EQUAL((int)Source::Http, (int)s.snapshot().source);     // the latest asker is still on record
   TEST_ASSERT_EQUAL((int)Step::Quiesce, (int)s.tick(1500));
   // ...and an upgrade to the bootloader with a *shorter* delay moves it in.
   Sequencer u;
   TEST_ASSERT_TRUE(u.request(Target::App, Source::Settings, 1500, 0));
   TEST_ASSERT_TRUE(u.request(Target::Bootloader, Source::Console, 300, 100));
-  TEST_ASSERT_EQUAL_UINT32(400, u.dueMs());
+  TEST_ASSERT_EQUAL_UINT32(400, u.snapshot().dueMs);
   // A third request, later and longer, does not push the deadline out to
   // its own delay — but it does hold it off far enough for its own
   // acknowledgement to leave, which is the floor and nothing more.
   TEST_ASSERT_TRUE(u.request(Target::Bootloader, Source::Http, 600, 200));
-  TEST_ASSERT_EQUAL_UINT32(200 + Sequencer::kAckFloorMs, u.dueMs());
+  TEST_ASSERT_EQUAL_UINT32(200 + Sequencer::kAckFloorMs, u.snapshot().dueMs);
+}
+
+static void test_the_snapshot_says_how_long_until_the_restart() {
+  // What STATUS and /api/status print: nothing while idle, the remaining
+  // time while armed, and 0 rather than a wrapped number once it is due.
+  Sequencer s;
+  TEST_ASSERT_FALSE(s.snapshot().armed());
+  TEST_ASSERT_EQUAL_UINT32(0, s.snapshot().dueInMs(5));
+  TEST_ASSERT_TRUE(s.request(Target::App, Source::Http, 1500, 0));
+  const Pending p = s.snapshot();
+  TEST_ASSERT_TRUE(p.armed());
+  TEST_ASSERT_EQUAL((int)State::Armed, (int)p.state);
+  TEST_ASSERT_EQUAL_UINT32(500, p.dueInMs(1000));
+  TEST_ASSERT_EQUAL_UINT32(0, p.dueInMs(1500));
+  TEST_ASSERT_EQUAL_UINT32(0, p.dueInMs(1600));
 }
 
 static void test_a_request_is_never_answered_after_its_own_restart() {
@@ -143,7 +158,7 @@ static void test_a_request_is_never_answered_after_its_own_restart() {
   Sequencer s;
   TEST_ASSERT_TRUE(s.request(Target::App, Source::Settings, 1500, 0));
   TEST_ASSERT_TRUE(s.request(Target::Bootloader, Source::Http, 600, 1495));
-  TEST_ASSERT_EQUAL_UINT32(1495 + Sequencer::kAckFloorMs, s.dueMs());
+  TEST_ASSERT_EQUAL_UINT32(1495 + Sequencer::kAckFloorMs, s.snapshot().dueMs);
   TEST_ASSERT_EQUAL((int)Step::None, (int)s.tick(1500));
   TEST_ASSERT_EQUAL((int)Step::Quiesce, (int)s.tick(1495 + Sequencer::kAckFloorMs));
 }
@@ -193,6 +208,7 @@ int main() {
   RUN_TEST(test_a_bootloader_request_outranks_a_pending_reboot);
   RUN_TEST(test_a_reboot_cannot_downgrade_a_pending_bootloader_entry);
   RUN_TEST(test_a_second_request_keeps_the_earlier_deadline);
+  RUN_TEST(test_the_snapshot_says_how_long_until_the_restart);
   RUN_TEST(test_a_request_is_never_answered_after_its_own_restart);
   RUN_TEST(test_every_refusal_has_a_status);
   RUN_TEST(test_nothing_is_accepted_once_quiescing);

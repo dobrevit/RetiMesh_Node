@@ -97,10 +97,16 @@ bool WifiManager::wifiEnabled() const { return settings.links().wifiEnabled; }
 // parsers for one thing.
 static void bootloaderJson(JsonObject o) {
   const Bootloader::Plan p = Bootloader::plan();
-  o["software_entry"] = Bootloader::canEnterAutomatically();
+  const Bootloader::Pending r = Bootloader::snapshot();
+  o["software_entry"] = p.has(Bootloader::Method::SoftwareApi);
   o["api_enabled"]    = settings.maintenance().bootloaderApi;
-  o["pending"]        = Bootloader::pending();
-  o["state"]          = Bootloader::stateName(Bootloader::state());
+  o["pending"]        = r.armed();
+  o["state"]          = Bootloader::stateName(r.state);
+  if (r.armed()) {
+    o["target"]    = Bootloader::targetName(r.target);
+    o["source"]    = Bootloader::sourceName(r.source);
+    o["due_in_ms"] = r.dueInMs(millis());
+  }
   o["primary"]        = Bootloader::methodName(p.primary());
   o["recovery"]       = Bootloader::manualRecovery();
   JsonArray methods = o["methods"].to<JsonArray>();

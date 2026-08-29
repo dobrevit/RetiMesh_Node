@@ -132,15 +132,14 @@ Refusal request(Target target, Source source, uint32_t delayMs, const char** why
   return Refusal::None;
 }
 
-bool   pending() { return sSeq.pending(); }
-State  state()   { return sSeq.state(); }
-Target target()  { return sSeq.target(); }
+bool    pending()  { return sSeq.pending(); }
+Pending snapshot() { return sSeq.snapshot(); }
 
 static void quiesce() {
   // From here on RetiTransportServer refuses connections and the settings
   // handlers refuse writes (they check pending()). What is in flight is left
   // to finish; the delay before this step was the time for that.
-  log_w("restarting into the %s", targetName(sSeq.target()));
+  log_w("restarting into the %s", targetName(sSeq.snapshot().target));
   // Record the run length now: tick() in loop() would have, but the restart
   // happens on this pass and the previous run's length is how the next boot
   // tells a deliberate restart from a crash loop.
@@ -158,7 +157,7 @@ static void restart() {
   // The download-boot handler, if this restart wants one, was registered
   // when the request was accepted; a restart into the application makes
   // sure none is left over from a request that failed to arm.
-  if (sSeq.target() != Target::Bootloader) disarmDownloadBoot();
+  if (sSeq.snapshot().target != Target::Bootloader) disarmDownloadBoot();
   esp_restart();
 }
 

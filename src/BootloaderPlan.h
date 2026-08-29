@@ -183,6 +183,22 @@ inline const char* sourceName(Source s) {
 
 enum class State : uint8_t { Idle = 0, Armed, Quiescing, Restarting };
 
+// What is armed, for whoever reports it: the console's STATUS, /api/status
+// and the tests read the same fields the operator sees. Copied out under
+// one lock, because three separate accessors could be read across a
+// request() and describe one request's deadline with another's target.
+struct Pending {
+  State    state  = State::Idle;
+  Target   target = Target::App;
+  Source   source = Source::Http;
+  uint32_t dueMs  = 0;
+  bool armed() const { return state != State::Idle; }
+  // Milliseconds until the deadline; 0 once it has passed or nothing is armed.
+  uint32_t dueInMs(uint32_t nowMs) const {
+    return armed() && (int32_t)(dueMs - nowMs) > 0 ? dueMs - nowMs : 0;
+  }
+};
+
 inline const char* stateName(State s) {
   switch (s) {
     case State::Idle:       return "idle";
@@ -264,9 +280,17 @@ public:
   // request that will not be answered.
   bool pending() const { return _state.load(std::memory_order_acquire) != State::Idle; }
   State  state()  const { return _state.load(std::memory_order_acquire); }
-  Target target() const { Guard g(_lock); return _target; }
-  Source source() const { Guard g(_lock); return _source; }
-  uint32_t dueMs() const { Guard g(_lock); return _dueMs; }
+  Pending snapshot() const {
+    Guard g(_lock);
+    // Field by field: with its default initialisers Pending is not an
+    // aggregate under gnu++11, and a brace list here does not compile there.
+    Pending p;
+    p.state  = _state.load(std::memory_order_relaxed);
+    p.target = _target;
+    p.source = _source;
+    p.dueMs  = _dueMs;
+    return p;
+  }
 
 private:
   struct Guard {
