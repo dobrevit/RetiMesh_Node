@@ -396,9 +396,21 @@ tooling does it: `BOOTLOADER CONFIRM` on the console — software entry is
 offered on these boards again, through the core's `usb_persist_restart`,
 which is not the bare download bit that hung the serial-JTAG-only firmware
 — or, where the console is switched off, the 1200-baud touch on the ACM
-port; the composite device vanishes, a `303a:1001` USB-Serial/JTAG port with
-the same MAC appears within a second, and esptool is pointed at that port
-**with its own reset at connect**. That last point was measured and matters:
+port, which the firmware routes through the same sequencer as a request of
+its own (`source: touch`) rather than letting the core restart from inside
+its USB task; esptool's DTR/RTS pattern on that port is not honoured, since
+the downloader never appears on it. Before the hand-over the firmware takes
+the device off the bus and the link down; then the composite device
+vanishes, a `303a:1001` USB-Serial/JTAG port with
+the same MAC appears, and esptool is pointed at that port **with its own
+reset at connect**. On a root port that takes a second. Behind some hubs it
+takes up to a minute: the chip is in its ROM within two seconds, but the
+hub does not report the full-speed device's departure until a transfer to
+it fails, and only then is the serial-JTAG unit enumerated — measured on
+one bench hub at anything from three seconds to two and a half minutes,
+whatever the device did electrically to announce its going. The tooling
+waits up to three minutes and says so; a node that is flashed often belongs
+on a root port. That last point was measured and matters:
 a downloader entered from software stays in the ROM through esptool's
 closing hard reset unless esptool's connect-time reset sequence ran first,
 and a board left that way looks dead — blank display, no port but the
