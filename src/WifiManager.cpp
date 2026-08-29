@@ -148,7 +148,6 @@ void WifiManager::begin() {
     // Android/iOS/Windows. Bound to the AP's address, not to every
     // interface: a host on the USB link must not have its names steered
     // here (CaptiveDns.h).
-    if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind %s:53", AP_IP.toString().c_str());
   } else {
     // Wi-Fi off is a configuration, not a failure: the names are still
     // derived (the display and the console show them) and the radio is left
@@ -170,6 +169,11 @@ void WifiManager::begin() {
   }
 
   setupRoutes();
+  // The resolver runs whether or not Wi-Fi does: the USB link's lease names
+  // the node as DNS (CaptiveDns.h), and with the access point off there
+  // would otherwise be nothing on port 53 to refuse the host's queries —
+  // a timeout where a refusal was promised.
+  if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
   _http.begin();
 
   // http://retimesh.local/ (and http://<ssid>.local/) for clients whose

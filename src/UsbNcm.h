@@ -22,7 +22,8 @@
 //  On a board whose own USB reaches the connector (HAS_USB_NCM), the OTG
 //  stack owns the peripheral and presents one device with two functions:
 //
-//    CDC-ACM  "RetiMesh Maintenance"  the console and the log (Serial)
+//    CDC-ACM  the console and the log (Serial); the core's function, and it
+//             names the interface itself
 //    CDC-NCM  "RetiMesh Network"      an Ethernet-over-USB link, usb0
 //
 //  The ACM function is the core's: with ARDUINO_USB_CDC_ON_BOOT the core

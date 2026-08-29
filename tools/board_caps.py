@@ -105,7 +105,6 @@ def flags(entry: dict) -> list:
             ("USB_MANUFACTURER", env.StringifyMacro(ident["manufacturer"])),          # noqa: F821
             ("USB_PRODUCT", env.StringifyMacro(ident["product"])),                    # noqa: F821
             ("USB_NETWORK_INTERFACE", env.StringifyMacro(ident["network_interface"])),  # noqa: F821
-            ("USB_CONSOLE_INTERFACE", env.StringifyMacro(ident["console_interface"])),  # noqa: F821
             ("USB_PID_IS_TEST_ALLOCATION", 1 if ident.get("pid_is_test_allocation") else 0),
         ]
     return out

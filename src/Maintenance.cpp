@@ -111,7 +111,8 @@ static void doUsbStatus() {
   #if HAS_USB_NCM
     // The OTG stack owns the peripheral: this port is the composite device's
     // ACM function, and usb0 is its NCM function.
-    dataf("USB_STATUS", "native=true personality=usb_otg_composite ncm=driver cdc_acm=composite");
+    dataf("USB_STATUS", "native=true personality=usb_otg_composite ncm=driver cdc_acm=composite pid_test_allocation=%s",
+          USB_PID_IS_TEST_ALLOCATION ? "yes" : "no");
     dataf("USB_STATUS", "ncm_link=%s host_opened=%s ncm_rx=%lu ncm_tx=%lu ncm_tx_dropped=%lu",
           UsbNcm::linkUp() ? "up" : "down", UsbNcm::hostOpened() ? "yes" : "no", (unsigned long)UsbNcm::rxPackets(),
           (unsigned long)UsbNcm::txPackets(), (unsigned long)UsbNcm::txDropped());

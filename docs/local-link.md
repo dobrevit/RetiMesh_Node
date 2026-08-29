@@ -337,7 +337,7 @@ enumerates as one device with two functions:
 
 ```
 USB-C   1209:0001  RetiMesh / RetiMesh Node / serial = the factory MAC
-  ├── CDC-ACM  "RetiMesh Maintenance"  interfaces 0-1  → /dev/ttyACM*: the console and the log
+  ├── CDC-ACM  (named by the core)     interfaces 0-1  → /dev/ttyACM*: the console and the log
   └── CDC-NCM  "RetiMesh Network"      interfaces 2-3  → an Ethernet link: usb0 on the node,
                                                           enx<mac> on a Linux host
 ```
@@ -373,9 +373,12 @@ allocator refuses a fifth IN endpoint and the NCM descriptor callback then
 returns nothing, which the core reports as a failed load rather than
 enumerating with an interface missing.
 
-**Identity.** Manufacturer, product, the serial (the MAC) and the two
-interface strings come from `boards.json` (`_usb_identity`), handed to the
-build by `tools/board_caps.py`. The VID:PID is not ours to choose: Espressif
+**Identity.** Manufacturer, product, the serial (the MAC) and the network
+interface's string come from `boards.json` (`_usb_identity`), handed to the
+build by `tools/board_caps.py`; the ACM interface is the core's function and
+carries the core's own name for it. `USB_STATUS` says whether the PID is the
+test allocation, and a release refuses it (`tools/check_boards.py
+--release` in the release workflow). The VID:PID is not ours to choose: Espressif
 allocates PIDs under 0x303A to open-source projects on request
 (github.com/espressif/usb-pids), and until one is granted the registry
 carries pid.codes' test allocation 1209:0001, flagged
@@ -398,7 +401,9 @@ which is not the bare download bit that hung the serial-JTAG-only firmware
 — or, where the console is switched off, the 1200-baud touch on the ACM
 port, which the firmware routes through the same sequencer as a request of
 its own (`source: touch`) rather than letting the core restart from inside
-its USB task; esptool's DTR/RTS pattern on that port is not honoured, since
+its USB task — a refused touch is logged, and since the core reports a line
+coding only when it changes, the tool opens the port at another speed before
+touching again; esptool's DTR/RTS pattern on that port is not honoured, since
 the downloader never appears on it. Before the hand-over the firmware takes
 the device off the bus and the link down; then the composite device
 vanishes, a `303a:1001` USB-Serial/JTAG port with

@@ -163,17 +163,18 @@ static esp_netif_t*         sNetif = nullptr;
 static esp_netif_ip_info_t  sIpInfo;
 static std::atomic<bool>    sHostOpened{false};   // the host set its packet filter: it opened the interface
 static std::atomic<bool>    sEnabled{false};      // the operator's switch, as last applied
-static bool                 sUp = false;          // the netif is started and connected
+static std::atomic<bool>    sUp{false};           // the netif is started and connected; read on three tasks
 static std::atomic<uint32_t> sRx{0}, sTx{0}, sTxDropped{0};
 
 // TinyUSB's transmit is a copy through xmit_cb, synchronous, so the frame
 // lwIP hands over is consumed before transmit() returns and lwIP may free it.
 static esp_err_t transmit(void*, void* buffer, size_t len) {
   if (!sUp || len > CFG_TUD_NET_MTU) return ESP_FAIL;
-  // The class driver holds one NTB in flight; a burst waits a few ticks for
-  // it and then drops, because the radio and the transport must never wait
-  // on the USB cable.
-  for (int i = 0; i < 10 && !tud_network_can_xmit((uint16_t)len); i++) vTaskDelay(1);
+  // This runs on the TCP/IP task, which carries the portal and the RNS
+  // transport too. The class driver holds one NTB in flight; if it is busy
+  // the frame is dropped here and now — TCP retransmits, and the radio and
+  // the transport must never wait on the USB cable, least of all on a host
+  // that has stopped draining it.
   if (!tud_network_can_xmit((uint16_t)len)) { sTxDropped++; return ESP_FAIL; }
   tud_network_xmit(buffer, (uint16_t)len);
   sTx++;
@@ -206,8 +207,13 @@ static Driver sDriver = { { postAttach, nullptr } };
 // port.
 static void onLineCoding(void*, esp_event_base_t, int32_t, void* data) {
   const auto* d = static_cast<arduino_usb_cdc_event_data_t*>(data);
-  if (d && d->line_coding.bit_rate == 1200)
-    Bootloader::request(Bootloader::Target::Bootloader, Bootloader::Source::Touch, 0);
+  if (!d || d->line_coding.bit_rate != 1200) return;
+  const char* why = nullptr;
+  const Bootloader::Refusal r = Bootloader::request(Bootloader::Target::Bootloader, Bootloader::Source::Touch, 0, &why);
+  // A refusal has nowhere to go but the log: the core posts this event only
+  // when the coding changes, so the host tool opens at another speed before
+  // touching again (device.py, touch_1200).
+  if (r != Bootloader::Refusal::None) log_w("touch: refused (%s)", why ? why : "");
 }
 
 void begin() {
@@ -232,10 +238,14 @@ void begin() {
   sNetif = esp_netif_new(&cfg);
   if (!sNetif) { log_e("usb0: esp_netif_new failed"); return; }
   esp_netif_set_mac(sNetif, sNodeMac);
-  // A way to reach the node, not a way out: the offer carries no router and
-  // no DNS, so the host keeps its default route and its resolver where they
-  // were and never sends the wider world down a cable that goes nowhere.
-  // The access point keeps both, because its captive portal needs them.
+  // A way to reach the node, not a way out: the offer carries no router, so
+  // the host keeps its default route where it was and never sends the wider
+  // world down a cable that goes nowhere. ESP-IDF's server names itself as
+  // DNS whenever it is told to name nobody, so that option cannot be
+  // dropped; the resolver behind it refuses every query that does not
+  // arrive on the access point (CaptiveDns.h), which is what lets the
+  // host's own resolver move on. The access point keeps the router, because
+  // its captive portal needs it.
   // (OFFER_START is the empty set of offers; OFFER_END, despite the name,
   // is every bit set.)
   dhcps_offer_t none = OFFER_START;
@@ -253,9 +263,9 @@ bool linkUp() { return sUp; }
 
 void detach() {
   if (sUp) {
+    sUp = false;                                    // before the stop, as in poll()
     esp_netif_action_disconnected(sNetif, nullptr, 0, nullptr);
     esp_netif_action_stop(sNetif, nullptr, 0, nullptr);
-    sUp = false;
   }
   tud_disconnect();
   // The soft disconnect alone leaves the PHY's pull-up on D+, and the core's
@@ -301,9 +311,11 @@ void poll(bool enabled) {
     sUp = true;
     log_i("usb0: up, %s/24, DHCP serving the host", address().toString().c_str());
   } else if (!want && sUp) {
+    // Down first, then stop: a frame arriving on the USB task between the
+    // two must not be handed to an interface that has just been torn down.
+    sUp = false;
     esp_netif_action_disconnected(sNetif, nullptr, 0, nullptr);
     esp_netif_action_stop(sNetif, nullptr, 0, nullptr);
-    sUp = false;
     log_i("usb0: down (%s)", !enabled ? "switched off" : "host gone");
   }
 }

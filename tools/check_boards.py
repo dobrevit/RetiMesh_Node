@@ -59,11 +59,15 @@ for env, meta in boards.items():
 
 ident = boards.get("_usb_identity")
 if isinstance(ident, dict):
-    for key in ("vid", "pid", "manufacturer", "product", "network_interface", "console_interface"):
+    for key in ("vid", "pid", "manufacturer", "product", "network_interface"):
         if not ident.get(key):
             problems.append(f"_usb_identity.{key} missing")
     if ident.get("pid_is_test_allocation") is None:
         problems.append("_usb_identity.pid_is_test_allocation missing — say whether the PID may ship")
+    # A release may not ship pid.codes' test allocation: the rule the registry
+    # states gets its teeth here, from the release workflow (--release).
+    if "--release" in sys.argv[1:] and ident.get("pid_is_test_allocation"):
+        problems.append("_usb_identity: the PID is a test allocation and may not ship in a release")
 
 for p in problems:
     print("boards.json:", p)
