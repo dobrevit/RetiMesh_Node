@@ -96,10 +96,10 @@ static RingbufHandle_t tcpInRing = nullptr; // TCP clients -> Transport
 static LocalLink::WifiApLink  apLink;
 static LocalLink::WifiStaLink staLink;
 static LocalLink::UnavailableLink usbLink(LocalLink::Type::UsbNcm, "usb0", BOARD_USB_NCM,
-  BOARD_USB_NCM ? "this build has no USB network stack (Arduino core 2.x TinyUSB carries no NCM)"
+  BOARD_USB_NCM ? "this build has no USB network stack (the core's TinyUSB carries NCM; the firmware does not drive it yet)"
                 : "this board's USB is a serial bridge, not the chip's own");
 static LocalLink::UnavailableLink pppLink(LocalLink::Type::PppUart, "ppp0", BOARD_UART_NETWORK,
-  BOARD_UART_NETWORK ? "this build has no PPP (the core's lwIP is built without it)"
+  BOARD_UART_NETWORK ? "this build has no PPP (the core's lwIP has it; the firmware does not drive it yet)"
                      : "this board has no bridge UART to carry PPP");
 
 void setup() {

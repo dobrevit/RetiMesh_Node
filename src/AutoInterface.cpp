@@ -218,8 +218,8 @@ void sendDiscovery() {
 
 void task(void*) {
   deriveGroupAddress();
-  // IPv6 on the AP comes up asynchronously; wait for a link-local address.
-  WiFi.softAPenableIpV6();
+  // IPv6 on the AP comes up asynchronously (WifiManager enables it before
+  // the AP starts); wait for the link-local address.
   for (int i = 0; i < 100 && !localLinkLocal(sLocal, sizeof(sLocal)); i++) vTaskDelay(pdMS_TO_TICKS(100));
   if (!sLocal[0]) { log_w("AutoInterface: no link-local IPv6 on the AP, giving up"); vTaskDelete(nullptr); return; }
   log_i("AutoInterface: AP link-local %s", sLocal);

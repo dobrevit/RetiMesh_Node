@@ -14,6 +14,37 @@ build all of them, so a change has to compile everywhere — including the three
 with no SD slot, where `HAS_SD 0` has to actually work. `boards.json` is the
 registry they come from. Add `-D` overrides under `build_flags`.
 
+The platform is the [pioarduino](https://github.com/pioarduino/platform-espressif32)
+fork of `espressif32`, pinned in `platformio.ini` to an exact release
+(`55.03.311` is Arduino core 3.3.11 on ESP-IDF 5.5.5). PlatformIO's own
+`espressif32` stopped at Arduino core 2.0.17 / ESP-IDF 4.4 and is not going to
+move, so the fork is the only maintained route to core 3.x. The pin is exact
+rather than a caret range because a platform bump is a toolchain bump — the
+compiler, the prebuilt IDF libraries and the core's API all move together — and
+CI has to build what was qualified; `tools/bump_deps.py` leaves it alone and it
+is moved by hand. The first build fetches the platform, the core, its prebuilt
+libraries and the GCC 14 toolchain from GitHub, a few hundred megabytes.
+
+The fork keeps one copy of the core per package directory: on every run it
+deletes any `framework-arduinoespressif32@<version>` package it finds, and it
+installs its own `tool-esptoolpy`, `tool-scons` and toolchains under the same
+names the official platform uses. It therefore cannot share `~/.platformio`
+with a checkout on the official platform (the RNode firmware mirror, or an
+older branch of this repo) without the two reinstalling each other's packages
+on every switch — and a build running in one checkout while the other
+installs is broken mid-way. On a bench that holds both toolchains, give the
+core-3 checkout its own package and platform directories on every `pio`
+command (`run`, `test`, `pkg`, `envdump`):
+
+```sh
+PLATFORMIO_PACKAGES_DIR=$HOME/.platformio/packages-core3 \
+PLATFORMIO_PLATFORMS_DIR=$HOME/.platformio/platforms-core3 \
+pio run -e t3s3
+```
+
+The first run downloads everything again into those directories; that is the
+point. A bench with only this repo on it needs neither variable.
+
 Shared build settings live in named sections rather than per-board copies:
 `[esp32s3]` for what any S3 wants, `[esp32s3_psram_usb]` for the four boards
 that also have in-package PSRAM and the S3's own USB on the connector. The

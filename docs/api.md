@@ -89,7 +89,7 @@ past the checks on the way in.
     { "name": "wifi-sta", "type": "wifi_sta", "hardware": true, "firmware": true, "enabled": true,
       "phase": "ready", "up": true, "ip": "192.168.1.42", "addressing": "dhcp", "uptime_s": 1200 },
     { "name": "usb0", "type": "usb_ncm",  "hardware": true,  "firmware": false, "enabled": false, "phase": "disabled",
-      "reason": "this build has no USB network stack (Arduino core 2.x TinyUSB carries no NCM)" },
+      "reason": "this build has no USB network stack (the core's TinyUSB carries NCM; the firmware does not drive it yet)" },
     { "name": "ppp0", "type": "ppp_uart", "hardware": false, "firmware": false, "enabled": false, "phase": "disabled",
       "reason": "this board has no bridge UART to carry PPP" }
   ],

@@ -25,8 +25,8 @@ flowchart TB
   subgraph links[Local links — LocalLink.h]
     AP[wifi-ap<br/>10.42.0.1/24 · DHCP server]
     STA[wifi-sta<br/>DHCP client on your LAN]
-    USB[usb0 · CDC-NCM<br/>10.64.n.1/24 · needs core 3.x]
-    PPP[ppp0 · PPPoS over CP2102<br/>needs lwIP with PPP]
+    USB[usb0 · CDC-NCM<br/>10.64.n.1/24 · not driven yet]
+    PPP[ppp0 · PPPoS over CP2102<br/>not driven yet]
   end
   LWIP --- AP
   LWIP --- STA
@@ -367,41 +367,35 @@ boot count, previous run length in RTC RAM, reported by `/api/status` and
 with a probe. An in-memory log ring served by the API is the natural next
 sink.
 
-**Why it is not in this build.** The pinned toolchain — `espressif32 ^6.9.0`,
-Arduino core 2.0.17 on ESP-IDF 4.4.7 — ships TinyUSB as a prebuilt library
-with MSC, DFU, HID, vendor, CDC and MIDI classes and **no NCM, ECM or RNDIS**
-(`esp32-hal-tinyusb.h`, `tusb_config.h` in the 4.4 lib-builder). NCM arrives
-with the core 3.x lib-builder (`CONFIG_TINYUSB_NCM_ENABLED`, default on) on
-ESP-IDF 5, which the official PlatformIO platform does not ship even at 7.0.x;
-it needs the pioarduino platform fork. The same core's prebuilt lwIP has
-`CONFIG_LWIP_PPP_SUPPORT` off, so PPPoS is in the same position. Two ways
-forward, in order of preference:
+**Why it is not in this build.** For a long time it could not be. The
+official `espressif32` platform is frozen on Arduino core 2.0.17 / ESP-IDF
+4.4.7, whose prebuilt TinyUSB has MSC, DFU, HID, vendor, CDC and MIDI classes
+and **no NCM, ECM or RNDIS**, and whose prebuilt lwIP has
+`CONFIG_LWIP_PPP_SUPPORT` off. The build has since moved to the pioarduino
+platform fork with Arduino core 3.3.x on ESP-IDF 5.5 (`platformio.ini` pins
+the release and says why), and that core's prebuilt libraries have both: its
+`tusb_config.h` takes `CFG_TUD_NCM` from `CONFIG_TINYUSB_NCM_ENABLED`, which
+is on; lwIP is built with `CONFIG_LWIP_PPP_SUPPORT`; and the core ships a
+`PPP` library over `esp_netif` PPP. SoftAP SAE (`WPA3_SOFTAP_SUPPORTED`) came
+with the same move. What the toolchain no longer withholds, the firmware has
+not yet taken up: the composite device and `UsbNcmLink` on the core's
+`esp_tinyusb`/`tinyusb_net`, and `PppLink` below, are the remaining work, and
+each is its own change.
 
-1. **Move the toolchain** to pioarduino + Arduino core 3.x (IDF 5.x). This is
-   the route that also brings WPA3 (`WPA3_SOFTAP_SUPPORTED` already waits on
-   IDF 5) and the current `esp_tinyusb`/`tinyusb_net` APIs. It is a
-   whole-firmware re-qualification — AsyncTCP, the Wi-Fi driver, RadioLib,
-   PSRAM handling — and belongs in its own branch.
-2. **Build TinyUSB from source** as a library under core 2.x with
-   `ARDUINO_USB_MODE=1` left alone (so the core's own USB code stays out of
-   the way), an own `tusb_config.h` with `CFG_TUD_NCM`, and the PHY switched to
-   the OTG controller with `usb_phy`/`usb_hal` from IDF 4.4. Feasible, but it
-   duplicates a component the core already links and has to be re-done when
-   (1) happens anyway.
-
-Either way the pieces that do not depend on the toolchain are done and tested:
-the link registry and phase machine, the capability model, the descriptor
-budget, the addressing rule, the console protocol the ACM port will speak, the
-touch detector, and the bootloader transition the S3 already performs.
+The pieces that never depended on the toolchain are done and tested: the link
+registry and phase machine, the capability model, the descriptor budget, the
+addressing rule, the console protocol the ACM port will speak, the touch
+detector, and the bootloader transition the S3 already performs.
 
 ## PPP over the bridge UART — follow-up specification
 
 For `heltec-v3`, `heltec-ws`, `tbeam`: PPPoS on UART0 behind the CP2102/CH9102,
 as `PppLink` in the same registry, the same `0.0.0.0` services on top.
 
-- **lwIP side:** `esp_netif` PPP (`esp_netif_ppp.h`, present in the SDK
-  headers; the library needs `CONFIG_LWIP_PPP_SUPPORT`), server mode with the
-  node at `10.65.<n>.1` and the host at `10.65.<n>.2`, `<n>` as for USB.
+- **lwIP side:** `esp_netif` PPP (`esp_netif_ppp.h`; the core's prebuilt
+  lwIP is built with `CONFIG_LWIP_PPP_SUPPORT`, and the core's own `PPP`
+  library wraps it), server mode with the node at `10.65.<n>.1` and the host
+  at `10.65.<n>.2`, `<n>` as for USB.
 - **UART task:** core 0, priority below the radio task, reading into a bounded
   ring (`PPP_RX_RING_BYTES`, 4 KB) and dropping on overflow — PPP retransmits
   and the radio must never wait for it. TX from the lwIP output callback with

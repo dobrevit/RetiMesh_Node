@@ -31,7 +31,7 @@ ROM, and a power cycle boots whatever is in flash.
 | Messages to a peer fail until Sideband is restarted (ratchet errors) | Sideband encrypts to the peer's announced ratchet key and caches it; after the peer's keys/ratchets change it can hold a stale one | wait for the peer's next announce or restart Sideband; the node relays announces with their ratchets unchanged (transport rebroadcasts preserve the context flag and ratchet bytes) |
 | Sideband does not find the node via Local/LAN | AutoInterface disabled on either side, different group id, or the phone's Wi-Fi blocks multicast (some Android power-saving modes) | check *Connect via Local/LAN* in Sideband and *Zero-config peering* on the node; group ids must match; fall back to TCP `10.42.0.1:4242` |
 | Settings page asks for a password | admin auth | `admin` / `retimesh` by default; factory reset restores it |
-| Wi-Fi security `wpa3` greyed out | ESP-IDF 4.4 core has no SoftAP SAE | use WPA2; WPA3 arrives with the core-3 migration |
+| Wi-Fi security `wpa3` greyed out | the firmware was built on an ESP-IDF 4.4 core, which has no SoftAP SAE | flash a current build (core 3.x / IDF 5), or use WPA2 |
 | Node reboots after saving Wi-Fi/transport settings | by design — those need re-registration | reconnect to the (possibly new) SSID |
 | `esp_littlefs: Failed to unlink … Has open FD` | microStore compaction deleting a segment it still holds open (fixed in our fork, upstream PR attermann/microStore#6) | update the firmware; harmless on older builds |
 | SD card shows `partial` | the FAT volume covers only part of the card (Raspberry Pi image, phone card) | *Format card* on the settings page (erases it) |

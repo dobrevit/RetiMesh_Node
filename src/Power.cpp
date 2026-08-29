@@ -89,7 +89,11 @@ uint32_t displaySleepMs() {
 
 void begin() {
 #if HAS_BATTERY_ADC
-  analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
+  // The default for every channel attached from here on, rather than a
+  // per-pin setting: core 3 attaches a pin to the ADC on its first read and
+  // refuses to configure one that is not attached yet, so the per-pin call
+  // before the first sample logged an error and set nothing.
+  analogSetAttenuation(ADC_11db);
   sample();
 #endif
   apply((Profile)settings.transport().powerProfile);
