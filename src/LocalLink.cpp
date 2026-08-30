@@ -54,11 +54,16 @@ Link* serving(uint32_t localIp) {
   return nullptr;
 }
 
-bool requestIsHostFacing(uint32_t localIp, uint32_t remoteIp) {
+bool requestIsOnItsLink(uint32_t localIp, uint32_t remoteIp) {
   const Link* l = serving(localIp);
-  if (!l || !isHostFacing(l->type())) return false;
+  if (!l) return false;
   const uint32_t mask = l->netmask();
   return mask != 0 && (remoteIp & mask) == (l->address() & mask);
+}
+
+bool requestIsHostFacing(uint32_t localIp, uint32_t remoteIp) {
+  const Link* l = serving(localIp);
+  return l && isHostFacing(l->type()) && requestIsOnItsLink(localIp, remoteIp);
 }
 
 uint32_t hostOrder(const IPAddress& a) { return ipv4(a[0], a[1], a[2], a[3]); }

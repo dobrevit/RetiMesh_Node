@@ -117,6 +117,13 @@ Link* serving(uint32_t localIpHostOrder);
 // like the access point looked local from where it sat.
 bool requestIsHostFacing(uint32_t localIpHostOrder, uint32_t remoteIpHostOrder);
 
+// The subnet half of that test on its own: true when a packet accepted at
+// `localIp` came from the subnet of the link holding that address. For a
+// caller that already knows which link it means and only needs to know the
+// packet came from that side of the node — the captive portal's resolver,
+// which answers on the access point and refuses everywhere else.
+bool requestIsOnItsLink(uint32_t localIpHostOrder, uint32_t remoteIpHostOrder);
+
 // An IPAddress as a host-order number, for comparing with address().
 uint32_t hostOrder(const IPAddress& a);
 
@@ -233,10 +240,6 @@ protected:
   Addressing addressing() const override { return Addressing::Dhcp; }
 };
 
-// Links this board could carry but this build does not: they appear in the
-// registry so the API lists them with hardware=true, firmware=false and a
-// reason, and the settings page can show the switch greyed out rather than
-// absent. Nothing else about them runs.
 // The S3's USB network link: CDC-NCM on the composite device (UsbNcm.h).
 // The device itself is composed before setup() runs; what this link brings up
 // and down is the network interface behind it, so the switch applies live —
@@ -259,6 +262,10 @@ protected:
 };
 #endif
 
+// Links this board could carry but this build does not: they appear in the
+// registry so the API lists them with hardware=true, firmware=false and a
+// reason, and the settings page can show the switch greyed out rather than
+// absent. Nothing else about them runs.
 class UnavailableLink : public Link {
 public:
   UnavailableLink(Type t, const char* name, bool hardware, const char* reason)
