@@ -284,7 +284,13 @@ static bool allowedUnauthenticated(Cmd c) {
 
 static void doAuth(const Request& r) {
   const uint32_t now = millis();
-  if (sAuthLockedUntilMs && (int32_t)(now - sAuthLockedUntilMs) < 0) {
+  // The lockout belongs to the network, and so does the counting. Somebody
+  // at the cable is already trusted and is most likely checking what the
+  // password is; a typo there must not be able to shut the door on whoever
+  // dials in next, and neither must a wait apply to a session that never
+  // needed to authenticate in the first place.
+  const bool counts = sCur && !sCur->trusted;
+  if (counts && sAuthLockedUntilMs && (int32_t)(now - sAuthLockedUntilMs) < 0) {
     err("AUTH", 429, "too many attempts; wait and try again");
     return;
   }
@@ -296,17 +302,17 @@ static void doAuth(const Request& r) {
   for (size_t i = 0; i < n; i++)
     same &= (i < r.rawValueLen && r.rawValue[i] == want[i]);
   if (!same) {
-    if (++sAuthFailures >= MAINT_AUTH_MAX_FAILURES) {
+    if (counts && ++sAuthFailures >= MAINT_AUTH_MAX_FAILURES) {
       sAuthLockedUntilMs = now + MAINT_AUTH_LOCKOUT_MS;
       if (!sAuthLockedUntilMs) sAuthLockedUntilMs = 1;    // never the "unset" value
       sAuthFailures = 0;
       if (sCur) sCur->closing = true;
     }
-    log_w("console: failed AUTH from a network session");
+    if (counts) log_w("console: failed AUTH from a network session");
     err("AUTH", 401, "wrong password");
     return;
   }
-  sAuthFailures = 0;
+  if (counts) sAuthFailures = 0;
   if (sCur) sCur->authed = true;
   ok("AUTH");
 }

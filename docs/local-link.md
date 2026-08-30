@@ -246,8 +246,22 @@ RM GET radio.sf=8
 RM OK GET lines=1
 ```
 
-`tools/console.py` is a client for it: `python tools/console.py <host> STATUS`
-for one command, or with no command for an interactive session.
+`tools/console.py` speaks both transports and works out which from what it is
+given — a path or a `COM` name is a port, anything else is a host:
+
+```sh
+python tools/console.py /dev/ttyUSB0 STATUS        # over the cable
+python tools/console.py 192.168.1.50 STATUS        # over the network
+python tools/console.py 192.168.1.50 SET radio.sf 9
+python tools/console.py retimesh-52a7f8.local      # interactive
+```
+
+It authenticates only on the network transport, and refuses `--password` on
+the cable rather than sending it: the cable needs none, and a typo there
+would spend a failure the next network caller has to pay for. The password
+comes from `--password`, then `RETIMESH_PASSWORD`, then a prompt. The
+protocol reader is `retimesh_flash.device.Console`, the one the flashing tool
+already used — one client, two transports, as in the firmware.
 
 The cable is trusted without a password and the socket is not, which is the
 one place the two transports differ. Physical access already allows dumping
