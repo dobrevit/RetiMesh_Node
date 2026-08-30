@@ -166,10 +166,10 @@ appears in the neighbour list too. The callsign defaults to the SSID.
   (Reticulum links tolerate loss).
 
 Per-file tour: [main.cpp](src/main.cpp) (task layout, ring buffers) ·
-[WifiManager](src/WifiManager.cpp) (AP, captive portal, web API) ·
-[RetiTransportServer](src/RetiTransportServer.cpp) (port 4242, HDLC, hub
-relay) · [LoRaRadio](src/LoRaRadio.cpp) (RadioLib SX1262, CSMA,
-fragmentation) · [HDLC.h](src/HDLC.h) (RNS TCP wire framing).
+[WifiManager](src/net/WifiManager.cpp) (AP, captive portal, web API) ·
+[RetiTransportServer](src/net/RetiTransportServer.cpp) (port 4242, HDLC, hub
+relay) · [LoRaRadio](src/radio/LoRaRadio.cpp) (RadioLib SX1262, CSMA,
+fragmentation) · [HDLC.h](src/net/HDLC.h) (RNS TCP wire framing).
 
 ## Development workflow
 

@@ -46,7 +46,7 @@ autolabeler:
     title: ['/^ci(\(.+\))?:/i']
     files: ['.github/**', 'tools/**']
   - label: radio
-    files: ['src/LoRaRadio.*', 'src/HDLC.h', 'src/RetiTransportServer.*']
+    files: ['src/radio/**', 'src/net/HDLC.h', 'src/net/RetiTransportServer.*']
   - label: dependencies
     title: ['/^(deps|build|chore)(\(deps\))?:/i', '/^bump /i']
   - label: breaking
