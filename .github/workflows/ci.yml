@@ -14,13 +14,37 @@ permissions:
   contents: read
 
 jobs:
+  # The board list comes from the registry, not from a copy of it here. Two
+  # copies drift, and this pair had: the Heltec Wireless Paper was added to
+  # boards.json and platformio.ini and never reached either matrix, so CI
+  # never built it and a release would have shipped eight boards while the
+  # tree carried nine. hil.yml already derives its matrix this way.
+  boards:
+    name: which boards to build
+    runs-on: ubuntu-latest
+    outputs:
+      envs: ${{ steps.list.outputs.envs }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          boards = json.load(open("boards.json"))
+          envs = [k for k in boards if not k.startswith("_")]
+          if not envs:
+              raise SystemExit("boards.json lists no boards")
+          print("envs=" + json.dumps(envs))
+          PY
+
   firmware:
     name: firmware (${{ matrix.env }})
+    needs: boards
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        env: [t3s3, t3s3-sx1280, t3s3-sx1280-pa, esp32s3-qspi, tbeam, heltec-ws, heltec-wb, heltec-v3]
+        env: ${{ fromJSON(needs.boards.outputs.envs) }}
     steps:
       - uses: actions/checkout@v7
       - id: ver
