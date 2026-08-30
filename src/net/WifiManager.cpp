@@ -464,8 +464,25 @@ void WifiManager::setupRoutes() {
                // memory (Diag.h). A request that cannot be served is answered
                // 503; before this it took the node down with it, on the
                // framework's task, under whoever sent it.
-               if (!Diag::guard(path, [&] { (this->*fn)(r, body, t); }))
-                 sendError(r, 503, "out of memory serving that request");
+               if (!Diag::guard(path, [&] { (this->*fn)(r, body, t); })) {
+                 // Replying is itself an allocation — a JsonDocument, a String,
+                 // a response object — on the same exhausted heap that just
+                 // threw, on the framework's task. So the apology gets its own
+                 // guard: a second failure here would reach the terminate
+                 // handler and abort, which is the thing being avoided. If
+                 // even this cannot be built the caller times out, which is a
+                 // worse answer than 503 and a far better one than a reboot.
+                 //
+                 // And it does not claim the change failed. A handler saves
+                 // its settings and arms its restart before it replies, so a
+                 // throw on the way out can follow a write that fully
+                 // happened; "that request failed" would be a lie the
+                 // operator then acts on.
+                 Diag::guard("the reply to a failed request", [&] {
+                   sendError(r, 503, "ran out of memory while replying — the change may have "
+                                     "been applied; check STATUS or /api/status");
+                 });
+               }
              });
   }
   // What this board can do about its bootloader, for tooling. No secrets:

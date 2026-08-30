@@ -16,6 +16,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include "Diag.h"
+#include "Lock.h"
 
 namespace {
 
@@ -165,7 +166,7 @@ void task(void*) {
         // closes the UART while holding the same lock, and a reader that decided
         // to run just before that would otherwise go on to read a port that has
         // since been shut down.
-        xSemaphoreTake(sLock, portMAX_DELAY);
+        Sys::Lock held(sLock);
         if (sFix.enabled) {
           // Bounded per pass so a chatty receiver cannot monopolise the task.
           // 9600 baud is under 1 KB/s, and this runs ten times a second.
@@ -186,7 +187,7 @@ void task(void*) {
           if (sFix.valid && millis() - sLastFixMs >= FIX_TIMEOUT) sFix.valid = false;
           sFix.ageMs = sFix.sentences ? millis() - sLastSentenceMs : 0;
         }
-        xSemaphoreGive(sLock);
+        held.release();
         vTaskDelay(pdMS_TO_TICKS(100));
       }
     });
@@ -201,8 +202,8 @@ namespace Gps {
 bool enabled() { return sFix.enabled; }
 
 void setEnabled(bool on) {
-  if (sLock) xSemaphoreTake(sLock, portMAX_DELAY);
-  if (on == sFix.enabled) { if (sLock) xSemaphoreGive(sLock); return; }
+  Sys::Lock held(sLock);
+  if (on == sFix.enabled) return;
   Pmu::gpsPower(on);
   if (on) {
     sSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
@@ -214,7 +215,6 @@ void setEnabled(bool on) {
     resetState();
     log_i("GNSS receiver off");
   }
-  if (sLock) xSemaphoreGive(sLock);
 }
 
 void begin() {
@@ -228,10 +228,8 @@ void begin() {
 
 Fix fix() {
   if (!sLock) return Fix{};
-  xSemaphoreTake(sLock, portMAX_DELAY);
-  Fix f = sFix;
-  xSemaphoreGive(sLock);
-  return f;
+  Sys::Lock held(sLock);
+  return sFix;
 }
 
 } // namespace Gps

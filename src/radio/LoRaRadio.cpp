@@ -381,9 +381,16 @@ bool LoRaRadio::applySettings(const RadioSettings& s) {
 void LoRaRadio::radioTask(void* self) {
   s_taskHandle = xTaskGetCurrentTaskHandle();
   // The radio is the one thing a relay exists to do, so it is the last thing
-  // that should be allowed to end the node (Diag.h). taskLoop() does not
-  // return; the guard is here for what it throws on the way.
-  Diag::guard("the radio task", [self] { static_cast<LoRaRadio*>(self)->taskLoop(); });
+  // that should be allowed to end the node (Diag.h) — and a guard that let
+  // this function *return* would end it just as surely: ESP-IDF's
+  // vPortTaskWrapper aborts on a task function that returns, so containing
+  // the throw and falling out of the bottom is the same reboot by a longer
+  // road. taskLoop() does not return of its own accord; when it throws, this
+  // goes back into it.
+  for (;;) {
+    Diag::guard("the radio task", [self] { static_cast<LoRaRadio*>(self)->taskLoop(); });
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
 }
 
 void LoRaRadio::taskLoop() {
