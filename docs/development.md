@@ -110,6 +110,14 @@ python tools/soak.py --out soak.csv retimesh-8249cc retimesh-cd5a28   # collect
 python tools/soak.py --summarise soak.csv                             # read it
 ```
 
+A soak is only as good as the build under it. Level every node in the fleet —
+firmware *and* filesystem, since `-t upload` writes only the application —
+and check `origin/main` immediately before flashing rather than when the
+branch merged: a run started on a commit that has since moved is measuring
+firmware nobody has any more, which is what voided the 2026-08-27 run's
+conclusions. Record the commit beside the CSV; the node cannot tell you,
+because a bench build reports `version=dev`.
+
 It reports restarts and why, the heap trend with its low-water mark and largest
 block, the lowest stack headroom by task name, table growth, and the five loss
 counters as deltas. Every one of those has caught something real on this bench.
@@ -214,7 +222,10 @@ them on every push.
 | `test_store_home` | where the Reticulum store belongs, card ownership, what a move does |
 | `test_local_link` | the local-link phase machine and the host-facing trust rule |
 | `test_bootloader` | which bootloader methods a board offers, the restart sequence and its re-arm rule |
-| `test_maintenance` | the console protocol: parsing, malformed and overlong lines, noise, replies |
+| `test_maintenance` | the console protocol: parsing, malformed and overlong lines, noise, replies, `AUTH` |
+| `test_settings_rules` | what a settings value may be, held to the vectors the API and the console share |
+| `test_ppp_uart` | who owns the bridge UART: what takes the port for PPP and, more importantly, what must not |
+| `test_display_refresh` | whether a drawn frame is worth pushing to the glass, and how |
 
 The host tooling has its own suite, run by CI too:
 ```sh
@@ -244,6 +255,9 @@ tools/          make_manifest.py (release bundles), build_site.py (Pages),
                 sampler and summariser), asset_stamp.py (build-time web asset
                 hash), board_caps.py (boards.json -> BOARD_* flags),
                 check_boards.py (boards.json consistency, CI),
+                console.py (the maintenance console over a port or a socket),
+                hil_ppp.py (PPP hardware-in-the-loop), hilreport.py (HIL
+                results as a job summary),
                 board_docs.py (boards.json -> the board matrix in docs/hardware.md, CI checks it),
                 upload_hook.py (bootloader hand-off around `-t upload`)
 boards.json     board registry used by CI, packaging, flasher and CLI
