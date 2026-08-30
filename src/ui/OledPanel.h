@@ -46,6 +46,8 @@ public:
   void blank(bool on) override {
     _oled.ssd1306_command(on ? SSD1306_DISPLAYOFF : SSD1306_DISPLAYON);
   }
+  // The panel and its charge pump come off, which is the point of the timer.
+  bool blanks() const override { return true; }
   const uint8_t* frame(size_t& len) const override {
     len = (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT / 8;
     return const_cast<Adafruit_SSD1306&>(_oled).getBuffer();

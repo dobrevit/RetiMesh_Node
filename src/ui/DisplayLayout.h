@@ -109,10 +109,9 @@ constexpr Layout kOled64x32 = {
   /*refreshMs*/ 500, /*activeRefreshMs*/ 500, /*fullEveryUpdates*/ 0,
 };
 
-// 2.13" e-paper, 250x122, as on the Heltec Wireless Paper. Not selected by any
-// board yet — the driver is the next piece of work — but written here because
-// it is what the numbers above have to survive, and because the two fields
-// that matter for it are the two an OLED never exercises.
+// 2.13" e-paper, 250x122, as on the Heltec Wireless Paper (heltec_wp.h selects
+// it with DISPLAY_KIND_EINK). The two fields that matter for it are the two an
+// OLED never exercises.
 //
 // The two intervals are the whole point of this panel's entry. Resting, it
 // redraws every five minutes: a node left on a shelf spends its panel's life

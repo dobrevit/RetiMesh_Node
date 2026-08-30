@@ -136,6 +136,8 @@ private:
     return _page == STATUS ? l.refreshMs : l.activeRefreshMs;
   }
   uint32_t      _frameSeq = 0;           // stands in for the hash on a panel with no readable buffer
+  uint32_t      _lastPaintMs = 0;
+  bool          _paintDue = true;        // boot, a page change, waking: draw without waiting for the cadence
 #endif
   bool    _ok   = false;
 };

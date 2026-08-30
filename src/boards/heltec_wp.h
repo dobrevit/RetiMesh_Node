@@ -19,15 +19,12 @@
 #pragma once
 // Heltec Wireless Paper — ESP32-S3 with an SX1262 and a 2.13" e-ink panel.
 //
-// The panel is not driven yet, and this header says so by leaving its pins
-// out rather than writing down numbers nothing has proved. An e-ink display
-// is not an OLED with different dimensions: it is written in whole frames,
-// takes the better part of a second to do it, and cannot be repainted on a
-// timer the way Display.cpp repaints the panels this firmware already has.
-// Bringing it up means abstracting the display behind something that can say
-// "this is a slow display, coalesce", so this board starts headless and gets
-// its panel when that abstraction exists. Everything else about the board —
-// the radio, Wi-Fi, the console, the store — works today.
+// The panel is driven (src/ui/EinkPanel.h). An e-ink display is not an OLED
+// with different dimensions: it is written in whole frames, takes the better
+// part of a second to do it, and cannot be repainted on the timer the other
+// panels use — so it is drawn every pass into memory and shown only when the
+// result differs and the panel can afford it. The pins below are the driver
+// library's own, and EinkPanel.h holds the two to each other at compile time.
 //
 // Pin sourcing, which on this bench is worth stating: the SPI four and Vext
 // come from the Arduino core's own variant for this exact board

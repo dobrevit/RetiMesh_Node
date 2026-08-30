@@ -162,6 +162,17 @@ static void test_urgency_is_spent_on_the_frame_it_showed() {
   TEST_ASSERT_EQUAL((int)Action::Skip,    (int)p.decide(200, 3));
 }
 
+static void test_urgency_lapses_when_the_frame_it_asked_for_is_unchanged() {
+  // A press that turns to a page which draws exactly what was already there
+  // has nothing to show. The exemption must not survive to be spent minutes
+  // later on a reading that ticked over with nobody watching.
+  RefreshPolicy p = eink();
+  p.decide(0, 1);
+  p.urgent();
+  TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(100, 1));   // identical: nothing to show
+  TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(200, 2));   // and the gap is back in force
+}
+
 static void test_the_clock_wrapping_does_not_freeze_the_panel() {
   // millis() wraps every 49 days. Unsigned differences carry through it, and
   // a soak run that spans one must not stop updating.
@@ -203,6 +214,7 @@ int main() {
   RUN_TEST(test_the_interval_does_not_hold_across_a_forget);
   RUN_TEST(test_a_press_does_not_wait_out_the_panels_gap);
   RUN_TEST(test_urgency_is_spent_on_the_frame_it_showed);
+  RUN_TEST(test_urgency_lapses_when_the_frame_it_asked_for_is_unchanged);
   RUN_TEST(test_the_clock_wrapping_does_not_freeze_the_panel);
   RUN_TEST(test_the_hash_tells_frames_apart_and_repeats_itself);
   return UNITY_END();

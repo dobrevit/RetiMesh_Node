@@ -51,9 +51,10 @@ public:
   };
 
   // `minIntervalMs` is the shortest gap between updates the panel can afford.
-  // `fullEveryMs` is how often it wants a whole-panel refresh regardless — 0
-  // on a panel that never needs one, which is every panel that is not e-paper.
-  // fullEveryUpdates is counted in updates and not in time because that is
+  //
+  // `fullEveryUpdates` is how many partial updates it will take before it
+  // wants a whole-panel one — 0 on a panel that never needs any, which is
+  // every panel that is not e-paper. It is counted in updates and not in time because that is
   // how the ghosting accrues: it is left behind by each partial update, so a
   // panel that has sat unchanged for an hour owes nothing and one that has
   // been pressed through twenty pages in a minute owes several. Good Display,
@@ -69,6 +70,13 @@ public:
   // `frame` identifies what was just drawn — a hash of the buffer. Equal
   // frames mean the glass is already right.
   Action decide(uint32_t nowMs, uint32_t frame) {
+    // Urgency is spent by asking, not by showing. A press paints immediately
+    // and this call is that frame; if it turns out to be identical to what is
+    // already on the glass there is nothing to show and nothing to carry
+    // forward — leaving the flag set would hand the exemption to whatever
+    // changed next, minutes later, with nobody at the panel.
+    const bool urgent = _urgent;
+    _urgent = false;
     // The first frame after forget() (or after boot) always goes out: the
     // panel holds whatever the last firmware left in it, and an identical
     // hash proves nothing about glass we have not written to. On a panel that
@@ -87,11 +95,10 @@ public:
     // panel, not to make a person wait: a button press that turns the page
     // and then shows nothing for five seconds reads as a node that did not
     // notice the press.
-    if (_shown && !_urgent && (uint32_t)(nowMs - _last) < _minIntervalMs) return Action::Skip;
+    if (_shown && !urgent && (uint32_t)(nowMs - _last) < _minIntervalMs) return Action::Skip;
 
     _frame  = frame;
     _shown  = true;
-    _urgent = false;
     _last   = nowMs;
     if (fullDue) { _sinceFull = 0; return Action::Full; }
     _sinceFull++;

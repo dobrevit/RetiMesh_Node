@@ -90,21 +90,38 @@ void Display::displayTask(void* self) {
   auto* d = static_cast<Display*>(self);
   if (!d->_ok) { vTaskDelete(nullptr); return; }
   pinMode(PIN_BUTTON, INPUT_PULLUP);
-  uint32_t lastPaint = 0;
   d->_lastActivityMs = millis();
   for (;;) {
     d->pollButton();
     uint32_t now = millis();
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
-      d->_page = STATUS; d->_pageChangedMs = now; lastPaint = 0;
+      d->_page = STATUS; d->_pageChangedMs = now;
       d->_refresh.interval(d->cadence());    // back to what the node rests at
+      // And shown now: this is the same transition a press makes, so it needs
+      // the same exemption. Without it the frame is refused by the gap that
+      // was just installed, and a panel that holds its image would sit on the
+      // page the operator left behind until the next resting redraw.
+      d->_refresh.urgent();
+      d->_paintDue = true;
     }
-    // Battery saving: switch the panel off after a minute without a press.
-    if (!d->_blank && now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
-    // Drawn at the cadence the page asks for; whether the result reaches the
-    // glass is still the policy's answer, and on a panel that costs something
-    // to update it usually is not.
-    if (!d->_blank && now - lastPaint >= d->cadence()) { lastPaint = now; d->paint(); }
+    // Battery saving, where there is any to save: an OLED comes off with its
+    // charge pump, an e-paper panel holds its image for nothing and blanking
+    // it would only stop the redraws that keep it true.
+    if (d->_panel->blanks() && !d->_blank &&
+        now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
+    // Drawn when something asked for it, and otherwise at the cadence the page
+    // asks for; whether the result reaches the glass is still the policy's
+    // answer, and on a panel that costs something to update it usually is not.
+    //
+    // _paintDue rather than a zeroed timestamp: at a five-minute cadence "last
+    // painted at zero" is not "paint now", it is "paint once millis() reaches
+    // five minutes" — which on this board meant the boot splash stayed on the
+    // glass until somebody pressed the button.
+    if (!d->_blank && (d->_paintDue || now - d->_lastPaintMs >= d->cadence())) {
+      d->_lastPaintMs = now;
+      d->_paintDue = false;
+      d->paint();
+    }
     vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
   }
 }
@@ -130,6 +147,8 @@ void Display::pollButton() {
         _pageChangedMs = now;
         _refresh.interval(cadence());        // the page decides how live it is
         _refresh.urgent();                   // and this press is not waiting for it
+        _lastPaintMs = now;
+        _paintDue = false;
         paint();
       }
     }
@@ -159,6 +178,8 @@ void Display::setBlank(bool blank) {
     // frame goes out whether or not it matches the last one drawn.
     _refresh.forget();
     _pageChangedMs = millis();
+    _lastPaintMs = _pageChangedMs;
+    _paintDue = false;
     paint();
   }
 }
@@ -755,9 +776,17 @@ void Display::paintQr() {
   }
   if (!ok) { _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("QR encode failed"); return; }
 
-  const uint8_t scale = (uint8_t)max(1, min(2, 62 / (qr.size + 2)));
+  // The code gets up to half the width and as much height as there is, from
+  // the layout rather than from the 62 and 64 that were this page's memory of
+  // one panel: on anything wider than 128 those literals put the symbol in a
+  // corner and centred it against the wrong height. Three is as large as a
+  // module is allowed to get — beyond that a bigger panel buys resolution the
+  // phone did not need and space the captions did.
+  const DisplayLayout::Layout ql = DisplayLayout::active();
+  const int16_t budget = min((int16_t)(ql.width / 2), (int16_t)ql.height);
+  const uint8_t scale = (uint8_t)max(1, min(3, budget / (qr.size + 2)));
   const uint8_t span  = (uint8_t)((qr.size + 2) * scale);     // + 1 module quiet zone
-  const uint8_t x0 = 0, y0 = (uint8_t)((64 - span) / 2);
+  const uint8_t x0 = 0, y0 = (uint8_t)((ql.height - span) / 2);
   _gfx->fillRect(x0, y0, span, span, _panel->ink());
   for (uint8_t y = 0; y < qr.size; y++)
     for (uint8_t x = 0; x < qr.size; x++)
