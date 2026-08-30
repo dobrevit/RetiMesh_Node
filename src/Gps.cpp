@@ -15,6 +15,7 @@
 #include <freertos/semphr.h>
 #include <sys/time.h>
 #include <time.h>
+#include "Diag.h"
 
 namespace {
 
@@ -214,7 +215,7 @@ void begin() {
   setenv("TZ", "UTC0", 1);
   tzset();
   setEnabled(settings.radio().gpsEnabled);
-  xTaskCreatePinnedToCore(task, "gps", 3072, nullptr, 1, nullptr, 0);
+  Diag::startTask(task, "gps", 3072, nullptr, 1, 0);
 }
 
 Fix fix() {

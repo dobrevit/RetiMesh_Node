@@ -50,6 +50,7 @@
 #include "LocalLinkState.h"
 #include "LocalLink.h"
 #include "RnsTransport.h"
+#include "Diag.h"
 
 using LocalLink::pppNodeAddress;
 
@@ -425,7 +426,7 @@ void begin() {
   // Core 0 with the network stack, below the radio (5, on core 1) and level
   // with AutoInterface: the reader moves bytes and blocks on the driver;
   // lwIP does the work on its own task.
-  xTaskCreatePinnedToCore(readerTask, "ppp-uart", 4096, nullptr, 2, nullptr, 0);
+  Diag::startTask(readerTask, "ppp-uart", 4096, nullptr, 2, 0);
   log_i("ppp0: PPP client on UART%d behind the %s bridge; asks the host's pppd for %s",
         (int)kUart, BOARD_USB_BRIDGE, ipOf(pppNodeAddress(sMacLastOctet)).toString().c_str());
 }

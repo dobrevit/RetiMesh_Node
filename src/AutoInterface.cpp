@@ -34,6 +34,7 @@
 #include "RnsTransport.h"
 #include "Settings.h"
 #include "WifiManager.h"
+#include "Diag.h"
 
 namespace {
 
@@ -406,7 +407,7 @@ void begin(RingbufHandle_t inRing) {
   // 8 KB: the reverse-peering pass copies the peer table onto the stack so it
   // can send without holding the lock, and that table is three times the size
   // it was.
-  xTaskCreatePinnedToCore(task, "autoif", 8192, nullptr, 2, nullptr, 0);
+  Diag::startTask(task, "autoif", 8192, nullptr, 2, 0);
 }
 
 bool enabled() { return sEnabled; }

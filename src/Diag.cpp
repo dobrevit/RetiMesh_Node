@@ -136,6 +136,24 @@ void begin() {
 
 const Boot& boot() { return sBoot; }
 
+bool startTask(TaskFunction_t fn, const char* name, uint32_t stackBytes,
+               void* arg, UBaseType_t priority, BaseType_t core) {
+  if (xTaskCreatePinnedToCore(fn, name, stackBytes, arg, priority, nullptr, core) == pdPASS)
+    return true;
+  // The figures that decide it: a task stack must come from byte-addressable
+  // internal RAM, so MALLOC_CAP_INTERNAL alone overstates what is available —
+  // part of it is 32-bit-only IRAM a stack cannot use. Reporting the 8-bit
+  // largest block is the difference between "40 KB free and an 8 KB stack
+  // failed, which makes no sense" and the actual answer.
+  log_e("task \"%s\" (%lu B stack) could not be created: %lu B free / %lu B largest block "
+        "of 8-bit internal RAM (%lu B free internal in all) — this node is running without it",
+        name, (unsigned long)stackBytes,
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  return false;
+}
+
 void tick(uint32_t uptimeS) { sRtc.uptimeS = uptimeS; }
 
 RestartMarks& restartMarks() { return sRtc.restart; }

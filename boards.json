@@ -172,8 +172,8 @@
         "auto_reset_dtr_rts": true
       },
       "uart": {
-        "network": true,
-        "ppp": true,
+        "network": false,
+        "ppp": false,
         "instance": 0,
         "rts": false,
         "cts": false,
