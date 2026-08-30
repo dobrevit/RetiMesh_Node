@@ -68,35 +68,74 @@ sequenceDiagram
 ```
 
 ## Modules
-| File | Responsibility |
+
+`src/` is one folder per unit. A file is included by its own name from
+anywhere — every unit is on the include path (`platformio.ini`) — so the
+folder says what a thing belongs to without putting the unit into sixty
+`#include` lines. `Config.h` and `main.cpp` stay at the root because they
+belong to no unit: one is the board's shape, the other is the boot order.
+
+### `src/` — the root
+| File | What |
 |---|---|
 | `main.cpp` | ring buffers, task layout, boot order |
 | `Config.h` | defaults, pins, sizes, shared stats struct |
-| `Settings.*` | NVS-backed runtime settings (radio, Wi-Fi, transport, admin) |
+| `boards/` | one header per board: pins, capabilities, what it has |
+
+### `src/radio/` — the LoRa side
+| File | What |
+|---|---|
 | `LoRaRadio.*` | RadioLib driver, auto-detect, RNode framing, CSMA, beacons |
-| `RetiTransportServer.*` | TCP :4242, HDLC, per-client ids, announce bookkeeping |
-| `RnsTransport.*` | microReticulum integration: interfaces, transport, announces, snapshots |
-| `RnsFileSystem.h` | microStore adapter over LittleFS or SD (`/rns`, never formats) |
-| `StoreHome.*` | where the Reticulum store lives, the card's ownership marker, and moving it |
-| `SdCard.*` | slot polling, capacity and filesystem detection, FAT32 format, event log |
-| `Diag.*` | reset reason, boot counter, previous run length, per-task stack headroom, heap |
-| `Airtime.*` | regulatory regime per region, duty cycle and dwell budget, airtime accounting |
 | `RadioCaps.*` | per-chip frequency, bandwidth, spreading-factor and power limits |
-| `Power.*`, `Pmu.*` | CPU/Wi-Fi/display profiles; battery via PMU or ADC divider |
-| `Gps.*` | NMEA reader, fix and satellite count, receiver power rail |
-| `AutoInterface.*` | RNS AutoInterface: IPv6 link-local peering, multicast and unicast |
+| `Airtime.*` | regulatory regime per region, duty cycle and dwell budget, airtime accounting |
+
+### `src/net/` — how a host reaches the node
+| File | What |
+|---|---|
+| `LocalLinkState.h`, `LocalLink.*` | the ways a host reaches the node: phase machine (pure), registry, adapters, local-address policy |
+| `WifiManager.*` | SoftAP, station, web routes, settings and system API |
+| `CaptiveDns.*` | the access point's resolver, and only the access point's |
+| `UsbNcm.*` | the S3's composite USB device and the network link behind it |
+| `PppArbiter.h`, `PppUart.*` | PPP over the bridge UART, sharing the port with the console |
+| `RetiTransportServer.*` | TCP :4242, HDLC, per-client ids, announce bookkeeping |
+| `HDLC.h` | RNS TCP framing (pure, unit-tested) |
 | `Mdns.h` | node name to a legal DNS label (pure, unit-tested) |
+
+### `src/rns/` — Reticulum
+| File | What |
+|---|---|
+| `RnsTransport.*` | microReticulum integration: interfaces, transport, announces, snapshots |
+| `RnsAnnounce.*` | node identity keys, announce parsing/verification for the neighbour table |
+| `AutoInterface.*` | RNS AutoInterface: IPv6 link-local peering, multicast and unicast |
+| `Neighbors.*` | table of stations heard (announces, station IDs, beacons) |
+| `RnsFileSystem.h` | microStore adapter over LittleFS or SD (`/rns`, never formats) |
+
+### `src/ui/` — what the node shows
+| File | What |
+|---|---|
+| `Display.*` | SSD1306 pages, button navigation, sleep |
 | `DisplayLayout.h` | panel geometry and refresh cost, per board |
 | `DisplayIcons.h` | procedural glyphs, sized at the call site |
-| `QrCode.h` | join/portal/address codes for the portal and panel |
-| `RnsAnnounce.*` | node identity keys, announce parsing/verification for the neighbour table |
-| `Neighbors.*` | table of stations heard (announces, station IDs, beacons) |
-| `WifiManager.*` | SoftAP, captive DNS, web routes, settings and system API |
-| `LocalLinkState.h`, `LocalLink.*` | the ways a host reaches the node: phase machine (pure), registry, Wi-Fi adapters, local-address policy |
-| `BootloaderPlan.h`, `Bootloader.*` | every restart: request → quiesce → restart; software entry into the ROM downloader on S2/S3/C3; the 1200-baud touch detector (pure) |
+| `Leds.*` | what the board's LEDs say: dark is normal, lit is worth a glance |
+| `QrCode.*` | join/portal/address codes for the portal and panel |
+
+### `src/sys/` — the node's own housekeeping
+| File | What |
+|---|---|
+| `Settings.*` | NVS-backed runtime settings (radio, Wi-Fi, transport, links, admin) |
+| `SettingsRules.h` | what a settings value may be — one home, shared by the API and the console (pure, unit-tested) |
+| `SettingsFields.*` | every setting by name, for the console's `GET`/`SET` |
 | `MaintenanceProtocol.h`, `Maintenance.*` | the serial maintenance console: line protocol (pure), commands |
-| `Display.*` | SSD1306 pages, button navigation, sleep |
-| `HDLC.h` | RNS TCP framing |
+| `BootloaderPlan.h`, `Bootloader.*` | every restart: request → quiesce → restart; software entry into the ROM downloader on S2/S3/C3 |
+| `Diag.*` | reset reason, boot counter, previous run length, per-task stack headroom, heap and DRAM |
+| `StoreHome.*` | where the Reticulum store lives, the card's ownership marker, and moving it |
+| `SdCard.*` | slot polling, capacity and filesystem detection, FAT32 format, event log |
+| `Power.*`, `Pmu.*` | CPU/Wi-Fi/display profiles; battery via PMU or ADC divider |
+| `Gps.*` | NMEA reader, fix and satellite count, receiver power rail |
+
+### Outside `src/`
+| Where | What |
+|---|---|
 | `data/` | web app (LittleFS): status page, settings page |
 
 ## Storage

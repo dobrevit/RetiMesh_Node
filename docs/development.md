@@ -212,7 +212,7 @@ branch prefix and the PR title are not decoration: Release Drafter reads both.
 | `docs/…` | `docs` | 📖 Documentation | patch |
 | `ci/…` | `ci` | 🧰 CI & tooling | patch |
 
-Touching `src/LoRaRadio.*`, `src/HDLC.h` or `src/RetiTransportServer.*` also
+Touching `src/LoRaRadio.*`, `src/net/HDLC.h` or `src/RetiTransportServer.*` also
 adds `radio`, which files the change under 📻 Radio / protocol and makes the
 release a minor one. A `!` after the type in the title (`feat!: …`) marks a
 breaking change and bumps the major version. Add `skip-changelog` to a PR that

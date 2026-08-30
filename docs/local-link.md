@@ -74,7 +74,7 @@ the reason rather than no switch.
 Every board's serial port — the S3's USB CDC, the Heltec's CP2102 — now
 answers commands as well as printing the log. One request per line; every
 reply line begins with `RM `, log lines never do, so a script filters on the
-prefix. The full grammar is in `src/MaintenanceProtocol.h`, which is pure and
+prefix. The full grammar is in `src/sys/MaintenanceProtocol.h`, which is pure and
 host-tested.
 
 ```
@@ -141,7 +141,7 @@ uppercased on its way in authenticates against nothing. Quotes around a value
 are stripped, which is how a text setting is cleared: `SET wifi.sta_ssid ""`
 forgets the station network and its password together.
 
-What a value may be is decided in `src/SettingsRules.h`, which the web API
+What a value may be is decided in `src/sys/SettingsRules.h`, which the web API
 uses too, so both refuse the same value in the same words — and the bounds
 come from the transceiver actually fitted, which is why the refusal above
 names the SX1262. A setting that needs a restart says so (`saved; restarting

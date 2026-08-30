@@ -8,7 +8,7 @@ Two views of the same node:
 
   * a serial port: the S3's USB-Serial/JTAG (303a:1001) on native-USB boards,
     a CP2102 (10c4:ea60) or CH9102 (1a86:55d4) on the bridged ones. The
-    maintenance console (src/MaintenanceProtocol.h) answers on it, which is
+    maintenance console (src/sys/MaintenanceProtocol.h) answers on it, which is
     how a port is told apart from any other ESP32 on the bench: every reply
     line starts with "RM ", and VERSION names the firmware and board.
 
