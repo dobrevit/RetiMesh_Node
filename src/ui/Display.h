@@ -29,22 +29,22 @@
 #include <Arduino.h>
 #include "Config.h"
 #include "DisplayLayout.h"
+#include "Panel.h"
+#include "RefreshPolicy.h"
 #include "Power.h"
 
-#if HAS_DISPLAY
-  #include <Wire.h>
-  #include <Adafruit_SSD1306.h>
+#if HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_OLED
+  #include "OledPanel.h"
 #endif
 
 class Display {
 public:
-  // Probes the I2C bus for a panel (ACK at OLED_ADDR, then the alternate
-  // address) before touching the driver. Returns false, and the module
-  // stays inert, when nothing answers — Adafruit's begin() alone would
-  // happily "succeed" against an empty bus.
+  // Asks the panel to find itself and start (OledPanel::begin for an
+  // SSD1306: the switched rail, the stuck-bus recovery, the two-address
+  // probe). Returns false, and the module stays inert, when there is no
+  // panel — which is also what a board with no screen at all gets.
   bool begin();
   bool present() const { return _ok; }
-  uint8_t address() const { return _addr; }
 
   // FreeRTOS entry point — created pinned to core 0 from main.cpp.
   static void displayTask(void* self);
@@ -112,11 +112,21 @@ private:
   bool     _longFired = false;
 
 #if HAS_DISPLAY
-  Adafruit_SSD1306 _oled{DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, PIN_OLED_RST};
+  #if DISPLAY_KIND == DISPLAY_KIND_OLED
+  OledPanel     _panelImpl;
+  #endif
+  Panel*        _panel = nullptr;        // the glass; null until begin() succeeds
+  Adafruit_GFX* _gfx   = nullptr;        // what the pages draw on, from the panel
+  // Drawing is free and showing is not, so they are decided separately: pages
+  // draw every pass, and this says whether the result is worth putting on the
+  // glass (RefreshPolicy.h). On an OLED it saves a kilobyte of I2C per
+  // unchanged frame; on e-paper it is the difference between a usable panel
+  // and one that flashes continuously.
+  RefreshPolicy _refresh{DisplayLayout::active().refreshMs,
+                         DisplayLayout::active().fullRefreshMs};
+  uint32_t      _frameSeq = 0;           // stands in for the hash on a panel with no readable buffer
 #endif
-  static bool ack(uint8_t addr);         // true if a device ACKs at addr
   bool    _ok   = false;
-  uint8_t _addr = 0;
 };
 
 extern Display display;

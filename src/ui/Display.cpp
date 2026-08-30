@@ -39,111 +39,33 @@ Display display;
 #include "QrCode.h"
 
 
-bool Display::ack(uint8_t addr) {
-  Wire.beginTransmission(addr);
-  return Wire.endTransmission() == 0;    // 0 = ACK received
-}
-
-// A reset that lands in the middle of a transfer — esptool's after a flash,
-// the RST button, a watchdog — leaves the panel holding SDA low, waiting for
-// clocks that never come, and it holds it until it loses power. The probe in
-// begin() then finds nothing, the display task never starts, and the board
-// runs dark until somebody pulls the plug. So the bus is clocked free before
-// anything else touches it: up to nine pulses on SCL with SDA released, then
-// a STOP, all of which is a no-op on a bus that is idle.
-static void releaseBus(int sda, int scl) {
-  // Only where the display is first on its bus. The T-Beam's PMU has opened
-  // Wire on these pins before the display looks, and a pinMode() on a pin
-  // the core's peripheral manager has given to a driver tears that driver
-  // down, for Wire.begin() below to build again. There the bus is left as
-  // the PMU found it.
-  if (perimanGetPinBus(sda, ESP32_BUS_TYPE_I2C_MASTER_SDA) != nullptr) return;
-  // Open-drain with the internal pull-ups, the same way Wire drives the
-  // lines: a board with no external resistors gets its clocks that way too.
-  pinMode(sda, INPUT_PULLUP);
-  pinMode(scl, OUTPUT_OPEN_DRAIN | PULLUP);
-  digitalWrite(scl, HIGH);
-  delayMicroseconds(5);
-  int pulses = 0;
-  while (digitalRead(sda) == LOW && pulses < 9) {
-    digitalWrite(scl, LOW);  delayMicroseconds(5);
-    digitalWrite(scl, HIGH); delayMicroseconds(5);
-    pulses++;
-  }
-  if (pulses) {
-    // STOP: SDA rising while SCL is high.
-    pinMode(sda, OUTPUT_OPEN_DRAIN | PULLUP);
-    digitalWrite(sda, LOW);  delayMicroseconds(5);
-    digitalWrite(scl, HIGH); delayMicroseconds(5);
-    digitalWrite(sda, HIGH); delayMicroseconds(5);
-    log_w("display: the panel was holding SDA low from an interrupted transfer; released after %d clocks", pulses);
-  }
-}
-
 bool Display::begin() {
-#if HAS_DISPLAY_VEXT
-  // The panel is fed from a switched rail, active low, and needs a moment to
-  // settle before it will answer. Without this the I2C probe finds nothing and
-  // the board looks broken rather than switched off.
-  pinMode(PIN_DISPLAY_VEXT, OUTPUT);
-  digitalWrite(PIN_DISPLAY_VEXT, LOW);
-  delay(50);
+#if DISPLAY_KIND == DISPLAY_KIND_OLED
+  _panel = &_panelImpl;
 #endif
+  if (!_panel || !_panel->begin()) return false;
+  _gfx = &_panel->gfx();
+  _ok  = true;
 
-  releaseBus(PIN_OLED_SDA, PIN_OLED_SCL);
-  Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-  Wire.setTimeOut(50);                   // a missing panel must not stall boot
-
-  #if PIN_OLED_RST >= 0
-    // Release the panel from reset before probing for it. The driver does this
-    // too, but only inside begin() — which runs after the probe below, so a
-    // panel still held in reset never answers and is written off as absent.
-    // Boards that tie reset high have PIN_OLED_RST at -1 and skip this.
-    pinMode(PIN_OLED_RST, OUTPUT);
-    digitalWrite(PIN_OLED_RST, LOW);
-    delay(20);
-    digitalWrite(PIN_OLED_RST, HIGH);
-    delay(20);
-  #endif
-
-  const uint8_t candidates[] = { OLED_ADDR, (uint8_t)(OLED_ADDR == 0x3C ? 0x3D : 0x3C) };
-  for (uint8_t a : candidates) {
-    if (ack(a)) { _addr = a; break; }
-  }
-  if (_addr == 0) {
-    log_w("No I2C device at 0x%02X/0x%02X (SDA %d / SCL %d) — display disabled",
-          candidates[0], candidates[1], PIN_OLED_SDA, PIN_OLED_SCL);
-    return false;
-  }
-
-  // periphBegin=false: Wire is already up on the board-specific pins.
-  if (!_oled.begin(SSD1306_SWITCHCAPVCC, _addr, true, false)) {
-    log_w("SSD1306 at 0x%02X did not initialise — display disabled", _addr);
-    return false;
-  }
-  log_i("SSD1306 found at 0x%02X (SDA %d / SCL %d)", _addr, PIN_OLED_SDA, PIN_OLED_SCL);
-  _oled.setRotation(OLED_ROTATION);
-  _oled.clearDisplay();
-  _oled.setTextColor(SSD1306_WHITE);
-  _oled.setTextSize(1);
-  // Adafruit_GFX wraps by default, so a row one character too long lands on
-  // the next row and, at the bottom, under the page dots. Clip instead.
-  _oled.setTextWrap(false);
-  _oled.setCursor(0, 0);
-  _oled.print(FW_NAME);
-  _oled.setCursor(0, DisplayLayout::rowY(0));
-  _oled.print("booting...");
-  _oled.display();
-  _ok = true;
+  // Something on the glass before the first page is drawn: the panel holds
+  // whatever the last firmware left in it otherwise, and on e-paper that
+  // survives a power cut.
+  _panel->clear();
+  _gfx->setCursor(0, 0);
+  _gfx->print(FW_NAME);
+  _gfx->setCursor(0, DisplayLayout::rowY(0));
+  _gfx->print("booting...");
+  _panel->flush(true);
+  _refresh.forget();                     // that frame was not a page
   return _ok;
 }
 
 void Display::notice(const char* title, const char* detail) {
   if (!_ok) return;
   const auto l = DisplayLayout::active();
-  _oled.clearDisplay();
-  _oled.setTextColor(SSD1306_WHITE);
-  _oled.setTextSize(1);
+  _panel->clear();
+  _gfx->setTextColor(_panel->ink());
+  _gfx->setTextSize(1);
   // Centred, because a notice is the only thing on the panel and a left-aligned
   // line on a 64-pixel display looks like a page that failed to finish drawing.
   auto centre = [&](const char* text, int16_t y) {
@@ -151,13 +73,17 @@ void Display::notice(const char* title, const char* detail) {
     const int16_t w = (int16_t)strlen(text) * DisplayLayout::FONT_W;
     int16_t x = (int16_t)((l.width - w) / 2);
     if (x < 0) x = 0;
-    _oled.setCursor(x, y);
-    _oled.print(text);
+    _gfx->setCursor(x, y);
+    _gfx->print(text);
   };
   const int16_t mid = (int16_t)(l.height / 2);
   centre(title,  (int16_t)(detail ? mid - DisplayLayout::FONT_H : mid - DisplayLayout::FONT_H / 2));
   centre(detail, (int16_t)(mid + 1));
-  _oled.display();
+  // Straight to the glass, whatever the policy would have said: a notice is
+  // shown because a person is waiting on it. What the page model believes is
+  // on the panel is no longer true afterwards.
+  _panel->flush(true);
+  _refresh.forget();
 }
 
 void Display::displayTask(void* self) {
@@ -214,17 +140,20 @@ Display::Page Display::nextPage(Page p) const {
 void Display::setBlank(bool blank) {
   _blank = blank;
   if (blank) {
-    _oled.ssd1306_command(SSD1306_DISPLAYOFF);           // panel + charge pump off
+    _panel->blank(true);                 // panel + charge pump off
   } else {
-    _oled.ssd1306_command(SSD1306_DISPLAYON);
+    _panel->blank(false);
+    // Nothing is known about the glass after it has been off, so the next
+    // frame goes out whether or not it matches the last one drawn.
+    _refresh.forget();
     _pageChangedMs = millis();
     paint();
   }
 }
 
 void Display::paint() {
-  if (_blank) return;
-  _oled.clearDisplay();
+  if (_blank || !_ok) return;
+  _panel->clear();
   // One PMU read per frame, shared by the header and whichever page is drawn.
   // The QR page draws neither a header nor battery text, so it skips the four
   // I2C transactions entirely rather than spending them on the panel's bus.
@@ -261,11 +190,23 @@ void Display::paint() {
     const int16_t dy = (int16_t)dl.height - 3;
     for (uint8_t i = 0; i < PAGE_COUNT; i++) {
       const int16_t dx = (int16_t)dl.width - 4 * PAGE_COUNT + 4 * i;
-      _oled.fillRect(dx, dy, 3, 3, i == _page ? SSD1306_WHITE : SSD1306_BLACK);
-      _oled.drawRect(dx, dy, 3, 3, SSD1306_WHITE);
+      _gfx->fillRect(dx, dy, 3, 3, i == _page ? _panel->ink() : _panel->paper());
+      _gfx->drawRect(dx, dy, 3, 3, _panel->ink());
     }
   }
-  _oled.display();
+
+  // The frame is drawn. Whether it reaches the glass is the panel's question,
+  // not the page's: an identical frame is not worth an update, and a panel
+  // that costs hundreds of milliseconds is not driven at the rate a page
+  // happens to be redrawn at.
+  size_t len = 0;
+  const uint8_t* fb = _panel->frame(len);
+  const uint32_t id = fb ? RefreshPolicy::hash(fb, len) : ++_frameSeq;
+  switch (_refresh.decide(millis(), id)) {
+    case RefreshPolicy::Action::Skip:    break;
+    case RefreshPolicy::Action::Partial: _panel->flush(false); break;
+    case RefreshPolicy::Action::Full:    _panel->flush(true);  break;
+  }
 }
 
 // --- status strip -----------------------------------------------------------
@@ -341,7 +282,7 @@ void Display::header(const char* title) {
   // cost a quarter of the panel to say what the readings already imply.
   const DisplayLayout::Layout l = DisplayLayout::active();
   if (!l.header) return;
-  _oled.fillRect(0, 0, l.width, l.headerH, SSD1306_WHITE);
+  _gfx->fillRect(0, 0, l.width, l.headerH, _panel->ink());
 
   // A status bar, laid out like a phone's: the title hard left, everything else
   // gathered right and assigned right to left so each piece knows where it
@@ -360,26 +301,26 @@ void Display::header(const char* title) {
   char pg[8];
   snprintf(pg, sizeof(pg), "%u/%u", (unsigned)(_page + 1), (unsigned)PAGE_COUNT);
   right -= (int16_t)strlen(pg) * 6;
-  _oled.setTextColor(SSD1306_BLACK);
-  _oled.setCursor(right, ty);
-  _oled.print(pg);
+  _gfx->setTextColor(_panel->paper());
+  _gfx->setCursor(right, ty);
+  _gfx->print(pg);
   right -= 2;
 
   // The cell, stood on end: seven pixels wide instead of seventeen.
   if (_bat.present) {
     right -= l.batteryW;
     // Dark on the light header bar, so the travelling line is drawn light.
-    DisplayIcons::batteryVertical(_oled, right, iy, l.batteryW, l.batteryH,
+    DisplayIcons::batteryVertical((*_gfx), right, iy, l.batteryW, l.batteryH,
                                   _bat.percent, chargeSure(_bat), _chargeSweep,
-                                  SSD1306_BLACK, SSD1306_WHITE);
+                                  _panel->paper(), _panel->ink());
     right -= 2;
     // A cell that is not animating reads as one that is sitting idle, which on
     // a board with no charger status is a claim it cannot make. Six pixels of
     // title, given up only on the boards that have to say it.
     if (!_bat.chargeKnown) {
       right -= DisplayLayout::FONT_W;
-      _oled.setCursor(right, ty);         // still black-on-white from the page number
-      _oled.print("?");
+      _gfx->setCursor(right, ty);         // still black-on-white from the page number
+      _gfx->print("?");
       right -= 2;
     }
   }
@@ -394,11 +335,11 @@ void Display::header(const char* title) {
     const uint8_t lw = (uint8_t)(sz % 2 ? sz : sz - 1);
     right -= lw;
     if (g_stats.radioOnline) {
-      DisplayIcons::loraSignal(_oled, right, iy, lw, sz,
+      DisplayIcons::loraSignal((*_gfx), right, iy, lw, sz,
                                g_stats.loraRxPackets ? signalPercent(g_stats.lastRssi) : 0,
-                               SSD1306_BLACK);
+                               _panel->paper());
     } else {
-      _oled.setCursor(right + 1, ty); _oled.print("!");
+      _gfx->setCursor(right + 1, ty); _gfx->print("!");
     }
     right -= 2;
 
@@ -412,14 +353,14 @@ void Display::header(const char* title) {
       const uint8_t bars = wifiManager.stationConnected()
           ? (uint8_t)(1 + wifiPercent((float)WiFi.RSSI()) * 2 / 100)
           : DisplayIcons::WIFI_NOT_JOINED;
-      DisplayIcons::wifi(_oled, right, iy, sz, bars, SSD1306_BLACK);
+      DisplayIcons::wifi((*_gfx), right, iy, sz, bars, _panel->paper());
     }
     right -= 2;
 
     #if HAS_GPS
       right -= sz;
       { Gps::Fix g = Gps::fix();
-        if (g.enabled) DisplayIcons::dish(_oled, right, iy, sz, g.valid, SSD1306_BLACK); }
+        if (g.enabled) DisplayIcons::dish((*_gfx), right, iy, sz, g.valid, _panel->paper()); }
       right -= 2;
     #endif
   }
@@ -432,9 +373,9 @@ void Display::header(const char* title) {
   char clipped[22];
   strlcpy(clipped, title, columns + 1 < sizeof(clipped) ? columns + 1 : sizeof(clipped));
 
-  _oled.setCursor(1, ty);
-  _oled.print(clipped);
-  _oled.setTextColor(SSD1306_WHITE);
+  _gfx->setCursor(1, ty);
+  _gfx->print(clipped);
+  _gfx->setTextColor(_panel->ink());
 }
 
 // A 21-column row can carry four counters only if each stays within three
@@ -452,14 +393,14 @@ void Display::meter(uint8_t row, const char* label, const char* value, uint8_t p
   const int y = DisplayLayout::rowY(row);
   char text[16];
   snprintf(text, sizeof(text), "%-4s%9s", label, value);
-  _oled.setCursor(0, y);
-  _oled.print(text);
+  _gfx->setCursor(0, y);
+  _gfx->print(text);
   // The same bars the header draws, floor and all, and the same five columns.
   // Thirteen pixels of width gave seven, so the meter beside a figure and the
   // icon in the status bar were reading the same thing on different scales —
   // there is no reason for that, and the precision is in the number anyway.
-  DisplayIcons::bars(_oled, DisplayLayout::active().width - 10, y, 9, 8,
-                     pct, SSD1306_WHITE);
+  DisplayIcons::bars((*_gfx), DisplayLayout::active().width - 10, y, 9, 8,
+                     pct, _panel->ink());
 }
 
 // 128x64 with the 6x8 built-in font: 21 columns x 8 rows.
@@ -474,38 +415,38 @@ void Display::paintStatus() {
   if (DisplayLayout::compact()) {
     const char* id = wifiManager.ssid();
     const size_t n = strlen(id);
-    _oled.setCursor(0, DisplayLayout::rowY(0));
-    _oled.print(n > 6 ? id + n - 6 : id);          // the MAC tail identifies it
+    _gfx->setCursor(0, DisplayLayout::rowY(0));
+    _gfx->print(n > 6 ? id + n - 6 : id);          // the MAC tail identifies it
 
-    _oled.setCursor(0, DisplayLayout::rowY(1));
+    _gfx->setCursor(0, DisplayLayout::rowY(1));
     if (g_stats.radioOnline) {
       snprintf(line, sizeof(line), "%.1f S%d",
                (double)settings.radio().freqMhz, settings.radio().sf);
     } else {
       snprintf(line, sizeof(line), "NO RADIO");
     }
-    _oled.print(line);
+    _gfx->print(line);
 
     // Arrows instead of "R" and "T": two characters back for digits, and a
     // symbol nobody has to be taught. The counts stay — an arrow with no
     // number beside it would say nothing.
     const uint8_t iy = DisplayLayout::rowY(2);
-    DisplayIcons::arrow(_oled, 0, iy + 1, 7, false, SSD1306_WHITE);   // received
-    _oled.setCursor(8, iy);
+    DisplayIcons::arrow((*_gfx), 0, iy + 1, 7, false, _panel->ink());   // received
+    _gfx->setCursor(8, iy);
     snprintf(line, sizeof(line), "%lu", (unsigned long)g_stats.loraRxPackets);
-    _oled.print(line);
+    _gfx->print(line);
     const int16_t tx = 8 + (int16_t)(strlen(line) + 1) * 6;
-    DisplayIcons::arrow(_oled, tx, iy + 1, 7, true, SSD1306_WHITE);   // sent
-    _oled.setCursor(tx + 8, iy);
+    DisplayIcons::arrow((*_gfx), tx, iy + 1, 7, true, _panel->ink());   // sent
+    _gfx->setCursor(tx + 8, iy);
     snprintf(line, sizeof(line), "%lu", (unsigned long)g_stats.loraTxPackets);
-    _oled.print(line);
+    _gfx->print(line);
 
     if (_bat.present) snprintf(line, sizeof(line), "%u%%%s %luh%02lum", _bat.percent,
                                chargeMark(_bat),
                                (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
     else              snprintf(line, sizeof(line), "%luh%02lum",
                                (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
-    _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print(line);
+    _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print(line);
     return;
   }
 
@@ -518,25 +459,25 @@ void Display::paintStatus() {
   // Row 1 — portal address / version. The address is the access point's,
   // and with Wi-Fi off there is none to give: say that, rather than print a
   // number nobody can reach.
-  _oled.setCursor(0, DisplayLayout::rowY(0));
+  _gfx->setCursor(0, DisplayLayout::rowY(0));
   snprintf(line, sizeof(line), "%s  %s", wifiManager.wifiEnabled() ? AP_IP.toString().c_str() : "wifi off", FW_VERSION);
-  _oled.print(line);
+  _gfx->print(line);
 
   // Row 2 — radio model + channel
-  _oled.setCursor(0, DisplayLayout::rowY(1));
+  _gfx->setCursor(0, DisplayLayout::rowY(1));
   if (g_stats.radioOnline) {
     snprintf(line, sizeof(line), "%s %.3fM SF%d", g_stats.radioModel,
              (double)settings.radio().freqMhz, settings.radio().sf);
   } else {
     snprintf(line, sizeof(line), "RADIO OFFLINE");
   }
-  _oled.print(line);
+  _gfx->print(line);
 
   // Row 3 — last RX quality
-  _oled.setCursor(0, DisplayLayout::rowY(2));
+  _gfx->setCursor(0, DisplayLayout::rowY(2));
   snprintf(line, sizeof(line), "RSSI %4.0f  SNR %5.1f",
            (double)g_stats.lastRssi, (double)g_stats.lastSnr);
-  _oled.print(line);
+  _gfx->print(line);
 
   // Row 4 — traffic. Arrows carry the direction, which frees the six columns
   // "RX" and "TX" were spending on words the reader learns once. The room goes
@@ -550,14 +491,14 @@ void Display::paintStatus() {
     // panel entirely.
     const int16_t y = DisplayLayout::rowY(3);
     char n[8];
-    DisplayIcons::arrow(_oled, 0, y + 1, 7, false, SSD1306_WHITE);
+    DisplayIcons::arrow((*_gfx), 0, y + 1, 7, false, _panel->ink());
     compactCount(n, sizeof(n), g_stats.loraRxPackets);
-    _oled.setCursor(8, y); _oled.print(n);
+    _gfx->setCursor(8, y); _gfx->print(n);
     int16_t x = 8 + (int16_t)(strlen(n) + 1) * 6;
 
-    DisplayIcons::arrow(_oled, x, y + 1, 7, true, SSD1306_WHITE);
+    DisplayIcons::arrow((*_gfx), x, y + 1, 7, true, _panel->ink());
     compactCount(n, sizeof(n), g_stats.loraTxPackets);
-    _oled.setCursor(x + 8, y); _oled.print(n);
+    _gfx->setCursor(x + 8, y); _gfx->print(n);
     x = x + 8 + (int16_t)(strlen(n) + 1) * 6;
 
     // The room the two labels used to take now carries the announce count,
@@ -566,11 +507,11 @@ void Display::paintStatus() {
     compactCount(an, sizeof(an), g_stats.announcesRx);
     snprintf(line, sizeof(line), "nb%u a%s",
              (unsigned)neighbors.count(NEIGHBOR_STALE_MS), an);
-    _oled.setCursor(x, y); _oled.print(line);
+    _gfx->setCursor(x, y); _gfx->print(line);
   }
 
   // Row 5 — peers + uptime
-  _oled.setCursor(0, DisplayLayout::rowY(4));
+  _gfx->setCursor(0, DisplayLayout::rowY(4));
   if (_bat.present)
     // The charge marker earns its character: it is how you tell a node that is
     // filling up from one that is quietly draining — or, on a board that cannot
@@ -582,7 +523,7 @@ void Display::paintStatus() {
     snprintf(line, sizeof(line), "rns %u wifi %u  %luh%02lum",
              (unsigned)g_stats.tcpClients, (unsigned)WiFi.softAPgetStationNum(),
              (unsigned long)(up / 3600), (unsigned long)(up % 3600 / 60));
-  _oled.print(line);
+  _gfx->print(line);
 }
 
 void Display::paintNeighbors() {
@@ -590,7 +531,7 @@ void Display::paintNeighbors() {
     Neighbor snap[MAX_NEIGHBORS];
     const size_t n = neighbors.snapshot(snap, MAX_NEIGHBORS);
     const uint32_t now = millis();
-    if (n == 0) { _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print("no peers"); return; }
+    if (n == 0) { _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print("no peers"); return; }
     char l[16];
     for (size_t i = 0; i < n && i < DisplayLayout::active().rows; i++) {
       const Neighbor& nb = snap[i];
@@ -602,7 +543,7 @@ void Display::paintNeighbors() {
       // Six characters of name and the age: enough to recognise a node you
       // already know, which is all this page is for at this size.
       snprintf(l, sizeof(l), "%-6.6s%3s", nb.name[0] ? nb.name : nb.hash, ageStr);
-      _oled.setCursor(0, DisplayLayout::rowY(i)); _oled.print(l);
+      _gfx->setCursor(0, DisplayLayout::rowY(i)); _gfx->print(l);
     }
     return;
   }
@@ -611,7 +552,7 @@ void Display::paintNeighbors() {
   char line[24];
   // The list below is the count; the header has icons to carry.
   header("Peers");
-  if (n == 0) { _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print("nothing heard yet"); return; }
+  if (n == 0) { _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print("nothing heard yet"); return; }
   uint32_t now = millis();
   for (size_t i = 0; i < n && i < 5; i++) {          // 5 rows fit under the header
     const Neighbor& nb = snap[i];
@@ -624,8 +565,8 @@ void Display::paintNeighbors() {
     else snprintf(ageStr, sizeof(ageStr), "%luh", (unsigned long)(age / 3600));
     if (nb.viaWifi) snprintf(line, sizeof(line), "%-11s wifi %4s", shortName, ageStr);
     else            snprintf(line, sizeof(line), "%-11s %4.0f %4s", shortName, (double)nb.rssi, ageStr);
-    _oled.setCursor(0, DisplayLayout::rowY(i));
-    _oled.print(line);
+    _gfx->setCursor(0, DisplayLayout::rowY(i));
+    _gfx->print(line);
   }
 }
 
@@ -634,16 +575,16 @@ void Display::paintTransport() {
     char l[16];
     const size_t n = RnsTransport::interfaceCount();
     snprintf(l, sizeof(l), "%s", g_stats.transportOnline ? "transport" : "trans OFF");
-    _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(l);
+    _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(l);
     snprintf(l, sizeof(l), "path %u", (unsigned)RnsTransport::pathCount());
-    _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(l);
+    _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(l);
     snprintf(l, sizeof(l), "if %u", (unsigned)n);
-    _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(l);
+    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(l);
     char aRx[6], aTx[6];
     compactCount(aRx, sizeof(aRx), g_stats.announcesRx);
     compactCount(aTx, sizeof(aTx), g_stats.announcesTx);
     snprintf(l, sizeof(l), "an %s/%s", aRx, aTx);
-    _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print(l);
+    _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print(l);
     return;
   }
   char line[24];
@@ -672,13 +613,13 @@ void Display::paintTransport() {
     else if (strncmp(full, "Auto/", 5) == 0)  full += strncmp(full + 5, "fe80::", 6) == 0 ? 11 : 5;
     char name[12]; strlcpy(name, full, sizeof(name));
     snprintf(line, sizeof(line), "%-9s %-6.6s %3luk", name, ifs[i].mode, (unsigned long)((ifs[i].rxb + ifs[i].txb) / 1024));
-    _oled.setCursor(0, DisplayLayout::rowY(row)); _oled.print(line);
+    _gfx->setCursor(0, DisplayLayout::rowY(row)); _gfx->print(line);
   }
   if (n > listed) {
     snprintf(line, sizeof(line), "+%u more", (unsigned)(n - listed));
-    _oled.setCursor(0, DisplayLayout::rowY(row)); _oled.print(line);
+    _gfx->setCursor(0, DisplayLayout::rowY(row)); _gfx->print(line);
   }
-  if (n == 0) { _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print("no interfaces"); }
+  if (n == 0) { _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print("no interfaces"); }
 
   // Announces and beacons, received/sent. "announce N in N out" ran past the
   // 21 columns the panel has as soon as either counter reached three digits,
@@ -690,25 +631,25 @@ void Display::paintTransport() {
   compactCount(bRx, sizeof(bRx), g_stats.beaconsRx);
   compactCount(bTx, sizeof(bTx), g_stats.beaconsTx);
   snprintf(line, sizeof(line), "p%u a%s/%s b%s/%s", paths, aRx, aTx, bRx, bTx);
-  _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print(line);
 }
 
 void Display::paintRadio() {
   if (DisplayLayout::compact()) {
     const RadioSettings& r = settings.radio();
     char l[16];
-    if (!g_stats.radioOnline) { _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print("NO RADIO"); return; }
+    if (!g_stats.radioOnline) { _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print("NO RADIO"); return; }
     snprintf(l, sizeof(l), "%.3f", (double)r.freqMhz);
-    _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(l);
+    _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(l);
     snprintf(l, sizeof(l), "SF%d BW%.0f", r.sf, (double)r.bwKhz);
-    _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(l);
+    _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(l);
     if (g_stats.loraRxPackets > 0) {
       snprintf(l, sizeof(l), "%.0fdBm", (double)g_stats.lastRssi);
-      _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(l);
+      _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(l);
       snprintf(l, sizeof(l), "%.1fdB", (double)g_stats.lastSnr);
-      _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print(l);
+      _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print(l);
     } else {
-      _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print("no RX yet");
+      _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("no RX yet");
     }
     return;
   }
@@ -723,9 +664,9 @@ void Display::paintRadio() {
   // both the buffer and the 21 columns, so the preamble it exists to show was
   // the part that got clipped. The unit is on the radio page header's model.
   snprintf(line, sizeof(line), "%.3f %+ddBm p%u", (double)r.freqMhz, r.txDbm, (unsigned)r.preamble);
-  _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(line);
   snprintf(line, sizeof(line), "BW%.0f SF%d CR4/%d sy%02X", (double)r.bwKhz, r.sf, r.cr, r.syncWord);
-  _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
 
   // The last packet heard, as a number and as a shape. Nothing received yet
   // means there is nothing to measure, and saying so beats an empty chart.
@@ -735,7 +676,7 @@ void Display::paintRadio() {
     snprintf(line, sizeof(line), "%.1fdB", (double)g_stats.lastSnr);
     meter(3, "snr", line, qualityPercent(g_stats.lastSnr, r.sf));
   } else {
-    _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print("sig  no RX yet");
+    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("sig  no RX yet");
   }
 
   if (g_stats.dutyLocked)
@@ -748,7 +689,7 @@ void Display::paintRadio() {
     // or not a duty limit is being enforced.
     snprintf(line, sizeof(line), "air %.2f%% nolim cw%u", (double)(g_stats.airtimeLong * 100.0f),
              g_stats.csmaBand);
-  _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print(line);
 }
 
 #if HAS_GPS
@@ -759,25 +700,25 @@ void Display::paintGps() {
   char line[24];
   header(g.enabled ? (g.valid ? "GNSS fix" : "GNSS scan") : "GNSS off");
   if (!g.enabled) {
-    _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print("Receiver powered down");
-    _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print("Enable on the settings");
-    _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print("page.");
+    _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("Receiver powered down");
+    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("Enable on the settings");
+    _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print("page.");
     return;
   }
   snprintf(line, sizeof(line), "sats %u  hdop %.1f", g.satellites, (double)g.hdop);
-  _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(line);
   if (g.valid) {
-    snprintf(line, sizeof(line), "%+.5f", g.latitude);   _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(line);
-    snprintf(line, sizeof(line), "%+.5f", g.longitude);  _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(line);
+    snprintf(line, sizeof(line), "%+.5f", g.latitude);   _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
+    snprintf(line, sizeof(line), "%+.5f", g.longitude);  _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(line);
     snprintf(line, sizeof(line), "alt %.0fm  %.0fkm/h", (double)g.altitude, (double)g.speedKmh);
-    _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print(line);
+    _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print(line);
   } else {
     snprintf(line, sizeof(line), "%lu sentences", (unsigned long)g.sentences);
-    _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(line);
-    _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(g.sentences ? "waiting for a fix" : "no data from module");
+    _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
+    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(g.sentences ? "waiting for a fix" : "no data from module");
   }
-  if (g.timeValid) { _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(g.utc + 11); _oled.print(g.clockSet ? " UTC sync" : " UTC"); }
-  else             { _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print("no time yet"); }
+  if (g.timeValid) { _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print(g.utc + 11); _gfx->print(g.clockSet ? " UTC sync" : " UTC"); }
+  else             { _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print("no time yet"); }
 }
 #endif
 
@@ -789,7 +730,7 @@ void Display::paintGps() {
 void Display::paintQr() {
   char text[192];
   bool open = settings.wifi().security == ApSecurity::Open;
-  if (!Qr::payloadText(Qr::Payload::Wifi, text, sizeof(text))) { _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print("QR: payload too long"); return; }
+  if (!Qr::payloadText(Qr::Payload::Wifi, text, sizeof(text))) { _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("QR: payload too long"); return; }
 
   // Rebuilding costs a few milliseconds, so only do it when it changed.
   static char builtFor[192] = "";
@@ -800,27 +741,27 @@ void Display::paintQr() {
     ok = Qr::encode(text, qr, buffer);
     strlcpy(builtFor, text, sizeof(builtFor));
   }
-  if (!ok) { _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print("QR encode failed"); return; }
+  if (!ok) { _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("QR encode failed"); return; }
 
   const uint8_t scale = (uint8_t)max(1, min(2, 62 / (qr.size + 2)));
   const uint8_t span  = (uint8_t)((qr.size + 2) * scale);     // + 1 module quiet zone
   const uint8_t x0 = 0, y0 = (uint8_t)((64 - span) / 2);
-  _oled.fillRect(x0, y0, span, span, SSD1306_WHITE);
+  _gfx->fillRect(x0, y0, span, span, _panel->ink());
   for (uint8_t y = 0; y < qr.size; y++)
     for (uint8_t x = 0; x < qr.size; x++)
       if (qrcode_getModule(&qr, x, y))
-        _oled.fillRect(x0 + (x + 1) * scale, y0 + (y + 1) * scale, scale, scale, SSD1306_BLACK);
+        _gfx->fillRect(x0 + (x + 1) * scale, y0 + (y + 1) * scale, scale, scale, _panel->paper());
 
   const uint8_t tx = (uint8_t)(span + 3);
-  _oled.setCursor(tx, 4);  _oled.print("Scan to");
-  _oled.setCursor(tx, 13); _oled.print("join wifi");
+  _gfx->setCursor(tx, 4);  _gfx->print("Scan to");
+  _gfx->setCursor(tx, 13); _gfx->print("join wifi");
   const char* ssid = wifiManager.ssid();
   size_t len = strlen(ssid);
   char line[12];
   strlcpy(line, ssid, sizeof(line));
-  _oled.setCursor(tx, 26); _oled.print(line);
-  if (len >= sizeof(line)) { _oled.setCursor(tx, 35); _oled.print(ssid + sizeof(line) - 1); }
-  _oled.setCursor(tx, 48); _oled.print(open ? "open" : "WPA2");
+  _gfx->setCursor(tx, 26); _gfx->print(line);
+  if (len >= sizeof(line)) { _gfx->setCursor(tx, 35); _gfx->print(ssid + sizeof(line) - 1); }
+  _gfx->setCursor(tx, 48); _gfx->print(open ? "open" : "WPA2");
 }
 #endif  // !DISPLAY_COMPACT
 
@@ -829,21 +770,21 @@ void Display::paintNetwork() {
     char l[16];
     const char* id = wifiManager.ssid();
     const size_t idn = strlen(id);
-    _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(idn > 10 ? id + idn - 10 : id);
+    _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(idn > 10 ? id + idn - 10 : id);
     if (!wifiManager.wifiEnabled()) {
-      _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print("wifi off");
+      _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("wifi off");
       snprintf(l, sizeof(l), "rns%u", (unsigned)g_stats.tcpClients);
-      _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(l);
-      _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print("console:ON");
+      _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(l);
+      _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print("console:ON");
       return;
     }
     snprintf(l, sizeof(l), "ch%u %s", settings.wifi().channel, wifiManager.securityName());
-    _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(l);
+    _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(l);
     snprintf(l, sizeof(l), "cli%u rns%u", (unsigned)WiFi.softAPgetStationNum(),
              (unsigned)g_stats.tcpClients);
-    _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print(l);
-    _oled.setCursor(0, DisplayLayout::rowY(3));
-    _oled.print((wifiManager.stationConnected() ? WiFi.localIP() : AP_IP).toString().c_str());
+    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(l);
+    _gfx->setCursor(0, DisplayLayout::rowY(3));
+    _gfx->print((wifiManager.stationConnected() ? WiFi.localIP() : AP_IP).toString().c_str());
     return;
   }
   char line[24];
@@ -860,16 +801,16 @@ void Display::paintNetwork() {
     // No access point and no station: the panel says so in the rows that
     // would otherwise describe a network that is not on the air, and names
     // the way back, since the console is then the only one.
-    _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print("Wi-Fi off");
+    _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print("Wi-Fi off");
     snprintf(line, sizeof(line), "rns %u  console on", (unsigned)g_stats.tcpClients);
-    _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(line);
-    _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print("up   WIFI ON @console");
+    _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
+    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("up   WIFI ON @console");
   } else {
   snprintf(line, sizeof(line), "%-12.12s %s", wifiManager.ssid(), wifiManager.securityName());
-  _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(line);
   snprintf(line, sizeof(line), "ch%-2u cli %u  rns %u", settings.wifi().channel,
            (unsigned)WiFi.softAPgetStationNum(), (unsigned)g_stats.tcpClients);
-  _oled.setCursor(0, DisplayLayout::rowY(1)); _oled.print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
 
   // Joined a network? Then there is one link worth measuring, and it gets a
   // label and a number like everything else.
@@ -880,11 +821,11 @@ void Display::paintNetwork() {
     snprintf(line, sizeof(line), "%ddBm", rssi);
     meter(2, "up", line, wifiPercent((float)rssi));
   } else {
-    _oled.setCursor(0, DisplayLayout::rowY(2)); _oled.print("up   not joined");
+    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("up   not joined");
   }
   }
-  _oled.setCursor(0, DisplayLayout::rowY(3)); _oled.print("dest ");
-  _oled.print(String(nodeIdentity.destHex()).substring(0, 16));
+  _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print("dest ");
+  _gfx->print(String(nodeIdentity.destHex()).substring(0, 16));
 #if HAS_SD
   SdCard::Info si = sdCard.info();
   if (si.state == SdCard::State::Absent) snprintf(line, sizeof(line), "SD: none");
@@ -893,7 +834,7 @@ void Display::paintNetwork() {
   if (_bat.present) snprintf(line, sizeof(line), "batt %.2fV %u%%%s", (double)_bat.volts, _bat.percent, chargeMark(_bat));
   else              snprintf(line, sizeof(line), "USB power");
 #endif
-  _oled.setCursor(0, DisplayLayout::rowY(4)); _oled.print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print(line);
 }
 
 #else

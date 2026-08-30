@@ -390,10 +390,22 @@
 #define SD_LOG_MAX_BYTES    (1024UL * 1024UL)
 
 // ---------------------------------------------------------------------------
-// OLED — SSD1306 128x64 on I2C (T3-S3: SDA 18 / SCL 17, address 0x3C)
+// Display — SSD1306 128x64 on I2C by default (T3-S3: SDA 18 / SCL 17, 0x3C)
 // ---------------------------------------------------------------------------
 #ifndef HAS_DISPLAY
   #define HAS_DISPLAY       1
+#endif
+
+// What kind of glass, which is a different question from how big. The size
+// decides the layout; the kind decides which driver is built and what an
+// update costs — an e-paper panel of the same dimensions is not a slower
+// OLED, it is a panel that has to be told how rarely it may be written.
+// A board declares this in its own header; anything that does not say has
+// the OLED every board so far has had.
+#define DISPLAY_KIND_OLED   1
+#define DISPLAY_KIND_EINK   2
+#ifndef DISPLAY_KIND
+  #define DISPLAY_KIND      DISPLAY_KIND_OLED
 #endif
 #ifndef PIN_OLED_SDA
   #define PIN_OLED_SDA      18
