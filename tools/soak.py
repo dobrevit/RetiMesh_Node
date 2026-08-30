@@ -56,6 +56,11 @@ FIELDS = [
     # heap_* columns above count 32-bit-only IRAM as well and so read healthy on
     # a board that cannot place another task (Diag.h).
     "dram_free", "dram_min", "dram_largest",
+    # Whether the node announces at all. Without it the summary cannot tell a
+    # node that is quiet because it was told to be from one that has stopped
+    # working. Last in the list on purpose: appending to a CSV written before
+    # this column existed leaves every other column where the header says.
+    "announce_interval",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -110,6 +115,7 @@ def sample(host, timeout=8):
         airtime_long_pct=d.get("airtime", {}).get("long_pct", ""),
         transport_online=int(bool(d.get("transport", {}).get("online"))),
         announces_tx=radio.get("announces_tx", ""),
+        announce_interval=radio.get("announce_interval", ""),
         tasks_missing=" ".join(missing_tasks(diag)),
         dram_free=heap.get("dram_free", ""),
         dram_min=heap.get("dram_min_free", ""),
@@ -150,6 +156,24 @@ def summarise(path):
         except (TypeError, ValueError):
             return 0.0
 
+    def announce_segments(rows):
+        """The announce counter, split at every restart, over the samples that
+        actually carry it. It is a RAM counter and starts again at zero on
+        every boot, so a run spanning one holds several counters rather than
+        one long one; and a sample that does not report it (a node running
+        firmware from before the column existed) says nothing about any
+        window, so it is not part of one."""
+        segments, current, boot = [], [], object()
+        for r in rows:
+            if r.get("boot_count", "") != boot:
+                boot = r.get("boot_count", "")
+                current = []
+                segments.append(current)
+            v = num(r.get("announces_tx"))
+            if v is not None:
+                current.append((parse_ts(r["ts"]), v))
+        return [s for s in segments if s]
+
     for node in sorted({r["node"] for r in rows}):
         rs = [r for r in rows if r["node"] == node]
         up = [r for r in rs if r["reachable"] == "1"]
@@ -186,16 +210,30 @@ def summarise(path):
         offline = [r for r in up if r.get("transport_online") == "0"]
         if offline:
             print(f"   ⚠ transport offline in {len(offline)}/{len(up)} samples")
-        ann = [num(r.get("announces_tx")) for r in up if num(r.get("announces_tx")) is not None]
-        if ann:
-            # From the timestamps, not the sample count: the interval is an
+        # Announcing switched off is a setting the settings page permits, not a
+        # fault, and a summary that calls it a failure teaches the operator to
+        # skip the warning. A CSV from before the column existed says nothing
+        # either way, and then the check runs as it always did.
+        intervals = {num(r.get("announce_interval")) for r in up
+                     if num(r.get("announce_interval")) is not None}
+        segments = announce_segments(up)
+        if intervals == {0.0}:
+            print("   announces: switched off (announce_interval 0)")
+        elif segments:
+            # From the timestamps of the samples that carry the counter, not
+            # the sample count and not the whole recording: the interval is an
             # argument, and a stated duration that assumes it would be wrong.
-            hours = (parse_ts(last["ts"]) - parse_ts(first["ts"])) / 3600.0
-            if ann[-1] == ann[0] and hours >= 1:
-                print(f"   ⚠ announced nothing in {hours:.0f}h (announces_tx stuck at {ann[0]:.0f}) — "
-                      "a node with announcing on should announce every ANNOUNCE_INTERVAL_S")
-            else:
-                print(f"   announces sent: {ann[0]:.0f} -> {ann[-1]:.0f}")
+            stuck = [s for s in segments if s[-1][1] == s[0][1] and s[-1][0] - s[0][0] >= 3600]
+            for s in stuck:
+                print(f"   ⚠ announced nothing in {(s[-1][0] - s[0][0]) / 3600.0:.0f}h "
+                      f"(announces_tx stuck at {s[0][1]:.0f}) — a node with announcing on "
+                      "should announce every ANNOUNCE_INTERVAL_S")
+            if not stuck:
+                if len(segments) == 1:
+                    print(f"   announces sent: {segments[0][0][1]:.0f} -> {segments[0][-1][1]:.0f}")
+                else:
+                    sent = sum(s[-1][1] - s[0][1] for s in segments)
+                    print(f"   announces sent: {sent:.0f} over {len(segments)} boots")
 
         # Memory. The trend matters more than any single reading.
         fr = [num(r["heap_free"]) for r in up if num(r["heap_free"]) is not None]

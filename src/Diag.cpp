@@ -237,9 +237,20 @@ bool report() {
           lowest, (unsigned long)headroom);
     warned = true;
   }
-  if (h.minFreeInternal < DIAG_HEAP_WARN_B) {
-    log_w("internal heap fell to %lu bytes at its lowest (warning below %d)",
-          (unsigned long)h.minFreeInternal, DIAG_HEAP_WARN_B);
+  // Whichever of the two is tighter, because either one can be the binding
+  // constraint and only one of them is ever the reason an allocation failed.
+  // The internal figure counts 32-bit-only IRAM as well, so on a board where
+  // that is a large share of it — a classic ESP32 — it reads tens of
+  // kilobytes healthier than the byte-addressable heap a stack must come
+  // from, and a threshold on it alone stays quiet through exactly the
+  // shortage that stops another task being created (Diag.h). On a board where
+  // the two coincide this is the same one warning it always was.
+  const uint32_t tightest = h.minFreeDram < h.minFreeInternal ? h.minFreeDram : h.minFreeInternal;
+  if (tightest < DIAG_HEAP_WARN_B) {
+    log_w("%s heap fell to %lu bytes at its lowest (warning below %d)%s",
+          h.minFreeDram < h.minFreeInternal ? "byte-addressable" : "internal",
+          (unsigned long)tightest, DIAG_HEAP_WARN_B,
+          h.minFreeDram < h.minFreeInternal ? " — this is what a stack or buffer can use" : "");
     warned = true;
   }
   return warned;
