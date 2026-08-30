@@ -163,7 +163,11 @@
 
 // ---------------------------------------------------------------------------
 // Firmware version — single-sourced from the git tag by CI
-// (PLATFORMIO_BUILD_FLAGS=-DFW_VERSION=\"v1.2.3\"); local builds say "dev".
+// (PLATFORMIO_BUILD_FLAGS=-DFW_VERSION=\"v1.2.3\"). A build CI did not version
+// asks git instead (tools/fw_version.py): `git describe --always --dirty`, so
+// a node can say which commit it runs and a bench of them can be told apart.
+// "dev" survives only where git cannot answer at all — a source tarball, or a
+// container without the binary.
 // ---------------------------------------------------------------------------
 #ifndef FW_VERSION
   #define FW_VERSION        "dev"
