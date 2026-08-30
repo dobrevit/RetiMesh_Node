@@ -71,12 +71,14 @@ void poll();                       // from loop(); reads what has arrived, answe
 // The transport owns the socket and its lifetime; the console owns the
 // protocol and the authentication. openSession() returns false when every
 // slot is taken, and the transport turns the caller away.
-bool   openSession(Stream& io);
+// `hostFacing` says whether the caller is on a link the node is the host end
+// of (the access point, usb0, ppp0) rather than out on the station network.
+// The bootloader refuses on the same terms the HTTP API does, and needs it.
+bool   openSession(Stream& io, bool hostFacing);
 void   closeSession(Stream& io);
 // True when the console is finished with this caller and the transport
 // should hang up: too many failed AUTHs. Checked after each poll().
 bool   sessionClosing(Stream& io);
 bool   sessionAuthed(Stream& io);
-size_t openSessions();
 
 } // namespace Maintenance

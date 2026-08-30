@@ -56,6 +56,9 @@ def run(console, line: str) -> int:
     status, _, _ = console.command(line)
     if console.last_lines:
         print("\n".join(console.last_lines))
+    if status == "CLOSED":
+        print("the node closed the connection", file=sys.stderr)
+        return 1
     if status == "TIMEOUT":
         print("no reply within %.0fs" % console.timeout, file=sys.stderr)
         return 1

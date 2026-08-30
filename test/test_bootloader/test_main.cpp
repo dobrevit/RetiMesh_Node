@@ -217,8 +217,36 @@ static void test_the_deadline_survives_millis_wraparound() {
   TEST_ASSERT_EQUAL((int)Step::Quiesce, (int)s.tick(0x00000100u));
 }
 
+// --- who may ask for the ROM downloader from off the cable -------------------
+static void test_the_api_switch_refuses_every_remote_caller() {
+  const char* why = nullptr;
+  TEST_ASSERT_FALSE(remoteEntryAllowed(true, false, true, &why));    // host-facing, still refused
+  TEST_ASSERT_NOT_NULL(strstr(why, "switched off"));
+  TEST_ASSERT_FALSE(remoteEntryAllowed(false, false, false, &why));
+}
+
+static void test_a_host_facing_link_may_ask_when_the_api_is_on() {
+  // The access point, usb0, ppp0: a caller there is as close to the node as
+  // somebody holding it.
+  const char* why = nullptr;
+  TEST_ASSERT_TRUE(remoteEntryAllowed(true, true, false, &why));
+  TEST_ASSERT_EQUAL_STRING("", why);
+}
+
+static void test_the_station_network_needs_its_own_permission() {
+  // The default. Anyone on the home LAN with the admin password could
+  // otherwise drop a relay into its ROM and leave it there.
+  const char* why = nullptr;
+  TEST_ASSERT_FALSE(remoteEntryAllowed(false, true, false, &why));
+  TEST_ASSERT_NOT_NULL(strstr(why, "bootloader_from_lan"));
+  TEST_ASSERT_TRUE(remoteEntryAllowed(false, true, true, &why));
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_the_api_switch_refuses_every_remote_caller);
+  RUN_TEST(test_a_host_facing_link_may_ask_when_the_api_is_on);
+  RUN_TEST(test_the_station_network_needs_its_own_permission);
   RUN_TEST(test_a_classic_esp32_behind_a_bridge_offers_only_the_bridge);
   RUN_TEST(test_an_s3_behind_a_bridge_offers_the_api_and_the_bridge);
   RUN_TEST(test_native_usb_serial_jtag_offers_only_the_hardware_handshake);

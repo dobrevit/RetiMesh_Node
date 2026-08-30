@@ -146,12 +146,12 @@
 #ifndef CONSOLE_TCP_PORT
   #define CONSOLE_TCP_PORT       4243     // beside the Reticulum transport's 4242
 #endif
-// One caller at a time. This is a configuration channel, not a service: two
-// operators changing settings at once is a race nobody asked for, and each
-// session costs a socket on a board that may have kilobytes to spare.
-#ifndef MAINT_NET_SESSIONS
-  #define MAINT_NET_SESSIONS     1
-#endif
+// One caller at a time, and not a setting: the transport holds one client
+// slot (ConsoleServer.cpp), so a second would be dead RAM and a macro that
+// raised it would be a knob that turns nothing. This is a configuration
+// channel rather than a service — two operators changing settings at once is
+// a race nobody asked for.
+#define MAINT_NET_SESSIONS       1
 // Guessing the admin password over the air. Counted for the node, not the
 // connection (Maintenance.h).
 #ifndef MAINT_AUTH_MAX_FAILURES

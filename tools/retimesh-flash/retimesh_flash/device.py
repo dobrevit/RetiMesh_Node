@@ -277,26 +277,42 @@ class _Socket:
         self._sock = sock
         self._poll = poll
         self.port = None
+        # A closed socket is readable for ever and recv() returns b'' every
+        # time, so "nothing yet" and "gone" look identical from the outside.
+        # Told apart once and remembered, or the reader spins at full tilt
+        # until the command timeout and then blames a timeout for a hangup.
+        self.closed_by_peer = False
 
     @property
     def in_waiting(self) -> int:
         # select() says readable, not how much; the chunk size is a hint and
         # read() below returns whatever actually arrived.
+        if self.closed_by_peer:
+            return 0
         r, _, _ = select.select([self._sock], [], [], 0)
         return 512 if r else 0
 
     def read(self, n: int = 1) -> bytes:
+        if self.closed_by_peer:
+            time.sleep(self._poll)               # no busy loop on a dead socket
+            return b""
         r, _, _ = select.select([self._sock], [], [], self._poll)
         if not r:
             return b""
         try:
-            return self._sock.recv(max(1, n))
+            chunk = self._sock.recv(max(1, n))
         except (BlockingIOError, InterruptedError):
             return b""
         except OSError:
+            self.closed_by_peer = True
             return b""
+        if not chunk:
+            self.closed_by_peer = True           # orderly close: end of stream
+        return chunk
 
     def write(self, data: bytes) -> int:
+        if self.closed_by_peer:
+            raise ConnectionResetError("the node closed the connection")
         self._sock.sendall(data)
         return len(data)
 
@@ -404,6 +420,11 @@ class Console:
             return True, "authenticated"
         if status == "ERR":
             return False, "%s (%s)" % (kv.get("text", "refused"), kv.get("code", "?"))
+        if status == "CLOSED":
+            # Most often the node refusing a second caller: it says so and
+            # hangs up, and last_lines has the words it used.
+            said = self.last_lines[-1] if self.last_lines else ""
+            return False, said or "the node closed the connection"
         return False, status.lower()
 
     def close(self) -> None:
@@ -439,7 +460,7 @@ class Console:
 
     def command(self, line: str) -> tuple[str, dict, list[dict]]:
         """Send one command. Returns (status, kv, data_lines) where status is
-        "OK", "ERR", "SHORT" or "TIMEOUT"; kv are the key=value pairs of the
+        "OK", "ERR", "SHORT", "TIMEOUT" or "CLOSED"; kv are the pairs of the
         final line (for ERR: code and text); data_lines are the RM <CMD> lines
         before it.
 
@@ -449,34 +470,52 @@ class Console:
         is SHORT, its data handed back for what it is worth rather than passed
         off as complete. A node that does not count (protocol 1) is taken at
         its word."""
+        cmd = line.split()[0].upper() if line.split() else ""
+        kept = []
         for attempt in (1, 2):
             status, kv, data = self._exchange(line)
-            if status == "ERR" and kv.get("cmd") == "?" and attempt == 1:
-                # The node refused a line it could not even name: ours, glued
-                # onto bytes a port prober left in its buffer. The node has
-                # discarded them with that reply; once more and it is clean.
+            kept = self.last_lines or kept
+            # An "ERR ?" is only worth another try when it is the node
+            # discarding a line it could not name — ours, glued onto bytes a
+            # port prober left in its buffer, which it answers with a 400.
+            # A 503 is a refusal the node meant, and repeating it writes to a
+            # socket the node has already closed and reports the timeout
+            # instead of what it actually said. AUTH is never repeated at all:
+            # a second try spends one of the three the node allows.
+            garbled = (status == "ERR" and kv.get("cmd") == "?"
+                       and int(kv.get("code", 0) or 0) == 400 and cmd != "AUTH")
+            if garbled and attempt == 1:
                 continue
             if status != "OK":
+                self.last_lines = kept
                 return status, kv, data
             expected = kv.pop("lines", None)
             if expected is None or not expected.isdigit() or int(expected) == len(data):
                 return status, kv, data
+        self.last_lines = kept
         return "SHORT", kv, data
 
     def _exchange(self, line: str) -> tuple[str, dict, list[dict]]:
         cmd = line.split()[0].upper()
-        self.ser.write((line.strip() + "\n").encode())
-        self.ser.flush()
+        self.last_lines = []
+        try:
+            self.ser.write((line.strip() + "\n").encode())
+            self.ser.flush()
+        except OSError:
+            # The node hung up between the last reply and this line. Saying
+            # so beats "no reply within 4s", which sends the operator looking
+            # for a timeout that never happened.
+            return "CLOSED", {}, []
         deadline = self.clock() + self.timeout
         data = []
         # What the node actually said, kept beside what was parsed out of it:
         # a client showing an operator the reply should show the node's words,
         # not this file's reconstruction of them.
-        self.last_lines = []
         while True:
             reply = self._readline(deadline)
             if reply is None:
-                return "TIMEOUT", {}, data
+                return ("CLOSED" if getattr(self.ser, "closed_by_peer", False)
+                        else "TIMEOUT"), {}, data
             if not reply.startswith(REPLY_PREFIX):
                 continue                       # a log line sharing the port
             self.last_lines.append(reply)

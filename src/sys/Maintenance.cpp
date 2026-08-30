@@ -53,6 +53,11 @@ struct Session {
   bool          trusted = false;
   bool          authed = false;
   bool          closing = false;       // the transport should hang up: too many failed AUTHs
+  // Whether this caller is on a link the node is the host end of. The
+  // bootloader asks it, because "physical access is already more than a
+  // password" is true of the cable and of a host on usb0 or the access
+  // point, and false of the station network (LocalLink.h).
+  bool          hostFacing = true;
 };
 
 static Session  sCable;                              // the port; always present
@@ -258,6 +263,18 @@ static void doRestart(const Request& r, Bootloader::Target target) {
     err(name, 400, text);
     return;
   }
+  // Over the cable this is allowed outright: physical access already means
+  // dumping the firmware and reflashing it, which is more than this. A
+  // network session is a different matter, and answers to the two switches
+  // the HTTP API answers to — otherwise putting the console on a socket
+  // would quietly void them (Bootloader.h).
+  if (target == Bootloader::Target::Bootloader && sCur && !sCur->trusted) {
+    const char* denied = nullptr;
+    if (!Bootloader::remoteEntryAllowed(sCur->hostFacing, &denied)) {
+      err(name, 403, denied);
+      return;
+    }
+  }
   const char* why = nullptr;
   // The reply has to leave before the port goes away; the same grace the
   // HTTP path gives its 202, so a host tool can wait on one figure.
@@ -276,10 +293,12 @@ static void doGet(const Request& r);
 static void doSet(const Request& r);
 
 // What a session that has not authenticated may still do: say who it is
-// talking to, ask what the vocabulary is, and prove itself. Everything else —
-// STATUS included, which names the node and reports its radio — waits.
+// talking to, and prove itself. Everything else waits — STATUS because it
+// names the node and reports its radio, and HELP because fourteen lines of
+// vocabulary is the longest thing an unauthenticated caller could make the
+// node write, and the refusal below already says what to do instead.
 static bool allowedUnauthenticated(Cmd c) {
-  return c == Cmd::Auth || c == Cmd::Version || c == Cmd::Help;
+  return c == Cmd::Auth || c == Cmd::Version;
 }
 
 static void doAuth(const Request& r) {
@@ -289,8 +308,12 @@ static void doAuth(const Request& r) {
   // password is; a typo there must not be able to shut the door on whoever
   // dials in next, and neither must a wait apply to a session that never
   // needed to authenticate in the first place.
+  // Cleared the moment it expires, not merely tested: millis() wraps every
+  // 49 days, so a sentinel left set turns back into "locked" halfway round
+  // and refuses the right password for another 24 days.
+  if (sAuthLockedUntilMs && (int32_t)(now - sAuthLockedUntilMs) >= 0) sAuthLockedUntilMs = 0;
   const bool counts = sCur && !sCur->trusted;
-  if (counts && sAuthLockedUntilMs && (int32_t)(now - sAuthLockedUntilMs) < 0) {
+  if (counts && sAuthLockedUntilMs) {
     err("AUTH", 429, "too many attempts; wait and try again");
     return;
   }
@@ -468,11 +491,12 @@ void useStream(Stream& io) {
   sCable.io = &io;
 }
 
-bool openSession(Stream& io) {
+bool openSession(Stream& io, bool hostFacing) {
   for (Session& s : sNet) {
     if (s.io) continue;
     s = Session();                       // nothing of the last caller's survives: not the
     s.io = &io;                          // half-typed line, and above all not the authentication
+    s.hostFacing = hostFacing;
     return true;
   }
   return false;
@@ -490,12 +514,6 @@ bool sessionClosing(Stream& io) {
 bool sessionAuthed(Stream& io) {
   for (Session& s : sNet) if (s.io == &io) return s.authed;
   return false;
-}
-
-size_t openSessions() {
-  size_t n = 0;
-  for (const Session& s : sNet) if (s.io) n++;
-  return n;
 }
 
 // One session's turn. The budget is per session, so a host pasting a script

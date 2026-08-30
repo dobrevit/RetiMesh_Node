@@ -231,6 +231,10 @@
         <select name="bootloader_from_lan"><option value="0">No &mdash; directly attached links only</option><option value="1">Yes &mdash; any host on the LAN</option></select></div>
       <div><label>Serial maintenance console</label>
         <select name="console_enabled"><option value="1">On</option><option value="0">Off &mdash; log only</option></select></div>
+      <div><label>Console over TCP (port 4243)</label>
+        <select name="console_tcp"><option value="1">On &mdash; after AUTH</option><option value="0">Off &mdash; nothing listens</option></select></div>
+      <div><label>Web portal (this page)</label>
+        <select name="web_ui"><option value="1">On</option><option value="0">Off &mdash; administer over the console</option></select></div>
     </div>
     <button type="submit">Save maintenance settings</button>
     <div class="msg" id="maintMsg"></div>
@@ -452,7 +456,8 @@ async function load() {
   // same object GET /api/system/bootloader returns.
   const mt = cfg.maintenance || {}, bl = cfg.bootloader || {};
   fill($("maintForm"), { bootloader_api: mt.bootloader_api ? "1" : "0", bootloader_from_lan: mt.bootloader_from_lan ? "1" : "0",
-    console_enabled: mt.console_enabled ? "1" : "0" });
+    console_enabled: mt.console_enabled ? "1" : "0", console_tcp: mt.console_tcp ? "1" : "0",
+    web_ui: mt.web_ui ? "1" : "0" });
   $("bootloaderBtn").disabled = !(bl.software_entry && mt.bootloader_api);
   $("maintNote").textContent = (bl.software_entry
       ? "This board can restart into its ROM downloader from software."
@@ -535,10 +540,16 @@ $("maintForm").addEventListener("submit", async ev => {
   ev.preventDefault();
   const f = ev.target.elements;
   try {
-    await api("/api/settings/maintenance", { bootloader_api: f.bootloader_api.value === "1",
-      bootloader_from_lan: f.bootloader_from_lan.value === "1", console_enabled: f.console_enabled.value === "1" });
-    setMsg("maintMsg", "Saved.", "ok");
-    setTimeout(load, 500);
+    // Turning the portal off takes this page with it, and the node restarts
+    // to do it — so say so before, and do not reload into nothing after.
+    if (f.web_ui.value === "0" &&
+        !confirm("Turn the web portal off? This page goes away at the restart, and the node is then "
+                 "administered over the console — on the cable, or on TCP port 4243 with the admin password.")) return;
+    const r = await api("/api/settings/maintenance", { bootloader_api: f.bootloader_api.value === "1",
+      bootloader_from_lan: f.bootloader_from_lan.value === "1", console_enabled: f.console_enabled.value === "1",
+      console_tcp: f.console_tcp.value === "1", web_ui: f.web_ui.value === "1" });
+    setMsg("maintMsg", r.restart ? "Saved. Restarting…" : "Saved.", r.restart ? "warn" : "ok");
+    if (!r.restart) setTimeout(load, 500);
   } catch (e) { setMsg("maintMsg", e.message, "bad"); }
 });
 
