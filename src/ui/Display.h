@@ -127,7 +127,14 @@ private:
   // unchanged frame; on e-paper it is the difference between a usable panel
   // and one that flashes continuously.
   RefreshPolicy _refresh{DisplayLayout::active().refreshMs,
-                         DisplayLayout::active().fullRefreshMs};
+                         DisplayLayout::active().fullEveryUpdates};
+  // The cadence the node is resting at, or the one it uses while somebody is
+  // on a page they turned to. Kept here because the task loop draws at it and
+  // the policy shows at it, and the two must not disagree.
+  uint32_t      cadence() const {
+    const DisplayLayout::Layout l = DisplayLayout::active();
+    return _page == STATUS ? l.refreshMs : l.activeRefreshMs;
+  }
   uint32_t      _frameSeq = 0;           // stands in for the hash on a panel with no readable buffer
 #endif
   bool    _ok   = false;

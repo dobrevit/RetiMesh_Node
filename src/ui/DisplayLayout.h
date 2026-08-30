@@ -68,11 +68,17 @@ struct Layout {
   uint8_t  headerH;        // height of the status bar, 0 where there is none
   uint8_t  iconSize;       // square, and what the bar is sized around
   bool     statusIcons;    // room in the header for the persistent state
-  uint16_t refreshMs;      // how often this panel can afford a redraw
-  // How often the panel wants a whole-panel refresh whatever is on it. Zero
-  // on a panel with nothing to clear, which is every panel that is not
+  // How often the panel is redrawn while the node is left to itself, and how
+  // often while somebody is looking at a page they turned to. They are the
+  // same number on a panel where an update costs nothing; they are three
+  // orders of magnitude apart on one where every update spends part of the
+  // panel's life.
+  uint32_t refreshMs;
+  uint32_t activeRefreshMs;
+  // Partial updates the panel will take before it wants a whole-panel one.
+  // Zero on a panel with nothing to clear, which is every panel that is not
   // e-paper: an OLED pixel holds no memory of what it showed before.
-  uint32_t fullRefreshMs;
+  uint16_t fullEveryUpdates;
 };
 
 // 128x64: the panel every page was written for, stated rather than assumed.
@@ -87,8 +93,8 @@ constexpr Layout kOled128x64 = {
   // of its nub, so at nine the icons' floor sat a pixel above the battery's and
   // the bar looked uneven. At ten they share a floor, and the L inside the LoRa
   // icon does not move — its height is (size+1)/2, which is five either way.
-  /*headerH*/ 12, /*iconSize*/ 10, /*statusIcons*/ true, /*refreshMs*/ 500,
-  /*fullRefreshMs*/ 0,
+  /*headerH*/ 12, /*iconSize*/ 10, /*statusIcons*/ true,
+  /*refreshMs*/ 500, /*activeRefreshMs*/ 500, /*fullEveryUpdates*/ 0,
 };
 
 // 64x32, as on the Heltec Wireless Stick: an eighth of the area. Ten columns
@@ -99,8 +105,8 @@ constexpr Layout kOled64x32 = {
   64, 32,
   /*columns*/ 10, /*rows*/ 4, /*rowY0*/ 0, /*rowPitch*/ 8,
   /*header*/ false, /*pageDots*/ false, /*batteryW*/ 0, /*batteryH*/ 0,
-  /*headerH*/ 0, /*iconSize*/ 0, /*statusIcons*/ false, /*refreshMs*/ 500,
-  /*fullRefreshMs*/ 0,
+  /*headerH*/ 0, /*iconSize*/ 0, /*statusIcons*/ false,
+  /*refreshMs*/ 500, /*activeRefreshMs*/ 500, /*fullEveryUpdates*/ 0,
 };
 
 // 2.13" e-paper, 250x122, as on the Heltec Wireless Paper. Not selected by any
@@ -108,18 +114,24 @@ constexpr Layout kOled64x32 = {
 // it is what the numbers above have to survive, and because the two fields
 // that matter for it are the two an OLED never exercises.
 //
-// refreshMs is five seconds, not five hundred milliseconds: an update on this
-// film takes the better part of a second and flashes while it happens, so a
-// status page that changes every five seconds is already at the edge of what
-// is pleasant to sit next to. fullRefreshMs is ten minutes, which is the
-// ghosting, not the content: partial updates leave a faint record of what was
-// there and only a whole-panel pass clears it.
+// The two intervals are the whole point of this panel's entry. Resting, it
+// redraws every five minutes: a node left on a shelf spends its panel's life
+// one update at a time, and the readings on the status page are not worth an
+// update every five seconds — at that rate a panel rated for a million of
+// them is used up in a couple of months, and at five minutes the same rating
+// lasts most of a decade. While somebody is on a page they turned to, five
+// seconds, because they are looking at it and it returns to the status page
+// on its own soon enough. A press is not held back by either (RefreshPolicy).
+//
+// fullEveryUpdates is the ghosting rather than the content: partial updates
+// leave a faint record of what was there, and Good Display suggest clearing
+// it every five of them.
 constexpr Layout kEink250x122 = {
   250, 122,
   /*columns*/ 41, /*rows*/ 10, /*rowY0*/ 15, /*rowPitch*/ 10,
   /*header*/ true, /*pageDots*/ false, /*batteryW*/ 7, /*batteryH*/ 10,
-  /*headerH*/ 12, /*iconSize*/ 10, /*statusIcons*/ true, /*refreshMs*/ 5000,
-  /*fullRefreshMs*/ 600000,
+  /*headerH*/ 12, /*iconSize*/ 10, /*statusIcons*/ true,
+  /*refreshMs*/ 300000, /*activeRefreshMs*/ 5000, /*fullEveryUpdates*/ 5,
 };
 
 // Chosen at build time from the panel the board header declares. Runtime

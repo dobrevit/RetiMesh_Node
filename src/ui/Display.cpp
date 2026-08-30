@@ -97,10 +97,14 @@ void Display::displayTask(void* self) {
     uint32_t now = millis();
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
       d->_page = STATUS; d->_pageChangedMs = now; lastPaint = 0;
+      d->_refresh.interval(d->cadence());    // back to what the node rests at
     }
     // Battery saving: switch the panel off after a minute without a press.
     if (!d->_blank && now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
-    if (!d->_blank && now - lastPaint >= DisplayLayout::active().refreshMs) { lastPaint = now; d->paint(); }
+    // Drawn at the cadence the page asks for; whether the result reaches the
+    // glass is still the policy's answer, and on a panel that costs something
+    // to update it usually is not.
+    if (!d->_blank && now - lastPaint >= d->cadence()) { lastPaint = now; d->paint(); }
     vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
   }
 }
@@ -119,7 +123,15 @@ void Display::pollButton() {
   if (!down && _pressedAtMs != 0) {
     if (!_longFired && now - _pressedAtMs >= 30) {          // short press
       if (_blank) setBlank(false);                           // wake only
-      else { _page = nextPage(_page); _pageChangedMs = now; paint(); }
+      // The press is the one change nobody should wait for: paint now, and
+      // tell the policy not to hold it back for the panel's usual gap.
+      else {
+        _page = nextPage(_page);
+        _pageChangedMs = now;
+        _refresh.interval(cadence());        // the page decides how live it is
+        _refresh.urgent();                   // and this press is not waiting for it
+        paint();
+      }
     }
     _pressedAtMs = 0;
   }
