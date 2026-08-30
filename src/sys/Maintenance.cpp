@@ -137,6 +137,14 @@ static void doStatus() {
   // Whether the console can be reached over the network, and whether somebody
   // already holds the one session — which is the answer to "why will it not
   // let me in" when two people administer the same node.
+  // Only when there is something to say: a healthy node should not carry a
+  // line of zeroes, and a node under pressure should say so before it dies
+  // rather than leaving a restart to be interpreted afterwards (Diag.h).
+  const Diag::Faults f = Diag::faults();
+  if (f.allocFailures || f.caught)
+    dataf("STATUS", "alloc_failures=%lu contained=%lu last_ms_ago=%lu",
+          (unsigned long)f.allocFailures, (unsigned long)f.caught,
+          (unsigned long)(f.lastMs ? millis() - f.lastMs : 0));
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
         ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),
         !ConsoleServer::connected() ? "none" : ConsoleServer::authenticated() ? "authenticated" : "unauthenticated");

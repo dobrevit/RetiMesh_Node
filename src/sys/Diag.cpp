@@ -18,6 +18,10 @@
 
 #include "Diag.h"
 
+#include <new>
+#include <exception>
+#include <atomic>
+
 #include <Preferences.h>
 #include <esp_attr.h>
 #include <esp_heap_caps.h>
@@ -76,7 +80,83 @@ const char* resetReasonName(uint8_t reason) {
   }
 }
 
+// --- running out of memory, survivably (Diag.h) ------------------------------
+static std::atomic<uint32_t> sAllocFailures{0};
+static std::atomic<uint32_t> sAllocLastMs{0};
+static std::atomic<uint32_t> sCaught{0};
+// A node in an allocation storm must not drown its own diagnosis: the first
+// failure is worth a line, the next thousand are worth a count.
+static uint32_t sLastAllocLogMs = 0;
+static constexpr uint32_t kAllocLogEveryMs = 5000;
+
+Faults faults() {
+  Faults f;
+  f.allocFailures = sAllocFailures.load();
+  f.lastMs        = sAllocLastMs.load();
+  f.caught        = sCaught.load();
+  return f;
+}
+
+void noteCaught(const char* what, const char* why) {
+  sCaught.fetch_add(1, std::memory_order_relaxed);
+  const uint32_t dram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  log_e("%s failed and was contained: %s — %lu B free / %lu B largest block of 8-bit "
+        "internal RAM. That work was skipped; the node is still running",
+        what, why,
+        (unsigned long)heap_caps_get_free_size(dram),
+        (unsigned long)heap_caps_get_largest_free_block(dram));
+}
+
+// Called by the runtime the moment any allocation fails — inside this
+// firmware, inside the framework, inside a library, wherever. It cannot make
+// the allocation succeed; what it can do is put the reason on the record
+// before whatever throws next, so a failure downstream is explained rather
+// than mysterious. Throwing bad_alloc from here is one of the three things a
+// new-handler is permitted to do, and it is what the default would have done.
+static void onAllocationFailed() {
+  sAllocFailures.fetch_add(1, std::memory_order_relaxed);
+  const uint32_t now = millis();
+  sAllocLastMs.store(now, std::memory_order_relaxed);
+  if (now - sLastAllocLogMs >= kAllocLogEveryMs || sAllocFailures.load() == 1) {
+    sLastAllocLogMs = now;
+    const uint32_t dram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    log_e("an allocation failed (%lu since boot): %lu B free / %lu B largest block of "
+          "8-bit internal RAM. Something is about to fail or be refused",
+          (unsigned long)sAllocFailures.load(),
+          (unsigned long)heap_caps_get_free_size(dram),
+          (unsigned long)heap_caps_get_largest_free_block(dram));
+  }
+  throw std::bad_alloc();
+}
+
+// The last word, for a throw in code this firmware does not own and cannot
+// wrap — serveStatic reads the filesystem on the async_tcp task, and neither
+// the task nor the code is ours. The node still dies here. It dies saying
+// why, which a bare backtrace did not.
+static void onTerminate() {
+  const uint32_t dram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  const char* why = "an exception nobody caught";
+  if (auto p = std::current_exception()) {
+    try { std::rethrow_exception(p); }
+    catch (const std::bad_alloc&) { why = "an allocation failed and nobody caught it"; }
+    catch (const std::exception& e) { why = e.what(); }
+    catch (...) {}
+  }
+  log_e("about to abort: %s. %lu B free / %lu B largest block of 8-bit internal RAM, "
+        "%lu allocation failures since boot. This is the node running out of the memory "
+        "a buffer can actually use, not a logic fault",
+        why,
+        (unsigned long)heap_caps_get_free_size(dram),
+        (unsigned long)heap_caps_get_largest_free_block(dram),
+        (unsigned long)sAllocFailures.load());
+  Serial.flush();
+  abort();
+}
+
 void begin() {
+  // Before anything else here allocates.
+  std::set_new_handler(onAllocationFailed);
+  std::set_terminate(onTerminate);
   const esp_reset_reason_t r = esp_reset_reason();
   sBoot.reason     = (uint8_t)r;
   sBoot.reasonName = resetReasonName((uint8_t)r);

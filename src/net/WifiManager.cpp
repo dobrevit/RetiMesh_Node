@@ -449,16 +449,40 @@ void WifiManager::setupRoutes() {
   };
   for (const Route& rt : posts) {
     auto fn = rt.fn;
+    const char* path = rt.path;
     const bool gated = !rt.ungated;
     _http.on(rt.path, HTTP_POST,
              [this](AsyncWebServerRequest* r) {
                if (r->contentLength() == 0 && authed(r)) sendError(r, 400, "empty");
              }, nullptr,
-             [this, fn, gated](AsyncWebServerRequest* r, uint8_t* d, size_t l, size_t i, size_t t) {
+             [this, fn, gated, path](AsyncWebServerRequest* r, uint8_t* d, size_t l, size_t i, size_t t) {
                const char* body = collectBody(r, d, l, i, t);
                if (!body || !authed(r)) return;
                if (gated && Bootloader::pending()) { sendError(r, 503, kRestartingMsg); return; }
-               (this->*fn)(r, body, t);
+               // Every settings and system write goes through here, so this is
+               // the one place that has to survive a handler running out of
+               // memory (Diag.h). A request that cannot be served is answered
+               // 503; before this it took the node down with it, on the
+               // framework's task, under whoever sent it.
+               if (!Diag::guard(path, [&] { (this->*fn)(r, body, t); })) {
+                 // Replying is itself an allocation — a JsonDocument, a String,
+                 // a response object — on the same exhausted heap that just
+                 // threw, on the framework's task. So the apology gets its own
+                 // guard: a second failure here would reach the terminate
+                 // handler and abort, which is the thing being avoided. If
+                 // even this cannot be built the caller times out, which is a
+                 // worse answer than 503 and a far better one than a reboot.
+                 //
+                 // And it does not claim the change failed. A handler saves
+                 // its settings and arms its restart before it replies, so a
+                 // throw on the way out can follow a write that fully
+                 // happened; "that request failed" would be a lie the
+                 // operator then acts on.
+                 Diag::guard("the reply to a failed request", [&] {
+                   sendError(r, 503, "ran out of memory while replying — the change may have "
+                                     "been applied; check STATUS or /api/status");
+                 });
+               }
              });
   }
   // What this board can do about its bootloader, for tooling. No secrets:
@@ -600,6 +624,16 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     hp["dram_min_free"]      = h.minFreeDram;
     hp["dram_largest_block"] = h.largestDramBlock;
     hp["psram_free"]    = h.freePsram;
+
+    // What has already failed to allocate, and what was contained when it did.
+    // A node under memory pressure should be readable as such while it is
+    // still running: before this the only evidence was a restart, after the
+    // fact, with a backtrace and no context (Diag.h).
+    const Diag::Faults f = Diag::faults();
+    JsonObject fo = dg["faults"].to<JsonObject>();
+    fo["alloc_failures"] = f.allocFailures;
+    fo["contained"]      = f.caught;
+    if (f.lastMs) fo["last_ms_ago"] = millis() - f.lastMs;
 
     Diag::TaskStack st[16];
     const size_t n = Diag::stacks(st, sizeof(st) / sizeof(st[0]));

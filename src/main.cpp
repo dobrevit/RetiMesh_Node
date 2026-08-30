@@ -315,7 +315,10 @@ void setup() {
   // The RNS task owns every call into microReticulum (Transport is
   // single-threaded): interface loops, forwarding, announces, persistence.
   sRnsTaskUp = Diag::startTask([](void*) {
-    for (;;) { RnsTransport::loop(); vTaskDelay(pdMS_TO_TICKS(10)); }
+    // RnsTransport::loop() catches what microReticulum throws inside its own
+    // pass; this catches everything else, so the one task that must keep
+    // running cannot be ended by an allocation (Diag.h).
+    for (;;) { Diag::guard("the rns task", [] { RnsTransport::loop(); }); vTaskDelay(pdMS_TO_TICKS(10)); }
   }, "rns", 16384, nullptr, 3, 1);
   // Online means Reticulum is both initialised and being driven: begin()
   // succeeding says only that the tables were built, and a node with no task

@@ -20,6 +20,7 @@
 //  SdCard.cpp — see SdCard.h
 // ============================================================================
 #include "SdCard.h"
+#include "Lock.h"
 #include <sd_diskio.h>
 #include "StoreHome.h"
 #include "Diag.h"
@@ -82,45 +83,41 @@ void SdCard::startPolling() {
 }
 
 void SdCard::reserve(bool on) {
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  _reserved = on;
-  xSemaphoreGive(_lock);
+  { Sys::Lock held(_lock);
+    _reserved = on;
+  }
 }
 
 bool SdCard::reserved() {
   if (!_lock) return false;
 
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  bool r = _reserved;
-  xSemaphoreGive(_lock);
-  return r;
+  { Sys::Lock held(_lock);
+    return _reserved;
+  }
 }
 
 bool SdCard::storageLost() {
   if (!_lock) return false;
 
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  bool l = _storageLost;
-  xSemaphoreGive(_lock);
-  return l;
+  { Sys::Lock held(_lock);
+    return _storageLost;
+  }
 }
 
 SdCard::Info SdCard::info() {
   if (!_lock) return Info{};
 
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  Info i = _info;
-  xSemaphoreGive(_lock);
-  return i;
+  { Sys::Lock held(_lock);
+    return _info;
+  }
 }
 
 bool SdCard::mounted() {
   if (!_lock) return false;
 
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  bool m = _mounted;
-  xSemaphoreGive(_lock);
-  return m;
+  { Sys::Lock held(_lock);
+    return _mounted;
+  }
 }
 
 const char* SdCard::formatRefusal() {
@@ -146,7 +143,7 @@ const char* SdCard::requestFormat() {
 void SdCard::task(void* self) {
   auto* sd = static_cast<SdCard*>(self);
   for (;;) {
-    sd->poll();
+    Diag::guard("the sd card task", [sd] { sd->poll(); });
     vTaskDelay(pdMS_TO_TICKS(SD_POLL_MS));
   }
 }
@@ -224,16 +221,16 @@ void SdCard::unmount() {
 }
 
 void SdCard::measure() {
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  _info.type        = SD.cardType();
-  _info.cardBytes   = SD.cardSize();
-  _info.volumeBytes = SD.totalBytes();
-  _info.usedBytes   = SD.usedBytes();
-  // A volume covering well under the card means foreign partitions
-  // (Raspberry Pi boot+ext4, phone cards, ...) — offer a full format.
-  bool partial = _info.cardBytes > 0 && _info.volumeBytes * 100 / _info.cardBytes < SD_PARTIAL_PERCENT;
-  _info.state = partial ? State::Partial : State::Mounted;
-  xSemaphoreGive(_lock);
+  { Sys::Lock held(_lock);
+    _info.type        = SD.cardType();
+    _info.cardBytes   = SD.cardSize();
+    _info.volumeBytes = SD.totalBytes();
+    _info.usedBytes   = SD.usedBytes();
+    // A volume covering well under the card means foreign partitions
+    // (Raspberry Pi boot+ext4, phone cards, ...) — offer a full format.
+    bool partial = _info.cardBytes > 0 && _info.volumeBytes * 100 / _info.cardBytes < SD_PARTIAL_PERCENT;
+    _info.state = partial ? State::Partial : State::Mounted;
+  }
 }
 
 void SdCard::poll() {
@@ -260,11 +257,11 @@ bool SdCard::checkSlot() {
                      "path table and caches are frozen until the node reboots");
       else     log_w("SD card removed");
       unmount();
-      xSemaphoreTake(_lock, portMAX_DELAY);
-      _info = Info{};
-      _reserved = res;                   // stays reserved: the store cannot move at runtime
-      _storageLost = res;
-      xSemaphoreGive(_lock);
+      { Sys::Lock held(_lock);
+        _info = Info{};
+        _reserved = res;                   // stays reserved: the store cannot move at runtime
+        _storageLost = res;
+      }
       return true;
     }
     return false;
@@ -284,18 +281,20 @@ bool SdCard::checkSlot() {
     return true;
   }
 
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  State prev = _info.state;
-  // A card that mounted a moment ago and then would not mount again is not an
-  // unformatted card; it is one the next poll should try again, and calling it
-  // unformatted invites an operator to format a card that has a filesystem.
-  _info.state     = !p.present ? State::Absent : p.fat ? State::Error : State::Unformatted;
-  _info.type      = p.present ? p.type  : CARD_NONE;
-  _info.cardBytes = p.present ? p.bytes : 0;
-  _info.volumeBytes = _info.usedBytes = 0;
-  State now = _info.state;
-  uint64_t bytes = _info.cardBytes;
-  xSemaphoreGive(_lock);
+  State prev, now;
+  uint64_t bytes;
+  { Sys::Lock held(_lock);
+    prev = _info.state;
+    // A card that mounted a moment ago and then would not mount again is not an
+    // unformatted card; it is one the next poll should try again, and calling it
+    // unformatted invites an operator to format a card that has a filesystem.
+    _info.state     = !p.present ? State::Absent : p.fat ? State::Error : State::Unformatted;
+    _info.type      = p.present ? p.type  : CARD_NONE;
+    _info.cardBytes = p.present ? p.bytes : 0;
+    _info.volumeBytes = _info.usedBytes = 0;
+    now   = _info.state;
+    bytes = _info.cardBytes;
+  }
   if (now != prev && now == State::Unformatted)
     log_w("SD card present (%.1f GB) but no recognised filesystem — format it from the settings page", bytes / 1e9);
   // Nothing mounted before and nothing mounted now: whatever is in the slot,
@@ -309,20 +308,20 @@ bool SdCard::checkSlot() {
 // reachable through the authenticated settings API with confirmation.
 // ---------------------------------------------------------------------------
 void SdCard::doFormat() {
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  _info.state = State::Formatting;
-  strlcpy(_info.lastFormat, "in progress", sizeof(_info.lastFormat));
-  xSemaphoreGive(_lock);
+  { Sys::Lock held(_lock);
+    _info.state = State::Formatting;
+    strlcpy(_info.lastFormat, "in progress", sizeof(_info.lastFormat));
+  }
   log_w("SD: formatting card");
 
   if (_mounted) unmount();
 
   uint8_t pdrv = sdcard_init(PIN_SD_CS, &_spi, SD_SPI_HZ);
   if (pdrv == 0xFF) {
-    xSemaphoreTake(_lock, portMAX_DELAY);
-    _info.state = State::Absent;
-    strlcpy(_info.lastFormat, "failed: no card", sizeof(_info.lastFormat));
-    xSemaphoreGive(_lock);
+    { Sys::Lock held(_lock);
+      _info.state = State::Absent;
+      strlcpy(_info.lastFormat, "failed: no card", sizeof(_info.lastFormat));
+    }
     return;
   }
   // The card has to be woken before it will take a raw write. sdcard_init()
@@ -347,10 +346,10 @@ void SdCard::doFormat() {
   if (mounted) sdcard_unmount(pdrv);
   sdcard_uninit(pdrv);
   if (!wiped) {
-    xSemaphoreTake(_lock, portMAX_DELAY);
-    _info.state = State::Error;
-    strlcpy(_info.lastFormat, "failed: write error", sizeof(_info.lastFormat));
-    xSemaphoreGive(_lock);
+    { Sys::Lock held(_lock);
+      _info.state = State::Error;
+      strlcpy(_info.lastFormat, "failed: write error", sizeof(_info.lastFormat));
+    }
     return;
   }
 
@@ -362,16 +361,16 @@ void SdCard::doFormat() {
     SD.mkdir(kLogDir);
     _logBytes = 0;
     Info i = info();
-    xSemaphoreTake(_lock, portMAX_DELAY);
-    snprintf(_info.lastFormat, sizeof(_info.lastFormat), "ok: %.1f GB in %lus", i.volumeBytes / 1e9, (unsigned long)((millis() - t0) / 1000));
-    xSemaphoreGive(_lock);
+    { Sys::Lock held(_lock);
+      snprintf(_info.lastFormat, sizeof(_info.lastFormat), "ok: %.1f GB in %lus", i.volumeBytes / 1e9, (unsigned long)((millis() - t0) / 1000));
+    }
     log_i("SD: format done, volume %.1f GB", i.volumeBytes / 1e9);
     log("boot: card formatted");
   } else {
-    xSemaphoreTake(_lock, portMAX_DELAY);
-    _info.state = State::Error;
-    strlcpy(_info.lastFormat, "failed: mkfs", sizeof(_info.lastFormat));
-    xSemaphoreGive(_lock);
+    { Sys::Lock held(_lock);
+      _info.state = State::Error;
+      strlcpy(_info.lastFormat, "failed: mkfs", sizeof(_info.lastFormat));
+    }
     log_e("SD: format failed");
   }
 }
@@ -379,17 +378,17 @@ void SdCard::doFormat() {
 // ---------------------------------------------------------------------------
 void SdCard::log(const char* line) {
   if (!_lock || !_mounted || !line) return;
-  xSemaphoreTake(_lock, portMAX_DELAY);
-  if (_logBytes > SD_LOG_MAX_BYTES) {
-    SD.remove(SdCard::LOG_PREV_PATH);
-    SD.rename(kLogFile, SdCard::LOG_PREV_PATH);
-    _logBytes = 0;
+  { Sys::Lock held(_lock);
+    if (_logBytes > SD_LOG_MAX_BYTES) {
+      SD.remove(SdCard::LOG_PREV_PATH);
+      SD.rename(kLogFile, SdCard::LOG_PREV_PATH);
+      _logBytes = 0;
+    }
+    File f = SD.open(kLogFile, FILE_APPEND);
+    if (f) {
+      size_t n = f.printf("%lu %s\n", (unsigned long)(millis() / 1000), line);
+      f.close();
+      _logBytes += n;
+    }
   }
-  File f = SD.open(kLogFile, FILE_APPEND);
-  if (f) {
-    size_t n = f.printf("%lu %s\n", (unsigned long)(millis() / 1000), line);
-    f.close();
-    _logBytes += n;
-  }
-  xSemaphoreGive(_lock);
 }

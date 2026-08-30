@@ -35,6 +35,7 @@
 #include "Settings.h"
 #include "WifiManager.h"
 #include "Diag.h"
+#include "Lock.h"
 
 namespace {
 
@@ -145,7 +146,7 @@ void refreshLinks() {
 // knows the group id is not evidence of a peer, and RNS reads it the same way
 // (AutoInterface.process_incoming ignores senders it has not peered with).
 uint32_t touchPeer(const char* addr, bool create, bool data, int ifindex) {
-  xSemaphoreTake(sLock, portMAX_DELAY);
+  Sys::Lock held(sLock);
   AutoInterface::Peer* slot = nullptr;
   for (auto& p : sPeers) if (p.addr[0] && strcmp(p.addr, addr) == 0) { slot = &p; break; }
   uint32_t evicted = 0;
@@ -172,7 +173,7 @@ uint32_t touchPeer(const char* addr, bool create, bool data, int ifindex) {
     for (const Link& l : sLinks) if (l.joined) { slot->ifindex = l.ifindex; break; }
     fresh = true;
   }
-  if (!slot) { xSemaphoreGive(sLock); return 0; }
+  if (!slot) return 0;
   // Always follow the netif a peer is actually heard on. Taking it only when
   // the peer was created, and defaulting to the access point when the caller
   // had none to give, scoped replies to the wrong link: a LAN peer we could
@@ -182,7 +183,7 @@ uint32_t touchPeer(const char* addr, bool create, bool data, int ifindex) {
   slot->lastSeenMs = millis();
   if (data) slot->datagrams++;
   uint32_t id = slot->id;
-  xSemaphoreGive(sLock);
+  held.release();                         // the calls below must not hold it
   if (evicted) RnsTransport::clientDisconnected(evicted);
   if (fresh) {
     log_i("AutoInterface: new peer %s (#%lu)", addr, (unsigned long)(id & 0xFFFF));
@@ -198,13 +199,13 @@ uint32_t noteData   (const char* addr, int ifindex) { return touchPeer(addr, fal
 
 void expirePeers() {
   uint32_t expired[AUTOIF_MAX_PEERS]; size_t n = 0;
-  xSemaphoreTake(sLock, portMAX_DELAY);
+  Sys::Lock held(sLock);
   for (auto& p : sPeers)
     if (p.addr[0] && millis() - p.lastSeenMs > kPeerTimeoutMs) {
       log_i("AutoInterface: peer %s timed out", p.addr);
       expired[n++] = p.id; p.addr[0] = '\0';
     }
-  xSemaphoreGive(sLock);
+  held.release();
   for (size_t i = 0; i < n; i++) RnsTransport::clientDisconnected(expired[i]);
 }
 
@@ -222,12 +223,11 @@ void fillAddress(sockaddr_in6& out, const char* addr, uint16_t port, int ifindex
 
 bool peerAddress(uint32_t id, sockaddr_in6& out) {
   bool ok = false;
-  xSemaphoreTake(sLock, portMAX_DELAY);
+  Sys::Lock held(sLock);
   for (auto& p : sPeers) if (p.addr[0] && p.id == id) {
     fillAddress(out, p.addr, kDataPort, p.ifindex);
     ok = true; break;
   }
-  xSemaphoreGive(sLock);
   return ok;
 }
 
@@ -285,13 +285,13 @@ void sendDiscovery() {
 void sendReversePeering() {
   struct { char addr[46]; int ifindex; } targets[AUTOIF_MAX_PEERS];
   size_t n = 0;
-  xSemaphoreTake(sLock, portMAX_DELAY);
+  Sys::Lock held(sLock);
   for (auto& p : sPeers) if (p.addr[0]) {
     strlcpy(targets[n].addr, p.addr, sizeof(targets[n].addr));
     targets[n].ifindex = p.ifindex;
     n++;
   }
-  xSemaphoreGive(sLock);
+  held.release();                         // sending must not hold it
   for (size_t i = 0; i < n; i++) {
     const Link* l = linkByIndex(targets[i].ifindex);
     if (!l) continue;
@@ -361,32 +361,42 @@ void task(void*) {
 
   uint32_t lastAnnounce = 0, lastReverse = 0, lastSecond = 0;
   uint8_t buf[RNS_MTU + 64];
+  // Guarded whole rather than per statement: the loop below uses continue,
+  // which cannot cross a lambda. A throw leaves the inner loop, is
+  // reported, and the outer one goes back in (Diag.h).
   for (;;) {
-    uint32_t now = millis();
-    if (now - lastAnnounce >= kAnnounceMs) { lastAnnounce = now; sendDiscovery(); }
-    if (now - lastReverse  >= kReverseMs)  { lastReverse  = now; sendReversePeering(); }
-    if (now - lastSecond   >= 1000)        { lastSecond   = now; expirePeers(); refreshLinks(); }
-
-    fd_set rd;
-    FD_ZERO(&rd);
-    FD_SET(sDisc, &rd); FD_SET(sUni, &rd); FD_SET(sData, &rd);
-    int maxfd = sDisc;
-    if (sUni  > maxfd) maxfd = sUni;
-    if (sData > maxfd) maxfd = sData;
-    timeval tv = { 0, (int)(kSelectMs * 1000) };
-    if (select(maxfd + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
-
-    bool more = false;
-    if (FD_ISSET(sDisc, &rd))
-      more |= drain(sDisc, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
-        handleDiscovery(b, n, s, "discovery"); });
-    if (FD_ISSET(sUni, &rd))
-      more |= drain(sUni, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
-        handleDiscovery(b, n, s, "reverse peering"); });
-    if (FD_ISSET(sData, &rd))
-      more |= drain(sData, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
-        handleData(b, n, s); });
-    if (more) vTaskDelay(1);                         // let core 0 breathe under a flood
+    Diag::guard("the autointerface task", [&] {
+      for (;;) {
+        uint32_t now = millis();
+        if (now - lastAnnounce >= kAnnounceMs) { lastAnnounce = now; sendDiscovery(); }
+        if (now - lastReverse  >= kReverseMs)  { lastReverse  = now; sendReversePeering(); }
+        if (now - lastSecond   >= 1000)        { lastSecond   = now; expirePeers(); refreshLinks(); }
+  
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(sDisc, &rd); FD_SET(sUni, &rd); FD_SET(sData, &rd);
+        int maxfd = sDisc;
+        if (sUni  > maxfd) maxfd = sUni;
+        if (sData > maxfd) maxfd = sData;
+        timeval tv = { 0, (int)(kSelectMs * 1000) };
+        if (select(maxfd + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
+  
+        bool more = false;
+        if (FD_ISSET(sDisc, &rd))
+          more |= drain(sDisc, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
+            handleDiscovery(b, n, s, "discovery"); });
+        if (FD_ISSET(sUni, &rd))
+          more |= drain(sUni, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
+            handleDiscovery(b, n, s, "reverse peering"); });
+        if (FD_ISSET(sData, &rd))
+          more |= drain(sData, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
+            handleData(b, n, s); });
+        if (more) vTaskDelay(1);                         // let core 0 breathe under a flood
+      }
+    });
+    // Something threw and was contained. A short wait, then back in:
+    // retrying at full speed into the same wall helps nobody.
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -415,9 +425,8 @@ bool enabled() { return sEnabled; }
 size_t peerCount() {
   size_t k = 0;
   if (!sLock) return 0;
-  xSemaphoreTake(sLock, portMAX_DELAY);
+  Sys::Lock held(sLock);
   for (auto& p : sPeers) if (p.addr[0]) k++;
-  xSemaphoreGive(sLock);
   return k;
 }
 
@@ -433,9 +442,8 @@ bool sendTo(uint32_t peerId, const uint8_t* packet, size_t len) {
 size_t peers(Peer* out, size_t max) {
   if (!sLock) return 0;
   size_t k = 0;
-  xSemaphoreTake(sLock, portMAX_DELAY);
+  Sys::Lock held(sLock);
   for (auto& p : sPeers) if (p.addr[0] && k < max) out[k++] = p;
-  xSemaphoreGive(sLock);
   return k;
 }
 
