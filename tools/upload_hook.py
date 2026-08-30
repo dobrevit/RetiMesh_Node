@@ -108,5 +108,12 @@ def after_upload(source, target, env):  # noqa: ARG001
              "downloader, press RST — and if it stays silent, see docs/local-link.md#recovery")
 
 
-env.AddPreAction("upload", before_upload)   # noqa: F821
-env.AddPostAction("upload", after_upload)   # noqa: F821
+# Both upload targets: the web app needs the ROM downloader exactly as the
+# firmware does. On a bridge board that went unnoticed, because esptool's own
+# DTR/RTS reset gets the chip there without help; on the composite device
+# there is no such path — the firmware does not honour the core's reboot on
+# that port — so `uploadfs` met the running application and esptool failed
+# with "No serial data received" after every firmware upload had worked.
+for _target in ("upload", "uploadfs"):
+    env.AddPreAction(_target, before_upload)    # noqa: F821
+    env.AddPostAction(_target, after_upload)    # noqa: F821
