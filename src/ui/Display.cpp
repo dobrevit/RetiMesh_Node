@@ -21,6 +21,7 @@
 // ============================================================================
 #include "Display.h"
 #include "DisplayLayout.h"
+#include "VersionLabel.h"
 #include "esp32-hal-periman.h"
 #include <WiFi.h>
 #include "WifiManager.h"
@@ -438,7 +439,7 @@ void Display::meter(uint8_t row, const char* label, const char* value, uint8_t p
 
 // 128x64 with the 6x8 built-in font: 21 columns x 8 rows.
 void Display::paintStatus() {
-  char line[24];
+  char line[DisplayLayout::rowBytes()];
   uint32_t up = millis() / 1000;
 
   // Ten columns will not hold "RSSI -104  SNR 11.5", and the left half of that
@@ -492,8 +493,22 @@ void Display::paintStatus() {
   // Row 1 — portal address / version. The address is the access point's,
   // and with Wi-Fi off there is none to give: say that, rather than print a
   // number nobody can reach.
+  //
+  // The version takes whatever the address leaves. Since a local build names
+  // its commit, FW_VERSION can be "v0.0.9-35-g8465afd" — eight characters more
+  // than this row has on a 128x64 panel, and the panel used to cut them off
+  // the end, which lands in the middle of the hash and identifies nothing.
+  // VersionLabel gives back the longest form that still means something.
+  char addr[16];
+  // Copied rather than pointed at: toString() returns a temporary, and a
+  // pointer into it would dangle before the row below is composed.
+  strlcpy(addr, wifiManager.wifiEnabled() ? AP_IP.toString().c_str() : "wifi off", sizeof(addr));
+  const size_t used = strlen(addr) + 2;                   // the two spaces between them
+  const size_t room = used < DisplayLayout::textWidth() ? DisplayLayout::textWidth() - used : 0;
+  char ver[DisplayLayout::rowBytes()];
+  VersionLabel::fit(FW_VERSION, room, ver, sizeof(ver));
   _gfx->setCursor(0, DisplayLayout::rowY(0));
-  snprintf(line, sizeof(line), "%s  %s", wifiManager.wifiEnabled() ? AP_IP.toString().c_str() : "wifi off", FW_VERSION);
+  snprintf(line, sizeof(line), "%s%s%s", addr, ver[0] ? "  " : "", ver);
   _gfx->print(line);
 
   // Row 2 — radio model + channel
@@ -565,7 +580,7 @@ void Display::paintNeighbors() {
     const size_t n = neighbors.snapshot(snap, MAX_NEIGHBORS);
     const uint32_t now = millis();
     if (n == 0) { _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print("no peers"); return; }
-    char l[16];
+    char l[DisplayLayout::rowBytes()];
     for (size_t i = 0; i < n && i < DisplayLayout::active().rows; i++) {
       const Neighbor& nb = snap[i];
       const uint32_t age = (now - nb.lastSeen) / 1000;
@@ -582,7 +597,7 @@ void Display::paintNeighbors() {
   }
   Neighbor snap[MAX_NEIGHBORS];
   size_t n = neighbors.snapshot(snap, MAX_NEIGHBORS);
-  char line[24];
+  char line[DisplayLayout::rowBytes()];
   // The list below is the count; the header has icons to carry.
   header("Peers");
   if (n == 0) { _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print("nothing heard yet"); return; }
@@ -605,7 +620,7 @@ void Display::paintNeighbors() {
 
 void Display::paintTransport() {
   if (DisplayLayout::compact()) {
-    char l[16];
+    char l[DisplayLayout::rowBytes()];
     const size_t n = RnsTransport::interfaceCount();
     snprintf(l, sizeof(l), "%s", g_stats.transportOnline ? "transport" : "trans OFF");
     _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(l);
@@ -620,7 +635,7 @@ void Display::paintTransport() {
     _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print(l);
     return;
   }
-  char line[24];
+  char line[DisplayLayout::rowBytes()];
   // Four rows fit under the header, so ask for four and take the count
   // separately. A node on a busy LAN has an interface per peer — many more
   // than fit here, and more than a stack buffer on this task wants to hold.
@@ -670,7 +685,7 @@ void Display::paintTransport() {
 void Display::paintRadio() {
   if (DisplayLayout::compact()) {
     const RadioSettings& r = settings.radio();
-    char l[16];
+    char l[DisplayLayout::rowBytes()];
     if (!g_stats.radioOnline) { _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print("NO RADIO"); return; }
     snprintf(l, sizeof(l), "%.3f", (double)r.freqMhz);
     _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(l);
@@ -687,7 +702,7 @@ void Display::paintRadio() {
     return;
   }
   const RadioSettings& r = settings.radio();
-  char line[24];
+  char line[DisplayLayout::rowBytes()];
   header(g_stats.radioOnline ? g_stats.radioModel : "Radio off");
   // Preamble and sync word ride along on the rows that had room for them: a
   // node on the wrong sync word hears nothing, and finding that out should not
@@ -730,7 +745,7 @@ void Display::paintRadio() {
 // number — it is what tells you whether the antenna has a view of the sky.
 void Display::paintGps() {
   Gps::Fix g = Gps::fix();
-  char line[24];
+  char line[DisplayLayout::rowBytes()];
   header(g.enabled ? (g.valid ? "GNSS fix" : "GNSS scan") : "GNSS off");
   if (!g.enabled) {
     _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("Receiver powered down");
@@ -808,7 +823,7 @@ void Display::paintQr() {
 
 void Display::paintNetwork() {
   if (DisplayLayout::compact()) {
-    char l[16];
+    char l[DisplayLayout::rowBytes()];
     const char* id = wifiManager.ssid();
     const size_t idn = strlen(id);
     _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(idn > 10 ? id + idn - 10 : id);
@@ -828,7 +843,7 @@ void Display::paintNetwork() {
     _gfx->print((wifiManager.stationConnected() ? WiFi.localIP() : AP_IP).toString().c_str());
     return;
   }
-  char line[24];
+  char line[DisplayLayout::rowBytes()];
   header("Network");
   // The AP address is the fixed 10.42.0.1 and already sits on the status page,
   // so the row it used to occupy carries the channel and the two counts that

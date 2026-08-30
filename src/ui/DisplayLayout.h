@@ -147,6 +147,12 @@ constexpr Layout active() {
 // suit one panel.
 constexpr uint8_t textWidth() { return active().columns; }
 
+// Bytes for a buffer that holds one full row and its terminator. Pages sized
+// their rows at 24 for as long as every panel was 21 columns wide; on a wider
+// one that constant cut the reading before the panel ever saw it, and on a
+// narrower one it was slack. Neither is the page's business to know.
+constexpr size_t rowBytes() { return (size_t)active().columns + 1; }
+
 // True where the panel is too small for the full page set to mean anything.
 // A page asked this decides what to show rather than being clipped: ten
 // columns will not hold "RSSI -104  SNR 11.5", and showing the left half of it
