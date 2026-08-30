@@ -21,6 +21,7 @@
 // ============================================================================
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
+#include "SettingsFields.h"
 
 #include "Config.h"
 #include "Settings.h"
@@ -232,6 +233,11 @@ static void doRestart(const Request& r, Bootloader::Target target) {
   ok(name, kv);
 }
 
+// Defined below with the rest of the settings work; declared here because
+// the dispatch table comes first.
+static void doGet(const Request& r);
+static void doSet(const Request& r);
+
 static void dispatch(const char* line) {
   sDataLines = 0;
   // The reply begins on a fresh line. The S3's USB unit drops the last
@@ -255,9 +261,82 @@ static void dispatch(const char* line) {
     case Cmd::Links:         doLinks(); break;
     case Cmd::Wifi:          doLinkSwitch(r, "wifi"); break;
     case Cmd::Ppp:           doLinkSwitch(r, "ppp"); break;
+    case Cmd::Get:           doGet(r); break;      // defined below, with the other settings work
+    case Cmd::Set:           doSet(r); break;
     case Cmd::Reset:         doRestart(r, Bootloader::Target::App); break;
     case Cmd::Bootloader:    doRestart(r, Bootloader::Target::Bootloader); break;
     default:                 break;      // Unknown never reaches here: parse() refused it
+  }
+}
+
+// --- settings -----------------------------------------------------------------
+// GET with nothing reads every setting, GET <section> one section, GET <key>
+// one setting. The keys are the web API's names with their section in front,
+// so an operator who knows one knows the other (SettingsFields.h).
+static void doGet(const Request& r) {
+  char line[160];
+  if (r.argc == 0) {
+    for (size_t i = 0; i < SettingsFields::count(); i++)
+      if (SettingsFields::render(i, line, sizeof(line))) dataf("GET", "%s", line);
+    ok("GET");
+    return;
+  }
+  // A key first: "radio.sf" is a key, "radio" a section, and a section that
+  // does not exist is a typo worth saying so about rather than an empty list.
+  if (SettingsFields::renderKey(r.args[0], line, sizeof(line))) {
+    dataf("GET", "%s", line);
+    ok("GET");
+    return;
+  }
+  if (!SettingsFields::sectionExists(r.args[0])) {
+    err("GET", errorCode(ParseError::BadArgument), "no such setting or section");
+    return;
+  }
+  for (size_t i = 0; i < SettingsFields::count(); i++)
+    if (SettingsFields::keyInSection(i, r.args[0]) && SettingsFields::render(i, line, sizeof(line)))
+      dataf("GET", "%s", line);
+  ok("GET");
+}
+
+// SET changes one setting. The value is whatever followed the key on the line,
+// as typed; the refusals are the web API's, because both go through the same
+// rule (SettingsRules.h).
+static void doSet(const Request& r) {
+  char value[MAX_LINE + 1];
+  size_t n = r.rawValueLen < sizeof(value) ? r.rawValueLen : sizeof(value) - 1;
+  const char* src = r.rawValue;
+  // Quotes around the value are stripped, which is how a text setting is
+  // cleared — SET wifi.sta_ssid "" — and how one keeps spaces at its ends.
+  // A bare empty value is refused by the parser as a typo, so without this
+  // there would be no way to unset a callsign or a station network from the
+  // console, which is the link that has to be able to undo a bad one.
+  if (n >= 2 && src[0] == '"' && src[n - 1] == '"') { src++; n -= 2; }
+  memcpy(value, src, n);
+  value[n] = '\0';
+
+  char detail[192] = "";
+  const SettingsFields::Result res = SettingsFields::set(r.args[0], value, detail, sizeof(detail));
+  char line[224];
+  switch (res) {
+    case SettingsFields::Result::Ok:
+    case SettingsFields::Result::OkRestart:
+    case SettingsFields::Result::OkNextBoot:
+      // Read back what was stored rather than echoing what was typed: a value
+      // the store rounded, truncated or ignored should show as it now is.
+      if (SettingsFields::renderKey(r.args[0], line, sizeof(line))) dataf("SET", "%s", line);
+      ok("SET", SettingsFields::resultText(res));
+      break;
+    case SettingsFields::Result::Unknown:
+      err("SET", errorCode(ParseError::BadArgument), "no such setting");
+      break;
+    case SettingsFields::Result::NvsFailed:
+      err("SET", 500, SettingsFields::resultText(res));
+      break;
+    default:
+      snprintf(line, sizeof(line), "%s%s%s", SettingsFields::resultText(res),
+               detail[0] ? ": " : "", detail);
+      err("SET", errorCode(ParseError::BadArgument), line);
+      break;
   }
 }
 

@@ -36,6 +36,7 @@
 #include "RnsTransport.h"
 #include "Mdns.h"
 #include "Diag.h"
+#include "SettingsRules.h"
 #include "SdCard.h"
 #include "StoreHome.h"
 #include "AutoInterface.h"
@@ -1251,59 +1252,19 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (in["gps_share_position"].is<bool>()) r.gpsSharePosition = in["gps_share_position"];
   if (in["callsign"].is<const char*>()) {
     String c = in["callsign"].as<String>(); c.trim();
-    for (size_t i = 0; i < c.length(); i++)
-      if (c[i] < 0x21 || c[i] > 0x7E) { sendError(request, 400, "callsign: printable ASCII without spaces only"); return; }
-    if (c.length() > 32) { sendError(request, 400, "callsign must be at most 32 characters"); return; }
     strlcpy(r.callsign, c.c_str(), sizeof(r.callsign));
   }
   if (in["region"].is<const char*>()) {
     strlcpy(r.region, in["region"].as<const char*>(), sizeof(r.region));
   }
 
-  int8_t maxDbm = loraRadio.online() ? loraRadio.maxTxDbm() : 22;
-  // Bounds come from the transceiver that is actually fitted, not from a
-  // sub-GHz assumption: an SX1280 tunes 2400-2500 MHz and has four bandwidths,
-  // none of which appear in the SX127x list.
-  const RadioCaps::Caps& caps = loraRadio.caps();
-  char msg[160], bwlist[96];
-
-  // The region bounds the channel, and the chip bounds the region. Both have
-  // to hold, and the message says which one was missed rather than quoting a
-  // range the operator cannot use anyway.
-  const Airtime::RegionInfo* region = Airtime::regionByKey(r.region);
-  if (!region) { sendError(request, 400, "unknown region — pick one the node offers"); return; }
-  const float lowMhz  = max(region->lowMhz,  caps.freqMinMhz);
-  const float highMhz = min(region->highMhz, caps.freqMaxMhz);
-  if (lowMhz > highMhz) {
-    snprintf(msg, sizeof(msg), "the %s cannot tune %s — choose a region this radio reaches",
-             caps.name, region->name);
+  // Every bound is SettingsRules', so the console refuses the same value with
+  // the same words (SettingsRules.h).
+  char msg[160];
+  const int8_t maxDbm = loraRadio.online() ? loraRadio.maxTxDbm() : 22;
+  if (!SettingsRules::validateRadio(r, loraRadio.caps(), maxDbm, msg, sizeof(msg))) {
     sendError(request, 400, msg); return;
   }
-  if (r.freqMhz < lowMhz || r.freqMhz > highMhz) {
-    snprintf(msg, sizeof(msg), "frequency must be %g-%g MHz in %s on the %s",
-             (double)lowMhz, (double)highMhz, region->name, caps.name);
-    sendError(request, 400, msg); return;
-  }
-  if (!RadioCaps::bandwidthSupported(caps, r.bwKhz)) {
-    snprintf(msg, sizeof(msg), "the %s supports these bandwidths in kHz: %s",
-             caps.name, RadioCaps::bandwidthList(caps, bwlist, sizeof(bwlist)));
-    sendError(request, 400, msg); return;
-  }
-  if (r.sf < caps.sfMin || r.sf > caps.sfMax) {
-    snprintf(msg, sizeof(msg), "spreading factor must be %u-%u on the %s",
-             (unsigned)caps.sfMin, (unsigned)caps.sfMax, caps.name);
-    sendError(request, 400, msg); return;
-  }
-  if (r.cr < 5 || r.cr > 8)                        { sendError(request, 400, "coding rate must be 5-8 (4/5..4/8)"); return; }
-  if (r.txDbm < caps.txMinDbm || r.txDbm > maxDbm) {
-    snprintf(msg, sizeof(msg), "tx power must be %d to %d dBm on the %s",
-             (int)caps.txMinDbm, (int)maxDbm, caps.name);
-    sendError(request, 400, msg); return;
-  }
-  if (r.preamble < 6 || r.preamble > 1000)         { sendError(request, 400, "preamble must be 6-1000 symbols"); return; }
-  if (r.beaconInterval != 0 && (r.beaconInterval < 10 || r.beaconInterval > 3600)) { sendError(request, 400, "beacon interval must be 0 (off) or 10-3600 s"); return; }
-  if (r.announceInterval != 0 && (r.announceInterval < 60 || r.announceInterval > 43200)) { sendError(request, 400, "announce interval must be 0 (off) or 60-43200 s"); return; }
-  if (r.dutyCyclePct > 100)                        { sendError(request, 400, "duty cycle must be 0 (off) or 1-100 %"); return; }
 
   if (!settings.saveRadio(r)) { sendError(request, 500, "nvs"); return; }
   if (loraRadio.online()) loraRadio.requestReconfigure(r);
@@ -1355,9 +1316,8 @@ void WifiManager::handleWifiPost(AsyncWebServerRequest* request, const char* bod
     }
   }
 
-  if (w.security != ApSecurity::Open && strlen(w.password) < 8) { sendError(request, 400, "a password is required for a secured network"); return; }
-  if (w.channel < 1 || w.channel > 13)          { sendError(request, 400, "channel must be 1-13"); return; }
-  if (w.maxStations < 1 || w.maxStations > 10)  { sendError(request, 400, "max stations must be 1-10"); return; }
+  char wmsg[160];
+  if (!SettingsRules::validateWifi(w, wmsg, sizeof(wmsg))) { sendError(request, 400, wmsg); return; }
 
   if (!settings.saveWifi(w)) { sendError(request, 500, "nvs"); return; }
 

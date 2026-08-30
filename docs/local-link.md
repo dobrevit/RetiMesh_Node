@@ -98,6 +98,53 @@ BOOTLOADER
 RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 ```
 
+### Settings over the console
+
+`GET` and `SET` reach every setting the web API has, by the API's own names
+with the section in front. This is the link that is there when no other one
+is: a node whose station password is wrong, or whose access point will not
+take clients, answers here and nowhere else — and before these two commands
+existed, the only way out of that was to erase the node, which takes its
+Reticulum identity with it.
+
+```
+GET radio
+RM GET region="eu868"
+RM GET freq_mhz=869.525
+RM GET sf=8
+...
+RM OK GET lines=14
+GET wifi.sta_ssid
+RM GET sta_ssid="home-network"
+RM OK GET lines=1
+SET radio.sf 9
+RM GET sf=9
+RM OK SET lines=1 saved
+SET radio.sf 99
+RM ERR SET 400 bad value: spreading factor must be 7-12 on the SX1262
+```
+
+`GET` with nothing reads everything, with a section (`GET radio`) reads that
+section, and with a key reads one setting. `SET` takes the value **as typed**
+— the rest of the line, case and spaces intact, because a password that is
+uppercased on its way in authenticates against nothing. Quotes around a value
+are stripped, which is how a text setting is cleared: `SET wifi.sta_ssid ""`
+forgets the station network and its password together.
+
+What a value may be is decided in `src/SettingsRules.h`, which the web API
+uses too, so both refuse the same value in the same words — and the bounds
+come from the transceiver actually fitted, which is why the refusal above
+names the SX1262. A setting that needs a restart says so (`saved; restarting
+to apply it`), and the reply reads the value back from the store rather than
+echoing what was typed.
+
+There is no password on any of this, deliberately. The console is the serial
+port: whoever has it can dump the flash, reflash the board, and ask for the
+ROM downloader with `BOOTLOADER CONFIRM`, which this node has always allowed.
+A password on the settings would guard a window beside an open door. Secrets
+are still never printed — `wifi.password` reads back as `(set)` or `(unset)`,
+because the console shares its port with the log.
+
 | Command | Reply |
 |---|---|
 | `HELP` | one `RM HELP cmd=… help="…"` line per command |
