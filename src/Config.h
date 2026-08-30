@@ -126,6 +126,11 @@
 #ifndef PPP_BAUD_DEFAULT
   #define PPP_BAUD_DEFAULT    115200
 #endif
+// There is no smaller pair for the console alone. A board that carries PPP
+// carries these sizes from boot whether the switch is on or off, because the
+// core fixes them before it installs the UART driver and they cannot be
+// resized afterwards (main.cpp, PppUart.h). What the switch gives back is the
+// interface and the reader task, not the ring.
 
 // ---------------------------------------------------------------------------
 // Firmware version — single-sourced from the git tag by CI
