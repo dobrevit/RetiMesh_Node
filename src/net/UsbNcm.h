@@ -45,6 +45,29 @@
 //  task: the TinyUSB callbacks arrive on the USB task and only record what
 //  happened, because esp_netif's actions block on the TCP/IP task and must
 //  not be called from a driver callback.
+//
+//  What the switch costs. links.usb does not merely decide whether usb0
+//  answers: with it off the interface, its DHCP server and the six-kilobyte
+//  transmit ring do not exist. Measured on a T3-S3, switching it off and on:
+//  6748 B of byte-addressable internal RAM, four cycles running with the
+//  figure returning to the same value each time. Before that the ring was
+//  .bss and the interface was built in begin(), so the switch was worth 68
+//  bytes — the switches existed and meant nothing to the allocator, which is
+//  the whole of the backlog row this closes.
+//
+//  What it does not give back is the composite device itself. The
+//  descriptors are assembled once, before setup() runs, and the host keeps
+//  its ACM port either way; only the network function behind it comes and
+//  goes, which is what tud_network_link_state tells the host.
+//
+//  Switching off is stepped across passes of the loop and never blocks it,
+//  because nothing here may be freed while the USB task or the TCP/IP task
+//  can still be inside it: the link goes down, esp_netif is stopped (which
+//  is itself the TCP/IP task's barrier), the retry timer is stopped, a no-op
+//  is run on the USB task to flush what was queued there, and only then are
+//  the interface and the ring released. If that last step never answers, the
+//  memory stays claimed — not freeing is harmless, freeing under a live
+//  callback is not.
 // ============================================================================
 #pragma once
 
@@ -56,12 +79,16 @@
 
 namespace UsbNcm {
 
-// Creates the network interface. Once, after the network stack exists
-// (WifiManager::begin() brings it up whether or not Wi-Fi is on).
+// What the device needs whether or not the network link is switched on: the
+// identity the descriptors are built from, the 1200-baud touch, and the
+// transmit retry timer. Nothing that the switch decides. Once, after the
+// network stack exists (WifiManager::begin() brings it up whether or not
+// Wi-Fi is on).
 void begin();
 
-// Applies the switch and any USB event recorded since the last pass. From
-// the loop task only.
+// Applies the switch and any USB event recorded since the last pass, and
+// builds or gives back what the switch decides (above). From the loop task
+// only, every pass — a teardown takes several of them.
 void poll(bool enabled);
 
 // Takes the device off the bus — the network interface down, the

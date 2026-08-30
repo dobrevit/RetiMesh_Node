@@ -168,7 +168,10 @@ static Registrar sRegistrar;
 // ---------------------------------------------------------------------------
 // 2. The network interface
 // ---------------------------------------------------------------------------
-static esp_netif_t*         sNetif = nullptr;
+// Atomic because the switch creates and destroys it from the loop task while
+// the USB task reads it in tud_network_recv_cb and the TCP/IP task in
+// transmit(). Nothing is freed while either can be inside it: see stepStop().
+static std::atomic<esp_netif_t*> sNetif{nullptr};
 static esp_netif_ip_info_t  sIpInfo;
 static std::atomic<bool>    sHostOpened{false};   // the host set its packet filter: it opened the interface
 static std::atomic<bool>    sEnabled{false};      // the operator's switch, as last applied
@@ -195,7 +198,11 @@ constexpr uint32_t kTxStaleMs = 200;
 constexpr uint64_t kTxRetryUs = 1000;   // the NTB frees when a transfer completes, which the driver does not announce
 
 struct TxSlot { uint16_t len; uint32_t queuedMs; uint8_t data[CFG_TUD_NET_MTU]; };
-TxSlot                sTxSlots[kTxSlots];
+// Six kilobytes, and it used to be six kilobytes of .bss on every board that
+// carries the composite device — paid whether usb0 was switched on or off,
+// which is the thing this file's switch was supposed to decide. On the heap
+// now, claimed when the link comes up and given back when it goes down.
+std::atomic<TxSlot*>  sTxSlots{nullptr};
 std::atomic<uint32_t> sTxHead{0};       // next slot to fill: the TCP/IP task's
 std::atomic<uint32_t> sTxTail{0};       // next slot to send: the USB task's
 esp_timer_handle_t    sTxRetry = nullptr;
@@ -203,8 +210,10 @@ esp_timer_handle_t    sTxRetry = nullptr;
 // On the USB task: hands the ring to the class driver, as many frames as it
 // will take, and comes back for the rest once the NTB has gone out.
 void drain(void*) {
+  TxSlot* slots = sTxSlots.load(std::memory_order_acquire);
+  if (!slots) return;                              // the link went down; nothing to send from
   while (sTxTail.load(std::memory_order_acquire) != sTxHead.load(std::memory_order_acquire)) {
-    TxSlot& s = sTxSlots[sTxTail % kTxSlots];
+    TxSlot& s = slots[sTxTail % kTxSlots];
     if (!sUp || (int32_t)(millis() - s.queuedMs) > (int32_t)kTxStaleMs) {
       sTxDropped++;
       sTxTail.fetch_add(1, std::memory_order_release);
@@ -225,11 +234,12 @@ void retryDrain(void*) { usbd_defer_func(drain, nullptr, false); }
 
 // On the TCP/IP task, which carries the portal and the RNS transport too.
 static esp_err_t transmit(void*, void* buffer, size_t len) {
-  if (!sUp || len > CFG_TUD_NET_MTU) return ESP_FAIL;
+  TxSlot* slots = sTxSlots.load(std::memory_order_acquire);
+  if (!sUp || !slots || len > CFG_TUD_NET_MTU) return ESP_FAIL;
   const uint32_t head = sTxHead.load(std::memory_order_relaxed);
   const bool waiting = head != sTxTail.load(std::memory_order_acquire);
   if (head - sTxTail.load(std::memory_order_acquire) >= kTxSlots) { sTxDropped++; return ESP_FAIL; }
-  TxSlot& s = sTxSlots[head % kTxSlots];
+  TxSlot& s = slots[head % kTxSlots];
   memcpy(s.data, buffer, len);
   s.len = (uint16_t)len;
   s.queuedMs = millis();
@@ -276,8 +286,16 @@ static void onLineCoding(void*, esp_event_base_t, int32_t, void* data) {
   if (r != Bootloader::Refusal::None) log_w("touch: refused (%s)", why ? why : "");
 }
 
+// What the device needs whether or not the network link is switched on: the
+// 1200-baud touch has to work either way, and the retry timer is a handle
+// small enough that taking it down and putting it back would be more risk
+// than it is worth (a dispatched callback outliving its own timer). The
+// interface, its DHCP server and the six-kilobyte transmit ring are the
+// switch's, below.
 void begin() {
-  if (sNetif) return;
+  static bool begun = false;
+  if (begun) return;
+  begun = true;
   // The core's own reboot on this port is already off: setup() switches it
   // off beside Serial.begin(), so that no touch in the seconds before this
   // point restarts the chip behind the sequencer's back.
@@ -286,7 +304,22 @@ void begin() {
     .callback = retryDrain, .arg = nullptr, .dispatch_method = ESP_TIMER_TASK,
     .name = "usb0-tx", .skip_unhandled_events = true,
   };
-  if (esp_timer_create(&retry, &sTxRetry) != ESP_OK) { log_e("usb0: no retry timer"); return; }
+  if (esp_timer_create(&retry, &sTxRetry) != ESP_OK) log_e("usb0: no retry timer");
+}
+
+// Everything the switch decides. Built on the way on; given back on the way
+// off, a step to a pass of the loop, because nothing here may be freed while
+// the USB task or the TCP/IP task can still be inside it (stepStop, below).
+static void startUsb() {
+  if (sNetif) return;
+  TxSlot* slots = (TxSlot*)heap_caps_malloc(sizeof(TxSlot) * kTxSlots,
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!slots) {
+    log_e("usb0: no room for the %u B transmit ring; the link stays down",
+          (unsigned)(sizeof(TxSlot) * kTxSlots));
+    return;
+  }
+  sTxHead = sTxTail = 0;
   sIpInfo.ip.addr = sIpInfo.gw.addr = (uint32_t)address();
   sIpInfo.netmask.addr = htonl(kUsbNetmask);
 
@@ -298,9 +331,13 @@ void begin() {
   base.route_prio = 20;
   base.ip_info = &sIpInfo;
   esp_netif_config_t cfg = { .base = &base, .driver = nullptr, .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH };
-  sNetif = esp_netif_new(&cfg);
-  if (!sNetif) { log_e("usb0: esp_netif_new failed"); return; }
-  esp_netif_set_mac(sNetif, sNodeMac);
+  esp_netif_t* netif = esp_netif_new(&cfg);
+  if (!netif) {
+    log_e("usb0: the interface could not be created; the link stays down");
+    heap_caps_free(slots);                 // nothing half-built is left behind
+    return;
+  }
+  esp_netif_set_mac(netif, sNodeMac);
   // A way to reach the node, not a way out: the offer carries no router, so
   // the host keeps its default route where it was and never sends the wider
   // world down a cable that goes nowhere. ESP-IDF's server names itself as
@@ -312,8 +349,8 @@ void begin() {
   // (OFFER_START is the empty set of offers; OFFER_END, despite the name,
   // is every bit set.)
   dhcps_offer_t none = OFFER_START;
-  if (esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &none, sizeof(none)) != ESP_OK ||
-      esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &none, sizeof(none)) != ESP_OK)
+  if (esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &none, sizeof(none)) != ESP_OK ||
+      esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &none, sizeof(none)) != ESP_OK)
     log_w("usb0: could not strip router/DNS from the DHCP offer");
   // One address in the pool, and it is the one the documentation names as the
   // host's static fallback (LocalLinkState.h, usbHostAddress). Only one host
@@ -325,10 +362,15 @@ void begin() {
   dhcps_lease_t lease = {};
   lease.enable = true;
   lease.start_ip.addr = lease.end_ip.addr = htonl(usbHostAddress(sMacLastOctet));
-  if (esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease)) != ESP_OK)
+  if (esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease)) != ESP_OK)
     log_w("usb0: could not pin the DHCP pool to %s", host.toString().c_str());
-  esp_netif_attach(sNetif, &sDriver);
-  log_i("usb0: composite device %s, host MAC %s, node at %s", USB_PRODUCT, sHostMacStr, address().toString().c_str());
+  esp_netif_attach(netif, &sDriver);
+  // Published only once it is whole, and the ring before it: the first thing
+  // that looks at either is a callback on another task.
+  sTxSlots.store(slots, std::memory_order_release);
+  sNetif.store(netif, std::memory_order_release);
+  log_i("usb0: composite device %s, host MAC %s, node at %s (ring %u B)", USB_PRODUCT, sHostMacStr,
+        address().toString().c_str(), (unsigned)(sizeof(TxSlot) * kTxSlots));
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +384,7 @@ bool linkUp() { return sUp; }
 // call start and stop alone, and so does this.
 static void bringDown() {
   sUp = false;                                      // recv_cb and transmit() check it first
-  esp_netif_action_stop(sNetif, nullptr, 0, nullptr);
+  if (esp_netif_t* n = sNetif.load()) esp_netif_action_stop(n, nullptr, 0, nullptr);
 }
 
 void detach() {
@@ -369,7 +411,70 @@ uint32_t rxPackets() { return sRx; }
 uint32_t txPackets() { return sTx; }
 uint32_t txDropped() { return sTxDropped; }
 
+// Giving the interface and the ring back, a step to a pass of the loop. The
+// order is what makes it safe, and each step is a barrier on the task that
+// could still be inside what the next step frees:
+//
+//   1. sUp = false        transmit(), drain() and recv_cb all bail on it
+//   2. esp_netif_action_stop   runs on the TCP/IP task, so when it returns
+//                         no earlier transmit() from lwIP is still running
+//   3. the retry timer stopped, so no further drain is dispatched
+//   4. a no-op posted through usbd_defer_func — it runs on the USB task, so
+//      when it has run, every drain queued before it has run too and any
+//      recv_cb that had started has finished
+//   5. only then are the netif and the ring destroyed
+//
+// If the fourth step never fires the memory simply stays allocated: not
+// freeing is harmless, and freeing under a live callback is not.
+enum class Stop : uint8_t { Idle = 0, Barrier };
+static Stop                 sStop = Stop::Idle;          // loop task only
+static uint32_t             sStopAskedMs = 0;
+static std::atomic<bool>    sBarrierPassed{false};
+static constexpr uint32_t   kBarrierWaitMs = 5000;
+
+static void barrier(void*) { sBarrierPassed.store(true, std::memory_order_release); }
+
+static void stepStop(uint32_t nowMs) {
+  if (sStop != Stop::Barrier) return;
+  if (!sBarrierPassed.load(std::memory_order_acquire)) {
+    if (nowMs - sStopAskedMs > kBarrierWaitMs) {
+      // Said once, and then left alone: usb0 stays down and its memory stays
+      // claimed, which is the safe half of the choice.
+      log_w("usb0: the USB task did not answer; the interface is kept rather than freed under it");
+      sStop = Stop::Idle;
+    }
+    return;
+  }
+  if (esp_netif_t* n = sNetif.exchange(nullptr, std::memory_order_acq_rel)) esp_netif_destroy(n);
+  if (TxSlot* slots = sTxSlots.exchange(nullptr, std::memory_order_acq_rel)) heap_caps_free(slots);
+  sStop = Stop::Idle;
+  log_i("usb0: switched off; the interface and its %u B ring are given back",
+        (unsigned)(sizeof(TxSlot) * kTxSlots));
+}
+
 void poll(bool enabled) {
+  const uint32_t now = millis();
+  // The switch decides whether the interface exists at all, not merely
+  // whether it answers (UsbNcm.h). A teardown once begun runs to its end
+  // before anything is built again.
+  if (sStop != Stop::Idle) {
+    stepStop(now);
+    return;
+  }
+  if (enabled && !sNetif) {
+    startUsb();
+  } else if (!enabled && sNetif) {
+    // The host is told the carrier has gone before anything is taken apart.
+    sEnabled = false;
+    if (tud_mounted()) usbd_defer_func([](void*) { if (tud_mounted()) tud_network_link_state(0, false); }, nullptr, false);
+    if (sUp) bringDown();
+    esp_timer_stop(sTxRetry);
+    sBarrierPassed = false;
+    sStopAskedMs = now;
+    sStop = Stop::Barrier;
+    usbd_defer_func(barrier, nullptr, false);
+    return;
+  }
   if (!sNetif) return;
   // Carrier is the cable: a mounted, awake device. The NCM class driver
   // gives no callback for the host opening its data interface — the
@@ -429,12 +534,14 @@ bool tud_network_recv_cb(const uint8_t* src, uint16_t size) {
     // Internal RAM: a frame lives microseconds, and on a PSRAM board plain
     // malloc() would put this copy where lwIP then reads it back through
     // the cache, twice.
-    void* copy = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    esp_netif_t* netif = sNetif.load(std::memory_order_acquire);
+    void* copy = netif ? heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : nullptr;
     if (copy) {
       memcpy(copy, src, size);
       // From here the buffer belongs to the stack, which frees it through
       // freeRxBuffer once the frame has been consumed.
-      if (esp_netif_receive(sNetif, copy, size, nullptr) == ESP_OK) sRx++;
+      if (esp_netif_receive(netif, copy, size, nullptr) == ESP_OK) sRx++;
+      else heap_caps_free(copy);           // refused: nobody else will free it
     }
   }
   tud_network_recv_renew();                         // the class buffer is ours no longer
