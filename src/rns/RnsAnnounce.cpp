@@ -20,6 +20,7 @@
 //  RnsAnnounce.cpp — see RnsAnnounce.h
 // ============================================================================
 #include "RnsAnnounce.h"
+#include "LxmfFormat.h"
 #include <Preferences.h>
 #include <esp_random.h>
 #include <SHA256.h>
@@ -119,20 +120,20 @@ static bool printable(const uint8_t* p, size_t n) {
 size_t displayName(const Announce& a, char* out, size_t cap) {
   const uint8_t* p = a.appData; size_t n = a.appDataLen;
   if (n == 0 || cap < 2) { out[0] = '\0'; return 0; }
-  // LXMF >= 0.5 app_data: msgpack fixarray [name(bin/str), stamp_cost, ...]
+  // An LXMF app_data is a msgpack array whose first element is the name; the
+  // shape is LxmfFormat.h's, once, because this node emits it too.
   if (n >= 2 && (p[0] & 0xF0) == 0x90) {
-    uint8_t t = p[1]; size_t l = 0, o = 2;
-    if ((t & 0xE0) == 0xA0)      { l = t & 0x1F; }            // fixstr
-    else if (t == 0xC4 && n >= 3){ l = p[2]; o = 3; }         // bin8
-    else if (t == 0xD9 && n >= 3){ l = p[2]; o = 3; }         // str8
-    if (l > 0 && o + l <= n) { p += o; n = l; }
-    else { out[0] = '\0'; return 0; }
+    const size_t k = lxmfName(p, n, out, cap);
+    return k && printable((const uint8_t*)out, k) ? k : (out[0] = '\0', 0);
   }
   if (!printable(p, n)) { out[0] = '\0'; return 0; }
   size_t k = min(n, cap - 1);
   memcpy(out, p, k); out[k] = '\0';
   return k;
 }
+
+
+
 
 } // namespace Rns
 

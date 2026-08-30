@@ -99,4 +99,17 @@ const char* modeName(uint8_t mode);        // settings value -> "full", ...
 const char* storageBackend();
 const char* storagePath();                 // VFS path, e.g. "/sd/rns"
 
+// The node's LXMF side: what has arrived at its delivery address, and the
+// last one of it. Not an inbox — enough that a node which advertises an LXMF
+// address can be seen to be answering, and that a message refused for want of
+// a verifiable sender is visible as refused rather than as silence.
+struct LxmfState {
+  uint32_t received;                     // verified, proved, and shown here
+  uint32_t rejected;                     // unparseable, unknown sender, or bad signature
+  char     lastFrom[33];                 // source hash, hex; empty if none
+  char     lastText[121];
+  uint32_t lastAgoMs;                    // 0 when nothing has arrived
+};
+LxmfState lxmf();
+
 } // namespace RnsTransport

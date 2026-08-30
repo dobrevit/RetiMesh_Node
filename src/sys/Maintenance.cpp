@@ -19,6 +19,7 @@
 // ============================================================================
 //  Maintenance.cpp — see Maintenance.h and MaintenanceProtocol.h.
 // ============================================================================
+#include "RnsTransport.h"
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
@@ -145,6 +146,13 @@ static void doStatus() {
     dataf("STATUS", "alloc_failures=%lu contained=%lu last_ms_ago=%lu",
           (unsigned long)f.allocFailures, (unsigned long)f.caught,
           (unsigned long)(f.lastMs ? millis() - f.lastMs : 0));
+  // Only once the node has been messaged: a line of zeroes on every node
+  // that has never been written to is noise.
+  const RnsTransport::LxmfState lx = RnsTransport::lxmf();
+  if (lx.received || lx.rejected)
+    dataf("STATUS", "lxmf_rx=%lu lxmf_rejected=%lu last_from=%s",
+          (unsigned long)lx.received, (unsigned long)lx.rejected,
+          lx.lastFrom[0] ? lx.lastFrom : "-");
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
         ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),
         !ConsoleServer::connected() ? "none" : ConsoleServer::authenticated() ? "authenticated" : "unauthenticated");

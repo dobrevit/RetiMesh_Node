@@ -30,6 +30,8 @@
 #include "Neighbors.h"
 #include "SdCard.h"
 #include "RnsAnnounce.h"
+#include "LxmfFormat.h"
+#include "Lock.h"
 #include "Settings.h"
 #include "LoRaRadio.h"
 #include "RetiTransportServer.h"
@@ -41,6 +43,25 @@ using RNS::Bytes;
 static RNS::Reticulum   reticulum({RNS::Type::NONE});
 static RNS::Identity    nodeRnsIdentity({RNS::Type::NONE});
 static RNS::Destination nodeDest({RNS::Type::NONE});
+// The node's LXMF address, under the same identity as retimesh.node. It is a
+// second destination rather than a second aspect on the first: the
+// destination hash is over the aspects, so lxmf.delivery is a different
+// address that LXMF clients already look for. Without it a RetiMesh node is
+// invisible to them — Sideband lists LXMF and NomadNet aspects and hides
+// everything else, so its announce stream stays empty however many nodes are
+// in earshot (docs/troubleshooting.md).
+static RNS::Destination lxmfDest({RNS::Type::NONE});
+
+// The last message this node was sent, and how many have arrived. Not an
+// inbox — a node that announces an LXMF address and then silently drops what
+// is sent to it is worse than one that never advertised, and this is the
+// smallest thing that makes it visible. A real store belongs with the
+// propagation-node work.
+static std::atomic<uint32_t> sLxmfRx{0}, sLxmfRejected{0};
+static SemaphoreHandle_t     sLxmfLock = nullptr;
+static char                  sLxmfFrom[33] = "";
+static char                  sLxmfText[121] = "";
+static uint32_t              sLxmfAtMs = 0;
 static RnsFileSystem    rnsFs;
 static bool             sStarted = false;
 
@@ -313,6 +334,75 @@ static void applyLogMute() {
   sMuted = want;
 }
 
+// An LXMF message arrived. The destination has already decrypted it, so what
+// is left is the envelope (RnsAnnounce.h) and the question of whether to
+// believe it.
+//
+// Believing it means checking the signature against the sender's public key,
+// and the only way to have that key is to have heard the sender announce.
+// So a message from a stranger is refused rather than shown: an unverified
+// sender hash is a claim, and a node that displayed it would be repeating
+// whatever anyone in earshot cared to put in the field.
+//
+// A verified message is proved. That is what makes this different from
+// announcing a delivery address and dropping what arrives: the sender's
+// client shows the message delivered, because it was.
+static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
+  Rns::LxmfMessage m;
+  if (!Rns::parseLxmf(data.data(), data.size(), m)) {
+    sLxmfRejected++;
+    log_w("lxmf: a message arrived that is not one; ignored");
+    return;
+  }
+  const RNS::Bytes source(m.sourceHash, 16);
+  RNS::Identity sender = RNS::Identity::recall(source);
+  if (!sender) {
+    sLxmfRejected++;
+    log_w("lxmf: message from %s, whose announce this node has not heard — cannot verify it, ignored",
+          source.toHex().c_str());
+    return;
+  }
+  // The signature covers both hashes and the payload, so it binds the message
+  // to this pair of addresses: the same bytes replayed at another node do not
+  // verify, and neither does an altered text.
+  RNS::Bytes signed_data(m.destHash, 16);
+  signed_data.append(m.sourceHash, 16);
+  signed_data.append(m.payload, m.payloadLen);
+  if (!sender.validate(RNS::Bytes(m.signature, 64), signed_data)) {
+    sLxmfRejected++;
+    log_w("lxmf: message from %s failed its signature; ignored", source.toHex().c_str());
+    return;
+  }
+
+  sLxmfRx++;
+  if (sLxmfLock) {
+    Sys::Lock held(sLxmfLock);
+    Rns::toHex(m.sourceHash, 16, sLxmfFrom);
+    const size_t k = m.contentLen < sizeof(sLxmfText) - 1 ? m.contentLen : sizeof(sLxmfText) - 1;
+    memcpy(sLxmfText, m.content, k);
+    sLxmfText[k] = '\0';
+    sLxmfAtMs = millis();
+  }
+  log_i("lxmf: message from %s (%u bytes): %.*s", source.toHex().c_str(),
+        (unsigned)m.contentLen, (int)(m.contentLen > 80 ? 80 : m.contentLen), (const char*)m.content);
+  // Tell the sender it arrived. Without this the message is delivered and
+  // their client says otherwise, which is the same silence as dropping it.
+  const_cast<RNS::Packet&>(packet).prove();
+}
+
+LxmfState lxmf() {
+  LxmfState s{};
+  s.received = sLxmfRx;
+  s.rejected = sLxmfRejected;
+  if (sLxmfLock) {
+    Sys::Lock held(sLxmfLock);
+    strlcpy(s.lastFrom, sLxmfFrom, sizeof(s.lastFrom));
+    strlcpy(s.lastText, sLxmfText, sizeof(s.lastText));
+    s.lastAgoMs = sLxmfAtMs ? millis() - sLxmfAtMs : 0;
+  }
+  return s;
+}
+
 bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpInRing) {
   sTxRing = txRing; sRxRing = rxRing; sTcpInRing = tcpInRing;
   // Deep enough that every interface this node can hold could register at
@@ -320,6 +410,7 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   // full queue lost peers silently.
   sEvents = xQueueCreate(RNS_MAX_INTERFACES + 8, sizeof(Event));
   sSnapLock = xSemaphoreCreateMutex();
+  sLxmfLock = xSemaphoreCreateMutex();
 
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
 
@@ -367,6 +458,9 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
 
     nodeDest = RNS::Destination(nodeRnsIdentity, RNS::Type::Destination::IN,
                                 RNS::Type::Destination::SINGLE, "retimesh", "node");
+    lxmfDest = RNS::Destination(nodeRnsIdentity, RNS::Type::Destination::IN,
+                                RNS::Type::Destination::SINGLE, "lxmf", "delivery");
+    lxmfDest.set_packet_callback(onLxmfPacket);
     sStarted = true;
     sAnnounceFloorMs = millis() + ANNOUNCE_BOOT_DELAY_MS;
     sNextAnnounceMs  = sAnnounceFloorMs;
@@ -612,6 +706,13 @@ void loop() {
       char app[64];
       int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
       nodeDest.announce(Bytes((const uint8_t*)app, (size_t)max(n, 0)));
+      // And the same node under its LXMF address, so it appears in the
+      // clients people actually use. The app_data is the shape LXMF expects
+      // rather than the free text above — the two announces describe one node
+      // to two audiences (RnsAnnounce.h).
+      uint8_t lx[64];
+      const size_t lxLen = Rns::lxmfAppData(wifiManager.ssid(), 0, lx, sizeof(lx));
+      if (lxLen) lxmfDest.announce(Bytes(lx, lxLen));
       g_stats.announcesTx++;
       sNextAnnounceMs = millis() + (uint32_t)interval * 1000UL;
       log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
