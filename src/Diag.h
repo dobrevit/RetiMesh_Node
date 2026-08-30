@@ -78,6 +78,17 @@ RestartMarks& restartMarks();
 // ROM session, which millis() does not.
 uint32_t rtcMs();
 
+// Starts a task and says so when it cannot. Every task this firmware creates
+// goes through here, because an unchecked xTaskCreate is a node that runs
+// without one of its parts and reports itself healthy: a Heltec Wireless
+// Stick, whose 16 KB "rns" stack would not fit once Wi-Fi and the web server
+// had taken theirs, answered "transport: online" for as long as anyone cared
+// to ask while no task was driving Reticulum at all. Returns false when the
+// task was not created, having logged the name, the stack it asked for and
+// what the heap had left.
+bool startTask(TaskFunction_t fn, const char* name, uint32_t stackBytes,
+               void* arg, UBaseType_t priority, BaseType_t core);
+
 // Keeps the current run length in RTC memory so the next boot can report it.
 // Call this every pass of the main loop, not on the heartbeat: the value is
 // only as accurate as its cadence, and a restart loop has to be visible as

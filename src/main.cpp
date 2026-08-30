@@ -110,6 +110,10 @@ static LocalLink::UnavailableLink pppLink(LocalLink::Type::PppUart, "ppp0", fals
   "this board has no bridge UART to carry PPP");
 #endif
 
+// Whether the task that drives Reticulum was created; the transport is only
+// "online" if something is running its loop.
+static bool sRnsTaskUp = false;
+
 void setup() {
   // Prefer PSRAM for anything larger than a few hundred bytes — packet
   // buffers, JSON documents, strings, Transport containers. Done first so
@@ -243,22 +247,28 @@ void setup() {
   #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
-  xTaskCreatePinnedToCore(LoRaRadio::radioTask, "radio",
-                          8192, &loraRadio, 5, nullptr, 1);
+  Diag::startTask(LoRaRadio::radioTask, "radio", 8192, &loraRadio, 5, 1);
 
   // 6 KB: the panel driver and the I2C stack are deep enough that 4 KB left
   // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
   // transaction to every network page.
   #if HAS_DISPLAY
-    xTaskCreatePinnedToCore(Display::displayTask, "display",
-                            6144, &display, 1, nullptr, 0);
+    Diag::startTask(Display::displayTask, "display", 6144, &display, 1, 0);
   #endif
 
   // The RNS task owns every call into microReticulum (Transport is
   // single-threaded): interface loops, forwarding, announces, persistence.
-  xTaskCreatePinnedToCore([](void*) {
+  sRnsTaskUp = Diag::startTask([](void*) {
     for (;;) { RnsTransport::loop(); vTaskDelay(pdMS_TO_TICKS(10)); }
-  }, "rns", 16384, nullptr, 3, nullptr, 1);
+  }, "rns", 16384, nullptr, 3, 1);
+  // Online means Reticulum is both initialised and being driven: begin()
+  // succeeding says only that the tables were built, and a node with no task
+  // running its loop routes nothing and announces nothing while every status
+  // it serves says "online".
+  if (!sRnsTaskUp) {
+    g_stats.transportOnline = false;
+    log_e("Reticulum is not being driven: the rns task did not start");
+  }
 
   if (settings.links().wifiEnabled)
     log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",
