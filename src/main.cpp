@@ -121,10 +121,13 @@ void setup() {
   if (psramFound()) heap_caps_malloc_extmem_enable(PSRAM_MALLOC_THRESHOLD);
 
   #if HAS_PPP
-    // The port is shared with PPP (PppUart.h): the driver's receive ring
-    // is PPP's receive ring, and a transmit queue lets a whole frame — or a
+    // The port is shared with PPP (PppUart.h): the driver's receive ring is
+    // PPP's receive ring, and a transmit queue lets a whole frame — or a
     // whole console reply — leave in one write. Both are sized before the
-    // driver is installed, which is the only time they can be.
+    // driver is installed, which is the only time they can be: the switch
+    // cannot give them back later, so a board that carries PPP pays for the
+    // rings whether or not it is switched on. What the switch does give back
+    // is the interface and the reader task.
     Serial.setRxBufferSize(PPP_RX_RING_BYTES);
     Serial.setTxBufferSize(PPP_TX_QUEUE_BYTES);
   #endif
@@ -219,17 +222,21 @@ void setup() {
   LocalLink::add(&usbLink);
   LocalLink::add(&pppLink);
   wifiManager.begin();                     // radio + web server, or web server alone with Wi-Fi off
-  LocalLink::begin();
+  // Before the links, not after: PPP hands the console its own reader when
+  // it takes the port (PppUart.h), and a begin() that ran afterwards would
+  // point the console back at the UART the reader is already draining —
+  // output fine, nothing ever read.
   // The maintenance console on the port the host already has. Its HELLO is
   // the line a flashing tool looks for, so it goes out before the services
   // that make the log busy. Where PPP shares the port, the console reads
   // and writes through the PPP driver's view of it, which hands the console
   // its bytes while the console owns the port and PPP its frames otherwise.
-  #if HAS_PPP
-    Maintenance::begin(PppUart::console());
-  #else
-    Maintenance::begin(Serial);
-  #endif
+  // The UART directly: with PPP off there is no reader between the two, and
+  // when PPP takes the port over it points the console at its own stream
+  // (PppUart.h).
+  Maintenance::begin(Serial);
+
+  LocalLink::begin();
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
   // Transport first, then the things that hand it peers. It builds the queue
   // those peers are announced on, and it takes long enough — mounting and

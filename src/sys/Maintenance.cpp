@@ -377,6 +377,14 @@ void begin(Stream& io) {
         MAINT_PROTOCOL_VERSION);
 }
 
+void useStream(Stream& io) {
+  if (sIo == &io) return;
+  // A half-typed line belongs to the stream it was typed on, not to the next
+  // one; carrying it across would glue two sources together.
+  sLines.reset();
+  sIo = &io;
+}
+
 void poll() {
   if (!sIo) return;
   if (!settings.maintenance().consoleEnabled) {

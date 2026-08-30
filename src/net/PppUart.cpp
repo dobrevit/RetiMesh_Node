@@ -51,6 +51,7 @@
 #include "LocalLink.h"
 #include "RnsTransport.h"
 #include "Diag.h"
+#include "Maintenance.h"
 
 using LocalLink::pppNodeAddress;
 
@@ -81,6 +82,12 @@ static std::atomic<Owner>    sOwner{Owner::Console};    // the arbiter's answer,
 static std::atomic<bool>     sEnabled{false};           // the operator's switch, as last applied
 static std::atomic<bool>     sClosing{false};           // the node is restarting: end the session
 static std::atomic<bool>     sStarted{false};           // connect was asked of esp_netif; transmit allowed
+// The reader task exists only while PPP does. It is four kilobytes of DRAM,
+// which is what a Wireless Stick needs for the task that drives Reticulum,
+// and with PPP off it would only be forwarding console bytes the console can
+// read for itself.
+static TaskHandle_t          sReader = nullptr;
+static std::atomic<bool>     sReaderStop{false};
 static std::atomic<bool>     sUp{false};                // IPCP done: address and peer are valid
 static std::atomic<bool>     sDead{false};              // the session reached PPP's dead phase
 static std::atomic<uint32_t> sOurIp{0}, sPeerIp{0};     // host order
@@ -351,6 +358,7 @@ static void service(uint32_t nowMs) {
 static void readerTask(void*) {
   static uint8_t buf[256];
   for (;;) {
+    if (sReaderStop) { sReader = nullptr; sReaderStop = false; vTaskDelete(nullptr); }
     // The driver returns early only once the buffer is full, so the wait
     // is the latency a short frame pays: ten milliseconds, a hundred idle
     // wake-ups a second when nothing arrives, each of which costs nothing.
@@ -381,6 +389,86 @@ static void readerTask(void*) {
 }
 
 // ---------------------------------------------------------------------------
+// The port's buffers cannot be resized once the driver is up: the core's
+// setRxBufferSize/setTxBufferSize only take effect before it installs, and
+// taking it down and putting it back — Serial.end() then Serial.begin() —
+// leaves the UART dead on this core. Measured, not assumed: the node kept
+// running and answering over Wi-Fi with its port silent, heartbeat included.
+// So the buffers are PPP's from boot on a board that carries PPP, and what
+// this unit gives back when the switch is off is the interface and the
+// reader task, not the twelve kilobytes of ring.
+// Everything PPP needs and the console does not: the interface, its events,
+// and the twelve kilobytes of port buffer. Built when the switch turns on and
+// given back when it turns off, so a node with PPP off pays nothing for it.
+static void startPpp() {
+  if (sNetif) return;
+  esp_netif_config_t cfg = ESP_NETIF_DEFAULT_PPP();
+  sNetif = esp_netif_new(&cfg);
+  if (!sNetif) {
+    log_e("ppp0: esp_netif_new failed; the port stays the console's");
+    return;
+  }
+  esp_netif_attach(sNetif, &sDriver);
+  esp_netif_ppp_config_t pc = {};
+  pc.ppp_phase_event_enabled = true;
+  pc.ppp_error_event_enabled = true;
+  esp_netif_ppp_set_params(sNetif, &pc);
+  // What the node asks for in IPCP. esp_netif's public PPP configuration
+  // carries addresses only in server builds, so the request goes to the pcb
+  // lwIP keeps in the netif's state — the pointer pppos_create stored there —
+  // and accept_local is set beside it so that a host which assigns something
+  // else is obeyed rather than argued with until LCP gives up. No DNS from
+  // the peer either: the node resolves nothing over this link and must not
+  // let pppd rewrite its resolver.
+  struct netif* impl = static_cast<struct netif*>(esp_netif_get_netif_impl(sNetif));
+  ppp_pcb* pcb = impl ? static_cast<ppp_pcb*>(impl->state) : nullptr;
+  if (pcb) {
+    ip4_addr_t our;
+    ip4_addr_set_u32(&our, htonl(pppNodeAddress(sMacLastOctet)));
+    ppp_set_ipcp_ouraddr(pcb, &our);
+    pcb->ipcp_wantoptions.accept_local = 1;
+    ppp_set_usepeerdns(pcb, 0);
+  }
+  esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_GOT_IP, onGotIp, nullptr);
+  esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_LOST_IP, onLostIp, nullptr);
+  esp_event_handler_register(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, onStatus, nullptr);
+  // Core 0 with the network stack, below the radio (5, on core 1) and level
+  // with AutoInterface: it moves bytes and blocks on the driver; lwIP does
+  // the work on its own task. From here it arbitrates the port, so the
+  // console reads through it rather than from the UART.
+  if (!sReader && xTaskCreatePinnedToCore(readerTask, "ppp-uart", 4096, nullptr, 2, &sReader, 0) != pdPASS) {
+    sReader = nullptr;
+    log_e("ppp0: the reader task would not start; PPP cannot take the port");
+  }
+  if (sReader) Maintenance::useStream(sConsole);
+  log_i("ppp0: PPP client on UART%d behind the %s bridge; asks the host's pppd for %s",
+        (int)kUart, BOARD_USB_BRIDGE, ipOf(pppNodeAddress(sMacLastOctet)).toString().c_str());
+}
+
+static void stopPpp() {
+  if (!sNetif) return;
+  // A session in progress is ended first: the host is told rather than left
+  // to time out, and the port is the console's again before it is resized.
+  shutdown(1000);
+  esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_GOT_IP, onGotIp);
+  esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_LOST_IP, onLostIp);
+  esp_event_handler_unregister(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, onStatus);
+  // The console goes back to the UART before the reader that was feeding it
+  // is asked to leave, so there is no moment with no console at all.
+  Maintenance::useStream(Serial);
+  if (sReader) {
+    sReaderStop = true;
+    for (int i = 0; i < 50 && sReader; i++) delay(10);   // it deletes itself at the top of its loop
+  }
+  esp_netif_destroy(sNetif);
+  sNetif = nullptr;
+  sStarted = false;
+  sUp = false;
+  sOurIp = 0;
+  sPeerIp = 0;
+  log_i("ppp0: switched off; the interface and its buffers are given back");
+}
+
 void begin() {
   static bool begun = false;
   if (begun) return;
@@ -389,50 +477,18 @@ void begin() {
   esp_efuse_mac_get_default(mac);
   sMacLastOctet = mac[5];
 
-  // The stack's own PPP client shape: key PPP_DEF, the PPP IP events, route
-  // priority 20 — the same as usb0's, below the station uplink's.
-  esp_netif_config_t cfg = ESP_NETIF_DEFAULT_PPP();
-  sNetif = esp_netif_new(&cfg);
-  if (!sNetif) {
-    log_e("ppp0: esp_netif_new failed; the port stays the console's");
-  } else {
-    esp_netif_attach(sNetif, &sDriver);
-    esp_netif_ppp_config_t pc = {};
-    pc.ppp_phase_event_enabled = true;
-    pc.ppp_error_event_enabled = true;
-    esp_netif_ppp_set_params(sNetif, &pc);
-    // What the node asks for in IPCP. esp_netif's public PPP configuration
-    // carries addresses only in server builds, so the request goes to the
-    // pcb lwIP keeps in the netif's state — the pointer pppos_create
-    // stored there — and accept_local is set beside it so that a host
-    // which assigns something else is obeyed rather than argued with until
-    // LCP gives up. No DNS from the peer either: the node resolves nothing
-    // over this link and must not let pppd rewrite its resolver.
-    struct netif* impl = static_cast<struct netif*>(esp_netif_get_netif_impl(sNetif));
-    ppp_pcb* pcb = impl ? static_cast<ppp_pcb*>(impl->state) : nullptr;
-    if (pcb) {
-      ip4_addr_t our;
-      ip4_addr_set_u32(&our, htonl(pppNodeAddress(sMacLastOctet)));
-      ppp_set_ipcp_ouraddr(pcb, &our);
-      pcb->ipcp_wantoptions.accept_local = 1;
-      ppp_set_usepeerdns(pcb, 0);
-    }
-    esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_GOT_IP, onGotIp, nullptr);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_LOST_IP, onLostIp, nullptr);
-    esp_event_handler_register(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, onStatus, nullptr);
-  }
   if (kPinRts >= 0 || kPinCts >= 0)
     uart_set_hw_flow_ctrl(kUart, UART_HW_FLOWCTRL_CTS_RTS, 64);
-  // Core 0 with the network stack, below the radio (5, on core 1) and level
-  // with AutoInterface: the reader moves bytes and blocks on the driver;
-  // lwIP does the work on its own task.
-  Diag::startTask(readerTask, "ppp-uart", 4096, nullptr, 2, 0);
-  log_i("ppp0: PPP client on UART%d behind the %s bridge; asks the host's pppd for %s",
-        (int)kUart, BOARD_USB_BRIDGE, ipOf(pppNodeAddress(sMacLastOctet)).toString().c_str());
+  // Nothing else: with the switch off the console reads the UART directly and
+  // this unit costs the node nothing at all.
 }
 
 void poll(bool enabled, uint32_t baud) {
   sEnabled = enabled;
+  // The switch decides whether the interface exists at all, not merely
+  // whether it answers: off means nothing allocated (PppUart.h).
+  if (enabled && !sNetif)      startPpp();
+  else if (!enabled && sNetif) stopPpp();
   // The speed of the whole port while PPP is on; the console's otherwise.
   // Applied while the console owns the port, never under a session — a
   // change saved over ppp0 would otherwise cut the reply that reports it —
