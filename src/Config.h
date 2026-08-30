@@ -484,7 +484,6 @@
 // with enough of a gap that a handful arriving together share one announce.
 #define ANNOUNCE_ON_PEER_DELAY_MS 2000
 #define ANNOUNCE_MAX_LEN    256
-#define TCP_IN_RING_BYTES   8192          // TCP clients -> Transport
 #define BEACON_MAX_LEN      64            // printable payload bytes
 // RetiMesh beacons are valid Reticulum packets: a broadcast to the PLAIN
 // destination "retimesh.beacon" (hash = RNS.Destination.hash(None,
@@ -565,9 +564,32 @@
 
 // ---------------------------------------------------------------------------
 // Ring buffers bridging TCP <-> LoRa (created in main.cpp)
+//
+// Storage goes to PSRAM where the board has any and to internal RAM where it
+// does not, which makes the size two different questions rather than one: 24 KB
+// is nothing out of two megabytes of PSRAM, and it is more than a tenth of
+// everything a Heltec Wireless Stick has. Measured, once the boot log started
+// billing each subsystem (Diag.h): 26916 B on the Stick, 26124 B on a Heltec
+// V3, on boards that finish booting with 4.5 KB and 51 KB respectively.
+//
+// Each ring holds whole RNS packets — NOSPLIT, RNS_MTU 500 plus framing — so
+// 8192 B is about sixteen packets and 4096 B about eight. Eight is seconds of
+// backlog at LoRa speeds, by which time a packet is stale and the sender has
+// given up on it anyway; the value is here rather than inline so a board that
+// wants another can say so in platformio.ini. A ring that turns out to be too
+// small says so instead of hiding it: the send fails, "LoRa TX ring full" is
+// logged, and lora_rx_drop_ring counts it in /api/status.
 // ---------------------------------------------------------------------------
-#define TX_RING_BYTES       8192            // TCP  -> LoRa direction
-#define RX_RING_BYTES       8192            // LoRa -> TCP  direction
+#ifndef RING_BYTES
+  #ifdef BOARD_HAS_PSRAM
+    #define RING_BYTES      8192
+  #else
+    #define RING_BYTES      4096
+  #endif
+#endif
+#define TX_RING_BYTES       RING_BYTES        // TCP  -> LoRa direction
+#define RX_RING_BYTES       RING_BYTES        // LoRa -> TCP  direction
+#define TCP_IN_RING_BYTES   RING_BYTES        // TCP clients + AutoInterface -> Transport
 
 // ---------------------------------------------------------------------------
 // Bulletin board

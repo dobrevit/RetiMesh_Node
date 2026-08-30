@@ -148,12 +148,12 @@ cost: autointerface    +9188 B  ( 39568 free,  36852 largest, +176036 B since bo
 cost: tasks           +35020 B  (  4548 free,   4084 largest, +211056 B since boot)
 ```
 
-That is a real Heltec Wireless Stick, and the last line is what it has left to
-run on: **4548 bytes**. It is not enough. That board throws `std::bad_alloc`
-out of the Reticulum loop within seconds of finishing boot and panics, and its
-`boot_count` runs into the hundreds. Nothing else the node reports says so —
-`heap_free` reads a comfortable 46 KB, because most of what is left is
-32-bit-only IRAM that no allocation can use.
+That is a real Heltec Wireless Stick, before the fix below, and the last line
+is what it had left to run on: **4548 bytes**. It was not enough. That board
+threw `std::bad_alloc` out of the Reticulum loop within seconds of finishing
+boot and panicked, and its `boot_count` had run to 181. Nothing else the node
+reported said so — `heap_free` read a comfortable 46 KB, because most of what
+was left is 32-bit-only IRAM that no allocation can use.
 
 Read the rest as the answer to "which switch is worth making cost nothing when
 it is off", per board. Wi-Fi is billed in two parts on purpose: the **radio**
@@ -162,11 +162,25 @@ pays whether Wi-Fi is on or off — so on this board, switching Wi-Fi off saves
 52 KB and still leaves 28 KB on the table for a web server nobody can reach.
 That, and not USB-NCM, is where lazy allocation is worth the work.
 
-Two more things this reading settled. `packet rings` costs 26 KB of scarce
-internal RAM on every board **without** PSRAM, because `psramRing()` falls back
-to the internal heap and the fallback is silent. And `local links` reads 0 here
-but 10556 B on a Heltec V3 with `links.ppp` on — the PPP interface and its
-reader task, which is what that switch now gives back.
+It also found a bug outright, which is the point of measuring. `packet rings`
+was costing 26 916 B of scarce internal RAM: `psramRing()` falls back to the
+internal heap on a board with no PSRAM, the fallback said nothing, the three
+ring sizes were chosen as though PSRAM would absorb them, and the fallback path
+leaked its control block every time. Boards without PSRAM now take 4096 B per
+ring rather than 8192 (`RING_BYTES` in `Config.h`, overridable per board), the
+leak is gone, and the boot log names where the storage came from. On the Stick
+that is 13 720 B instead of 26 916, it ends boot with 17 428 B free instead of
+4548, and it stops crash-looping — 15 minutes with no panic, no `bad_alloc` and
+no dropped packets, against a reboot every 35 seconds before.
+
+The trade is deliberate: 4096 B holds about eight RNS packets, which is seconds
+of backlog at LoRa speeds, and a ring that turns out to be too small says so
+rather than hiding it — the send fails, `LoRa TX ring full` is logged, and
+`lora_rx_drop_ring` counts it in `/api/status`.
+
+And `local links` reads 0 on this board but 10 556 B on a Heltec V3 with
+`links.ppp` on — the PPP interface and its reader task, which is what that
+switch now gives back.
 
 The numbers differ enough between boards that one board's answer is not
 another's, which is why this is measured per board rather than reasoned about

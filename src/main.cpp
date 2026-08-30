@@ -76,13 +76,28 @@
 
 NodeStats g_stats;
 
-// Ring buffer storage lives in PSRAM (only tasks touch the rings; the radio
-// ISR just posts a notification). The control blocks stay internal.
+// Ring buffer storage lives in PSRAM where the board has any (only tasks touch
+// the rings; the radio ISR just posts a notification). The control blocks stay
+// internal.
+//
+// Where there is no PSRAM the storage comes out of the internal heap, and that
+// is worth saying: the fallback used to happen in silence, and a Heltec
+// Wireless Stick was paying 26916 B for these three rings while every figure
+// it reported said it had heap to spare (Diag.h). It also used to allocate the
+// control block before it knew whether the storage existed, and leak it on the
+// way past — a few hundred bytes of internal RAM, on precisely the boards that
+// have none to lose.
+static bool sRingsInPsram = true;
+
 static RingbufHandle_t psramRing(size_t bytes) {
-  uint8_t* storage = (uint8_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  StaticRingbuffer_t* cb = (StaticRingbuffer_t*)heap_caps_malloc(sizeof(StaticRingbuffer_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (!storage || !cb) return xRingbufferCreate(bytes, RINGBUF_TYPE_NOSPLIT);   // no PSRAM: internal
-  return xRingbufferCreateStatic(bytes, RINGBUF_TYPE_NOSPLIT, storage, cb);
+  if (uint8_t* storage = (uint8_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) {
+    if (auto* cb = (StaticRingbuffer_t*)heap_caps_malloc(sizeof(StaticRingbuffer_t),
+                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT))
+      return xRingbufferCreateStatic(bytes, RINGBUF_TYPE_NOSPLIT, storage, cb);
+    heap_caps_free(storage);            // no control block: the storage is no use on its own
+  }
+  sRingsInPsram = false;
+  return xRingbufferCreate(bytes, RINGBUF_TYPE_NOSPLIT);
 }
 
 // The directions of the bridge. NOSPLIT keeps every item (= one RNS
@@ -179,6 +194,9 @@ void setup() {
   txRing = psramRing(TX_RING_BYTES);
   rxRing = psramRing(RX_RING_BYTES);
   tcpInRing = psramRing(TCP_IN_RING_BYTES);
+  log_i("packet rings: tx %u, rx %u, tcp-in %u B in %s", (unsigned)TX_RING_BYTES,
+        (unsigned)RX_RING_BYTES, (unsigned)TCP_IN_RING_BYTES,
+        sRingsInPsram ? "PSRAM" : "internal RAM (this board has none)");
   {
     // Both figures, because only one of them can hold a task stack and it is
     // not the larger one (Diag.h). The rings themselves are PSRAM's where
