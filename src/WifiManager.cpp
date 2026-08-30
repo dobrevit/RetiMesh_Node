@@ -553,6 +553,12 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     hp["free"]          = h.freeInternal;
     hp["min_free"]      = h.minFreeInternal;
     hp["largest_block"] = h.largestBlock;   // free minus this is the fragmentation
+    // The byte-addressable subset, which is what a stack or buffer must come
+    // from; the figures above count 32-bit-only IRAM too and so overstate what
+    // is usable. See Diag.h.
+    hp["dram_free"]          = h.freeDram;
+    hp["dram_min_free"]      = h.minFreeDram;
+    hp["dram_largest_block"] = h.largestDramBlock;
     hp["psram_free"]    = h.freePsram;
 
     Diag::TaskStack st[16];

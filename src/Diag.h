@@ -98,10 +98,20 @@ void tick(uint32_t uptimeS);
 
 const char* resetReasonName(uint8_t reason);
 
+// Internal RAM comes in two kinds and only one of them can hold a task stack,
+// a buffer or anything else addressed a byte at a time: part of what
+// MALLOC_CAP_INTERNAL counts is 32-bit-only IRAM. A board can therefore report
+// tens of KB free and fail to place an 8 KB stack, which is exactly what a
+// Heltec Wireless Stick did — 48.9 KB free internal, 6.6 KB of it usable, and
+// no task driving Reticulum as a result. So the byte-addressable figures are
+// reported beside the others: they are the ones that decide.
 struct Heap {
   uint32_t freeInternal;
   uint32_t minFreeInternal;                 // low-water mark since boot
   uint32_t largestBlock;                    // largest single allocation still possible
+  uint32_t freeDram;                        // 8-bit-capable: what a stack or buffer can actually use
+  uint32_t minFreeDram;                     // its low-water mark since boot
+  uint32_t largestDramBlock;                // the largest stack this node could still place
   uint32_t freePsram;
 };
 Heap heap();
