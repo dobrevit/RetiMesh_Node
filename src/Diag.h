@@ -46,6 +46,12 @@
 
 namespace Diag {
 
+// How the previous run's restart went, in milliseconds between its steps:
+// entering the restart, handing over to the core's persist-restart (the
+// composite device only), and this boot. `known` is false where no restart
+// preceded this boot, or the RTC domain did not hold.
+struct LastRestart { uint32_t toPersistMs = 0, toBootMs = 0; bool known = false; };
+
 // Why the previous run ended. The reset register is cleared by a power cycle,
 // so "power-on" on a cold start is the expected answer, not a missing one.
 struct Boot {
@@ -55,11 +61,22 @@ struct Boot {
   uint32_t    count           = 0;          // boots recorded in NVS, this one included
   bool        prevUptimeKnown = false;      // false after a power cut or brownout
   uint32_t    prevUptimeS     = 0;          // how long the run that just ended lasted
+  LastRestart lastRestart;
 };
 
 // Call first in setup(), before anything that might itself crash.
 void begin();
 const Boot& boot();
+
+// The marks a restart leaves for the next boot: on the RTC clock, in the one
+// RTC-resident record beside the run length, so one magic decides whether
+// RTC memory held. Bootloader stamps them as the restart goes (zero: not
+// stamped); begin() reads them into boot().lastRestart and clears them.
+struct RestartMarks { uint32_t entryMs, persistMs; };
+RestartMarks& restartMarks();
+// The RTC clock in milliseconds: it runs on through a software reset and the
+// ROM session, which millis() does not.
+uint32_t rtcMs();
 
 // Keeps the current run length in RTC memory so the next boot can report it.
 // Call this every pass of the main loop, not on the heartbeat: the value is

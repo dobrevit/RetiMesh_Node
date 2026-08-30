@@ -30,12 +30,16 @@
 #if HAS_USB_NCM
 #include <Arduino.h>
 #include <atomic>
+#include <esp_heap_caps.h>
 #include <esp_mac.h>
 #include <esp_netif.h>
 #include <esp_netif_defaults.h>
+#include <esp_timer.h>
 #include <dhcpserver/dhcpserver.h>
+#include <lwip/def.h>
 #include "esp32-hal-tinyusb.h"
 #include "tusb.h"
+#include "device/usbd_pvt.h"              // usbd_defer_func: run a function on the USB task
 #include <hal/usb_wrap_ll.h>
 #include <hal/usb_serial_jtag_ll.h>
 #include <soc/usb_wrap_struct.h>
@@ -43,6 +47,7 @@
 #include "Bootloader.h"
 
 using LocalLink::usbNodeAddress;
+using LocalLink::usbHostAddress;
 using LocalLink::kUsbNetmask;
 
 #ifndef CFG_TUD_NCM
@@ -74,14 +79,8 @@ static void deriveIdentity() {
   for (int i = 0; i < 6; i++) snprintf(sHostMacStr + 2 * i, 3, "%02X", sHostMac[i]);
 }
 
-static void octets(uint32_t hostOrder, uint8_t out[4]) {
-  out[0] = hostOrder >> 24; out[1] = hostOrder >> 16; out[2] = hostOrder >> 8; out[3] = hostOrder;
-}
-
-IPAddress address() {
-  uint8_t o[4]; octets(usbNodeAddress(sMacLastOctet), o);
-  return IPAddress(o[0], o[1], o[2], o[3]);
-}
+// IPAddress and esp_netif both keep the dword in network order.
+IPAddress address() { return IPAddress(htonl(usbNodeAddress(sMacLastOctet))); }
 
 // ---------------------------------------------------------------------------
 // 1. The NCM function
@@ -100,7 +99,17 @@ static uint16_t descriptor(uint8_t* dst, uint8_t* itf) {
   const uint8_t epNotify = tinyusb_get_free_in_endpoint();
   const uint8_t epIn     = tinyusb_get_free_in_endpoint();
   const uint8_t epOut    = tinyusb_get_free_out_endpoint();
-  if (!epNotify || !epIn || !epOut) return 0;
+  if (!epNotify || !epIn || !epOut) {
+    // The core's allocator reserves an endpoint as it hands it out and offers
+    // no way to hand one back, so a partial set is spent for the rest of the
+    // run and the next function to ask is short of one it should have had.
+    // Nothing here can undo that; what it can do is say which of the three
+    // was missing, because the core reports only that an interface failed to
+    // load.
+    log_e("usb0: no free USB endpoint (notify %u, in %u, out %u); the network interface will not load",
+          epNotify, epIn, epOut);
+    return 0;
+  }
   const uint8_t strName = tinyusb_add_string_descriptor(USB_NETWORK_INTERFACE);
   const uint8_t strMac  = tinyusb_add_string_descriptor(sHostMacStr);
   const uint8_t d[TUD_CDC_NCM_DESC_LEN] = {
@@ -163,21 +172,72 @@ static esp_netif_t*         sNetif = nullptr;
 static esp_netif_ip_info_t  sIpInfo;
 static std::atomic<bool>    sHostOpened{false};   // the host set its packet filter: it opened the interface
 static std::atomic<bool>    sEnabled{false};      // the operator's switch, as last applied
+static bool                 sMounted = false;     // the device was mounted on the last poll
 static std::atomic<bool>    sUp{false};           // the netif is started and connected; read on three tasks
 static std::atomic<uint32_t> sRx{0}, sTx{0}, sTxDropped{0};
 
-// TinyUSB's transmit is a copy through xmit_cb, synchronous, so the frame
-// lwIP hands over is consumed before transmit() returns and lwIP may free it.
+// Frames for the host wait here between the TCP/IP task and the USB task.
+// The class driver keeps no lock: its transmit path runs on whichever task
+// calls it and its completion path on the USB task, and the two walk the
+// same NTB lists — so every call into it is made from the USB task, through
+// usbd_defer_func(), which is how ESP-IDF's own glue does it. The ring also
+// carries a burst: the driver holds one NTB, in flight for a millisecond or
+// two per frame, while lwIP sends a window's worth of segments in one call;
+// dropping what did not fit left TCP over the cable at one segment per ACK.
+//
+// The TCP/IP task fills, the USB task empties, and neither waits: a full
+// ring drops the frame (TCP retransmits), and a frame that has waited
+// kTxStaleMs is waiting on a host that has stopped draining and is dropped
+// too. The radio and the transport must never wait on the USB cable.
+namespace {
+constexpr size_t   kTxSlots   = 4;
+constexpr uint32_t kTxStaleMs = 200;
+constexpr uint64_t kTxRetryUs = 1000;   // the NTB frees when a transfer completes, which the driver does not announce
+
+struct TxSlot { uint16_t len; uint32_t queuedMs; uint8_t data[CFG_TUD_NET_MTU]; };
+TxSlot                sTxSlots[kTxSlots];
+std::atomic<uint32_t> sTxHead{0};       // next slot to fill: the TCP/IP task's
+std::atomic<uint32_t> sTxTail{0};       // next slot to send: the USB task's
+esp_timer_handle_t    sTxRetry = nullptr;
+
+// On the USB task: hands the ring to the class driver, as many frames as it
+// will take, and comes back for the rest once the NTB has gone out.
+void drain(void*) {
+  while (sTxTail.load(std::memory_order_acquire) != sTxHead.load(std::memory_order_acquire)) {
+    TxSlot& s = sTxSlots[sTxTail % kTxSlots];
+    if (!sUp || (int32_t)(millis() - s.queuedMs) > (int32_t)kTxStaleMs) {
+      sTxDropped++;
+      sTxTail.fetch_add(1, std::memory_order_release);
+      continue;
+    }
+    if (!tud_network_can_xmit(s.len)) {
+      esp_timer_start_once(sTxRetry, kTxRetryUs);   // already running: the same moment
+      return;
+    }
+    tud_network_xmit(s.data, s.len);               // copied through xmit_cb, synchronously
+    sTx++;
+    sTxTail.fetch_add(1, std::memory_order_release);
+  }
+}
+
+void retryDrain(void*) { usbd_defer_func(drain, nullptr, false); }
+}
+
+// On the TCP/IP task, which carries the portal and the RNS transport too.
 static esp_err_t transmit(void*, void* buffer, size_t len) {
   if (!sUp || len > CFG_TUD_NET_MTU) return ESP_FAIL;
-  // This runs on the TCP/IP task, which carries the portal and the RNS
-  // transport too. The class driver holds one NTB in flight; if it is busy
-  // the frame is dropped here and now — TCP retransmits, and the radio and
-  // the transport must never wait on the USB cable, least of all on a host
-  // that has stopped draining it.
-  if (!tud_network_can_xmit((uint16_t)len)) { sTxDropped++; return ESP_FAIL; }
-  tud_network_xmit(buffer, (uint16_t)len);
-  sTx++;
+  const uint32_t head = sTxHead.load(std::memory_order_relaxed);
+  const bool waiting = head != sTxTail.load(std::memory_order_acquire);
+  if (head - sTxTail.load(std::memory_order_acquire) >= kTxSlots) { sTxDropped++; return ESP_FAIL; }
+  TxSlot& s = sTxSlots[head % kTxSlots];
+  memcpy(s.data, buffer, len);
+  s.len = (uint16_t)len;
+  s.queuedMs = millis();
+  sTxHead.store(head + 1, std::memory_order_release);
+  usbd_defer_func(drain, nullptr, false);
+  // A kick can be lost when the USB task's queue is full; frames already
+  // waiting get the timer as well, so nothing sits in the ring unannounced.
+  if (waiting) esp_timer_start_once(sTxRetry, kTxRetryUs);
   return ESP_OK;
 }
 
@@ -218,14 +278,17 @@ static void onLineCoding(void*, esp_event_base_t, int32_t, void* data) {
 
 void begin() {
   if (sNetif) return;
-  Serial.enableReboot(false);
+  // The core's own reboot on this port is already off: setup() switches it
+  // off beside Serial.begin(), so that no touch in the seconds before this
+  // point restarts the chip behind the sequencer's back.
   Serial.onEvent(ARDUINO_USB_CDC_LINE_CODING_EVENT, onLineCoding);
-  uint8_t o[4];
-  octets(usbNodeAddress(sMacLastOctet), o);
-  esp_netif_set_ip4_addr(&sIpInfo.ip, o[0], o[1], o[2], o[3]);
-  esp_netif_set_ip4_addr(&sIpInfo.gw, o[0], o[1], o[2], o[3]);
-  octets(kUsbNetmask, o);
-  esp_netif_set_ip4_addr(&sIpInfo.netmask, o[0], o[1], o[2], o[3]);
+  const esp_timer_create_args_t retry = {
+    .callback = retryDrain, .arg = nullptr, .dispatch_method = ESP_TIMER_TASK,
+    .name = "usb0-tx", .skip_unhandled_events = true,
+  };
+  if (esp_timer_create(&retry, &sTxRetry) != ESP_OK) { log_e("usb0: no retry timer"); return; }
+  sIpInfo.ip.addr = sIpInfo.gw.addr = (uint32_t)address();
+  sIpInfo.netmask.addr = htonl(kUsbNetmask);
 
   // The access point's shape — a DHCP server, up as soon as it is started —
   // on the Ethernet stack, under our own key and address.
@@ -252,6 +315,18 @@ void begin() {
   if (esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &none, sizeof(none)) != ESP_OK ||
       esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &none, sizeof(none)) != ESP_OK)
     log_w("usb0: could not strip router/DNS from the DHCP offer");
+  // One address in the pool, and it is the one the documentation names as the
+  // host's static fallback (LocalLinkState.h, usbHostAddress). Only one host
+  // is ever on this cable, so a range buys nothing — and left to itself the
+  // server hands out whatever IDF's default pool starts at, which is .2 today
+  // and is not a promise anybody made. A host configured by hand and a host
+  // that asked now land on the same address either way.
+  const IPAddress host(htonl(usbHostAddress(sMacLastOctet)));
+  dhcps_lease_t lease = {};
+  lease.enable = true;
+  lease.start_ip.addr = lease.end_ip.addr = htonl(usbHostAddress(sMacLastOctet));
+  if (esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease)) != ESP_OK)
+    log_w("usb0: could not pin the DHCP pool to %s", host.toString().c_str());
   esp_netif_attach(sNetif, &sDriver);
   log_i("usb0: composite device %s, host MAC %s, node at %s", USB_PRODUCT, sHostMacStr, address().toString().c_str());
 }
@@ -261,12 +336,17 @@ void begin() {
 // ---------------------------------------------------------------------------
 bool linkUp() { return sUp; }
 
+// The interface goes down the way the access point's does: stopped, not
+// disconnected first. esp_netif's stop returns early on an interface that is
+// already down, leaving its DHCP server running; the access point's handlers
+// call start and stop alone, and so does this.
+static void bringDown() {
+  sUp = false;                                      // recv_cb and transmit() check it first
+  esp_netif_action_stop(sNetif, nullptr, 0, nullptr);
+}
+
 void detach() {
-  if (sUp) {
-    sUp = false;                                    // before the stop, as in poll()
-    esp_netif_action_disconnected(sNetif, nullptr, 0, nullptr);
-    esp_netif_action_stop(sNetif, nullptr, 0, nullptr);
-  }
+  if (sUp) bringDown();
   tud_disconnect();
   // The soft disconnect alone leaves the PHY's pull-up on D+, and the core's
   // hand-over raises the serial-JTAG unit's pull-up on the same line within
@@ -299,11 +379,19 @@ void poll(bool enabled) {
   // makes when it opens the interface is kept as a diagnostic.
   const bool mounted = tud_mounted() && !tud_suspended();
   if (!mounted) sHostOpened = false;
-  if (enabled != sEnabled) {
+  // Tell the host the carrier state — when the operator's switch moves, and
+  // again whenever the device has been mounted afresh. The class driver is
+  // reset on every bus reset and takes its link state from its own default,
+  // not from what we last sent: after a replug or a resume, a link this node
+  // still considers up was never announced to the host that just arrived, and
+  // its interface sits at NO-CARRIER until somebody toggles the switch. Sent
+  // from the USB task, like every other call into the class driver.
+  const bool remounted = mounted && !sMounted;
+  if (enabled != sEnabled || remounted) {
     sEnabled = enabled;
-    // Tell the host, so its interface shows the carrier the operator set.
-    if (mounted) tud_network_link_state(0, enabled);
+    if (mounted) usbd_defer_func([](void*) { if (tud_mounted()) tud_network_link_state(0, sEnabled); }, nullptr, false);
   }
+  sMounted = mounted;
   const bool want = enabled && mounted;
   if (want && !sUp) {
     esp_netif_action_start(sNetif, nullptr, 0, nullptr);
@@ -311,11 +399,7 @@ void poll(bool enabled) {
     sUp = true;
     log_i("usb0: up, %s/24, DHCP serving the host", address().toString().c_str());
   } else if (!want && sUp) {
-    // Down first, then stop: a frame arriving on the USB task between the
-    // two must not be handed to an interface that has just been torn down.
-    sUp = false;
-    esp_netif_action_disconnected(sNetif, nullptr, 0, nullptr);
-    esp_netif_action_stop(sNetif, nullptr, 0, nullptr);
+    bringDown();
     log_i("usb0: down (%s)", !enabled ? "switched off" : "host gone");
   }
 }
@@ -328,14 +412,9 @@ void poll(bool enabled) {
 // ---------------------------------------------------------------------------
 extern "C" {
 
-// Referenced by TinyUSB's network classes; the descriptor string above is
-// what the host actually reads.
-uint8_t tud_network_mac_address[6];
-
-void tud_network_init_cb(void) {
-  memcpy(tud_network_mac_address, UsbNcm::sHostMac, 6);
-}
-
+// No tud_network_init_cb and no tud_network_mac_address here: the header
+// declares both for ECM/RNDIS, and this NCM driver calls neither. The host
+// learns its MAC from the descriptor string above.
 void tud_network_set_packet_filter_cb(uint16_t) {
   UsbNcm::sHostOpened = true;
 }
@@ -347,7 +426,10 @@ bool tud_network_default_link_state_cb(void) {
 bool tud_network_recv_cb(const uint8_t* src, uint16_t size) {
   using namespace UsbNcm;
   if (sUp && size) {
-    void* copy = malloc(size);
+    // Internal RAM: a frame lives microseconds, and on a PSRAM board plain
+    // malloc() would put this copy where lwIP then reads it back through
+    // the cache, twice.
+    void* copy = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (copy) {
       memcpy(copy, src, size);
       // From here the buffer belongs to the stack, which frees it through

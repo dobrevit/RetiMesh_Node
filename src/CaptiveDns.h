@@ -27,9 +27,17 @@
 //  a host that asked the node over the cable would have every name steered
 //  to the portal. The core's DNSServer answers on every interface and keeps
 //  its socket to itself, so this is a responder of our own that looks at
-//  the address a query arrived on: the access point's gets the portal's
+//  which link a query arrived over: the access point's gets the portal's
 //  answer, any other gets REFUSED — an answer, and at once, which is what
 //  lets the host's resolver move on rather than wait out a timeout.
+//
+//  "Arrived over" is both addresses, not the local one alone. lwIP accepts a
+//  packet addressed to any of the node's own addresses whichever interface it
+//  turns up on, so a host on the LAN or on the USB cable that sends to the
+//  access point's address reaches this responder with the access point's
+//  address as the local one. The sender has to be on the access point's own
+//  subnet too — LocalLink::requestIsOnItsLink, the same rule the bootloader
+//  API is guarded by.
 //
 //  Asynchronous — the reply is built in the receive callback — so there is
 //  no polling task, and nothing to poll when the access point is off.

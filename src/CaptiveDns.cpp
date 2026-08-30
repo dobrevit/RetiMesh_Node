@@ -19,6 +19,7 @@
 #include "CaptiveDns.h"
 #include <Arduino.h>
 #include <lwip/def.h>
+#include "LocalLink.h"
 
 // RFC 1035, the parts a captive portal needs: a header, one question, and
 // one answer that points the name at us.
@@ -60,11 +61,24 @@ void CaptiveDns::handle(AsyncUDPPacket& pkt) {
   // Only the access point is steered to the portal. A query that arrived
   // over any other link — the USB cable, whose lease names us as DNS — is
   // refused outright, so the resolver moves on without waiting.
-  const bool ours   = pkt.localIP() == _ip;
+  //
+  // Both addresses decide that, for the reason LocalLink::requestIsHostFacing
+  // is written the way it is: lwIP accepts a packet for any of the node's
+  // addresses on whichever interface it arrives, so a host on the LAN or on
+  // the USB link that sends to the access point's address reaches this
+  // handler with the access point's address as the local one. The sender has
+  // to be on the access point's own subnet as well.
+  const bool ours   = pkt.localIP() == _ip &&
+                      LocalLink::requestIsOnItsLink(LocalLink::hostOrder(pkt.localIP()),
+                                                    LocalLink::hostOrder(pkt.remoteIP()));
   const bool answer = ours && qtype == kTypeA && qclass == kClassIn;
 
   uint8_t r[kMaxReply];
-  if (kHeader + question + 16 > sizeof(r)) return;
+  // Room for the question as asked, and for the answer only when there is one
+  // to write. Reserving the answer's 16 bytes on the REFUSED path too meant a
+  // long name got no reply at all — the resolver then waits out its timeout,
+  // which is the one thing this responder exists to prevent.
+  if (kHeader + question + (answer ? 16 : 0) > sizeof(r)) return;
   memcpy(r, q, kHeader + question);                              // id, flags, counts, the question as asked
   r[2] = (q[2] & 0x01) | kQr | (ours ? kAa : 0);                 // response, recursion as asked, authoritative on the AP
   r[3] = ours ? 0 : kRcodeRefused;                               // no error, or REFUSED; no recursion available

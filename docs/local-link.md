@@ -190,14 +190,17 @@ wired to EN and IO0. `POST /api/system/bootloader` answers `501` there and
 `BOOTLOADER CONFIRM` answers `RM ERR BOOTLOADER 501`, and the flashing tools
 fall through to esptool's own reset, which is what always worked.
 
-**A native-USB S3 (`t3s3` and its variants) answers `501` too**, and this
-was learned on the bench rather than read anywhere. Its console is the
-chip's own USB-Serial/JTAG unit, and that unit is not reset by the software
-reset `esp_restart()` performs: the host keeps its old enumeration while the
-ROM downloader comes up behind it expecting a fresh one, and the chip sits
-hung — no console, no downloader, no port drop. The RESET button did not
-recover it on the bench; only removing power did, so whatever is stuck lives
-in a domain EN does not reach. The same unit implements esptool's DTR/RTS handshake in hardware,
+**A native-USB S3 whose USB is the serial-JTAG unit alone answers `501`
+too**, and this was learned on the bench rather than read anywhere. That
+unit is not reset by the software reset `esp_restart()` performs: the host
+keeps its old enumeration while the ROM downloader comes up behind it
+expecting a fresh one, and the chip sits hung — no console, no downloader,
+no port drop. The RESET button did not recover it on the bench; only
+removing power did, so whatever is stuck lives in a domain EN does not
+reach. The shipped S3 images (`t3s3` and its variants, `esp32s3-qspi`) are
+not in this position: they present the composite device, whose OTG stack
+hands the peripheral back to the serial-JTAG unit before the restart, and
+they enter from software (the table above). The serial-JTAG unit implements esptool's DTR/RTS handshake in hardware,
 which works unaided and is what those boards offer. The software entry
 remains for the S3 behind a UART bridge (`heltec-v3`), where the downloader
 talks on UART0 and the bridge is untouched by the chip resetting; that path
@@ -253,9 +256,9 @@ re-posts on retry cannot push a promised restart out indefinitely.
 find the node          the --upload-port, or the one ESP-looking port; several -> say which
 ask the console        BOOTLOADER CONFIRM on the port (no credentials, names the board)
   or ask HTTP          POST /api/system/bootloader at $RETIMESH_NODE_URL, if the console is silent
-wait for the port      the USB-Serial/JTAG unit drops and returns (bounded, 8 s)
-esptool                PlatformIO's own invocation, --before no_reset when the downloader is known up
-wait for VERSION       the application announces itself again (20 s) — or the hook says what to press
+wait for the port      the port drops and returns (8 s; a composite device's downloader, up to 180 s behind a slow hub)
+esptool                PlatformIO's own invocation, its own reset at connect even into a downloader that is up
+wait for VERSION       the application announces itself again (20 s on a bridge, up to 180 s on native USB) — or the hook says what to press
 ```
 
 Every step is bounded and every failure is a message, not a hang. When the
@@ -379,8 +382,11 @@ enumerating with an interface missing.
 interface's string come from `boards.json` (`_usb_identity`), handed to the
 build by `tools/board_caps.py`; the ACM interface is the core's function and
 carries the core's own name for it. `USB_STATUS` says whether the PID is the
-test allocation, and a release refuses it (`tools/check_boards.py
---release` in the release workflow). The VID:PID is not ours to choose: Espressif
+test allocation, and every release says so too: `tools/check_boards.py
+--release`, the first step of the release workflow, warns about it in the
+build log without holding the release up — six of the eight boards a tag
+builds never present the composite device, and blocking their firmware over
+a PID they do not carry helps nobody. The VID:PID is not ours to choose: Espressif
 allocates PIDs under 0x303A to open-source projects on request
 (github.com/espressif/usb-pids), and until one is granted the registry
 carries pid.codes' test allocation 1209:0001, flagged

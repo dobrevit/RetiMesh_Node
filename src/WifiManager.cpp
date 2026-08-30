@@ -109,7 +109,7 @@ static void bootloaderJson(JsonObject o) {
     o["due_in_ms"] = r.dueInMs(millis());
   }
   o["primary"]        = Bootloader::methodName(p.primary());
-  const Bootloader::LastRestart lr = Bootloader::lastRestart();
+  const Diag::LastRestart lr = Diag::boot().lastRestart;
   if (lr.known) {
     JsonObject last = o["last_restart"].to<JsonObject>();
     last["to_persist_ms"] = lr.toPersistMs;
@@ -170,11 +170,14 @@ void WifiManager::begin() {
   }
 
   setupRoutes();
-  // The resolver runs whether or not Wi-Fi does: the USB link's lease names
-  // the node as DNS (CaptiveDns.h), and with the access point off there
-  // would otherwise be nothing on port 53 to refuse the host's queries —
-  // a timeout where a refusal was promised.
-  if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
+  // Where the USB link exists the resolver runs whether or not Wi-Fi does:
+  // the link's lease names the node as DNS (CaptiveDns.h), and with the
+  // access point off there would otherwise be nothing on port 53 to refuse
+  // the host's queries — a timeout where a refusal was promised. A board
+  // with neither has nothing to answer, and AsyncUDP's task goes unmade.
+  if (wifiEnabled() || HAS_USB_NCM) {
+    if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
+  }
   _http.begin();
 
   // http://retimesh.local/ (and http://<ssid>.local/) for clients whose
@@ -335,8 +338,6 @@ void WifiManager::tick() {
   }
 }
 
-// all captive-portal work stays off the radio core.
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // HTTP Basic Auth against the admin password. Sends the 401 challenge
 // itself when it fails, so callers just `return`.

@@ -53,8 +53,15 @@ static void test_native_usb_serial_jtag_offers_only_the_hardware_handshake() {
 }
 
 static void test_manual_recovery_is_always_last_and_always_there() {
-  const Caps combos[] = { Caps{}, Caps{true, false, false}, Caps{true, true, false},
-                          Caps{false, false, true}, Caps{true, true, true} };
+  // Every combination of the four capabilities, by field: a positional list
+  // here changed meaning when Caps grew a member, and swept the wrong rows.
+  Caps combos[16];
+  for (int i = 0; i < 16; i++) {
+    combos[i].forceDownloadBoot = (i & 1) != 0;
+    combos[i].nativeUsb         = (i & 2) != 0;
+    combos[i].otgStack          = (i & 4) != 0;
+    combos[i].bridgeAutoReset   = (i & 8) != 0;
+  }
   for (const Caps& c : combos) {
     const Plan p = plan(c);
     TEST_ASSERT_TRUE(p.count >= 1);

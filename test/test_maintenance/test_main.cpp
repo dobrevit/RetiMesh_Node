@@ -97,7 +97,7 @@ static void test_the_assembler_delivers_lines_and_tolerates_crlf() {
   const char* in = "VERSION\r\nSTATUS\n\n\r\n";
   int lines = 0;
   for (const char* p = in; *p; p++) {
-    if (a.feed(*p, over)) {
+    if (a.feed(*p, over, 0)) {
       lines++;
       if (lines == 1) TEST_ASSERT_EQUAL_STRING("VERSION", a.line());
       if (lines == 2) TEST_ASSERT_EQUAL_STRING("STATUS", a.line());
@@ -141,15 +141,33 @@ static void test_an_overlong_line_is_dropped_whole_and_reported_once() {
   char in[MAX_LINE + 40];
   memset(in, 'X', sizeof(in));
   memcpy(in, "BOOTLOADER CONFIRM ", 19);
-  for (size_t i = 0; i < sizeof(in); i++) { if (a.feed(in[i], over)) lines++; if (over) reports++; }
+  for (size_t i = 0; i < sizeof(in); i++) { if (a.feed(in[i], over, 0)) lines++; if (over) reports++; }
   TEST_ASSERT_EQUAL(0, lines);
   TEST_ASSERT_EQUAL(0, reports);            // not until the line ends
-  TEST_ASSERT_FALSE(a.feed('\n', over));
+  TEST_ASSERT_FALSE(a.feed('\n', over, 0));
   TEST_ASSERT_TRUE(over);
   // ...and the next line works.
-  for (const char* p = "VERSION"; *p; p++) a.feed(*p, over);
-  TEST_ASSERT_TRUE(a.feed('\n', over));
+  for (const char* p = "VERSION"; *p; p++) a.feed(*p, over, 0);
+  TEST_ASSERT_TRUE(a.feed('\n', over, 0));
   TEST_ASSERT_EQUAL_STRING("VERSION", a.line());
+}
+
+static void test_an_overlong_line_that_pauses_is_still_swallowed_whole() {
+  // The overlong line arrives in two writes with a stall between them: the
+  // stall must not turn its tail into a fresh line that parses. idle()
+  // drops what is buffered, not the fact that a line is being dropped.
+  LineAssembler a;
+  bool over = false;
+  for (int i = 0; i < MAX_LINE + 10; i++) a.feed('X', over, 100);
+  TEST_ASSERT_TRUE(a.pending());
+  TEST_ASSERT_FALSE(a.idle(100 + 2 * LINE_IDLE_MS));      // nothing buffered to drop
+  uint32_t t = 100 + 2 * LINE_IDLE_MS;
+  int lines = 0;
+  for (const char* p = "VERSION"; *p; p++) if (a.feed(*p, over, t++)) lines++;
+  TEST_ASSERT_FALSE(a.feed('\n', over, t));
+  TEST_ASSERT_EQUAL(0, lines);
+  TEST_ASSERT_TRUE(over);                                  // reported once, at the newline
+  TEST_ASSERT_FALSE(a.pending());
 }
 
 // --- replies -----------------------------------------------------------------
@@ -207,6 +225,7 @@ int main() {
   RUN_TEST(test_the_assembler_delivers_lines_and_tolerates_crlf);
   RUN_TEST(test_a_line_that_stalls_is_dropped_not_prepended);
   RUN_TEST(test_an_overlong_line_is_dropped_whole_and_reported_once);
+  RUN_TEST(test_an_overlong_line_that_pauses_is_still_swallowed_whole);
   RUN_TEST(test_replies_carry_the_prefix_a_host_filters_on);
   RUN_TEST(test_replies_never_overrun_a_small_buffer);
   RUN_TEST(test_every_command_in_the_table_parses_by_its_own_name);

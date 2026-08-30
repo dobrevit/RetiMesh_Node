@@ -35,9 +35,11 @@
 //  Behind the NCM function sits an esp_netif on the default Ethernet stack
 //  with a DHCP server, at usbNodeAddress(<last MAC octet>) (LocalLinkState.h).
 //  The services already bind 0.0.0.0, so HTTP, the transport and mDNS reach
-//  the host over it with nothing more to do. The link is brought up when the
-//  host activates the data interface and down when the cable goes or the
-//  operator switches usb off; the device itself stays enumerated either way.
+//  the host over it with nothing more to do. The link is brought up once the
+//  host has enumerated the device (the class driver does not report the data
+//  interface being opened; the first frame decides the rest) and down when
+//  the cable goes or the operator switches usb off; the device itself stays
+//  enumerated either way.
 //
 //  Every transition of the network interface runs from poll(), on the loop
 //  task: the TinyUSB callbacks arrive on the USB task and only record what

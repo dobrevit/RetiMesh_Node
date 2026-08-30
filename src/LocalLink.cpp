@@ -22,6 +22,7 @@
 // ============================================================================
 #include "LocalLink.h"
 #include "UsbNcm.h"
+#include <lwip/def.h>
 #include <WiFi.h>
 #include "WifiManager.h"
 #include "Bootloader.h"
@@ -53,11 +54,16 @@ Link* serving(uint32_t localIp) {
   return nullptr;
 }
 
-bool requestIsHostFacing(uint32_t localIp, uint32_t remoteIp) {
+bool requestIsOnItsLink(uint32_t localIp, uint32_t remoteIp) {
   const Link* l = serving(localIp);
-  if (!l || !isHostFacing(l->type())) return false;
+  if (!l) return false;
   const uint32_t mask = l->netmask();
   return mask != 0 && (remoteIp & mask) == (l->address() & mask);
+}
+
+bool requestIsHostFacing(uint32_t localIp, uint32_t remoteIp) {
+  const Link* l = serving(localIp);
+  return l && isHostFacing(l->type()) && requestIsOnItsLink(localIp, remoteIp);
 }
 
 uint32_t hostOrder(const IPAddress& a) { return ipv4(a[0], a[1], a[2], a[3]); }
@@ -125,15 +131,15 @@ Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Sourc
 }
 
 // ---------------------------------------------------------------------------
-// Wi-Fi adapters
+// The phase machine, for every link that runs
 // ---------------------------------------------------------------------------
-void WifiLink::begin() {
-  _applied = wanted();
-  _m = Machine(_applied);
+void MachineLink::begin() {
+  _m = Machine(enabled());
   poll(millis());
 }
 
-void WifiLink::poll(uint32_t nowMs) {
+void MachineLink::poll(uint32_t nowMs) {
+  drive();
   if (!enabled()) { _m.apply(Event::Disable, nowMs); return; }
   _m.apply(Event::Enable, nowMs);
   const bool up = carrier();
@@ -141,7 +147,7 @@ void WifiLink::poll(uint32_t nowMs) {
   if (up) _m.apply((uint32_t)ip() != 0 ? Event::AddressUp : Event::AddressDown, nowMs);
 }
 
-Snapshot WifiLink::snapshot() const {
+Snapshot MachineLink::snapshot() const {
   Snapshot s;
   s.type = type();
   strlcpy(s.name, name(), sizeof(s.name));
@@ -156,14 +162,17 @@ Snapshot WifiLink::snapshot() const {
   return s;
 }
 
-uint32_t WifiLink::address() const {
+uint32_t MachineLink::address() const {
   return _m.phase() == Phase::Ready ? hostOrder(ip()) : 0;
 }
 
-uint32_t WifiLink::netmask() const {
+uint32_t MachineLink::netmask() const {
   return _m.phase() == Phase::Ready ? hostOrder(mask()) : 0;
 }
 
+// ---------------------------------------------------------------------------
+// Wi-Fi adapters
+// ---------------------------------------------------------------------------
 bool      WifiApLink::wanted() const  { return settings.links().wifiEnabled; }
 bool      WifiApLink::carrier() const { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
 IPAddress WifiApLink::ip() const      { return WiFi.softAPIP(); }
@@ -180,47 +189,14 @@ IPAddress WifiStaLink::mask() const    { return WiFi.subnetMask(); }
 // ---------------------------------------------------------------------------
 #if HAS_USB_NCM
 bool UsbNcmLink::enabled() const { return settings.links().usbEnabled; }
-
-void UsbNcmLink::begin() {
-  _m = Machine(enabled());
-  UsbNcm::begin();
-  poll(millis());
-}
-
-void UsbNcmLink::poll(uint32_t nowMs) {
-  // The driver follows the switch every pass, so a change saved by the API
-  // or the console takes effect here, on the loop task, where the network
-  // stack may be called.
-  UsbNcm::poll(enabled());
-  if (!enabled()) { _m.apply(Event::Disable, nowMs); return; }
-  _m.apply(Event::Enable, nowMs);
-  const bool up = UsbNcm::linkUp();
-  _m.apply(up ? Event::CarrierUp : Event::CarrierDown, nowMs);
-  if (up) _m.apply(Event::AddressUp, nowMs);          // static: it comes with the carrier
-}
-
-Snapshot UsbNcmLink::snapshot() const {
-  Snapshot s;
-  s.type = type();
-  strlcpy(s.name, name(), sizeof(s.name));
-  s.phase = _m.phase();
-  s.uptimeS = _m.uptimeS(millis());
-  // One host per cable: the count is whether it is there.
-  s.clientKnown = true;
-  s.clients = s.phase == Phase::Ready ? 1 : 0;
-  if (s.phase == Phase::Ready) {
-    s.addressing = Addressing::Static;
-    strlcpy(s.ip, UsbNcm::address().toString().c_str(), sizeof(s.ip));
-  }
-  return s;
-}
-
-uint32_t UsbNcmLink::address() const {
-  return _m.phase() == Phase::Ready ? hostOrder(UsbNcm::address()) : 0;
-}
-uint32_t UsbNcmLink::netmask() const {
-  return _m.phase() == Phase::Ready ? kUsbNetmask : 0;
-}
+void UsbNcmLink::begin() { UsbNcm::begin(); MachineLink::begin(); }
+// The driver follows the switch every pass, so a change saved by the API or
+// the console takes effect here, on the loop task, where the network stack
+// may be called.
+void      UsbNcmLink::drive()         { UsbNcm::poll(enabled()); }
+bool      UsbNcmLink::carrier() const { return UsbNcm::linkUp(); }
+IPAddress UsbNcmLink::ip() const      { return UsbNcm::address(); }
+IPAddress UsbNcmLink::mask() const    { return IPAddress(htonl(kUsbNetmask)); }
 #endif
 
 // ---------------------------------------------------------------------------

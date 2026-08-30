@@ -41,7 +41,9 @@ except Exception as exc:  # pragma: no cover - only when pyserial is missing
 
 
 def _log(msg: str) -> None:
-    print(f"retimesh: {msg}")
+    # Flushed: PlatformIO captures this through a pipe, where Python buffers
+    # by block, and a wait that reports nothing for a minute reads as a hang.
+    print(f"retimesh: {msg}", flush=True)
 
 
 def before_upload(source, target, env):  # noqa: ARG001
@@ -72,10 +74,14 @@ def before_upload(source, target, env):  # noqa: ARG001
         # name (ttyACM0 -> ttyACM1 on a busy host): point esptool at it.
         _log(f"using {result.port}" + (f" instead of {port}" if port else ""))
         env.Replace(UPLOAD_PORT=result.port)
+    # The chip's identity, for after_upload: the downloader's port name
+    # carries none, and on a native-USB board the application comes back as
+    # another device altogether.
+    env.Replace(RETIMESH_NODE_ID=result.node_id)
     if result.entered:
         # entered is only ever true once the node has been seen to go down
-        # and come back as the downloader: a DTR/RTS reset on top would kick
-        # it back to the application on a USB-Serial/JTAG port.
+        # and come back as the downloader; what esptool does at connect is
+        # the hand-off's answer, decided in one place (HandOff.esptool_before).
         _log(f"downloader ready on {result.port} via {result.method}")
         flags = list(env.get("UPLOADERFLAGS", []))
         if "--before" in flags:
@@ -90,11 +96,11 @@ def after_upload(source, target, env):  # noqa: ARG001
     if device is None or os.environ.get("RETIMESH_NO_AUTO_BOOTLOADER") == "1":
         return
     port = env.subst("$UPLOAD_PORT") or None
-    # The same patience as the hand-off: on a native-USB board the way back
-    # from the ROM is a new device on the bus, and a hub that was slow to
-    # report the chip leaving is as slow to report it returning.
-    wait = 90.0
-    info = device.wait_for_application(port=port, timeout=wait, log=_log)
+    # The same patience as the hand-off, and by the same rule for every
+    # caller: device.application_wait_s decides from what the chip is.
+    node_id = env.get("RETIMESH_NODE_ID")
+    wait = device.application_wait_s(node_id, port)
+    info = device.wait_for_application(port=port, timeout=wait, log=_log, node_id=node_id)
     if info:
         _log(f"application is back: {info}")
     else:

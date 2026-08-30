@@ -62,34 +62,6 @@ namespace Bootloader {
 
 static Sequencer sSeq;
 
-// Timestamps a restart leaves for the next boot to read, in RTC memory and
-// on the RTC clock, both of which survive every reset short of a power
-// cycle — the ROM session and esptool's reset between the two runs included.
-// Two marks: entering restart(), and handing over to the core's
-// persist-restart on the composite device. No shutdown handler: IDF keeps
-// five slots, Wi-Fi holds one and the core's hand-over needs one, and a
-// diagnostic is not worth making a refused flash more likely.
-#include <esp_attr.h>
-extern "C" uint64_t esp_rtc_get_time_us(void);
-struct RestartMarks { uint32_t magic; uint32_t entryMs, persistMs; };
-static RTC_NOINIT_ATTR RestartMarks sMarks;
-static constexpr uint32_t kMarksMagic = 0x52535452;   // "RSTR"
-static LastRestart sLast = {0, 0, false};
-static inline uint32_t rtcMs() { return (uint32_t)(esp_rtc_get_time_us() / 1000); }
-
-void begin() {
-  if (sMarks.magic == kMarksMagic && sMarks.entryMs) {
-    const uint32_t now  = rtcMs();
-    const uint32_t base = sMarks.persistMs ? sMarks.persistMs : sMarks.entryMs;
-    sLast.toPersistMs = sMarks.persistMs ? sMarks.persistMs - sMarks.entryMs : 0;
-    sLast.toBootMs    = now - base;
-    sLast.known = true;
-    log_i("last restart: %lu ms to the core's persist-restart, %lu ms from there to this boot",
-          (unsigned long)sLast.toPersistMs, (unsigned long)sLast.toBootMs);
-  }
-  sMarks.magic = 0;
-}
-LastRestart lastRestart() { return sLast; }
 static const char kRecovery[] =
   "hold BOOT, press RST (or replug USB while holding BOOT), then flash with esptool";
 
@@ -98,6 +70,10 @@ static const char kRecovery[] =
 #else
   #define HAS_FORCE_DOWNLOAD_BOOT 0
 #endif
+// Whether this build sets the bit with a handler of its own. The composite
+// device leaves that to the core's persist-restart (restart() below), so it
+// carries no handler and has nothing to disarm.
+#define OWN_DOWNLOAD_HANDLER (HAS_FORCE_DOWNLOAD_BOOT && !HAS_USB_NCM)
 
 Caps caps() {
   Caps c;
@@ -108,7 +84,7 @@ Caps caps() {
   return c;
 }
 
-#if HAS_FORCE_DOWNLOAD_BOOT
+#if OWN_DOWNLOAD_HANDLER
 static void IRAM_ATTR forceDownloadBootHandler() {
   REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
 }
@@ -136,7 +112,7 @@ static bool armDownloadBoot() {
     }
     esp_unregister_shutdown_handler(slotProbe);
     return true;
-  #elif HAS_FORCE_DOWNLOAD_BOOT
+  #elif OWN_DOWNLOAD_HANDLER
     const esp_err_t err = esp_register_shutdown_handler(forceDownloadBootHandler);
     if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) return true;
     log_e("bootloader: esp_register_shutdown_handler failed (%d): the shutdown table is full", (int)err);
@@ -147,7 +123,7 @@ static bool armDownloadBoot() {
 }
 
 static void disarmDownloadBoot() {
-  #if HAS_FORCE_DOWNLOAD_BOOT
+  #if OWN_DOWNLOAD_HANDLER
     esp_unregister_shutdown_handler(forceDownloadBootHandler);
   #endif
 }
@@ -206,7 +182,13 @@ static void quiesce() {
 
 static void restart() {
   const Target target = sSeq.snapshot().target;
-  sMarks = { kMarksMagic, rtcMs(), 0 };
+  // The timestamps the next boot reads back (Diag.h): on the RTC clock,
+  // which runs on through the ROM session and esptool's reset. No shutdown
+  // handler of our own for them: IDF keeps five slots, Wi-Fi holds one and
+  // the core's hand-over needs one, and a diagnostic is not worth making a
+  // refused flash more likely.
+  Diag::RestartMarks& marks = Diag::restartMarks();
+  marks.entryMs = Diag::rtcMs();
   #if HAS_USB_NCM
     // The core's own way into the downloader on the composite device: it
     // registers a shutdown handler that sets the download bit, hands the
@@ -214,14 +196,15 @@ static void restart() {
     // handler stays unarmed on this path — armDownloadBoot() defers to it.
     if (target == Target::Bootloader) {
       UsbNcm::detach();
-      sMarks.persistMs = rtcMs();
+      marks.persistMs = Diag::rtcMs();
       usb_persist_restart(RESTART_BOOTLOADER);
       // It returns only when it could not register its shutdown handler.
       // The device is already off the bus, so there is no console left to
       // report to and nothing to wait for: restart into the application,
-      // where the log and the API will say what happened.
+      // where the log and the API will say what happened — and the marks
+      // must not say a hand-over took place, because none did.
+      marks.persistMs = 0;
       log_e("bootloader: the core's persist-restart could not arm; restarting into the application");
-      esp_restart();
     }
   #endif
   // A plain restart must not carry a download flag armed by an earlier

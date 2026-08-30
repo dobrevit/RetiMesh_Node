@@ -61,14 +61,9 @@ inline bool reboot(Source source = Source::Settings) {
 bool    pending();
 Pending snapshot();
 
-// How the previous run's restart went, in milliseconds between its steps:
-// entering restart(), handing over to the core's persist-restart (composite
-// device only), and this boot. Zero where no restart preceded this boot.
-// Kept in RTC memory across the ROM session, so a restart that took a long
-// way round can say where.
-struct LastRestart { uint32_t toPersistMs, toBootMs; bool known; };
-LastRestart lastRestart();
-void begin();      // reads the markers left by the previous run; once, early
+// How the previous run's restart went is Diag's to report
+// (Diag::boot().lastRestart): restart() stamps the RTC record, Diag reads
+// it back at the next boot.
 
 // From loop(): runs the sequence. Never returns from the Restart step.
 void tick();

@@ -253,15 +253,23 @@ def cmd_install(args):
 
         # A running node is asked politely for its downloader first; esptool's
         # own reset remains the fallback, and BOOT+RST the one after that.
-        before = None
+        before, node_id = None, None
         if not args.no_handoff:
             r = dev.hand_off_to_bootloader(port=port, log=lambda m: print("  " + m), port_hint="--port")
-            before, port = r.esptool_before, r.port or port
+            before, port, node_id = r.esptool_before, r.port or port, r.node_id
             if not r.entered:
                 print("  " + r.message)
+                # A hand-off that ends with no port is one whose port has gone:
+                # the node was asked, went down, and nothing came back. Running
+                # esptool against the path it used to be on fails with an open
+                # error that reads like a different fault altogether.
+                if r.port is None and not dev.select_port(dev.list_ports(), device=port):
+                    sys.exit(f"  {port} is no longer there; nothing to flash")
         flash(board, tmp, port, args.mode, args.baud, before=before)
-        info = dev.wait_for_application(port, timeout=20.0)
-        print(f"\nBack up: {info}" if info else "\nThe node did not answer within 20 s; press RST if it stays quiet.")
+        wait = dev.application_wait_s(node_id, port)
+        info = dev.wait_for_application(port, timeout=wait, node_id=node_id, log=lambda m: print("  " + m))
+        print(f"\nBack up: {info}" if info else
+              f"\nThe node did not answer within {wait:.0f} s; press RST if it stays quiet.")
         print("\nDone. Join the Wi-Fi network \"retimesh-XXXXXX\" (last six hex digits of the board MAC)\n"
               "and open http://10.42.0.1/")
 

@@ -196,7 +196,7 @@ public:
   // Returns true when a complete line is available in line(). `overflowed`
   // is set (once, on the byte that ended the overlong line) so the caller can
   // answer with a TooLong error. `nowMs` stamps the byte for idle().
-  bool feed(char c, bool& overflowed, uint32_t nowMs = 0) {
+  bool feed(char c, bool& overflowed, uint32_t nowMs) {
     overflowed = false;
     _lastByteMs = nowMs;
     if (c == '\n' || c == '\r') {
@@ -214,10 +214,13 @@ public:
   void reset() { _len = 0; _dropping = false; }
   bool pending() const { return _len > 0 || _dropping; }
   // Called when the port has nothing to read: drops a partial line the port
-  // has been silent on for LINE_IDLE_MS. True when it dropped one.
+  // has been silent on for LINE_IDLE_MS. True when it dropped one. An
+  // overlong line being dropped stays in that state: its remainder, if it
+  // ever arrives, is still swallowed to the newline and reported, not
+  // assembled into a fresh line that might parse.
   bool idle(uint32_t nowMs) {
-    if (!pending() || nowMs - _lastByteMs <= LINE_IDLE_MS) return false;
-    reset();
+    if (_len == 0 || nowMs - _lastByteMs <= LINE_IDLE_MS) return false;
+    _len = 0;
     return true;
   }
 

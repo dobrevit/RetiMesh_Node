@@ -70,6 +70,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <atomic>
+#if defined(ESP_PLATFORM)
+  #include <freertos/FreeRTOS.h>
+  #include <freertos/task.h>
+#endif
 
 namespace Bootloader {
 
@@ -234,7 +238,7 @@ enum class Step : uint8_t { None = 0, Quiesce, Restart };
 //
 // request() runs on whichever task took the HTTP request or the console
 // line; tick() runs on the loop task; and two requests can race each other
-// from two tasks. The fields are therefore guarded by a spinlock rather than
+// from two tasks. The fields are therefore guarded by a lock rather than
 // by a comment about store ordering, which is what an earlier version had,
 // and which the compiler was under no obligation to honour: had it sunk the
 // deadline store below the state store, a tick landing between them would
@@ -301,12 +305,27 @@ public:
   }
 
 private:
-  struct Guard {
-    std::atomic_flag& f;
-    explicit Guard(std::atomic_flag& flag) : f(flag) { while (f.test_and_set(std::memory_order_acquire)) {} }
-    ~Guard() { f.clear(std::memory_order_release); }
-  };
-  mutable std::atomic_flag _lock = ATOMIC_FLAG_INIT;
+  // On the chip the guard is a critical section: the holder cannot be
+  // preempted, so a caller of higher priority landing on the same core —
+  // the USB event task carrying a touch, unpinned and at priority 24 — waits
+  // out a few instructions rather than spinning on a flag held by a task
+  // that can no longer run. Off the chip (the native tests, one thread) a
+  // flag is all that is needed.
+  #if defined(ESP_PLATFORM)
+    struct Guard {
+      portMUX_TYPE& m;
+      explicit Guard(portMUX_TYPE& mux) : m(mux) { taskENTER_CRITICAL(&m); }
+      ~Guard() { taskEXIT_CRITICAL(&m); }
+    };
+    mutable portMUX_TYPE _lock = portMUX_INITIALIZER_UNLOCKED;
+  #else
+    struct Guard {
+      std::atomic_flag& f;
+      explicit Guard(std::atomic_flag& flag) : f(flag) { while (f.test_and_set(std::memory_order_acquire)) {} }
+      ~Guard() { f.clear(std::memory_order_release); }
+    };
+    mutable std::atomic_flag _lock = ATOMIC_FLAG_INIT;
+  #endif
   std::atomic<State> _state{State::Idle};
   Target   _target = Target::App;
   Source   _source = Source::Http;
