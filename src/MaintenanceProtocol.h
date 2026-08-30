@@ -66,10 +66,14 @@ namespace Maintenance {
 #define MAINT_PROTOCOL_VERSION 2
 constexpr size_t MAX_LINE = 96;           // request line, bytes, excluding the newline
 constexpr size_t MAX_ARGS = 3;
-constexpr size_t MAX_ARG  = 24;
+// Long enough for the longest settings key a SET can name
+// (transport.announce_rate_penalty, 31), which is what decides this rather
+// than any command word.
+constexpr size_t MAX_ARG  = 40;
 
 enum class Cmd : uint8_t {
   Help = 0, Status, Version, Reset, Bootloader, UsbStatus, NetworkStatus, Links, Wifi, Ppp,
+  Get, Set,
   Unknown,
 };
 
@@ -86,6 +90,8 @@ inline const CmdInfo* commands(size_t& count) {
     { Cmd::Links,         "LINKS",          "",        "which links this board offers and which are enabled" },
     { Cmd::Wifi,          "WIFI",           "ON|OFF",  "enable or disable Wi-Fi (saves, restarts)" },
     { Cmd::Ppp,           "PPP",            "ON|OFF",  "enable or disable PPP on this port (saves, applies live)" },
+    { Cmd::Get,           "GET",            "[key]",   "read settings: all, one section (radio), or one key (radio.sf)" },
+    { Cmd::Set,           "SET",            "key value", "change one setting; the value is taken as typed" },
     { Cmd::Reset,         "RESET",          "CONFIRM", "restart into the application" },
     { Cmd::Bootloader,    "BOOTLOADER",     "CONFIRM", "restart into the ROM downloader for flashing" },
   };
@@ -108,6 +114,13 @@ struct Request {
   char   args[MAX_ARGS][MAX_ARG] = {};
   size_t argc = 0;
   bool   confirmed = false;              // "CONFIRM" appeared among the arguments
+  // SET's value, verbatim: everything after the key, with the case it was
+  // typed in and any spaces it contained. The tokens above are uppercased,
+  // which is right for a command and wrong for a password, an SSID or a
+  // callsign. It points into the line the caller parsed, which outlives the
+  // request; empty for every other command.
+  const char* rawValue = nullptr;
+  size_t      rawValueLen = 0;
   bool   hasArg(const char* a) const {
     for (size_t i = 0; i < argc; i++) if (strcmp(args[i], a) == 0) return true;
     return false;
@@ -149,6 +162,20 @@ inline ParseError parse(const char* line, Request& out) {
       if (out.argc >= MAX_ARGS) return ParseError::BadArgument;
       if (!copyToken(start, len, out.args[out.argc], MAX_ARG)) return ParseError::BadArgument;
       out.argc++;
+      // SET takes its value as typed. Everything after the key is that value —
+      // spaces and all, so an SSID with a space in it survives — and the
+      // tokeniser stops here rather than uppercasing a password into
+      // something that will not authenticate.
+      if (out.argc == 1 && strcmp(out.word, "SET") == 0) {
+        const char* v = p;
+        while (*v == ' ' || *v == '\t') v++;
+        const char* end = v + strlen(v);
+        while (end > v && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) end--;
+        out.rawValue = v;
+        out.rawValueLen = (size_t)(end - v);
+        nTokens++;
+        break;
+      }
     }
     nTokens++;
   }
@@ -167,6 +194,15 @@ inline ParseError parse(const char* line, Request& out) {
     case Cmd::Wifi: case Cmd::Ppp:
       if (out.argc != 1 || (strcmp(out.args[0], "ON") != 0 && strcmp(out.args[0], "OFF") != 0))
         return ParseError::BadArgument;
+      break;
+    case Cmd::Get:
+      // No argument reads everything; one names a section or a single key.
+      if (out.argc > 1) return ParseError::BadArgument;
+      break;
+    case Cmd::Set:
+      // A key and a value, and the value may not be empty — "SET x" with
+      // nothing after it is a typo, not a request to blank a setting.
+      if (out.argc != 1 || out.rawValueLen == 0) return ParseError::BadArgument;
       break;
     case Cmd::Reset: case Cmd::Bootloader:
       // CONFIRM is optional at parse time; a request without it gets a 400

@@ -98,6 +98,74 @@ BOOTLOADER
 RM ERR BOOTLOADER 400 add CONFIRM: BOOTLOADER CONFIRM
 ```
 
+### Settings over the console
+
+`GET` and `SET` reach every setting the web API has, by the API's own names
+with the section in front. This is the link that is there when no other one
+is: a node whose station password is wrong, or whose access point will not
+take clients, answers here and nowhere else — and before these two commands
+existed, the only way out of that was to erase the node, which takes its
+Reticulum identity with it.
+
+```
+GET
+RM GET section=radio
+RM GET section=wifi
+RM GET section=links
+RM GET section=maintenance
+RM GET section=transport
+RM GET section=admin
+RM OK GET lines=6 note="GET <section> or GET <section>.<key> for values"
+GET radio
+RM GET radio.region="eu868"
+RM GET radio.freq_mhz=869.525
+RM GET radio.sf=8
+...
+RM OK GET lines=14
+GET wifi.sta_ssid
+RM GET wifi.sta_ssid="home-network"
+RM OK GET lines=1
+SET radio.sf 9
+RM SET radio.sf=9
+RM OK SET lines=1 saved
+SET radio.sf 99
+RM ERR SET 400 bad value: spreading factor must be 7-12 on the SX1262
+```
+
+`GET` with nothing lists the sections rather than every value: the whole table
+is forty-odd lines, and writing them is done from the loop task on a port
+whose host may not be reading. `GET radio` reads a section and `GET radio.sf`
+one setting. `SET` takes the value **as typed**
+— the rest of the line, case and spaces intact, because a password that is
+uppercased on its way in authenticates against nothing. Quotes around a value
+are stripped, which is how a text setting is cleared: `SET wifi.sta_ssid ""`
+forgets the station network and its password together.
+
+What a value may be is decided in `src/SettingsRules.h`, which the web API
+uses too, so both refuse the same value in the same words — and the bounds
+come from the transceiver actually fitted, which is why the refusal above
+names the SX1262. A setting that needs a restart says so (`saved; restarting
+to apply it`), and the reply reads the value back from the store rather than
+echoing what was typed.
+
+A refusal keeps its own code, as `WIFI` and `PPP` always have: **400** the
+value was wrong, **409** a restart is already in progress and the same command
+will work in a moment, **501** this board or build has no such link. Nothing
+is written at all while a restart is pending — the web API answers `503` in
+that state for the same reason, that a setting saved then might not reach
+flash before the restart does.
+
+Values that have names use them, as the API does: `transport.power_profile` is
+`performance|balanced|battery`, `wifi.security` is `open|wpa2|wpa2wpa3|wpa3`,
+and both are matched without regard to case.
+
+There is no password on any of this, deliberately. The console is the serial
+port: whoever has it can dump the flash, reflash the board, and ask for the
+ROM downloader with `BOOTLOADER CONFIRM`, which this node has always allowed.
+A password on the settings would guard a window beside an open door. Secrets
+are still never printed — `wifi.password` reads back as `(set)` or `(unset)`,
+because the console shares its port with the log.
+
 | Command | Reply |
 |---|---|
 | `HELP` | one `RM HELP cmd=… help="…"` line per command |

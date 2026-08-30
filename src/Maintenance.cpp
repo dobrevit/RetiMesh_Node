@@ -21,6 +21,7 @@
 // ============================================================================
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
+#include "SettingsFields.h"
 
 #include "Config.h"
 #include "Settings.h"
@@ -187,28 +188,31 @@ static void doLinks() {
 // WIFI ON|OFF and PPP ON|OFF: one link's switch, by the key the settings
 // table binds it to. The same rule the HTTP handler applies, in the one
 // place it is written; the reply names the key it changed.
+// WIFI ON and SET links.wifi on are the same operation and now take the same
+// path: the mapping from a link key to its switch lives in LocalLink::fields
+// and is walked once, in SettingsFields, rather than here as well. The reply
+// keeps this command's shape — a key=value on the OK line — because scripts
+// read it.
 static void doLinkSwitch(const Request& r, const char* key) {
   const char* name = cmdName(r.cmd);
   const bool on = strcmp(r.args[0], "ON") == 0;
-  LinkSettings want = settings.links();
-  bool changed[8] = {};
-  size_t n = 0;
-  const LocalLink::Field* f = LocalLink::fields(n);
-  for (size_t i = 0; i < n && i < 8; i++)
-    if (strcmp(f[i].key, key) == 0) { want.*(f[i].on) = on; changed[i] = true; }
-  const char* detail = "";
-  char kv[96];
+  char field[32];
+  snprintf(field, sizeof(field), "links.%s", key);
+  char detail[192] = "";
+  const SettingsFields::Result res = SettingsFields::set(field, on ? "on" : "off", detail, sizeof(detail));
+  char kv[128];
   const char* state = on ? "on" : "off";
-  switch (LocalLink::applyLinks(want, changed, Bootloader::Source::Console, &detail)) {
-    case LocalLink::Apply::Unchanged:        snprintf(kv, sizeof(kv), "%s=%s unchanged=true", key, state); ok(name, kv); break;
-    case LocalLink::Apply::Saved:            snprintf(kv, sizeof(kv), "%s=%s restart=false", key, state); ok(name, kv); break;
-    case LocalLink::Apply::SavedRestarting:  snprintf(kv, sizeof(kv), "%s=%s restart=true", key, state); ok(name, kv); break;
-    case LocalLink::Apply::SavedNextBoot:    snprintf(kv, sizeof(kv), "%s=%s restart=false note=applies_at_next_boot", key, state); ok(name, kv); break;
-    case LocalLink::Apply::RefusedUnusable:  err(name, 400, detail); break;
-    case LocalLink::Apply::RefusedBaud:      err(name, 400, detail); break;   // a switch changes no speed; the switch statement is exhaustive
-    case LocalLink::Apply::RefusedLockedOut: err(name, 400, "refused: with the serial console switched off this would leave no way to reach the node"); break;
-    case LocalLink::Apply::RefusedBusy:      err(name, 409, "a restart is already in progress"); break;
-    case LocalLink::Apply::NvsFailed:        err(name, 500, "NVS write failed"); break;
+  switch (res) {
+    case SettingsFields::Result::Ok:
+      snprintf(kv, sizeof(kv), "%s=%s restart=false", key, state); ok(name, kv); break;
+    case SettingsFields::Result::OkRestart:
+      snprintf(kv, sizeof(kv), "%s=%s restart=true", key, state); ok(name, kv); break;
+    case SettingsFields::Result::OkNextBoot:
+      snprintf(kv, sizeof(kv), "%s=%s restart=false note=applies_at_next_boot", key, state); ok(name, kv); break;
+    case SettingsFields::Result::Busy:        err(name, 409, "a restart is already in progress"); break;
+    case SettingsFields::Result::Unsupported: err(name, 501, detail); break;
+    case SettingsFields::Result::NvsFailed:   err(name, 500, "NVS write failed"); break;
+    default:                                  err(name, 400, detail[0] ? detail : "refused"); break;
   }
 }
 
@@ -231,6 +235,11 @@ static void doRestart(const Request& r, Bootloader::Target target) {
            RESTART_ACK_DELAY_MS);
   ok(name, kv);
 }
+
+// Defined below with the rest of the settings work; declared here because
+// the dispatch table comes first.
+static void doGet(const Request& r);
+static void doSet(const Request& r);
 
 static void dispatch(const char* line) {
   sDataLines = 0;
@@ -255,9 +264,108 @@ static void dispatch(const char* line) {
     case Cmd::Links:         doLinks(); break;
     case Cmd::Wifi:          doLinkSwitch(r, "wifi"); break;
     case Cmd::Ppp:           doLinkSwitch(r, "ppp"); break;
+    case Cmd::Get:           doGet(r); break;      // defined below, with the other settings work
+    case Cmd::Set:           doSet(r); break;
     case Cmd::Reset:         doRestart(r, Bootloader::Target::App); break;
     case Cmd::Bootloader:    doRestart(r, Bootloader::Target::Bootloader); break;
     default:                 break;      // Unknown never reaches here: parse() refused it
+  }
+}
+
+// --- settings -----------------------------------------------------------------
+// GET with nothing reads every setting, GET <section> one section, GET <key>
+// one setting. The keys are the web API's names with their section in front,
+// so an operator who knows one knows the other (SettingsFields.h).
+static void doGet(const Request& r) {
+  char line[160];
+  if (r.argc == 0) {
+    // The section names, not every value. A bare GET over the whole table is
+    // forty-odd blocking writes from the loop task — and on a USB CDC whose
+    // host has the port open but is not draining it, a write is bounded by
+    // nothing. The same file caps reads at kBudget for that reason.
+    char seen[8][24] = {};
+    size_t sections = 0;
+    for (size_t i = 0; i < SettingsFields::count() && sections < 8; i++) {
+      const char* key = SettingsFields::keyAt(i);
+      const char* dot = strchr(key, '.');
+      if (!dot) continue;
+      const size_t len = (size_t)(dot - key);
+      bool known = false;
+      for (size_t s = 0; s < sections; s++) if (!strncmp(seen[s], key, len) && seen[s][len] == '\0') known = true;
+      if (known) continue;
+      snprintf(seen[sections], sizeof(seen[sections]), "%.*s", (int)len, key);
+      sections++;
+    }
+    for (size_t s = 0; s < sections; s++) dataf("GET", "section=%s", seen[s]);
+    ok("GET", "note=\"GET <section> or GET <section>.<key> for values\"");
+    return;
+  }
+  // A key first: "radio.sf" is a key, "radio" a section, and a section that
+  // does not exist is a typo worth saying so about rather than an empty list.
+  if (SettingsFields::renderKey(r.args[0], line, sizeof(line))) {
+    dataf("GET", "%s", line);
+    ok("GET");
+    return;
+  }
+  if (!SettingsFields::sectionExists(r.args[0])) {
+    err("GET", errorCode(ParseError::BadArgument), "no such setting or section");
+    return;
+  }
+  for (size_t i = 0; i < SettingsFields::count(); i++)
+    if (SettingsFields::keyInSection(i, r.args[0]) && SettingsFields::render(i, line, sizeof(line)))
+      dataf("GET", "%s", line);
+  ok("GET");
+}
+
+// SET changes one setting. The value is whatever followed the key on the line,
+// as typed; the refusals are the web API's, because both go through the same
+// rule (SettingsRules.h).
+static void doSet(const Request& r) {
+  char value[MAX_LINE + 1];
+  size_t n = r.rawValueLen < sizeof(value) ? r.rawValueLen : sizeof(value) - 1;
+  const char* src = r.rawValue;
+  // Quotes around the value are stripped, which is how a text setting is
+  // cleared — SET wifi.sta_ssid "" — and how one keeps spaces at its ends.
+  // A bare empty value is refused by the parser as a typo, so without this
+  // there would be no way to unset a callsign or a station network from the
+  // console, which is the link that has to be able to undo a bad one.
+  if (n >= 2 && src[0] == '"' && src[n - 1] == '"') { src++; n -= 2; }
+  memcpy(value, src, n);
+  value[n] = '\0';
+
+  char detail[192] = "";
+  const SettingsFields::Result res = SettingsFields::set(r.args[0], value, detail, sizeof(detail));
+  char line[224];
+  switch (res) {
+    case SettingsFields::Result::Ok:
+    case SettingsFields::Result::OkRestart:
+    case SettingsFields::Result::OkNextBoot:
+      // Read back what was stored rather than echoing what was typed: a value
+      // the store rounded, truncated or ignored should show as it now is.
+      if (SettingsFields::renderKey(r.args[0], line, sizeof(line))) dataf("SET", "%s", line);
+      ok("SET", SettingsFields::resultText(res));
+      break;
+    case SettingsFields::Result::Unknown:
+      err("SET", errorCode(ParseError::BadArgument), "no such setting");
+      break;
+    case SettingsFields::Result::NvsFailed:
+      err("SET", 500, SettingsFields::resultText(res));
+      break;
+    // The three refusals keep their own codes, as WIFI and PPP have always
+    // returned them: 409 is worth retrying, 501 never is, and 400 means the
+    // value was wrong. Flattening them onto 400 tells a script to give up on
+    // a restart that will be over in a second.
+    case SettingsFields::Result::Busy:
+      err("SET", 409, detail[0] ? detail : SettingsFields::resultText(res));
+      break;
+    case SettingsFields::Result::Unsupported:
+      err("SET", 501, detail[0] ? detail : SettingsFields::resultText(res));
+      break;
+    default:
+      snprintf(line, sizeof(line), "%s%s%s", SettingsFields::resultText(res),
+               detail[0] ? ": " : "", detail);
+      err("SET", errorCode(ParseError::BadArgument), line);
+      break;
   }
 }
 

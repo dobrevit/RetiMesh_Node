@@ -64,9 +64,10 @@ const char* profileName(Profile p) {
 
 bool profileFromName(const char* n, Profile& out) {
   if (!n) return false;
-  if (!strcmp(n, "performance")) { out = Profile::Performance; return true; }
-  if (!strcmp(n, "balanced"))    { out = Profile::Balanced;    return true; }
-  if (!strcmp(n, "battery"))     { out = Profile::Battery;     return true; }
+  // Case-insensitively, as every other named value this node takes.
+  if (!strcasecmp(n, "performance")) { out = Profile::Performance; return true; }
+  if (!strcasecmp(n, "balanced"))    { out = Profile::Balanced;    return true; }
+  if (!strcasecmp(n, "battery"))     { out = Profile::Battery;     return true; }
   return false;
 }
 

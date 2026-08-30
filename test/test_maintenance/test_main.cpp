@@ -202,6 +202,43 @@ static void test_replies_never_overrun_a_small_buffer() {
   TEST_ASSERT_EQUAL('\0', buf[sizeof(buf) - 1]);
 }
 
+static void test_set_takes_its_value_as_typed() {
+  // The tokens a command is matched by are uppercased, which is right for
+  // ON|OFF and ruinous for a password: "MyPass123" that comes back as
+  // "MYPASS123" authenticates against nothing. SET's value is therefore taken
+  // from the line verbatim, spaces included, so an SSID with a space in it
+  // survives the trip.
+  Request r;
+  TEST_ASSERT_EQUAL((int)ParseError::None, (int)parse("SET wifi.password MyPass123", r));
+  TEST_ASSERT_EQUAL((int)Cmd::Set, (int)r.cmd);
+  TEST_ASSERT_EQUAL_STRING("WIFI.PASSWORD", r.args[0]);      // the key, matched case-insensitively
+  TEST_ASSERT_EQUAL(9, (int)r.rawValueLen);
+  TEST_ASSERT_EQUAL(0, strncmp("MyPass123", r.rawValue, r.rawValueLen));
+
+  TEST_ASSERT_EQUAL((int)ParseError::None, (int)parse("SET wifi.ssid My Home Network  ", r));
+  TEST_ASSERT_EQUAL(15, (int)r.rawValueLen);                 // trailing blanks trimmed, inner ones kept
+  TEST_ASSERT_EQUAL(0, strncmp("My Home Network", r.rawValue, r.rawValueLen));
+
+  // A key with nothing after it is a typo, not a request to blank a setting.
+  TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("SET wifi.ssid", r));
+  TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("SET", r));
+
+  // The longest key the table can name has to fit in an argument.
+  TEST_ASSERT_EQUAL((int)ParseError::None, (int)parse("SET transport.announce_rate_penalty 3600", r));
+  TEST_ASSERT_EQUAL_STRING("TRANSPORT.ANNOUNCE_RATE_PENALTY", r.args[0]);
+}
+
+static void test_get_reads_all_a_section_or_one_key() {
+  Request r;
+  TEST_ASSERT_EQUAL((int)ParseError::None, (int)parse("GET", r));
+  TEST_ASSERT_EQUAL(0, (int)r.argc);
+  TEST_ASSERT_EQUAL((int)ParseError::None, (int)parse("GET radio", r));
+  TEST_ASSERT_EQUAL_STRING("RADIO", r.args[0]);
+  TEST_ASSERT_EQUAL((int)ParseError::None, (int)parse("GET radio.sf", r));
+  TEST_ASSERT_EQUAL_STRING("RADIO.SF", r.args[0]);
+  TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("GET radio sf", r));
+}
+
 static void test_every_command_in_the_table_parses_by_its_own_name() {
   size_t n = 0;
   const CmdInfo* all = commands(n);
@@ -210,7 +247,8 @@ static void test_every_command_in_the_table_parses_by_its_own_name() {
     char line[64];
     // With its required argument where it has one, so the shape check passes.
     const char* arg = strcmp(all[i].args, "CONFIRM") == 0 ? " CONFIRM"
-                    : strcmp(all[i].args, "ON|OFF") == 0  ? " ON" : "";
+                    : strcmp(all[i].args, "ON|OFF") == 0  ? " ON"
+                    : strcmp(all[i].args, "key value") == 0 ? " radio.sf 9" : "";
     snprintf(line, sizeof(line), "%s%s", all[i].name, arg);
     Request r;
     TEST_ASSERT_EQUAL_MESSAGE((int)ParseError::None, (int)parse(line, r), all[i].name);
@@ -234,6 +272,8 @@ int main() {
   RUN_TEST(test_an_overlong_line_that_pauses_is_still_swallowed_whole);
   RUN_TEST(test_replies_carry_the_prefix_a_host_filters_on);
   RUN_TEST(test_replies_never_overrun_a_small_buffer);
+  RUN_TEST(test_set_takes_its_value_as_typed);
+  RUN_TEST(test_get_reads_all_a_section_or_one_key);
   RUN_TEST(test_every_command_in_the_table_parses_by_its_own_name);
   return UNITY_END();
 }

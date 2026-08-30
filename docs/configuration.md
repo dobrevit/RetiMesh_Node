@@ -63,7 +63,7 @@ See [local-link.md](local-link.md).
 |---|---|---|
 | Bootloader API | on | `POST /api/system/bootloader` answers; off = flash by hand only |
 | …also from the station network | no | by default only a directly attached link (AP, USB, PPP) may ask; the upstream LAN is refused |
-| Serial maintenance console | on | the port answers `VERSION`, `STATUS`, `BOOTLOADER CONFIRM`, …; off = log only |
+| Serial maintenance console | on | the port answers `VERSION`, `STATUS`, `GET`/`SET`, `BOOTLOADER CONFIRM`, …; off = log only. `GET` and `SET` reach every setting in this document by its API name with the section in front (`radio.sf`, `wifi.sta_ssid`) — see [local-link.md](local-link.md#settings-over-the-console) |
 
 The page also carries *Restart node* and *Enter bootloader* — the latter behind
 a confirmation and a typed word, and only where the chip can do it.
