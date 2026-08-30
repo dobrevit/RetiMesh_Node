@@ -37,6 +37,7 @@
 #include "Mdns.h"
 #include "Diag.h"
 #include "SettingsRules.h"
+#include "SettingsFields.h"
 #include "SdCard.h"
 #include "StoreHome.h"
 #include "AutoInterface.h"
@@ -139,6 +140,8 @@ static const MaintField kMaintFields[] = {
   { "bootloader_api",      &MaintenanceSettings::bootloaderApi },
   { "bootloader_from_lan", &MaintenanceSettings::bootloaderFromLan },
   { "console_enabled",     &MaintenanceSettings::consoleEnabled },
+  { "console_tcp",         &MaintenanceSettings::consoleTcp },
+  { "web_ui",              &MaintenanceSettings::webUi },
 };
 
 void WifiManager::begin() {
@@ -176,16 +179,27 @@ void WifiManager::begin() {
   // the server lazy would be worth, on the board it is running on.
   Diag::cost(wifiEnabled() ? "wifi radio" : "netif stack (wifi off)");
 
-  setupRoutes();
-  // Where the USB link exists the resolver runs whether or not Wi-Fi does:
-  // the link's lease names the node as DNS (CaptiveDns.h), and with the
-  // access point off there would otherwise be nothing on port 53 to refuse
-  // the host's queries — a timeout where a refusal was promised. A board
-  // with neither has nothing to answer, and AsyncUDP's task goes unmade.
-  if (wifiEnabled() || HAS_USB_NCM) {
-    if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
+  // The portal is the largest thing a small board can decline: 28624 B of
+  // byte-addressable RAM with Wi-Fi on, measured on a Heltec Wireless Stick
+  // that has about 213 KB of it and needs 53 KB for Reticulum. Off means the
+  // routes are never registered and nothing listens on port 80; an operator
+  // reaches the node over the console's own listener instead, which costs a
+  // few hundred bytes to do the same job (ConsoleServer.h).
+  if (!settings.maintenance().webUi) {
+    log_w("the web portal is switched off; HTTP :%d does not answer. The console does, "
+          "on the cable and on TCP :%d", HTTP_PORT, CONSOLE_TCP_PORT);
+  } else {
+    setupRoutes();
+    // Where the USB link exists the resolver runs whether or not Wi-Fi does:
+    // the link's lease names the node as DNS (CaptiveDns.h), and with the
+    // access point off there would otherwise be nothing on port 53 to refuse
+    // the host's queries — a timeout where a refusal was promised. A board
+    // with neither has nothing to answer, and AsyncUDP's task goes unmade.
+    if (wifiEnabled() || HAS_USB_NCM) {
+      if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
+    }
+    _http.begin();
   }
-  _http.begin();
 
   // http://retimesh.local/ (and http://<ssid>.local/) for clients whose
   // captive-portal detection does not fire.
@@ -219,11 +233,14 @@ void WifiManager::begin() {
     return;
   }
   if (MDNS.begin(_hostname)) {
-    MDNS.addService("http", "tcp", HTTP_PORT);
+    // Only what actually answers: a browser sent to _http._tcp on a node
+    // whose portal is off gets a connection refused and no explanation.
+    if (settings.maintenance().webUi) MDNS.addService("http", "tcp", HTTP_PORT);
     MDNS.addService("rns", "tcp", RNS_TCP_PORT);
     // So a browser or a script can tell the nodes apart without opening each
     // one: the same identity the portal and the announce carry.
     for (const char* svc : { "http", "rns" }) {
+      if (strcmp(svc, "http") == 0 && !settings.maintenance().webUi) continue;
       MDNS.addServiceTxt(svc, "tcp", "name",  _ssid);
       MDNS.addServiceTxt(svc, "tcp", "node",  nodeIdentity.destHex());
       MDNS.addServiceTxt(svc, "tcp", "fw",    FW_VERSION);
@@ -1166,12 +1183,23 @@ void WifiManager::handleMaintenancePost(AsyncWebServerRequest* request, const ch
   MaintenanceSettings m = settings.maintenance();
   for (const MaintField& f : kMaintFields)
     if (in[f.key].is<bool>()) m.*(f.on) = in[f.key];
-  if (LocalLink::lockedOut(settings.links(), m.consoleEnabled)) {
-    sendError(request, 400, "refused: no local link is enabled, so switching the console off would leave no way to reach the node");
-    return;
+  // Through the same commit the console uses, so both refuse alike and the
+  // restart the portal's switch needs is asked for once rather than twice.
+  char detail[160] = "";
+  const SettingsFields::Result res = SettingsFields::commitMaintenance(m, detail, sizeof(detail));
+  switch (res) {
+    case SettingsFields::Result::Ok:
+      request->send(200, "application/json", "{\"ok\":true}");
+      return;
+    case SettingsFields::Result::OkRestart:
+    case SettingsFields::Result::OkNextBoot:
+      request->send(200, "application/json", "{\"ok\":true,\"restart\":true}");
+      return;
+    case SettingsFields::Result::Busy:      sendError(request, 409, detail[0] ? detail : "a restart is already in progress"); return;
+    case SettingsFields::Result::Refused:   sendError(request, 400, detail); return;
+    case SettingsFields::Result::NvsFailed: sendError(request, 500, "nvs"); return;
+    default:                                sendError(request, 400, detail[0] ? detail : "refused"); return;
   }
-  if (!settings.saveMaintenance(m)) { sendError(request, 500, "nvs"); return; }
-  request->send(200, "application/json", "{\"ok\":true}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,7 +1587,7 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
       JsonObject mt = in["maintenance"];
       for (const MaintField& f : kMaintFields) ms.*(f.on) = mt[f.key] | ms.*(f.on);
     }
-    if ((haveLinks || haveMaint) && LocalLink::lockedOut(ls, ms.consoleEnabled)) {
+    if ((haveLinks || haveMaint) && LocalLink::lockedOut(ls, ms.consoleEnabled, ms.webUi)) {
       sendError(request, 400, "refused: this file would leave the node with every local link off and the console off, and no way back in");
       return;
     }

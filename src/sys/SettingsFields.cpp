@@ -149,17 +149,26 @@ Result commitTransport(TransportSettings& t, char* err, size_t n) {
   return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
 }
 
+}  // namespace — commitMaintenance is the web API's too (SettingsFields.h)
+
 Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n) {
   if (restartPending(err, n)) return Result::Busy;
   // The console can switch itself off, but not into a node with no way in.
-  if (LocalLink::lockedOut(settings.links(), m.consoleEnabled)) {
-    snprintf(err, n, "refused: no local link is enabled, so switching the console off "
-                     "would leave no way to reach the node");
+  if (LocalLink::lockedOut(settings.links(), m.consoleEnabled, m.webUi)) {
+    snprintf(err, n, "refused: this would leave no way to reach the node — with the console "
+                     "off it needs a link switched on and the web portal to answer on it");
     return Result::Refused;
   }
+  const bool needRestart = m.webUi != settings.maintenance().webUi;
   if (!settings.saveMaintenance(m)) return Result::NvsFailed;
-  return Result::Ok;
+  // The portal cannot be taken down under the request that asked for it, and
+  // it cannot be raised without the routes it was never given: either way the
+  // change lands at the next boot, as Wi-Fi's does.
+  if (!needRestart) return Result::Ok;
+  return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
 }
+
+namespace {
 
 Result commitAdmin(const char* password, char* err, size_t n) {
   if (restartPending(err, n)) return Result::Busy;
@@ -352,6 +361,10 @@ const Entry kFields[] = {
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().consoleEnabled ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       MaintenanceSettings m = settings.maintenance(); m.consoleEnabled = b; return commitMaintenance(m, e, n); } },
+  { "maintenance.web_ui",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().webUi ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
+      MaintenanceSettings m = settings.maintenance(); m.webUi = b; return commitMaintenance(m, e, n); } },
   { "maintenance.console_tcp",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().consoleTcp ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }

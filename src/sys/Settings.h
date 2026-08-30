@@ -138,6 +138,12 @@ struct MaintenanceSettings {
   bool bootloaderFromLan = false;       // ...also from the station (upstream LAN) link
   bool consoleEnabled    = true;        // the serial maintenance console reads commands
   bool consoleTcp        = true;        // ...and answers on CONSOLE_TCP_PORT too, after AUTH
+  // The web portal. Off means the routes are never registered and nothing
+  // listens on port 80, which is the largest single thing a small board can
+  // decline: 28624 B of byte-addressable RAM on a Heltec Wireless Stick with
+  // Wi-Fi on, against 272 B for a console listener that does the same job for
+  // an operator (ConsoleServer.h). Restart-applied, like Wi-Fi itself.
+  bool webUi             = true;
 };
 
 class Settings {

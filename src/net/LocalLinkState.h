@@ -210,6 +210,26 @@ constexpr uint32_t kUsbNetmask = 0xFFFFFF00u;
 inline uint32_t pppNodeAddress(uint8_t macLastOctet) { return ipv4(10, 65, macLastOctet, 1); }
 inline uint32_t pppHostAddress(uint8_t macLastOctet) { return ipv4(10, 65, macLastOctet, 2); }
 
+// Whether a set of switches would leave the node with no way to reach its
+// own configuration. Refused wherever settings are written, because a node
+// in that state can only be recovered by erasing it, which takes its
+// Reticulum identity with it.
+//
+// Two ways in, and one has to survive. The serial console is on every board
+// and is a way in by itself; it also carries the network console behind it
+// (ConsoleServer.h), which is why switching it off takes both. With it off
+// the node needs a link switched on *and* something listening on that link,
+// which is the web portal — the console's own listener went off with the
+// console.
+//
+// Here rather than in LocalLink.cpp so the settings API, the console and the
+// link manager refuse the same combinations for the same reason, and so it
+// can be held to its cases without a node.
+inline bool wouldLockOut(bool anyLinkOn, bool consoleEnabled, bool webUi) {
+  if (consoleEnabled) return false;
+  return !(anyLinkOn && webUi);
+}
+
 // Whether a serial speed may be used for PPP on this board: one of the rates
 // the board's registry entry lists (boards.json uart.qualification, handed
 // to the build as BOARD_UART_BAUDS) and no faster than the highest rate

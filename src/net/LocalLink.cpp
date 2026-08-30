@@ -102,8 +102,8 @@ bool anySwitchOn(const LinkSettings& l) {
   return false;
 }
 
-bool lockedOut(const LinkSettings& l, bool consoleEnabled) {
-  return !consoleEnabled && !anySwitchOn(l);
+bool lockedOut(const LinkSettings& l, bool consoleEnabled, bool webUi) {
+  return wouldLockOut(anySwitchOn(l), consoleEnabled, webUi);   // the rule is in LocalLinkState.h
 }
 
 const uint32_t* pppBauds(size_t& n) {
@@ -153,7 +153,8 @@ Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Sourc
     }
     next.pppBaud = want.pppBaud;
   }
-  if (lockedOut(next, settings.maintenance().consoleEnabled)) return Apply::RefusedLockedOut;
+  if (lockedOut(next, settings.maintenance().consoleEnabled, settings.maintenance().webUi))
+    return Apply::RefusedLockedOut;
   const bool wifiChanged = next.wifiEnabled != settings.links().wifiEnabled;
   bool same = next.pppBaud == settings.links().pppBaud;
   for (size_t i = 0; i < n; i++) if (next.*(f[i].on) != settings.links().*(f[i].on)) same = false;

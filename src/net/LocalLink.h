@@ -182,10 +182,21 @@ enum class Apply : uint8_t {
 // receives the link key or reason text a refusal is about.
 Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Source source, const char** detail);
 
-// Whether these settings would leave the node with no way in at all: no
-// usable link switched on, and the console off. Refused wherever settings are
-// written, because a node in that state can only be recovered by erasing it.
-bool lockedOut(const LinkSettings& l, bool consoleEnabled);
+// Whether these settings would leave the node with no way in at all.
+// Refused wherever settings are written, because a node in that state can
+// only be recovered by erasing it, which takes its Reticulum identity with
+// it. Two ways in, and one of them has to survive:
+//
+//   the cable    the serial console, on every board, whenever it is enabled
+//   the network  a link switched on, with something behind it that answers —
+//                the web portal, or the console's own listener, which needs
+//                the console enabled too (ConsoleServer.h)
+//
+// So the console being off is what makes the rest matter: with it on there
+// is always a way in, and with it off the node needs both a link and a
+// portal, since its network console went off with it. The rule itself is
+// wouldLockOut() in LocalLinkState.h; this asks it about these settings.
+bool lockedOut(const LinkSettings& l, bool consoleEnabled, bool webUi);
 
 // --- the links this firmware drives -----------------------------------------
 // One body for all of them. They differ in the carrier probe, where the

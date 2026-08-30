@@ -47,6 +47,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct MaintenanceSettings;
+
 namespace SettingsFields {
 
 enum class Result : uint8_t {
@@ -77,6 +79,12 @@ bool keyInSection(size_t i, const char* prefix);
 
 // Parse, validate and apply one setting. `err` carries the refusal.
 Result set(const char* key, const char* value, char* err, size_t errLen);
+
+// The maintenance section's commit, exported because the web API writes the
+// same section and must refuse on the same terms and ask for the same
+// restart. The rule for whether a change leaves a way into the node, and for
+// what the portal's switch costs, has one home and this is it.
+Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n);
 
 // The words for a result, for the console and anything else that reports one.
 const char* resultText(Result r);

@@ -164,8 +164,31 @@ static void test_an_address_is_one_number_octets_first() {
   TEST_ASSERT_NOT_EQUAL(ipv4(10, 42, 0, 1), ipv4(1, 0, 42, 10));
 }
 
+// --- no way in --------------------------------------------------------------
+static void test_the_console_alone_is_a_way_in() {
+  // It is on every board and it carries the network console behind it, so
+  // with it on nothing else can lock the operator out.
+  TEST_ASSERT_FALSE(wouldLockOut(false, true, false));   // no link, no portal
+  TEST_ASSERT_FALSE(wouldLockOut(true, true, true));
+}
+
+static void test_with_the_console_off_a_link_needs_something_listening_on_it() {
+  // A link switched on is not a way in by itself: the portal is what answers
+  // on it once the console — and the listener behind it — is off.
+  TEST_ASSERT_TRUE(wouldLockOut(true, false, false));    // a link, nothing serving
+  TEST_ASSERT_FALSE(wouldLockOut(true, false, true));    // a link and the portal
+}
+
+static void test_with_the_console_off_and_no_link_there_is_no_way_in() {
+  TEST_ASSERT_TRUE(wouldLockOut(false, false, true));    // a portal nothing can reach
+  TEST_ASSERT_TRUE(wouldLockOut(false, false, false));
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_the_console_alone_is_a_way_in);
+  RUN_TEST(test_with_the_console_off_a_link_needs_something_listening_on_it);
+  RUN_TEST(test_with_the_console_off_and_no_link_there_is_no_way_in);
   RUN_TEST(test_a_disabled_link_ignores_carrier_and_address);
   RUN_TEST(test_enable_carrier_address_reach_ready_in_order);
   RUN_TEST(test_a_static_address_can_arrive_with_the_carrier);
