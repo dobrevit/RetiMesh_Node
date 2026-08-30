@@ -125,6 +125,59 @@ missing** means the RTC domain was lost, which is what an EN-pin reset from a
 USB bridge looks like: opening the console on a CH34x board resets it, so a
 "restart" in the data may be the person watching it.
 
+## What each subsystem costs
+The boot log carries a bill. After each subsystem starts, `Diag::cost()` logs
+what it took of the RAM that decides — byte-addressable internal RAM, the kind
+a task stack has to come from — where DRAM stands afterwards, and the running
+total:
+
+```
+cost: littlefs         +2032 B  (213572 free, 110580 largest, +2032 B since boot)
+cost: settings          +336 B  (213236 free, 110580 largest, +2368 B since boot)
+cost: power               +0 B  (213236 free, 110580 largest, +2368 B since boot)
+cost: packet rings    +26916 B  (186320 free, 110580 largest, +29284 B since boot)
+cost: identity            +0 B  (186320 free, 110580 largest, +29284 B since boot)
+cost: display          +2484 B  (183836 free, 110580 largest, +31768 B since boot)
+cost: wifi radio      +52500 B  (131336 free, 110580 largest, +84268 B since boot)
+cost: http + dns + mdns  +28424 B  (102912 free, 102388 largest, +112692 B since boot)
+cost: local links         +0 B  (102912 free, 102388 largest, +112692 B since boot)
+cost: lora radio       +1216 B  (101696 free,  98292 largest, +113908 B since boot)
+cost: reticulum       +52668 B  ( 49028 free,  45044 largest, +166576 B since boot)
+cost: rns tcp server    +272 B  ( 48756 free,  45044 largest, +166848 B since boot)
+cost: autointerface    +9188 B  ( 39568 free,  36852 largest, +176036 B since boot)
+cost: tasks           +35020 B  (  4548 free,   4084 largest, +211056 B since boot)
+```
+
+That is a real Heltec Wireless Stick, and the last line is what it has left to
+run on: **4548 bytes**. It is not enough. That board throws `std::bad_alloc`
+out of the Reticulum loop within seconds of finishing boot and panics, and its
+`boot_count` runs into the hundreds. Nothing else the node reports says so —
+`heap_free` reads a comfortable 46 KB, because most of what is left is
+32-bit-only IRAM that no allocation can use.
+
+Read the rest as the answer to "which switch is worth making cost nothing when
+it is off", per board. Wi-Fi is billed in two parts on purpose: the **radio**
+is what the switch is meant to buy, and **http + dns + mdns** is what a node
+pays whether Wi-Fi is on or off — so on this board, switching Wi-Fi off saves
+52 KB and still leaves 28 KB on the table for a web server nobody can reach.
+That, and not USB-NCM, is where lazy allocation is worth the work.
+
+Two more things this reading settled. `packet rings` costs 26 KB of scarce
+internal RAM on every board **without** PSRAM, because `psramRing()` falls back
+to the internal heap and the fallback is silent. And `local links` reads 0 here
+but 10556 B on a Heltec V3 with `links.ppp` on — the PPP interface and its
+reader task, which is what that switch now gives back.
+
+The numbers differ enough between boards that one board's answer is not
+another's, which is why this is measured per board rather than reasoned about
+once. It exists because the alternative is estimating, and estimating is how a
+Wireless Stick came to spend about 16 KB on a PPP link whose switch was off —
+almost exactly the `rns` stack it then could not place, so it ran with no
+Reticulum at all while reporting `transport: online`.
+
+A negative figure is a credit: a subsystem that probed for hardware, found none
+and handed back what it took to look.
+
 ## Unit tests
 Pure headers are tested on the host, no hardware needed:
 ```sh
