@@ -106,6 +106,7 @@ void Settings::load() {
   LOAD(_links.wifiEnabled,  "l_wifi", getBool("l_wifi"));
   LOAD(_links.usbEnabled,   "l_usb",  getBool("l_usb"));
   LOAD(_links.pppEnabled,   "l_ppp",  getBool("l_ppp"));
+  LOAD(_links.pppBaud,      "l_pbaud", getUInt("l_pbaud"));
   LOAD(_maintenance.bootloaderApi,     "m_bapi", getBool("m_bapi"));
   LOAD(_maintenance.bootloaderFromLan, "m_blan", getBool("m_blan"));
   LOAD(_maintenance.consoleEnabled,    "m_con",  getBool("m_con"));
@@ -182,7 +183,8 @@ bool Settings::saveLinks(const LinkSettings& l) {
   _links = l;
   bool ok = _prefs.putBool("l_wifi", l.wifiEnabled) > 0
          && _prefs.putBool("l_usb",  l.usbEnabled)  > 0
-         && _prefs.putBool("l_ppp",  l.pppEnabled)  > 0;
+         && _prefs.putBool("l_ppp",  l.pppEnabled)  > 0
+         && _prefs.putUInt("l_pbaud", l.pppBaud)    > 0;
   if (!ok) log_e("NVS write failed (links)");
   return ok;
 }

@@ -198,14 +198,26 @@ def node_id_from_path(device: str) -> Optional[str]:
     return mac_node_id(m.group(1)) if m else None
 
 
-def usb_node_url(node_id: Optional[str]) -> Optional[str]:
-    """Where a node answers over its USB link, from its MAC: 10.64.<n>.1 with
-    <n> the last octet — the firmware's usbNodeAddress() (LocalLinkState.h),
+def _link_url(second_octet: int, node_id: Optional[str]) -> Optional[str]:
+    """10.<second>.<n>.1 with <n> the last octet of the MAC: the firmware's
+    addressing rule (LocalLinkState.h, usbNodeAddress / pppNodeAddress),
     written here a second time because this package cannot include that
     header; the tests hold both to the same vector. None for anything that
     is not a MAC, rather than an address aimed at the wrong subnet."""
     node_id = mac_node_id(node_id)
-    return node_url(f"10.64.{int(node_id[-2:], 16)}.1") if node_id else None
+    return node_url(f"10.{second_octet}.{int(node_id[-2:], 16)}.1") if node_id else None
+
+
+def usb_node_url(node_id: Optional[str]) -> Optional[str]:
+    """Where a node answers over its USB link: 10.64.<n>.1."""
+    return _link_url(64, node_id)
+
+
+def ppp_node_url(node_id: Optional[str]) -> Optional[str]:
+    """Where a node asks to answer over PPP: 10.65.<n>.1 — asks, because
+    the node is the PPP client and the host's pppd assigns; the pppd
+    command the tool prints is what makes the two agree."""
+    return _link_url(65, node_id)
 
 
 def touch_1200(device: str, sleep=time.sleep) -> None:
@@ -482,6 +494,194 @@ def request_bootloader_http(base_url: str, auth: tuple[str, str] = DEFAULT_ADMIN
 
 
 # ---------------------------------------------------------------------------
+# PPP over the bridge UART
+#
+# On the CP2102/CH9102 boards the host can run pppd on the node's serial
+# port and reach it as a network interface (docs/local-link.md). While it
+# does, the console on that port is unreachable — PPP owns it — and so is
+# esptool: pppd holds the tty with the PPP line discipline on it, and a
+# second opener would inject bytes into the frames. Everything here is
+# about knowing that before touching the port. pppd needs root on most
+# distributions, so nothing here runs it: the commands are printed.
+# ---------------------------------------------------------------------------
+PPP_DEFAULT_BAUD = 115200
+# The pppd invocation the firmware expects (PppUart.h): the node is the PPP
+# client, pppd the server — `local` because a USB bridge has no carrier to
+# watch, and the LCP echoes because they are how the node tells a dead host
+# from an idle one (it hands its port back to the console after 30 s of
+# silence) and how pppd notices the node restarting into its downloader.
+# nocrtscts is not decoration: Debian's /etc/ppp/options switches hardware
+# flow control on, and a CP2102 with CRTSCTS waits for a CTS the board never
+# drives — pppd's frames then never leave the bridge, and nothing answers.
+# Measured on the Wireless Bridge; the spec's "no board exposes RTS/CTS" is
+# why the option must be explicit.
+PPPD_OPTIONS = ["noauth", "local", "nodetach", "nocrtscts", "lcp-echo-interval", "5", "lcp-echo-failure", "4"]
+# The same options as a peers file. `noauth` is a privileged pppd option, so
+# the command line above needs root every time; the options in
+# /etc/ppp/peers/<name> are trusted, so once that file is there any member
+# of the group pppd is setuid for (`dip` on Debian and its descendants) can
+# bring the link up with `call <name>` and no sudo — which is the way to
+# run it on a bench.
+PPPD_PEERS_NAME = "retimesh"
+PPPD_PEERS_PATH = f"/etc/ppp/peers/{PPPD_PEERS_NAME}"
+
+
+@dataclass
+class PppLink:
+    ifname: str                       # ppp0
+    node_ip: str                      # the far end: where the node answers
+    host_ip: Optional[str]            # our end
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.node_ip}"
+
+
+@dataclass
+class Pppd:
+    pid: int
+    port: Optional[str]               # the tty on its command line
+    baud: Optional[int]
+    argv: list
+
+
+def _ip_routes() -> list:
+    """`ip -4 route show`, as lines; nothing where there is no `ip`."""
+    import subprocess
+    try:
+        rc = subprocess.run(["ip", "-4", "route", "show"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+    return rc.stdout.splitlines() if rc.returncode == 0 else []
+
+
+def ppp_links(routes: Optional[Iterable[str]] = None) -> list:
+    """The point-to-point links this host has up, from the routing table
+    (`ip -4 route show`, injectable): a host route to the far end through a
+    pppN device, with our own address as its source. The node is the far end."""
+    out = []
+    for line in (_ip_routes() if routes is None else routes):
+        m = re.match(r"^(\d+\.\d+\.\d+\.\d+)\s+dev\s+(ppp\d+)\b(?:.*?\bsrc\s+(\d+\.\d+\.\d+\.\d+))?", line.strip())
+        if m:
+            out.append(PppLink(m.group(2), m.group(1), m.group(3)))
+    return out
+
+
+def _proc_cmdlines() -> list:
+    """(pid, argv) for every process /proc lets us read; nothing elsewhere."""
+    out = []
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return out
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+        except Exception:
+            continue
+        if argv:
+            out.append((int(pid), argv))
+    return out
+
+
+def find_pppd(port: Optional[str] = None, cmdlines: Optional[Iterable] = None) -> list:
+    """Every pppd on this host, or the ones holding `port` — from the
+    command lines /proc exposes to everyone (injectable), since the
+    process itself is root's and its open files are not ours to list. The
+    port is the first /dev argument, the speed the first bare number."""
+    out = []
+    for pid, argv in (_proc_cmdlines() if cmdlines is None else cmdlines):
+        if not argv or os.path.basename(argv[0]) != "pppd":
+            continue
+        dev = next((a for a in argv[1:] if a.startswith("/dev/")), None)
+        baud = next((int(a) for a in argv[1:] if a.isdigit()), None)
+        if port and (dev is None or not same_device(dev, port)):
+            continue
+        out.append(Pppd(pid, dev, baud, list(argv)))
+    return out
+
+
+def ppp_addresses(links_data: Iterable[dict]) -> Optional[tuple]:
+    """(node, host, baud, enabled) for the PPP link, from the console's LINKS
+    reply: the addresses the node asks for, which are what pppd is told to
+    assign. None when the node has no PPP link this build can run."""
+    for d in links_data:
+        if d.get("link") == "ppp0" and d.get("firmware") == "yes" and d.get("asks") and d.get("peer"):
+            return d["asks"], d["peer"], _int(d.get("baud"), PPP_DEFAULT_BAUD), d.get("enabled") == "yes"
+    return None
+
+
+def pppd_command(port: str, node_ip: str, host_ip: str, baud: int = PPP_DEFAULT_BAUD, peers: bool = False) -> list:
+    """The pppd command line for one node on one port, ready to print. The
+    host's address comes first in pppd's local:remote pair. With `peers` the
+    options come from the peers file instead (pppd_peers_file()), which is
+    the form that needs no root."""
+    options = ["call", PPPD_PEERS_NAME] if peers else list(PPPD_OPTIONS)
+    return ["pppd", port, str(baud), *options, f"{host_ip}:{node_ip}"]
+
+
+def pppd_peers_file() -> str:
+    """The contents of the peers file the `call` form relies on: one option
+    per line, the same options as the command line."""
+    words = list(PPPD_OPTIONS)
+    lines = []
+    while words:
+        w = words.pop(0)
+        if words and words[0].isdigit():
+            lines.append(f"{w} {words.pop(0)}")
+        else:
+            lines.append(w)
+    return "\n".join(lines) + "\n"
+
+
+def shell_words(argv: Iterable[str]) -> str:
+    import shlex
+    return " ".join(shlex.quote(a) for a in argv)
+
+
+# How long the host may take to let go of the port once the node has been
+# told to restart: pppd sees the node stop answering its LCP echoes — four
+# five-second echoes — or the node's own Terminate-Request as it goes down,
+# whichever first, and exits. `persist` would keep it dialling for ever,
+# which is why the documented command line does not carry it.
+_PPP_RELEASE_S = 40.0
+
+
+def _hand_off_over_ppp(port: Port, pppd: Pppd, link: Optional[PppLink], auth, log: Log, request_http,
+                       pppd_fn, probe_rom, sleep, clock) -> "HandOff":
+    """pppd holds the port. The console is not reachable there, but the node
+    is — over the link pppd made — so the bootloader is asked for over HTTP,
+    and then the port is waited for: esptool cannot have it until pppd has
+    let it go, and only root can make pppd do that."""
+    stop = f"sudo kill {pppd.pid}"
+    if link is None:
+        return HandOff(False, "none", port.device,
+                       f"pppd (pid {pppd.pid}) holds {port.device} but no ppp interface has a route up; "
+                       f"stop it ({stop}) and retry, or wait for the link to come up", node_id=port.node_id)
+    log(f"pppd (pid {pppd.pid}) holds {port.device}; the node is at {link.url} over {link.ifname}")
+    ok, msg, delay_ms = request_http(link.url, auth)
+    log(f"HTTP bootloader request over {link.ifname}: {msg}")
+    if not ok:
+        # A 501 is a classic ESP32 that esptool must reset itself — which
+        # it cannot do while pppd has the port. Nothing here may kill a
+        # root process; the operator is told exactly what to run.
+        return HandOff(False, "none", port.device,
+                       f"{msg}; stop pppd first ({stop}), then retry — esptool needs the port",
+                       node_id=port.node_id)
+    log(f"waiting for pppd to release {port.device} (up to {_PPP_RELEASE_S:.0f} s)")
+    deadline = clock() + delay_ms / 1000.0 + _PPP_RELEASE_S
+    while pppd_fn(port.device) and clock() < deadline:
+        sleep(1.0)
+    if pppd_fn(port.device):
+        return HandOff(False, "http", port.device,
+                       f"the node accepted the request but pppd (pid {pppd.pid}) still holds {port.device}; "
+                       f"stop it ({stop}) and retry with the reset left to esptool", node_id=port.node_id)
+    log(f"pppd has let go of {port.device}")
+    return _confirm_downloader(port, "http", log, probe_rom)
+
+
+# ---------------------------------------------------------------------------
 # esptool
 # ---------------------------------------------------------------------------
 _ESPTOOL_MAJOR: Optional[int] = None
@@ -615,7 +815,8 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
                            request_http=request_bootloader_http, probe_rom=None,
                            esptool_cmd: Optional[list[str]] = None,
                            sleep=time.sleep, clock=time.monotonic, reappear_timeout: float = 8.0,
-                           port_hint: str = "--port", touch=touch_1200) -> HandOff:
+                           port_hint: str = "--port", touch=touch_1200,
+                           pppd_fn=find_pppd, ppp_links_fn=ppp_links) -> HandOff:
     """Console first, HTTP second, esptool's own reset last.
 
     Returns where esptool should point and whether the downloader is known to
@@ -626,6 +827,17 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
         probe_rom = lambda dev: downloader_present(dev, esptool_cmd=esptool_cmd, log=log)  # noqa: E731
     ports = ports_fn()
     chosen = select_port(ports, device=port)
+    # A port pppd holds is not opened, and not left to esptool either: the
+    # node is asked over the link pppd made instead (docs/local-link.md).
+    # Before anything else, because opening the port would write into the
+    # PPP stream and the console on it would not answer anyway.
+    if chosen:
+        holders = pppd_fn(chosen.device)
+        if holders:
+            links = ppp_links_fn()
+            link = links[0] if len(links) == 1 else None
+            return _hand_off_over_ppp(chosen, holders[0], link, auth, log, request_http,
+                                      pppd_fn, probe_rom, sleep, clock)
     if port and chosen is None:
         # The named port is not there. If it was the composite device and the
         # chip is already in its ROM — an earlier attempt got it there and

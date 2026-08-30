@@ -94,6 +94,11 @@ maintenance console, the link listing, the bootloader transition, esptool
 reaching the ROM, a flash and the application's return. Both run from
 `.github/workflows/hil.yml` on a self-hosted runner labelled `retimesh-hil`
 (dispatch only; ordinary CI never touches hardware).
+`sudo tools/hil_ppp.py --port … [--firmware …] [--chip esp32]` does the same
+round over PPP on a bridged board — `PPP ON`, pppd up, the API over ppp0,
+the bootloader request over ppp0, pppd exiting as the node goes down,
+esptool, the application back, ppp0 up again — and needs root for pppd, so
+it is run by hand rather than from the workflow.
 
 ## Soak testing
 A soak is only worth running if someone reads the result, and a week of JSON is

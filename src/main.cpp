@@ -72,6 +72,7 @@
 #include "Bootloader.h"
 #include "Leds.h"
 #include "Maintenance.h"
+#include "PppUart.h"
 
 NodeStats g_stats;
 
@@ -102,9 +103,12 @@ static LocalLink::UnavailableLink usbLink(LocalLink::Type::UsbNcm, "usb0", BOARD
   BOARD_USB_NCM ? "this build runs the chip's USB as a serial port, not as the composite device"
                 : "this board's USB is a serial bridge, not the chip's own");
 #endif
-static LocalLink::UnavailableLink pppLink(LocalLink::Type::PppUart, "ppp0", BOARD_UART_NETWORK,
-  BOARD_UART_NETWORK ? "this build has no PPP (the core's lwIP has it; the firmware does not drive it yet)"
-                     : "this board has no bridge UART to carry PPP");
+#if HAS_PPP
+static LocalLink::PppLink pppLink;
+#else
+static LocalLink::UnavailableLink pppLink(LocalLink::Type::PppUart, "ppp0", false,
+  "this board has no bridge UART to carry PPP");
+#endif
 
 void setup() {
   // Prefer PSRAM for anything larger than a few hundred bytes — packet
@@ -112,6 +116,14 @@ void setup() {
   // every later allocation benefits.
   if (psramFound()) heap_caps_malloc_extmem_enable(PSRAM_MALLOC_THRESHOLD);
 
+  #if HAS_PPP
+    // The port is shared with PPP (PppUart.h): the driver's receive ring
+    // is PPP's receive ring, and a transmit queue lets a whole frame — or a
+    // whole console reply — leave in one write. Both are sized before the
+    // driver is installed, which is the only time they can be.
+    Serial.setRxBufferSize(PPP_RX_RING_BYTES);
+    Serial.setTxBufferSize(PPP_TX_QUEUE_BYTES);
+  #endif
   Serial.begin(115200);
   #if HAS_USB_NCM
     // On the composite device the log rides the ACM port with the console,
@@ -206,8 +218,14 @@ void setup() {
   LocalLink::begin();
   // The maintenance console on the port the host already has. Its HELLO is
   // the line a flashing tool looks for, so it goes out before the services
-  // that make the log busy.
-  Maintenance::begin(Serial);
+  // that make the log busy. Where PPP shares the port, the console reads
+  // and writes through the PPP driver's view of it, which hands the console
+  // its bytes while the console owns the port and PPP its frames otherwise.
+  #if HAS_PPP
+    Maintenance::begin(PppUart::console());
+  #else
+    Maintenance::begin(Serial);
+  #endif
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
   // Transport first, then the things that hand it peers. It builds the queue
   // those peers are announced on, and it takes long enough — mounting and

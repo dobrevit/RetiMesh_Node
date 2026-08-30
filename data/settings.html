@@ -217,7 +217,9 @@
     <button type="submit">Save links</button>
     <div class="msg" id="linksMsg"></div>
     <div class="note">Switching Wi-Fi off restarts the node without its access point. It stays reachable over USB or PPP where the board
-      has them, and always through the serial maintenance console: <code>WIFI ON</code> there turns the access point back on.</div>
+      has them, and always through the serial maintenance console: <code>WIFI ON</code> there turns the access point back on.
+      USB and PPP apply without a restart. With PPP on, the serial speed is the whole port's &mdash; the console and the log run at it too
+      &mdash; and the console goes quiet while a host has PPP open on the port.</div>
   </form>
 
   <h2>Maintenance</h2>
@@ -431,6 +433,17 @@ async function load() {
     if (!l.supported) { sel.disabled = true; sel.value = "0"; }
     if (!l.hardware) div.title = l.reason || "";
     div.append(lab, sel); fields.appendChild(div);
+    // The PPP link has one setting beyond its switch: the port's speed. The
+    // choices are the node's — the speeds this board is qualified for — so
+    // a rate it would refuse is never offered.
+    if (key === "ppp" && l.supported && Array.isArray(l.bauds)) {
+      const bdiv = document.createElement("div");
+      const blab = document.createElement("label"); blab.textContent = "Serial speed while PPP is on ";
+      const bsel = document.createElement("select"); bsel.name = "ppp_baud";
+      for (const b of l.bauds) { const o = document.createElement("option"); o.value = String(b); o.textContent = b + " baud"; bsel.appendChild(o); }
+      bsel.value = String(l.baud);
+      bdiv.append(blab, bsel); fields.appendChild(bdiv);
+    }
   }
   const reasons = ["usb", "ppp"].filter(k => lk[k] && !lk[k].supported && lk[k].hardware).map(k => k + ": " + lk[k].reason);
   $("linksStatus").textContent = reasons.length ? reasons.join(" · ") : "";
@@ -510,7 +523,7 @@ $("linksForm").addEventListener("submit", async ev => {
   ev.preventDefault();
   const body = {};
   for (const sel of ev.target.querySelectorAll("#linkFields select"))
-    if (!sel.disabled) body[sel.name] = sel.value === "1";
+    if (!sel.disabled) body[sel.name] = sel.name === "ppp_baud" ? Number(sel.value) : sel.value === "1";
   if (body.wifi === false && !confirm("Turn Wi-Fi off? The access point and this page go away until it is turned back on over USB, PPP or the serial console (WIFI ON).")) return;
   try {
     const r = await api("/api/settings/links", body);

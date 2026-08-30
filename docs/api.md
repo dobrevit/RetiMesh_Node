@@ -269,7 +269,10 @@ buttons from those rather than working the rule out again from the fields above.
 `local_links` lists every way a host can reach the node — see
 [local-link.md](local-link.md). `type` is `wifi_ap`, `wifi_sta`, `usb_ncm` or
 `ppp_uart`; `phase` is `disabled`, `down`, `up` (carrier, no address) or
-`ready`; `addressing` is `static`, `dhcp`, `link_local` or `none`. `hardware`
+`ready`; `addressing` is `static` (the node's own number: the access point,
+usb0), `dhcp` (leased to the node: the station uplink), `ipcp` (assigned by
+the PPP peer: ppp0, where the node is the client and the host's pppd
+decides) or `none`. `hardware`
 says the board has it, `firmware` that this build can run it, `enabled` that
 the operator has it on; when the first is true and the second false, `reason`
 says why. `clients` is present only where the link can count its hosts.
@@ -316,14 +319,14 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 ```
 
 ## Settings (auth)
-- `GET /api/settings` → `{ radio, wifi, transport, links, maintenance, bootloader, admin }` (password never returned; `has_password`, `default_password` flags). `links` is `{ wifi: {hardware, supported, enabled}, usb: {…, reason}, ppp: {…, reason} }` — `enabled` is false for a link this build cannot run, whatever is stored; `maintenance` is `{ bootloader_api, bootloader_from_lan, console_enabled }`; `bootloader` is what the board can do, the same object as `GET /api/system/bootloader`
+- `GET /api/settings` → `{ radio, wifi, transport, links, maintenance, bootloader, admin }` (password never returned; `has_password`, `default_password` flags). `links` is `{ wifi: {hardware, supported, enabled}, usb: {…, reason}, ppp: {…, reason, baud, bauds, node_ip, host_ip} }` — `enabled` is false for a link this build cannot run, whatever is stored; on a board that runs PPP, `baud` is the serial speed while PPP is on, `bauds` the speeds this board may be set to (the registry's ladder up to the rate the board has been tried at — the only list the settings page offers), and `node_ip`/`host_ip` the addresses the node asks its peer for (what the host's pppd is told); `maintenance` is `{ bootloader_api, bootloader_from_lan, console_enabled }`; `bootloader` is what the board can do, the same object as `GET /api/system/bootloader`
 - `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct,gps_enabled,gps_share_position}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,sta_ssid,sta_password}` → saves, restarts (`"restart":true`); `sta_ssid` blank = station mode off
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,auto_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text
-- `GET /api/settings/export` → downloadable JSON of all settings (no identity keys). `links` carries only the links this build can run: a switch for a driver that does not exist here would carry a meaningless value onto a node where it means something
+- `GET /api/settings/export` → downloadable JSON of all settings (no identity keys). `links` carries only the links this build can run, and `ppp_baud` where it runs PPP: a switch for a driver that does not exist here would carry a meaningless value onto a node where it means something (an import drops a `ppp_baud` the receiving board is not qualified for, likewise)
 - `POST /api/settings/import` (a settings export; sections optional) → applies, restarts
-- `POST /api/settings/links` `{wifi,usb,ppp}` (any subset, booleans) → saves; `"restart":true` when Wi-Fi changed and the restart was granted. A link the board lacks or the build cannot run is refused by name with the reason (`400`) rather than saved; so is a combination that, with the console off, would leave no way to reach the node
+- `POST /api/settings/links` `{wifi,usb,ppp,ppp_baud}` (any subset; the first three booleans, `ppp_baud` an integer) → saves; `"restart":true` when Wi-Fi changed and the restart was granted; `usb`, `ppp` and `ppp_baud` apply live. A link the board lacks or the build cannot run is refused by name with the reason (`400`) rather than saved; so is a combination that, with the console off, would leave no way to reach the node, and so is a `ppp_baud` outside `links.ppp.bauds` (`400 ppp_baud … refused`). A speed change is applied when the console next owns the port, so one saved over ppp0 does not cut off its own reply
 - `POST /api/settings/maintenance` `{bootloader_api,bootloader_from_lan,console_enabled}` → saves, applies live; turning the console off is refused (`400`) while no local link is enabled, for the same reason
 - `POST /api/settings/admin` `{password}`
 - `POST /api/settings/reset` → factory defaults, restarts (identity kept)

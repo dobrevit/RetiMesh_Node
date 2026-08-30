@@ -54,8 +54,11 @@ namespace LocalLink {
 // to mention and no test can exercise.
 enum class Type : uint8_t { WifiAp = 0, WifiSta, UsbNcm, PppUart };
 
-// How the node's address on the link was decided.
-enum class Addressing : uint8_t { None = 0, Static, Dhcp };
+// How the node's address on the link was decided. Ipcp is PPP's: the peer
+// hands the address over in IPCP, which is neither a lease nor a fixed
+// number of ours — the node asks for the one its addressing rule names and
+// takes what the peer assigns.
+enum class Addressing : uint8_t { None = 0, Static, Dhcp, Ipcp };
 
 // The phase machine. Ready is the only phase in which a service can be
 // reached over the link; everything else is a reason it cannot.
@@ -97,6 +100,7 @@ inline const char* addressingName(Addressing a) {
     case Addressing::None:      return "none";
     case Addressing::Static:    return "static";
     case Addressing::Dhcp:      return "dhcp";
+    case Addressing::Ipcp:      return "ipcp";
   }
   return "unknown";
 }
@@ -196,5 +200,26 @@ inline uint32_t ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
 inline uint32_t usbNodeAddress(uint8_t macLastOctet) { return ipv4(10, 64, macLastOctet, 1); }
 inline uint32_t usbHostAddress(uint8_t macLastOctet) { return ipv4(10, 64, macLastOctet, 2); }
 constexpr uint32_t kUsbNetmask = 0xFFFFFF00u;
+
+// The PPP link's addressing: the same shape one subnet over, 10.65.<n> with
+// the node at .1 and the host at .2. Here the node is the PPP *client* — the
+// core's prebuilt lwIP has no PPP server (PppUart.h says why) — so these are
+// what the node asks the peer for in IPCP and what the host's pppd is told
+// to assign, not addresses the node can impose. They agree when the host
+// follows the rule, and the node takes what it is given when it does not.
+inline uint32_t pppNodeAddress(uint8_t macLastOctet) { return ipv4(10, 65, macLastOctet, 1); }
+inline uint32_t pppHostAddress(uint8_t macLastOctet) { return ipv4(10, 65, macLastOctet, 2); }
+
+// Whether a serial speed may be used for PPP on this board: one of the rates
+// the board's registry entry lists (boards.json uart.qualification, handed
+// to the build as BOARD_UART_BAUDS) and no faster than the highest rate
+// that has been tried on its hardware (uart.tested_max_baud,
+// BOARD_UART_MAX_BAUD). The rule is here, once, so that the settings API,
+// the console and the driver refuse the same speeds for the same reason.
+inline bool pppBaudAllowed(uint32_t baud, const uint32_t* qualified, size_t count, uint32_t maxBaud) {
+  if (baud == 0 || baud > maxBaud) return false;
+  for (size_t i = 0; i < count; i++) if (qualified[i] == baud) return true;
+  return false;
+}
 
 } // namespace LocalLink

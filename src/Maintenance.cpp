@@ -28,6 +28,7 @@
 #include "LocalLink.h"
 #include "WifiManager.h"
 #include "UsbNcm.h"
+#include "PppUart.h"
 #include "Diag.h"
 
 namespace Maintenance {
@@ -124,7 +125,15 @@ static void doUsbStatus() {
           BOARD_USB_NCM ? "hardware" : "no");
   #else
     dataf("USB_STATUS", "native=false bridge=%s uart_network=%s auto_reset=%s",
-          BOARD_USB_BRIDGE, BOARD_UART_NETWORK ? "hardware" : "no", BOARD_BRIDGE_AUTO_RESET ? "yes" : "no");
+          BOARD_USB_BRIDGE, BOARD_UART_NETWORK ? "driver" : "no", BOARD_BRIDGE_AUTO_RESET ? "yes" : "no");
+    #if HAS_PPP
+      // Who has the port right now, and how PPP has been going. A reader
+      // sees this line only while the console owns the port, which is the
+      // point: uart_owner=ppp is what the log line after a session says.
+      dataf("USB_STATUS", "uart_owner=%s baud=%lu ppp_sessions=%lu ppp_rx=%lu ppp_tx=%lu ppp_tx_dropped=%lu",
+            PppUart::ownerName(PppUart::owner()), (unsigned long)PppUart::baud(), (unsigned long)PppUart::sessions(),
+            (unsigned long)PppUart::rxBytes(), (unsigned long)PppUart::txBytes(), (unsigned long)PppUart::txDropped());
+    #endif
   #endif
   // Software entry is offered exactly when the plan lists it; the plan is
   // built from the same facts the request path decides on.
@@ -153,32 +162,48 @@ static void doLinks() {
   for (size_t i = 0; i < LocalLink::count(); i++) {
     const LocalLink::Link* l = LocalLink::at(i);
     const char* why = l->reason();
-    dataf("LINKS", "link=%s type=%s hardware=%s firmware=%s enabled=%s%s%s%s",
+    // The PPP link's speed and the addresses it will ask for ride with it:
+    // what a host has to tell its pppd (PppUart.h), read from the port
+    // before pppd takes it.
+    char baud[80] = "";
+    #if HAS_PPP
+      if (l->type() == LocalLink::Type::PppUart)
+        snprintf(baud, sizeof(baud), " baud=%lu asks=%s peer=%s", (unsigned long)settings.links().pppBaud,
+                 PppUart::askedAddress().toString().c_str(), PppUart::askedPeer().toString().c_str());
+    #endif
+    dataf("LINKS", "link=%s type=%s hardware=%s firmware=%s enabled=%s%s%s%s%s",
           l->name(), LocalLink::typeName(l->type()), l->hardware() ? "yes" : "no",
-          l->firmware() ? "yes" : "no", l->enabled() ? "yes" : "no",
+          l->firmware() ? "yes" : "no", l->enabled() ? "yes" : "no", baud,
           why[0] ? " reason=\"" : "", why, why[0] ? "\"" : "");
   }
   ok("LINKS");
 }
 
-static void doWifi(const Request& r) {
-  // The same rule the HTTP handler applies, in the one place it is written.
+// WIFI ON|OFF and PPP ON|OFF: one link's switch, by the key the settings
+// table binds it to. The same rule the HTTP handler applies, in the one
+// place it is written; the reply names the key it changed.
+static void doLinkSwitch(const Request& r, const char* key) {
+  const char* name = cmdName(r.cmd);
   const bool on = strcmp(r.args[0], "ON") == 0;
   LinkSettings want = settings.links();
-  want.wifiEnabled = on;
-  bool changed[8] = { true };            // only the first field, wifi, is given
+  bool changed[8] = {};
+  size_t n = 0;
+  const LocalLink::Field* f = LocalLink::fields(n);
+  for (size_t i = 0; i < n && i < 8; i++)
+    if (strcmp(f[i].key, key) == 0) { want.*(f[i].on) = on; changed[i] = true; }
   const char* detail = "";
   char kv[96];
   const char* state = on ? "on" : "off";
   switch (LocalLink::applyLinks(want, changed, Bootloader::Source::Console, &detail)) {
-    case LocalLink::Apply::Unchanged:        snprintf(kv, sizeof(kv), "wifi=%s unchanged=true", state); ok("WIFI", kv); break;
-    case LocalLink::Apply::Saved:            snprintf(kv, sizeof(kv), "wifi=%s restart=false", state); ok("WIFI", kv); break;
-    case LocalLink::Apply::SavedRestarting:  snprintf(kv, sizeof(kv), "wifi=%s restart=true", state); ok("WIFI", kv); break;
-    case LocalLink::Apply::SavedNextBoot:    snprintf(kv, sizeof(kv), "wifi=%s restart=false note=applies_at_next_boot", state); ok("WIFI", kv); break;
-    case LocalLink::Apply::RefusedUnusable:  err("WIFI", 400, detail); break;
-    case LocalLink::Apply::RefusedLockedOut: err("WIFI", 400, "refused: with the serial console switched off this would leave no way to reach the node"); break;
-    case LocalLink::Apply::RefusedBusy:      err("WIFI", 409, "a restart is already in progress"); break;
-    case LocalLink::Apply::NvsFailed:        err("WIFI", 500, "NVS write failed"); break;
+    case LocalLink::Apply::Unchanged:        snprintf(kv, sizeof(kv), "%s=%s unchanged=true", key, state); ok(name, kv); break;
+    case LocalLink::Apply::Saved:            snprintf(kv, sizeof(kv), "%s=%s restart=false", key, state); ok(name, kv); break;
+    case LocalLink::Apply::SavedRestarting:  snprintf(kv, sizeof(kv), "%s=%s restart=true", key, state); ok(name, kv); break;
+    case LocalLink::Apply::SavedNextBoot:    snprintf(kv, sizeof(kv), "%s=%s restart=false note=applies_at_next_boot", key, state); ok(name, kv); break;
+    case LocalLink::Apply::RefusedUnusable:  err(name, 400, detail); break;
+    case LocalLink::Apply::RefusedBaud:      err(name, 400, detail); break;   // a switch changes no speed; the switch statement is exhaustive
+    case LocalLink::Apply::RefusedLockedOut: err(name, 400, "refused: with the serial console switched off this would leave no way to reach the node"); break;
+    case LocalLink::Apply::RefusedBusy:      err(name, 409, "a restart is already in progress"); break;
+    case LocalLink::Apply::NvsFailed:        err(name, 500, "NVS write failed"); break;
   }
 }
 
@@ -223,7 +248,8 @@ static void dispatch(const char* line) {
     case Cmd::UsbStatus:     doUsbStatus(); break;
     case Cmd::NetworkStatus: doNetworkStatus(); break;
     case Cmd::Links:         doLinks(); break;
-    case Cmd::Wifi:          doWifi(r); break;
+    case Cmd::Wifi:          doLinkSwitch(r, "wifi"); break;
+    case Cmd::Ppp:           doLinkSwitch(r, "ppp"); break;
     case Cmd::Reset:         doRestart(r, Bootloader::Target::App); break;
     case Cmd::Bootloader:    doRestart(r, Bootloader::Target::Bootloader); break;
     default:                 break;      // Unknown never reaches here: parse() refused it

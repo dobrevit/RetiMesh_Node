@@ -41,6 +41,7 @@
 #include "AutoInterface.h"
 #include "Power.h"
 #include "LocalLink.h"
+#include "PppUart.h"
 #include "Bootloader.h"
 
 WifiManager wifiManager;
@@ -1057,6 +1058,21 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
       o["supported"] = l->usable();
       o["enabled"]   = LocalLink::switchOn(*l, settings.links());
       if (l->reason()[0]) o["reason"] = l->reason();
+      if (f[i].type == LocalLink::Type::PppUart && l->usable()) {
+        // The speed, and the speeds this board may be set to — the page
+        // draws its list from this answer, as it draws the switches, so
+        // the rule (LocalLinkState.h) is applied here and nowhere on the page.
+        o["baud"] = settings.links().pppBaud;
+        JsonArray bauds = o["bauds"].to<JsonArray>();
+        size_t nb = 0;
+        const uint32_t* ladder = LocalLink::pppBauds(nb);
+        for (size_t b = 0; b < nb; b++) if (LocalLink::pppBaudUsable(ladder[b])) bauds.add(ladder[b]);
+        #if HAS_PPP
+          // The addresses the node asks for, which a host gives its pppd.
+          o["node_ip"] = PppUart::askedAddress().toString();
+          o["host_ip"] = PppUart::askedPeer().toString();
+        #endif
+      }
     }
   }
   {
@@ -1074,11 +1090,12 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
 // ---------------------------------------------------------------------------
 // Local links and maintenance settings
 // ---------------------------------------------------------------------------
-// POST /api/settings/links {"wifi":bool,"usb":bool,"ppp":bool} — any subset.
-// A link the board lacks or the build cannot run is refused by name rather
-// than saved: a setting nothing acts on is a lie the page would go on
-// showing. Wi-Fi changes restart the node (the AP cannot be torn down under
-// the request that asked); the answer says so.
+// POST /api/settings/links {"wifi":bool,"usb":bool,"ppp":bool,"ppp_baud":int}
+// — any subset. A link the board lacks or the build cannot run is refused
+// by name rather than saved: a setting nothing acts on is a lie the page
+// would go on showing; so is a PPP speed the board is not qualified for.
+// Wi-Fi changes restart the node (the AP cannot be torn down under the
+// request that asked); the answer says so. USB and PPP apply live.
 void WifiManager::handleLinksPost(AsyncWebServerRequest* request, const char* body, size_t len) {
   JsonDocument in;
   if (deserializeJson(in, body, len) != DeserializationError::Ok) { sendError(request, 400, "bad json"); return; }
@@ -1091,6 +1108,7 @@ void WifiManager::handleLinksPost(AsyncWebServerRequest* request, const char* bo
     want.*(f[i].on) = in[f[i].key];
     changed[i] = true;
   }
+  if (in["ppp_baud"].is<uint32_t>()) want.pppBaud = in["ppp_baud"];
   const char* detail = "";
   const LocalLink::Apply a = LocalLink::applyLinks(want, changed, Bootloader::Source::Settings, &detail);
   JsonDocument out;
@@ -1098,6 +1116,11 @@ void WifiManager::handleLinksPost(AsyncWebServerRequest* request, const char* bo
     case LocalLink::Apply::RefusedUnusable: {
       char msg[160];
       snprintf(msg, sizeof(msg), "cannot be enabled: %s", detail);
+      sendError(request, 400, msg); return;
+    }
+    case LocalLink::Apply::RefusedBaud: {
+      char msg[160];
+      snprintf(msg, sizeof(msg), "ppp_baud %lu refused: %s", (unsigned long)want.pppBaud, detail);
       sendError(request, 400, msg); return;
     }
     case LocalLink::Apply::RefusedLockedOut:
@@ -1439,6 +1462,8 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
       const LocalLink::Link* link = LocalLink::find(f[i].type);
       if (link && link->usable()) l[f[i].key] = LocalLink::switchOn(*link, settings.links());
     }
+    const LocalLink::Link* ppp = LocalLink::find(LocalLink::Type::PppUart);
+    if (ppp && ppp->usable()) l["ppp_baud"] = settings.links().pppBaud;
   }
   JsonObject m = doc["maintenance"].to<JsonObject>();
   for (const MaintField& f : kMaintFields) m[f.key] = settings.maintenance().*(f.on);
@@ -1544,6 +1569,14 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
         const LocalLink::Link* link = LocalLink::find(f[i].type);
         if (want && (!link || !link->usable())) continue;
         ls.*(f[i].on) = want;
+      }
+      // The PPP speed, where this board runs PPP and is qualified for it;
+      // dropped otherwise, as a switch for a link this board lacks is —
+      // the file came from another node.
+      if (lk["ppp_baud"].is<uint32_t>()) {
+        const uint32_t baud = lk["ppp_baud"];
+        const LocalLink::Link* ppp = LocalLink::find(LocalLink::Type::PppUart);
+        if (ppp && ppp->usable() && LocalLink::pppBaudUsable(baud)) ls.pppBaud = baud;
       }
     }
     if (haveMaint) {

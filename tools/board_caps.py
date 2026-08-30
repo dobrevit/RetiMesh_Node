@@ -14,7 +14,7 @@ second copy in a board header that can drift, this runs before every build and
 hands the env's "local_link" block to the compiler as -D flags:
 
     BOARD_USB_NATIVE, BOARD_USB_NCM, BOARD_USB_BRIDGE, BOARD_BRIDGE_AUTO_RESET,
-    BOARD_UART_NETWORK, BOARD_UART_MAX_BAUD
+    BOARD_UART_NETWORK, BOARD_UART_INSTANCE, BOARD_UART_BAUDS, BOARD_UART_MAX_BAUD
 
 The framework's own USB flags come from the same block. A board whose own USB
 unit is on the connector with OTG and NCM behind it runs the OTG stack
@@ -81,6 +81,11 @@ def flags(entry: dict) -> list:
         ("BOARD_USB_BRIDGE", env.StringifyMacro(usb.get("bridge", "none"))),  # noqa: F821
         ("BOARD_BRIDGE_AUTO_RESET", 1 if usb.get("auto_reset_dtr_rts") else 0),
         ("BOARD_UART_NETWORK", 1 if uart.get("network") else 0),
+        ("BOARD_UART_INSTANCE", int(uart.get("instance", 0))),
+        # The speeds the registry lists for the bridge, as a brace-initialiser
+        # body: the firmware's baud rule (LocalLinkState.h) takes the list
+        # from here rather than carrying its own copy of the ladder.
+        ("BOARD_UART_BAUDS", ",".join(str(int(b)) for b in uart.get("qualification", [115200]))),
         ("BOARD_UART_MAX_BAUD", int(uart.get("tested_max_baud", 115200))),
     ]
     # The framework's view of the same facts. ARDUINO_USB_MODE says which

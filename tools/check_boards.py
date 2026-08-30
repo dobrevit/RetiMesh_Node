@@ -52,6 +52,25 @@ for env, meta in boards.items():
         problems.append(f"{env}: a bridged board should say whether its UART may carry PPP")
     if uart.get("network") and "tested_max_baud" not in uart:
         problems.append(f"{env}: uart.tested_max_baud missing")
+    # The PPP baud rule (LocalLinkState.h, pppBaudAllowed) takes its ladder
+    # from `qualification` and its ceiling from `tested_max_baud`; the
+    # firmware refuses what is not listed or is above the ceiling, so the
+    # data has to be the shape the rule expects: ascending, the console's
+    # 115200 among them (the speed everything else on the port runs at), and
+    # the ceiling one of the rungs.
+    if uart.get("network"):
+        rungs = uart.get("qualification")
+        if not isinstance(rungs, list) or not rungs or any(not isinstance(b, int) or b <= 0 for b in rungs):
+            problems.append(f"{env}: uart.qualification must list the bauds PPP may run at")
+        else:
+            if rungs != sorted(set(rungs)):
+                problems.append(f"{env}: uart.qualification must be ascending with no repeats")
+            if 115200 not in rungs:
+                problems.append(f"{env}: uart.qualification must include 115200, the console's speed")
+            if uart.get("tested_max_baud") not in rungs:
+                problems.append(f"{env}: uart.tested_max_baud must be one of uart.qualification")
+        if "instance" not in uart:
+            problems.append(f"{env}: uart.instance missing — which UART the bridge is on")
     # The framework's USB flags are derived from this block by board_caps.py,
     # so there is nothing in platformio.ini to cross-check them against; only
     # that the env exists at all.

@@ -121,6 +121,12 @@ struct LinkSettings {
   bool wifiEnabled = true;
   bool usbEnabled  = true;              // USB networking, where the board and build carry it
   bool pppEnabled  = false;             // PPP over the bridge UART, likewise
+  // The serial port's speed while PPP is on — console and log included,
+  // since they share the port (PppUart.h). Refused unless the board's
+  // registry entry lists it and it is no faster than the board has been
+  // tried at; the default is the console's speed, so nothing changes until
+  // somebody asks.
+  uint32_t pppBaud = PPP_BAUD_DEFAULT;
 };
 
 // Maintenance surfaces. The bootloader API is on by default because the

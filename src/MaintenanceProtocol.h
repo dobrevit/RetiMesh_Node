@@ -69,7 +69,7 @@ constexpr size_t MAX_ARGS = 3;
 constexpr size_t MAX_ARG  = 24;
 
 enum class Cmd : uint8_t {
-  Help = 0, Status, Version, Reset, Bootloader, UsbStatus, NetworkStatus, Links, Wifi,
+  Help = 0, Status, Version, Reset, Bootloader, UsbStatus, NetworkStatus, Links, Wifi, Ppp,
   Unknown,
 };
 
@@ -85,6 +85,7 @@ inline const CmdInfo* commands(size_t& count) {
     { Cmd::NetworkStatus, "NETWORK_STATUS", "",        "every local link: phase, address, counters" },
     { Cmd::Links,         "LINKS",          "",        "which links this board offers and which are enabled" },
     { Cmd::Wifi,          "WIFI",           "ON|OFF",  "enable or disable Wi-Fi (saves, restarts)" },
+    { Cmd::Ppp,           "PPP",            "ON|OFF",  "enable or disable PPP on this port (saves, applies live)" },
     { Cmd::Reset,         "RESET",          "CONFIRM", "restart into the application" },
     { Cmd::Bootloader,    "BOOTLOADER",     "CONFIRM", "restart into the ROM downloader for flashing" },
   };
@@ -163,7 +164,7 @@ inline ParseError parse(const char* line, Request& out) {
   // Argument shapes, checked here so a handler never sees a request it has
   // to refuse for its form.
   switch (out.cmd) {
-    case Cmd::Wifi:
+    case Cmd::Wifi: case Cmd::Ppp:
       if (out.argc != 1 || (strcmp(out.args[0], "ON") != 0 && strcmp(out.args[0], "OFF") != 0))
         return ParseError::BadArgument;
       break;

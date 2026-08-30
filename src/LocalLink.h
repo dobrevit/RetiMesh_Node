@@ -78,6 +78,11 @@ public:
   // order; both 0 unless Ready.
   virtual uint32_t address() const = 0;
   virtual uint32_t netmask() const = 0;
+  // Whether a remote address belongs to this link: the second half of the
+  // host-facing test (requestIsHostFacing). On a subnet the address falls
+  // inside it; a point-to-point link has one peer and answers for that
+  // address alone, so it overrides this.
+  virtual bool remoteOnLink(uint32_t remoteIpHostOrder) const;
   // Why a link the board has cannot run in this build. Empty for links that
   // can. A virtual, because the alternative — casting on the strength of
   // firmware() being false — was sound only while one class answered false.
@@ -148,6 +153,14 @@ bool switchOn(const Link& l, const LinkSettings& s);
 // Whether any link this build can run is switched on in these settings.
 bool anySwitchOn(const LinkSettings& l);
 
+// The PPP speeds this board's registry entry lists, and whether one may be
+// used: the rule in LocalLinkState.h applied to that ladder and to the
+// highest speed the board has been tried at (BOARD_UART_BAUDS,
+// BOARD_UART_MAX_BAUD). The settings API lists by the first and refuses by
+// the second; the driver applies only what passes.
+const uint32_t* pppBauds(size_t& count);
+bool pppBaudUsable(uint32_t baud);
+
 // What applying a set of link switches came to. One function, because the
 // HTTP handler and the console command each used to walk the same steps —
 // check, save, ask for the restart, phrase the answer — and the console's
@@ -158,13 +171,15 @@ enum class Apply : uint8_t {
   SavedRestarting,  // saved; a restart is armed and will apply it
   SavedNextBoot,    // saved; a restart is already in progress, so it applies at the next boot
   RefusedUnusable,  // a switch was turned on for a link this board or build cannot run
+  RefusedBaud,      // the PPP speed is not one this board is qualified for
   RefusedLockedOut, // it would leave no way to reach the node
   RefusedBusy,      // a restart is already in progress, so nothing was written
   NvsFailed,
 };
 // `want` carries the switches to apply; `changed` names which keys were
-// given (the rest keep their stored value). `detail` receives the link key
-// or reason text a refusal is about.
+// given (the rest keep their stored value). `want.pppBaud` travels with
+// them and is applied whenever it differs from what is stored. `detail`
+// receives the link key or reason text a refusal is about.
 Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Source source, const char** detail);
 
 // Whether these settings would leave the node with no way in at all: no
@@ -259,6 +274,29 @@ protected:
   Addressing addressing() const override { return Addressing::Static; }
   bool       clientsKnown() const override { return true; }
   uint8_t    clients() const override { return 1; }   // one host per cable: whether it is there
+};
+#endif
+
+// PPP over the bridge UART (PppUart.h). The interface exists from boot and
+// a session begins when the host's pppd opens one, so the switch and the
+// speed apply live, as usb0's switch does — no restart.
+#if HAS_PPP
+class PppLink : public MachineLink {
+public:
+  Type type() const override { return Type::PppUart; }
+  const char* name() const override { return "ppp0"; }
+  bool enabled() const override;                // the stored switch, live
+  void begin() override;
+  // One peer, and the subnet rule would refuse it: a /32 holds only us.
+  bool remoteOnLink(uint32_t remoteIpHostOrder) const override;
+protected:
+  void       drive() override;                  // the driver follows the switch and the speed every pass
+  bool       carrier() const override;
+  IPAddress  ip() const override;
+  IPAddress  mask() const override;
+  Addressing addressing() const override { return Addressing::Ipcp; }
+  bool       clientsKnown() const override { return true; }
+  uint8_t    clients() const override { return 1; }   // one host per port: whether it is there
 };
 #endif
 
