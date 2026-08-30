@@ -137,6 +137,7 @@ struct MaintenanceSettings {
   bool bootloaderApi     = true;        // POST /api/system/bootloader answers at all
   bool bootloaderFromLan = false;       // ...also from the station (upstream LAN) link
   bool consoleEnabled    = true;        // the serial maintenance console reads commands
+  bool consoleTcp        = true;        // ...and answers on CONSOLE_TCP_PORT too, after AUTH
 };
 
 class Settings {

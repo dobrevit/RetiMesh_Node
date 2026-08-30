@@ -113,6 +113,7 @@ void Settings::load() {
   LOAD(_maintenance.bootloaderApi,     "m_bapi", getBool("m_bapi"));
   LOAD(_maintenance.bootloaderFromLan, "m_blan", getBool("m_blan"));
   LOAD(_maintenance.consoleEnabled,    "m_con",  getBool("m_con"));
+  LOAD(_maintenance.consoleTcp,        "m_ctcp", getBool("m_ctcp"));
   if (_admin.password[0] == '\0') strlcpy(_admin.password, ADMIN_PASSWORD_DEFAULT, sizeof(_admin.password));
   #undef LOAD
 
@@ -196,7 +197,8 @@ bool Settings::saveMaintenance(const MaintenanceSettings& m) {
   _maintenance = m;
   bool ok = _prefs.putBool("m_bapi", m.bootloaderApi)     > 0
          && _prefs.putBool("m_blan", m.bootloaderFromLan) > 0
-         && _prefs.putBool("m_con",  m.consoleEnabled)    > 0;
+         && _prefs.putBool("m_con",  m.consoleEnabled)    > 0
+         && _prefs.putBool("m_ctcp", m.consoleTcp)         > 0;
   if (!ok) log_e("NVS write failed (maintenance)");
   return ok;
 }

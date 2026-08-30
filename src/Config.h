@@ -133,6 +133,35 @@
 // interface and the reader task, not the ring.
 
 // ---------------------------------------------------------------------------
+// The maintenance console (Maintenance.h) and its network transport
+// (ConsoleServer.h)
+//
+// The console over a socket is what lets a node be configured from a
+// distance without a resident web server: measured on a Heltec Wireless
+// Stick, "http + dns + mdns" costs 28616 B of byte-addressable RAM against
+// 272 B for the Reticulum TCP listener beside it, on a board that finishes
+// booting with about 27 KB. Same parser, same settings rules, same refusals
+// as the cable — a second transport, not a second implementation.
+// ---------------------------------------------------------------------------
+#ifndef CONSOLE_TCP_PORT
+  #define CONSOLE_TCP_PORT       4243     // beside the Reticulum transport's 4242
+#endif
+// One caller at a time. This is a configuration channel, not a service: two
+// operators changing settings at once is a race nobody asked for, and each
+// session costs a socket on a board that may have kilobytes to spare.
+#ifndef MAINT_NET_SESSIONS
+  #define MAINT_NET_SESSIONS     1
+#endif
+// Guessing the admin password over the air. Counted for the node, not the
+// connection (Maintenance.h).
+#ifndef MAINT_AUTH_MAX_FAILURES
+  #define MAINT_AUTH_MAX_FAILURES 3
+#endif
+#ifndef MAINT_AUTH_LOCKOUT_MS
+  #define MAINT_AUTH_LOCKOUT_MS   30000
+#endif
+
+// ---------------------------------------------------------------------------
 // Firmware version — single-sourced from the git tag by CI
 // (PLATFORMIO_BUILD_FLAGS=-DFW_VERSION=\"v1.2.3\"); local builds say "dev".
 // ---------------------------------------------------------------------------

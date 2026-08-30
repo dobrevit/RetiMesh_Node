@@ -73,7 +73,7 @@ constexpr size_t MAX_ARG  = 40;
 
 enum class Cmd : uint8_t {
   Help = 0, Status, Version, Reset, Bootloader, UsbStatus, NetworkStatus, Links, Wifi, Ppp,
-  Get, Set,
+  Get, Set, Auth,
   Unknown,
 };
 
@@ -92,6 +92,7 @@ inline const CmdInfo* commands(size_t& count) {
     { Cmd::Ppp,           "PPP",            "ON|OFF",  "enable or disable PPP on this port (saves, applies live)" },
     { Cmd::Get,           "GET",            "[key]",   "read settings: all, one section (radio), or one key (radio.sf)" },
     { Cmd::Set,           "SET",            "key value", "change one setting; the value is taken as typed" },
+    { Cmd::Auth,          "AUTH",           "password", "prove yourself; a session that arrived over the network answers nothing else until you do" },
     { Cmd::Reset,         "RESET",          "CONFIRM", "restart into the application" },
     { Cmd::Bootloader,    "BOOTLOADER",     "CONFIRM", "restart into the ROM downloader for flashing" },
   };
@@ -106,7 +107,7 @@ inline const char* cmdName(Cmd c) {
   return "?";
 }
 
-enum class ParseError : uint8_t { None = 0, Empty, TooLong, Unknown, BadArgument };
+enum class ParseError : uint8_t { None = 0, Empty, TooLong, Unknown, BadArgument, Unauthorised };
 
 struct Request {
   Cmd    cmd = Cmd::Unknown;
@@ -140,6 +141,27 @@ inline bool copyToken(const char* in, size_t len, char* out, size_t outLen) {
   return true;
 }
 
+// Which commands take the rest of the line as typed rather than tokenised,
+// and after how many arguments: SET's value begins after its key, AUTH's
+// password is the whole tail. Both need their case and their spaces — a
+// password uppercased is a password that will not authenticate, and an SSID
+// with a space in it has to survive the parser. SIZE_MAX means "tokenise
+// everything", which is every other command.
+inline size_t rawTailAfter(const char* word) {
+  if (strcmp(word, "SET") == 0)  return 1;
+  if (strcmp(word, "AUTH") == 0) return 0;
+  return (size_t)-1;
+}
+
+inline void captureRawTail(const char* p, Request& out) {
+  const char* v = p;
+  while (*v == ' ' || *v == '\t') v++;
+  const char* end = v + strlen(v);
+  while (end > v && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) end--;
+  out.rawValue = v;
+  out.rawValueLen = (size_t)(end - v);
+}
+
 // One line -> one request. Leading and trailing whitespace is ignored; a
 // carriage return counts as whitespace so a terminal that sends CRLF works.
 inline ParseError parse(const char* line, Request& out) {
@@ -158,26 +180,15 @@ inline ParseError parse(const char* line, Request& out) {
     const size_t len = (size_t)(p - start);
     if (nTokens == 0) {
       if (!copyToken(start, len, out.word, sizeof(out.word))) return ParseError::BadArgument;
-    } else {
-      if (out.argc >= MAX_ARGS) return ParseError::BadArgument;
-      if (!copyToken(start, len, out.args[out.argc], MAX_ARG)) return ParseError::BadArgument;
-      out.argc++;
-      // SET takes its value as typed. Everything after the key is that value —
-      // spaces and all, so an SSID with a space in it survives — and the
-      // tokeniser stops here rather than uppercasing a password into
-      // something that will not authenticate.
-      if (out.argc == 1 && strcmp(out.word, "SET") == 0) {
-        const char* v = p;
-        while (*v == ' ' || *v == '\t') v++;
-        const char* end = v + strlen(v);
-        while (end > v && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) end--;
-        out.rawValue = v;
-        out.rawValueLen = (size_t)(end - v);
-        nTokens++;
-        break;
-      }
+      nTokens++;
+      if (rawTailAfter(out.word) == 0) { captureRawTail(p, out); break; }
+      continue;
     }
+    if (out.argc >= MAX_ARGS) return ParseError::BadArgument;
+    if (!copyToken(start, len, out.args[out.argc], MAX_ARG)) return ParseError::BadArgument;
+    out.argc++;
     nTokens++;
+    if (out.argc == rawTailAfter(out.word)) { captureRawTail(p, out); break; }
   }
   if (nTokens == 0) return ParseError::Empty;
 
@@ -191,6 +202,10 @@ inline ParseError parse(const char* line, Request& out) {
   // Argument shapes, checked here so a handler never sees a request it has
   // to refuse for its form.
   switch (out.cmd) {
+    case Cmd::Auth:
+      // The password is the tail, so argc says nothing about it.
+      if (!out.rawValue || out.rawValueLen == 0) return ParseError::BadArgument;
+      break;
     case Cmd::Wifi: case Cmd::Ppp:
       if (out.argc != 1 || (strcmp(out.args[0], "ON") != 0 && strcmp(out.args[0], "OFF") != 0))
         return ParseError::BadArgument;
@@ -293,6 +308,7 @@ inline int errorCode(ParseError e) {
     case ParseError::TooLong:     return 400;
     case ParseError::Unknown:     return 404;
     case ParseError::BadArgument: return 400;
+    case ParseError::Unauthorised: return 401;
   }
   return 400;
 }
@@ -304,6 +320,7 @@ inline const char* errorText(ParseError e) {
     case ParseError::TooLong:     return "line too long";
     case ParseError::Unknown:     return "unknown command, try HELP";
     case ParseError::BadArgument: return "bad argument, try HELP";
+    case ParseError::Unauthorised: return "authenticate first: AUTH <password>";
   }
   return "";
 }

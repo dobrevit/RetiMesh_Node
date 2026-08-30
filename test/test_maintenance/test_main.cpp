@@ -248,13 +248,62 @@ static void test_every_command_in_the_table_parses_by_its_own_name() {
     // With its required argument where it has one, so the shape check passes.
     const char* arg = strcmp(all[i].args, "CONFIRM") == 0 ? " CONFIRM"
                     : strcmp(all[i].args, "ON|OFF") == 0  ? " ON"
-                    : strcmp(all[i].args, "key value") == 0 ? " radio.sf 9" : "";
+                    : strcmp(all[i].args, "key value") == 0 ? " radio.sf 9"
+                    : strcmp(all[i].args, "password") == 0 ? " hunter2" : "";
     snprintf(line, sizeof(line), "%s%s", all[i].name, arg);
     Request r;
     TEST_ASSERT_EQUAL_MESSAGE((int)ParseError::None, (int)parse(line, r), all[i].name);
     TEST_ASSERT_EQUAL((int)all[i].cmd, (int)r.cmd);
     TEST_ASSERT_EQUAL_STRING(all[i].name, cmdName(all[i].cmd));
   }
+}
+
+// --- AUTH, and the tail rule it shares with SET ------------------------------
+static void test_auth_takes_the_whole_tail_with_its_case_and_spaces() {
+  // The tokeniser uppercases, which is right for a command and fatal for a
+  // password: "Sw0rdf1sh" arriving as "SW0RDF1SH" authenticates nobody. The
+  // rule that spares SET's value spares this too, from one token earlier.
+  Request r = parseOk("AUTH Sw0rdf1sh");
+  TEST_ASSERT_EQUAL((int)Cmd::Auth, (int)r.cmd);
+  TEST_ASSERT_EQUAL_size_t(9, r.rawValueLen);
+  TEST_ASSERT_EQUAL_STRING_LEN("Sw0rdf1sh", r.rawValue, 9);
+
+  // A password may contain spaces; the tail is taken whole, not tokenised.
+  r = parseOk("AUTH two words here");
+  TEST_ASSERT_EQUAL_size_t(14, r.rawValueLen);
+  TEST_ASSERT_EQUAL_STRING_LEN("two words here", r.rawValue, 14);
+
+  // Trailing whitespace is not part of the secret.
+  r = parseOk("AUTH  padded   ");
+  TEST_ASSERT_EQUAL_size_t(6, r.rawValueLen);
+  TEST_ASSERT_EQUAL_STRING_LEN("padded", r.rawValue, 6);
+}
+
+static void test_auth_without_a_password_is_refused() {
+  Request r;
+  TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("AUTH", r));
+  TEST_ASSERT_EQUAL((int)ParseError::BadArgument, (int)parse("AUTH   ", r));
+}
+
+static void test_set_still_takes_its_value_after_the_key() {
+  // The tail rule was generalised to serve both; SET must not have moved.
+  Request r = parseOk("SET wifi.sta_ssid My Network");
+  TEST_ASSERT_EQUAL((int)Cmd::Set, (int)r.cmd);
+  TEST_ASSERT_EQUAL_size_t(1, r.argc);
+  TEST_ASSERT_EQUAL_STRING("WIFI.STA_SSID", r.args[0]);
+  TEST_ASSERT_EQUAL_STRING_LEN("My Network", r.rawValue, 10);
+}
+
+static void test_an_unauthorised_reply_is_a_401_a_script_can_read() {
+  TEST_ASSERT_EQUAL(401, errorCode(ParseError::Unauthorised));
+  TEST_ASSERT_NOT_NULL(strstr(errorText(ParseError::Unauthorised), "AUTH"));
+  char out[224];
+  const size_t n = formatErr(out, sizeof(out), "STATUS", errorCode(ParseError::Unauthorised),
+                             errorText(ParseError::Unauthorised));
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_EQUAL_STRING_LEN("RM ERR ", out, 7);
+  TEST_ASSERT_NOT_NULL(strstr(out, " 401 "));
+  TEST_ASSERT_NOT_NULL(strstr(out, "STATUS"));
 }
 
 int main() {
@@ -275,5 +324,9 @@ int main() {
   RUN_TEST(test_set_takes_its_value_as_typed);
   RUN_TEST(test_get_reads_all_a_section_or_one_key);
   RUN_TEST(test_every_command_in_the_table_parses_by_its_own_name);
+  RUN_TEST(test_auth_takes_the_whole_tail_with_its_case_and_spaces);
+  RUN_TEST(test_auth_without_a_password_is_refused);
+  RUN_TEST(test_set_still_takes_its_value_after_the_key);
+  RUN_TEST(test_an_unauthorised_reply_is_a_401_a_script_can_read);
   return UNITY_END();
 }

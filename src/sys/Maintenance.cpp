@@ -31,13 +31,41 @@
 #include "UsbNcm.h"
 #include "PppUart.h"
 #include "Diag.h"
+#include "ConsoleServer.h"
 
 namespace Maintenance {
 
-static Stream*       sIo = nullptr;
-static LineAssembler sLines;
-static char          sOut[224];
-static unsigned      sDataLines = 0;   // data lines sent for the command in hand; the OK line reports it
+// One conversation with one host. The cable has one and a network transport
+// brings its own, and both are served in the same pass. There used to be a
+// single stream, which meant a second transport could only be added by
+// displacing the first — and a console pointed at the wrong stream is a node
+// with a perfect log that answers nothing, which is a bug this file has
+// already had once (useStream, below).
+struct Session {
+  Stream*       io = nullptr;
+  LineAssembler lines;
+  unsigned      dataLines = 0;         // data lines sent for the command in hand; the OK line reports it
+  // Whether this host has already proved it may be here. The cable is
+  // trusted without a password because physical access allows dumping the
+  // firmware and reflashing it, which is strictly more than editing a
+  // setting. A socket on the access point is not physical access and that
+  // reasoning does not carry across, so it authenticates (Maintenance.h).
+  bool          trusted = false;
+  bool          authed = false;
+  bool          closing = false;       // the transport should hang up: too many failed AUTHs
+};
+
+static Session  sCable;                              // the port; always present
+static Session  sNet[MAINT_NET_SESSIONS];            // whatever a network transport brings
+static Session* sCur = nullptr;                      // the one being served this instant
+static char     sOut[224];
+
+// Failed AUTHs are counted for the whole node, not per connection: a limit a
+// caller can reset by hanging up and dialling again is not a limit. The
+// cable is unaffected, so a lockout cannot strand the operator — it only
+// closes the door the guessing is coming through.
+static uint8_t  sAuthFailures = 0;
+static uint32_t sAuthLockedUntilMs = 0;
 
 // Bytes read per poll. The loop task runs every 200 ms and a typed command is
 // a dozen bytes; a host script pasting a line is under a hundred. Anything
@@ -46,11 +74,11 @@ static unsigned      sDataLines = 0;   // data lines sent for the command in han
 static const size_t kBudget = 128;
 
 static void send(size_t n) {
-  if (!sIo) return;
-  sIo->write((const uint8_t*)sOut, n < sizeof(sOut) ? n : sizeof(sOut) - 1);
-  sIo->write('\n');
+  if (!sCur || !sCur->io) return;
+  sCur->io->write((const uint8_t*)sOut, n < sizeof(sOut) ? n : sizeof(sOut) - 1);
+  sCur->io->write('\n');
 }
-static void ok(const char* cmd, const char* kv = nullptr) { send(formatOk(sOut, sizeof(sOut), cmd, sDataLines, kv)); }
+static void ok(const char* cmd, const char* kv = nullptr) { send(formatOk(sOut, sizeof(sOut), cmd, sCur ? sCur->dataLines : 0, kv)); }
 static void err(const char* cmd, int code, const char* text) { send(formatErr(sOut, sizeof(sOut), cmd, code, text)); }
 
 // A data line, formatted straight into the output buffer after its prefix.
@@ -68,7 +96,7 @@ static void dataf(const char* cmd, const char* fmt, ...) {
   const int body = vsnprintf(sOut + head, sizeof(sOut) - (size_t)head, fmt, ap);
   va_end(ap);
   send((size_t)head + (body < 0 ? 0 : (size_t)body));
-  sDataLines++;
+  if (sCur) sCur->dataLines++;
 }
 
 // --- handlers ---------------------------------------------------------------
@@ -101,6 +129,12 @@ static void doStatus() {
         (unsigned long)h.largestDramBlock);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
+  // Whether the console can be reached over the network, and whether somebody
+  // already holds the one session — which is the answer to "why will it not
+  // let me in" when two people administer the same node.
+  dataf("STATUS", "console_tcp=%s port=%u session=%s",
+        ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),
+        !ConsoleServer::connected() ? "none" : ConsoleServer::authenticated() ? "authenticated" : "unauthenticated");
   // The armed restart, in the same words /api/status uses: what it is for,
   // who asked, and how long until it fires.
   const Bootloader::Pending p = Bootloader::snapshot();
@@ -241,18 +275,58 @@ static void doRestart(const Request& r, Bootloader::Target target) {
 static void doGet(const Request& r);
 static void doSet(const Request& r);
 
+// What a session that has not authenticated may still do: say who it is
+// talking to, ask what the vocabulary is, and prove itself. Everything else —
+// STATUS included, which names the node and reports its radio — waits.
+static bool allowedUnauthenticated(Cmd c) {
+  return c == Cmd::Auth || c == Cmd::Version || c == Cmd::Help;
+}
+
+static void doAuth(const Request& r) {
+  const uint32_t now = millis();
+  if (sAuthLockedUntilMs && (int32_t)(now - sAuthLockedUntilMs) < 0) {
+    err("AUTH", 429, "too many attempts; wait and try again");
+    return;
+  }
+  const char* want = settings.admin().password;
+  const size_t n = strlen(want);
+  // Length first, then every byte: a comparison that stops at the first
+  // difference tells a caller how much of a password it has right.
+  bool same = (r.rawValueLen == n);
+  for (size_t i = 0; i < n; i++)
+    same &= (i < r.rawValueLen && r.rawValue[i] == want[i]);
+  if (!same) {
+    if (++sAuthFailures >= MAINT_AUTH_MAX_FAILURES) {
+      sAuthLockedUntilMs = now + MAINT_AUTH_LOCKOUT_MS;
+      if (!sAuthLockedUntilMs) sAuthLockedUntilMs = 1;    // never the "unset" value
+      sAuthFailures = 0;
+      if (sCur) sCur->closing = true;
+    }
+    log_w("console: failed AUTH from a network session");
+    err("AUTH", 401, "wrong password");
+    return;
+  }
+  sAuthFailures = 0;
+  if (sCur) sCur->authed = true;
+  ok("AUTH");
+}
+
 static void dispatch(const char* line) {
-  sDataLines = 0;
+  if (sCur) sCur->dataLines = 0;
   // The reply begins on a fresh line. The S3's USB unit drops the last
   // packet it was holding when the host opened the port; when that was the
   // end of a log line, the host's buffer holds an unterminated fragment and
   // the first reply line arrives glued to it — read as log noise, not as a
   // reply. An empty line costs nothing and ends whatever was left hanging.
-  if (sIo) sIo->write('\n');
+  if (sCur && sCur->io) sCur->io->write('\n');
   Request r;
   const ParseError e = parse(line, r);
   if (e != ParseError::None) {
     err(r.word[0] ? r.word : "?", errorCode(e), errorText(e));
+    return;
+  }
+  if (sCur && !sCur->trusted && !sCur->authed && !allowedUnauthenticated(r.cmd)) {
+    err(r.word, errorCode(ParseError::Unauthorised), errorText(ParseError::Unauthorised));
     return;
   }
   switch (r.cmd) {
@@ -264,6 +338,7 @@ static void dispatch(const char* line) {
     case Cmd::Links:         doLinks(); break;
     case Cmd::Wifi:          doLinkSwitch(r, "wifi"); break;
     case Cmd::Ppp:           doLinkSwitch(r, "ppp"); break;
+    case Cmd::Auth:          doAuth(r); break;
     case Cmd::Get:           doGet(r); break;      // defined below, with the other settings work
     case Cmd::Set:           doSet(r); break;
     case Cmd::Reset:         doRestart(r, Bootloader::Target::App); break;
@@ -371,46 +446,88 @@ static void doSet(const Request& r) {
 
 // --- entry points -------------------------------------------------------------
 void begin(Stream& io) {
-  sIo = &io;
-  sLines.reset();
+  sCable.io = &io;
+  sCable.trusted = true;                 // the cable: physical access (Maintenance.h)
+  sCable.lines.reset();
+  sCur = &sCable;
   dataf("HELLO", "firmware=\"%s\" version=%s board=\"%s\" protocol=%d", FW_NAME, FW_VERSION, BOARD_NAME,
         MAINT_PROTOCOL_VERSION);
 }
 
 void useStream(Stream& io) {
-  if (sIo == &io) return;
+  if (sCable.io == &io) return;
   // A half-typed line belongs to the stream it was typed on, not to the next
   // one; carrying it across would glue two sources together.
-  sLines.reset();
-  sIo = &io;
+  sCable.lines.reset();
+  sCable.io = &io;
 }
 
-void poll() {
-  if (!sIo) return;
+bool openSession(Stream& io) {
+  for (Session& s : sNet) {
+    if (s.io) continue;
+    s = Session();                       // nothing of the last caller's survives: not the
+    s.io = &io;                          // half-typed line, and above all not the authentication
+    return true;
+  }
+  return false;
+}
+
+void closeSession(Stream& io) {
+  for (Session& s : sNet) if (s.io == &io) s = Session();
+}
+
+bool sessionClosing(Stream& io) {
+  for (Session& s : sNet) if (s.io == &io) return s.closing;
+  return false;
+}
+
+bool sessionAuthed(Stream& io) {
+  for (Session& s : sNet) if (s.io == &io) return s.authed;
+  return false;
+}
+
+size_t openSessions() {
+  size_t n = 0;
+  for (const Session& s : sNet) if (s.io) n++;
+  return n;
+}
+
+// One session's turn. The budget is per session, so a host pasting a script
+// cannot starve the cable of its pass.
+static void serve(Session& s) {
+  if (!s.io) return;
+  sCur = &s;
   if (!settings.maintenance().consoleEnabled) {
     // Off means off, not deferred. Bytes that arrive while the console is
     // disabled are discarded rather than left in the port's buffer, where an
     // earlier version let them sit until the console was switched back on —
     // at which point a "BOOTLOADER CONFIRM" typed days before was executed.
     size_t budget = kBudget;
-    while (budget-- && sIo->available() > 0) sIo->read();
-    sLines.reset();
+    while (budget-- && s.io->available() > 0) s.io->read();
+    s.lines.reset();
     return;
   }
   // Nothing to read: the port is silent, which is when a stalled partial
   // line — a prober's leftovers — expires (MaintenanceProtocol.h).
-  if (sIo->available() <= 0) {
-    if (sLines.idle(millis())) log_d("console: dropped a line the port went silent on");
+  if (s.io->available() <= 0) {
+    if (s.lines.idle(millis())) log_d("console: dropped a line the port went silent on");
     return;
   }
   size_t budget = kBudget;
-  while (budget-- && sIo->available() > 0) {
-    const int c = sIo->read();
+  while (budget-- && s.io->available() > 0) {
+    const int c = s.io->read();
     if (c < 0) break;
     bool overflowed = false;
-    if (sLines.feed((char)c, overflowed, millis())) dispatch(sLines.line());
+    if (s.lines.feed((char)c, overflowed, millis())) dispatch(s.lines.line());
     else if (overflowed) err("?", errorCode(ParseError::TooLong), errorText(ParseError::TooLong));
+    if (s.closing) break;              // the transport hangs up; nothing more from this one
   }
+}
+
+void poll() {
+  serve(sCable);
+  for (Session& s : sNet) serve(s);
+  sCur = &sCable;                      // anything logged between polls belongs to the port
 }
 
 } // namespace Maintenance

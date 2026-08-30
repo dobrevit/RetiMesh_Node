@@ -30,6 +30,24 @@
 //  do, and a request line is never echoed, so a host filters on the prefix.
 //  Runs on the loop task, a few bytes per pass; it never blocks and never
 //  allocates.
+//
+//  **More than one way in.** The port is one session; a network transport
+//  (ConsoleServer.h) brings its own, and both are served in the same pass.
+//  They differ in one thing only:
+//
+//    the cable    trusted on sight. Physical access already allows dumping
+//                 the firmware and reflashing it, which is strictly more
+//                 than editing a setting, and the console already answers
+//                 BOOTLOADER CONFIRM. So there is no password on the wire.
+//    the network  answers HELP, VERSION and AUTH, and nothing else until
+//                 AUTH succeeds. A socket on an open access point is not
+//                 physical access and the reasoning above does not carry
+//                 across it. The credential is the admin password — the
+//                 same one the web API takes, so there is one to change and
+//                 not two. Failures are counted for the node rather than
+//                 the connection, because a limit a caller resets by
+//                 hanging up is not a limit; the cable is never locked out,
+//                 so no lockout can strand the operator.
 // ============================================================================
 #pragma once
 
@@ -48,5 +66,17 @@ void begin(Stream& io);            // announces itself with "RM HELLO ..."
 // changed — only who hands its bytes over.
 void useStream(Stream& io);
 void poll();                       // from loop(); reads what has arrived, answers complete lines
+
+// --- sessions a network transport brings ------------------------------------
+// The transport owns the socket and its lifetime; the console owns the
+// protocol and the authentication. openSession() returns false when every
+// slot is taken, and the transport turns the caller away.
+bool   openSession(Stream& io);
+void   closeSession(Stream& io);
+// True when the console is finished with this caller and the transport
+// should hang up: too many failed AUTHs. Checked after each poll().
+bool   sessionClosing(Stream& io);
+bool   sessionAuthed(Stream& io);
+size_t openSessions();
 
 } // namespace Maintenance
