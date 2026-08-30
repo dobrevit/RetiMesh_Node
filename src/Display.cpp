@@ -625,8 +625,7 @@ void Display::paintNeighbors() {
 void Display::paintTransport() {
   if (DisplayLayout::compact()) {
     char l[16];
-    RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
-    const size_t n = RnsTransport::interfaces(ifs, RNS_MAX_CLIENTS + 1);
+    const size_t n = RnsTransport::interfaceCount();
     snprintf(l, sizeof(l), "%s", g_stats.transportOnline ? "transport" : "trans OFF");
     _oled.setCursor(0, DisplayLayout::rowY(0)); _oled.print(l);
     snprintf(l, sizeof(l), "path %u", (unsigned)RnsTransport::pathCount());
@@ -641,8 +640,11 @@ void Display::paintTransport() {
     return;
   }
   char line[24];
-  RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
-  size_t n = RnsTransport::interfaces(ifs, RNS_MAX_CLIENTS + 1);
+  // Four rows fit under the header, so ask for four and take the count
+  // separately. A node on a busy LAN has an interface per peer — many more
+  // than fit here, and more than a stack buffer on this task wants to hold.
+  RnsTransport::IfaceInfo ifs[4];
+  const size_t n = RnsTransport::interfaceCount();
   // "Transport 2 paths" is 17 of the 18 columns the battery leaves, and says
   // what it means without a legend.
   const unsigned paths = (unsigned)RnsTransport::pathCount();
@@ -650,14 +652,18 @@ void Display::paintTransport() {
   // page number to carry now, and nine columns left for a name.
   snprintf(line, sizeof(line), g_stats.transportOnline ? "Transport" : "Trans off");
   header(line);
-  // Four rows fit under the header. interfaces() can return five (LoRa plus
-  // RNS_MAX_CLIENTS peers), so when there are more than fit, the last row
-  // counts the remainder instead of letting a live interface vanish.
-  const size_t listed = (n > 4) ? 3 : n;
+  // When there are more than fit, the last row counts the remainder instead
+  // of letting a live interface vanish.
+  const size_t listed = RnsTransport::interfaces(ifs, (n > 4) ? 3 : 4);
   uint8_t row = 0;
   for (size_t i = 0; i < listed; i++, row++) {
-    char name[12]; strlcpy(name, ifs[i].name, sizeof(name));
-    if (strncmp(name, "WiFi/", 5) == 0) memmove(name, name + 5, strlen(name + 5) + 1);   // just the IP
+    // Nine columns for a name that carries an address: drop the kind prefix,
+    // and for an Auto peer the "fe80::" every link-local starts with, leaving
+    // the part that tells one peer from another.
+    const char* full = ifs[i].name;
+    if (strncmp(full, "WiFi/", 5) == 0)       full += 5;
+    else if (strncmp(full, "Auto/", 5) == 0)  full += strncmp(full + 5, "fe80::", 6) == 0 ? 11 : 5;
+    char name[12]; strlcpy(name, full, sizeof(name));
     snprintf(line, sizeof(line), "%-9s %-6.6s %3luk", name, ifs[i].mode, (unsigned long)((ifs[i].rxb + ifs[i].txb) / 1024));
     _oled.setCursor(0, DisplayLayout::rowY(row)); _oled.print(line);
   }

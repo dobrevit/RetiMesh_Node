@@ -37,9 +37,10 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 |---|---|---|
 | Transport | enabled | disabled = plain bridge (no routing, no announces re-broadcast) |
 | LoRa interface mode | `full` | `full`, `gateway`, `access_point`, `roaming`, `boundary` |
-| Wi-Fi clients mode | `access_point` | applied to every TCP and AutoInterface client interface |
+| Client interface mode | `full` | one interface per client on :4242 (Sideband, `rnsd`) |
+| Peer interface mode | `full` | one interface per zero-config peer — the other nodes and hosts on the Wi-Fi links |
 | Power profile | performance | `performance` 240 MHz · `balanced` 160 MHz + Wi-Fi modem sleep · `battery` 80 MHz + Wi-Fi sleep + 20 s display timeout; applied live |
-| Zero-config peering (AutoInterface) | enabled | RNS AutoInterface on the AP; group id blank = `reticulum` (peers must share it) |
+| Zero-config peering (AutoInterface) | enabled | RNS AutoInterface on the access point *and* the station link; group id blank = `reticulum` (peers must share it) |
 | Announce cap | 2 % | share of each interface's bandwidth announces may use (rnsd `announce_cap`) |
 | Announce rate target / grace / penalty | 0 / 0 / 0 | throttle destinations announcing too often (rnsd `announce_rate_*`); 0 = off |
 | Reticulum store on SD | on | where the store belongs when a card is present. **Read-only on this form** — saving the flag alone moved nothing and left the node reading an empty store, so the store is moved with *Use this card* / *Eject* under SD card, which copy the data and restart into the new home. See [Architecture](architecture.md#the-store-has-one-home). |

@@ -46,6 +46,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>
+#include "Config.h"                        // INTERFACE_NAME_MAX, RNS_MAX_INTERFACES
 
 namespace RnsTransport {
 
@@ -60,12 +61,15 @@ bool started();
 void clientConnected(uint32_t id, const char* remote);
 void clientDisconnected(uint32_t id);
 
-// Thread-safe snapshots, refreshed by the RNS task.
-struct PathInfo  { char hash[33]; char via[20]; uint8_t hops; uint32_t ageS; };
-struct IfaceInfo { char name[24]; char mode[14]; uint32_t rxb, txb; };
+// Thread-safe snapshots, refreshed by the RNS task. The name buffers hold a
+// whole interface name: they are what a path's "via" is matched against by
+// eye, and a truncated one makes two different peers read as the same.
+struct PathInfo  { char hash[33]; char via[INTERFACE_NAME_MAX]; uint8_t hops; uint32_t ageS; };
+struct IfaceInfo { char name[INTERFACE_NAME_MAX]; char mode[14]; uint32_t rxb, txb; };
 size_t paths(PathInfo* out, size_t max);
 size_t interfaces(IfaceInfo* out, size_t max);
 size_t pathCount();
+size_t interfaceCount();                   // whole list, even when a caller reads fewer
 
 // Reticulum table sizes, refreshed alongside the snapshots above. These are the
 // structures that grow with traffic, so a soak run watches them as closely as

@@ -21,6 +21,7 @@
 // ============================================================================
 #include "WifiManager.h"
 #include <sys/stat.h>
+#include <memory>
 #include "QrCode.h"
 #include "Pmu.h"
 #include "Gps.h"
@@ -763,6 +764,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   tr["online"]  = g_stats.transportOnline;
   tr["lora_mode"] = RnsTransport::modeName(settings.transport().loraMode);
   tr["wifi_mode"] = RnsTransport::modeName(settings.transport().wifiMode);
+  tr["auto_mode"] = RnsTransport::modeName(settings.transport().autoMode);
   JsonObject ai = tr["autointerface"].to<JsonObject>();
   ai["enabled"] = settings.transport().autoEnabled;
   ai["online"]  = AutoInterface::enabled();
@@ -770,8 +772,27 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   ai["peers"]   = AutoInterface::peerCount();
   ai["group_id"] = settings.transport().autoGroupId[0] ? settings.transport().autoGroupId : AUTOIF_GROUP_ID;
   {
-    RnsTransport::IfaceInfo ifs[RNS_MAX_CLIENTS + 1];
-    size_t k = RnsTransport::interfaces(ifs, RNS_MAX_CLIENTS + 1);
+    // Which peers, not just how many: when a room of nodes cannot see each
+    // other, the first question is whether they have peered at all, and the
+    // answer used to be a bare count.
+    std::unique_ptr<AutoInterface::Peer[]> ap(new AutoInterface::Peer[AUTOIF_MAX_PEERS]);
+    size_t an = AutoInterface::peers(ap.get(), AUTOIF_MAX_PEERS);
+    JsonArray pl = ai["peer_list"].to<JsonArray>();
+    uint32_t nowMs = millis();
+    for (size_t i = 0; i < an; i++) {
+      JsonObject o = pl.add<JsonObject>();
+      o["address"]   = ap[i].addr;
+      o["age_s"]     = (nowMs - ap[i].lastSeenMs) / 1000;
+      o["datagrams"] = ap[i].datagrams;
+    }
+  }
+  {
+    // Sized for every interface Transport can hold — the radio, the clients
+    // and the Auto peers. Sized for the clients alone, this listed the first
+    // five and quietly left the rest out. Off the stack because that is a
+    // kilobyte and a half on a task that has other things to do with it.
+    std::unique_ptr<RnsTransport::IfaceInfo[]> ifs(new RnsTransport::IfaceInfo[RNS_MAX_INTERFACES]);
+    size_t k = RnsTransport::interfaces(ifs.get(), RNS_MAX_INTERFACES);
     JsonArray ia = tr["interfaces"].to<JsonArray>();
     for (size_t i = 0; i < k; i++) {
       JsonObject o = ia.add<JsonObject>();
@@ -999,6 +1020,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   tr["enabled"]   = settings.transport().enabled;
   tr["lora_mode"] = settings.transport().loraMode;
   tr["wifi_mode"] = settings.transport().wifiMode;
+  tr["auto_mode"] = settings.transport().autoMode;
   tr["announce_cap"] = settings.transport().announceCap;
   tr["announce_rate_target"] = settings.transport().announceRateTarget;
   tr["announce_rate_grace"] = settings.transport().announceRateGrace;
@@ -1329,6 +1351,7 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
   if (in["enabled"].is<bool>())  t.enabled  = in["enabled"];
   if (in["lora_mode"].is<int>()) t.loraMode = in["lora_mode"];
   if (in["wifi_mode"].is<int>()) t.wifiMode = in["wifi_mode"];
+  if (in["auto_mode"].is<int>()) t.autoMode = in["auto_mode"];
   if (in["announce_cap"].is<int>())          t.announceCap         = in["announce_cap"];
   if (in["announce_rate_target"].is<int>())  t.announceRateTarget  = in["announce_rate_target"];
   if (in["announce_rate_grace"].is<int>())   t.announceRateGrace   = in["announce_rate_grace"];
@@ -1353,12 +1376,14 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
     if (g.length() > 32) { sendError(request, 400, "group id must be at most 32 characters"); return; }
     strlcpy(t.autoGroupId, g.c_str(), sizeof(t.autoGroupId));
   }
-  if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5) { sendError(request, 400, "mode must be 1-5"); return; }
+  if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5
+      || t.autoMode < 1 || t.autoMode > 5) { sendError(request, 400, "mode must be 1-5"); return; }
   if (t.announceCap < 1 || t.announceCap > 100) { sendError(request, 400, "announce cap must be 1-100 %"); return; }
   TransportSettings before = settings.transport();
   if (!settings.saveTransport(t)) { sendError(request, 500, "nvs"); return; }
   Power::apply((Power::Profile)t.powerProfile);                  // live
   bool needRestart = before.enabled != t.enabled || before.loraMode != t.loraMode || before.wifiMode != t.wifiMode
+                  || before.autoMode != t.autoMode
                   || before.autoEnabled != t.autoEnabled || strcmp(before.autoGroupId, t.autoGroupId) != 0
                   || before.announceCap != t.announceCap;
   JsonDocument out;
@@ -1387,6 +1412,7 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   w["sta_ssid"] = ws.staSsid; w["sta_password"] = ws.staPassword;
   JsonObject t = doc["transport"].to<JsonObject>();
   t["enabled"] = ts.enabled; t["lora_mode"] = ts.loraMode; t["wifi_mode"] = ts.wifiMode;
+  t["auto_mode"] = ts.autoMode;
   t["announce_cap"] = ts.announceCap; t["announce_rate_target"] = ts.announceRateTarget;
   t["announce_rate_grace"] = ts.announceRateGrace; t["announce_rate_penalty"] = ts.announceRatePenalty;
   t["auto_enabled"] = ts.autoEnabled; t["auto_group_id"] = ts.autoGroupId;
@@ -1469,6 +1495,7 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
   if (in["transport"].is<JsonObject>()) {
     JsonObject t = in["transport"]; TransportSettings ts = settings.transport();
     ts.enabled = t["enabled"] | ts.enabled; ts.loraMode = t["lora_mode"] | ts.loraMode; ts.wifiMode = t["wifi_mode"] | ts.wifiMode;
+    ts.autoMode = t["auto_mode"] | ts.autoMode;
     ts.announceCap = t["announce_cap"] | ts.announceCap; ts.announceRateTarget = t["announce_rate_target"] | ts.announceRateTarget;
     ts.announceRateGrace = t["announce_rate_grace"] | ts.announceRateGrace; ts.announceRatePenalty = t["announce_rate_penalty"] | ts.announceRatePenalty;
     ts.autoEnabled = t["auto_enabled"] | ts.autoEnabled;
@@ -1482,7 +1509,8 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     storeHomeIgnored = t["sd_store"].is<bool>() && (bool)t["sd_store"] != ts.sdStore;
     ts.powerProfile = t["power_profile"] | ts.powerProfile;
     if (t["auto_group_id"].is<const char*>()) strlcpy(ts.autoGroupId, t["auto_group_id"], sizeof(ts.autoGroupId));
-    if (ts.loraMode < 1 || ts.loraMode > 5 || ts.wifiMode < 1 || ts.wifiMode > 5 || ts.announceCap < 1 || ts.announceCap > 100) { sendError(request, 400, "transport section invalid"); return; }
+    if (ts.loraMode < 1 || ts.loraMode > 5 || ts.wifiMode < 1 || ts.wifiMode > 5
+        || ts.autoMode < 1 || ts.autoMode > 5 || ts.announceCap < 1 || ts.announceCap > 100) { sendError(request, 400, "transport section invalid"); return; }
     settings.saveTransport(ts);
   }
   {

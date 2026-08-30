@@ -75,17 +75,27 @@ struct WifiSettings {
 // Interface modes use rnsd's vocabulary: 1 full, 2 gateway, 3 access_point,
 // 4 roaming, 5 boundary. Changing these needs a restart (interfaces are
 // registered with Transport at boot), same as editing rnsd's config.
+//
+// There are three of them because the node has three kinds of neighbour and
+// they do not want the same policy. A mode is not a preference: RNS refuses
+// to broadcast announces onto an access_point interface at all, so a mode
+// chosen for one kind of neighbour silences every other kind that shares it.
+// wifiMode and autoMode used to be one field, which meant that picking
+// "phones come and go" for Sideband also stopped this node exchanging
+// announces with the other nodes on the LAN — a mesh of them saw nothing of
+// each other and nobody was told why.
 struct TransportSettings {
   bool     enabled  = true;
   uint8_t  loraMode = 1;                // full: the LoRa channel is the mesh
-  uint8_t  wifiMode = 3;                // access_point: phones come and go
+  uint8_t  wifiMode = 1;                // clients on :4242 (Sideband, rnsd)
+  uint8_t  autoMode = 1;                // AutoInterface peers: other nodes on the LAN
   // rnsd's announce_cap / announce_rate_target / announce_rate_grace /
   // announce_rate_penalty, applied to every interface.
   uint8_t  announceCap        = 2;      // % of interface bandwidth for announces
   uint16_t announceRateTarget = 0;      // s between announces from one destination (0 = off)
   uint8_t  announceRateGrace  = 0;      // violations tolerated before blocking
   uint16_t announceRatePenalty = 0;     // s added to the block
-  bool     autoEnabled = true;          // RNS AutoInterface peering on the AP
+  bool     autoEnabled = true;          // RNS AutoInterface peering on the Wi-Fi links
   char     autoGroupId[33] = "";        // "" = RNS default "reticulum"
   uint8_t  powerProfile = 0;            // 0 performance, 1 balanced, 2 battery (Power.h)
   bool     sdStore = true;              // the Reticulum store's home is the SD card

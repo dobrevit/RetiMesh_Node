@@ -204,14 +204,19 @@ void setup() {
   // the line a flashing tool looks for, so it goes out before the services
   // that make the log busy.
   Maintenance::begin(Serial);
-  transportServer.begin(tcpInRing);
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
+  // Transport first, then the things that hand it peers. It builds the queue
+  // those peers are announced on, and it takes long enough — mounting and
+  // walking the store — that a client which was connected before the restart
+  // reconnects inside the gap. Accepting first meant that client's arrival was
+  // posted to a queue that did not exist yet.
   g_stats.transportOnline = RnsTransport::begin(txRing, rxRing, tcpInRing);
+  transportServer.begin(tcpInRing);
   #if HAS_AUTOINTERFACE
-    // Zero-config peering on the AP (RNS AutoInterface). Always begun, even
-    // with Wi-Fi off: the heartbeat and /api/status ask it for a peer count,
-    // and the lock they take exists only once begin() has run. It decides
-    // for itself whether there is a netif worth joining.
+    // Zero-config peering on the Wi-Fi links (RNS AutoInterface). Always
+    // begun, even with Wi-Fi off: the heartbeat and /api/status ask it for a
+    // peer count, and the lock they take exists only once begin() has run. It
+    // decides for itself whether there is a netif worth joining.
     AutoInterface::begin(tcpInRing);
   #endif
 

@@ -47,6 +47,7 @@ static RingbufHandle_t  sTxRing = nullptr, sRxRing = nullptr, sTcpInRing = nullp
 static QueueHandle_t    sEvents = nullptr;
 static SemaphoreHandle_t sSnapLock = nullptr;
 static uint32_t         sNextAnnounceMs = 0;
+static uint32_t         sAnnounceFloorMs = 0;   // nothing announces before this
 
 static RNS::Type::Interface::modes toMode(uint8_t m) {
   using namespace RNS::Type::Interface;
@@ -57,6 +58,13 @@ static RNS::Type::Interface::modes toMode(uint8_t m) {
     case 5:  return MODE_BOUNDARY;
     default: return MODE_FULL;
   }
+}
+
+// The one mode that stops announces reaching a neighbour outright, asked of
+// toMode() rather than compared against a number, so the rule stays in one
+// place if the vocabulary ever grows.
+static bool blocksAnnounces(uint8_t m) {
+  return toMode(m) == RNS::Type::Interface::MODE_ACCESS_POINT;
 }
 
 // One line per store directory at boot ("path_store: 2 files, 12 KB").
@@ -124,7 +132,16 @@ public:
     _IN = _OUT = true;
     _HW_MTU = RNS_MTU;
     applyAnnounceLimits(*this);
+    refreshBitrate();
+  }
+  // RNS's own formula (RNodeInterface): the channel's payload bitrate. It
+  // decides the announce cap's airtime budget, so it has to follow the
+  // channel — which the settings page applies live. Computed once in the
+  // constructor, it went on describing the channel the node booted on.
+  void refreshBitrate() {
     const RadioSettings& r = settings.radio();
+    if (r.sf == _sf && r.cr == _cr && r.bwKhz == _bw) return;
+    _sf = r.sf; _cr = r.cr; _bw = r.bwKhz;
     _bitrate = (uint32_t)(r.sf * ((4.0 / r.cr) / (pow(2.0, r.sf) / r.bwKhz)) * 1000.0);
   }
   bool send_outgoing(const Bytes& data) override {
@@ -136,6 +153,7 @@ public:
     return true;
   }
   void loop() override {
+    refreshBitrate();
     size_t sz = 0;
     uint8_t* item;
     while ((item = (uint8_t*)xRingbufferReceive(sRxRing, &sz, 0)) != nullptr) {
@@ -148,6 +166,9 @@ public:
       vRingbufferReturnItem(sRxRing, item);
     }
   }
+private:
+  uint8_t _sf = 0, _cr = 0;
+  float   _bw = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -172,18 +193,24 @@ private:
   uint32_t _id;
 };
 
-// The limits live in protected InterfaceImpl fields; a tiny subclass view
-// lets one helper set them for every interface type.
+// The limits live in protected InterfaceImpl fields, and the public Interface
+// wrapper exposes setters for three of the four. Reaching the fourth goes
+// through pointers-to-member named in a derived class: naming a protected base
+// member through a derived type is what makes it accessible, and the pointer
+// that comes back is a pointer to the *base* member, so it applies to any
+// interface implementation. This used to static_cast an InterfaceImpl& to
+// LimitsView& — a cast to a sibling type the object never was, which is
+// undefined behaviour whatever it does in practice.
 struct LimitsView : RNS::InterfaceImpl {
-  void apply(const TransportSettings& t) {
-    _announce_cap          = t.announceCap / 100.0f;
-    _announce_rate_target  = t.announceRateTarget;
-    _announce_rate_grace   = t.announceRateGrace;
-    _announce_rate_penalty = t.announceRatePenalty;
+  static void apply(RNS::InterfaceImpl& impl, const TransportSettings& t) {
+    impl.*(&LimitsView::_announce_cap)          = t.announceCap / 100.0f;
+    impl.*(&LimitsView::_announce_rate_target)  = t.announceRateTarget;
+    impl.*(&LimitsView::_announce_rate_grace)   = t.announceRateGrace;
+    impl.*(&LimitsView::_announce_rate_penalty) = t.announceRatePenalty;
   }
 };
 static void applyAnnounceLimits(RNS::InterfaceImpl& impl) {
-  static_cast<LimitsView&>(impl).apply(settings.transport());
+  LimitsView::apply(impl, settings.transport());
 }
 
 // Transport hands us verified announces with interface, hops and signal
@@ -229,6 +256,31 @@ static std::map<uint32_t, TcpIface> tcpIfaces;
 
 struct Event { bool connect; uint32_t id; char remote[46]; };
 
+// An AutoInterface peer is another node on the LAN or on our access point; a
+// plain id is a client on :4242. They get their modes from different settings
+// because they are different kinds of neighbour — see TransportSettings.
+static bool isAutoPeer(uint32_t id) { return (id & AutoInterface::AUTO_ID_BASE) != 0; }
+
+static RNS::Type::Interface::modes modeFor(uint32_t id) {
+  const TransportSettings& t = settings.transport();
+  return toMode(isAutoPeer(id) ? t.autoMode : t.wifiMode);
+}
+
+// Every interface Transport holds is identified by the hash of its name
+// (RNS::Interface::get_hash), so a name has to be unique per registration or
+// register_interface() silently keeps the interface already under that hash
+// and drops the new one — leaving a peer that can send to us and never hears
+// a thing back. RNS's own TCPServerInterface names a spawned interface after
+// the remote address *and port* for exactly this reason: the port is what
+// makes a phone reconnecting from the same address a different interface.
+// An Auto peer carries its whole link-local address rather than one hextet of
+// it, because the address is the peer's identity — a hextet is 16 bits of an
+// EUI-64 that two boards from one production run may well share. A link-local
+// compresses to at most "fe80::a:b:c:d", so both forms fit a name.
+static void interfaceName(uint32_t id, const char* remote, char* out, size_t cap) {
+  snprintf(out, cap, "%s/%s", isAutoPeer(id) ? "Auto" : "WiFi", remote);
+}
+
 // ---------------------------------------------------------------------------
 namespace RnsTransport {
 
@@ -236,7 +288,10 @@ bool started() { return sStarted; }
 
 bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpInRing) {
   sTxRing = txRing; sRxRing = rxRing; sTcpInRing = tcpInRing;
-  sEvents = xQueueCreate(8, sizeof(Event));
+  // Deep enough that every interface this node can hold could register at
+  // once and still leave room for churn. Eight was under half of that, and a
+  // full queue lost peers silently.
+  sEvents = xQueueCreate(RNS_MAX_INTERFACES + 8, sizeof(Event));
   sSnapLock = xSemaphoreCreateMutex();
 
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
@@ -286,45 +341,105 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
     nodeDest = RNS::Destination(nodeRnsIdentity, RNS::Type::Destination::IN,
                                 RNS::Type::Destination::SINGLE, "retimesh", "node");
     sStarted = true;
-    sNextAnnounceMs = millis() + ANNOUNCE_BOOT_DELAY_MS;
-    log_i("Reticulum transport up: identity %s, LoRa mode %s, Wi-Fi clients %s",
+    sAnnounceFloorMs = millis() + ANNOUNCE_BOOT_DELAY_MS;
+    sNextAnnounceMs  = sAnnounceFloorMs;
+    const TransportSettings& t = settings.transport();
+    log_i("Reticulum transport up: identity %s, modes LoRa %s, clients %s, auto peers %s",
           RNS::Transport::identity().hash().toHex().c_str(),
-          modeName(settings.transport().loraMode), modeName(settings.transport().wifiMode));
+          modeName(t.loraMode), modeName(t.wifiMode), modeName(t.autoMode));
+    // RNS refuses to broadcast announces onto an access_point interface, and
+    // says so only at a TRACE level this build does not compile in. Left
+    // unsaid, the result is a node that looks alive and whose neighbours never
+    // hear of it, so say it once at boot, where it will be read.
+    const struct { const char* who; uint8_t mode; } kinds[] = {
+      { "the radio",            t.loraMode },
+      { "clients on the port",  t.wifiMode },
+      { "AutoInterface peers",  t.autoMode },
+    };
+    for (const auto& k : kinds)
+      if (blocksAnnounces(k.mode))
+        log_w("no announces are sent to %s: mode is access_point, so they must discover by path request", k.who);
   } catch (const std::exception& e) {
     log_e("Reticulum transport start failed: %s", e.what());
   }
   return sStarted;
 }
 
+// Both of these are called from the AsyncTCP and AutoInterface tasks, and both
+// used to post into the queue without looking at the answer. A dropped connect
+// is a peer whose packets drainTcp() then discards for as long as it stays
+// connected; a dropped disconnect is an interface registered for the rest of
+// the uptime, pointing at a socket that has gone. Neither said anything.
+static void postEvent(const Event& e) {
+  if (!sEvents) {
+    // The listener can be accepting before begin() has built the queue.
+    log_w("transport event for #%lu dropped: the RNS task is not up yet", (unsigned long)e.id);
+    return;
+  }
+  if (xQueueSend(sEvents, &e, pdMS_TO_TICKS(20)) != pdTRUE)
+    log_e("transport event queue full, dropped %s for #%lu",
+          e.connect ? "connect" : "disconnect", (unsigned long)e.id);
+}
+
 void clientConnected(uint32_t id, const char* remote) {
   Event e{ true, id, {0} };
-  strlcpy(e.remote, remote, sizeof(e.remote));       // IPv4 text, or the IPv6 tail for Auto peers
-  xQueueSend(sEvents, &e, 0);
+  strlcpy(e.remote, remote, sizeof(e.remote));       // "ip:port", or an Auto peer's link-local
+  postEvent(e);
 }
 
 void clientDisconnected(uint32_t id) {
   Event e{ false, id, {0} };
-  xQueueSend(sEvents, &e, 0);
+  postEvent(e);
+}
+
+// Bring the next announce forward, never push it back, and never move it
+// before the boot delay — a peer that turns up while the radio is still
+// starting has to wait for the radio like everyone else. Announces switched
+// off in settings stay off: loop() checks the interval, not this.
+static void announceSoon() {
+  if (!sStarted) return;
+  uint32_t at = millis() + ANNOUNCE_ON_PEER_DELAY_MS;
+  if ((int32_t)(at - sAnnounceFloorMs) < 0) at = sAnnounceFloorMs;
+  if ((int32_t)(at - sNextAnnounceMs) < 0) sNextAnnounceMs = at;
+}
+
+// Drop whatever is registered under this interface's hash. Names are unique
+// per registration now, so this only fires if one ever repeats — but a
+// collision costs the new peer every packet it should have received, silently
+// and for good, which is too expensive to leave to the naming scheme alone.
+static void evictCollision(const RNS::Interface& iface) {
+  if (!RNS::Transport::find_interface_from_hash(iface.get_hash())) return;
+  log_w("interface name %s is already registered; dropping the older one",
+        iface.name().c_str());
+  for (auto it = tcpIfaces.begin(); it != tcpIfaces.end(); ++it) {
+    if (it->second.handle.get_hash() != iface.get_hash()) continue;
+    RNS::Transport::deregister_interface(it->second.handle);
+    tcpIfaces.erase(it);
+    return;
+  }
+  RNS::Transport::deregister_interface(iface);      // not ours: the LoRa interface
 }
 
 static void processEvents() {
   Event e;
   while (xQueueReceive(sEvents, &e, 0) == pdTRUE) {
     if (e.connect) {
-      char name[32];
-      if (e.id & AutoInterface::AUTO_ID_BASE) {
-        const char* tail = strrchr(e.remote, ':');            // last hextet keeps it readable
-        snprintf(name, sizeof(name), "Auto/%s", tail ? tail + 1 : e.remote);
-      } else {
-        snprintf(name, sizeof(name), "WiFi/%s", e.remote);
-      }
+      char name[INTERFACE_NAME_MAX];
+      interfaceName(e.id, e.remote, name, sizeof(name));
       auto* impl = new TcpClientRnsInterface(e.id, name);
       RNS::Interface iface(impl);
-      iface.mode(toMode(settings.transport().wifiMode));
+      const RNS::Type::Interface::modes mode = modeFor(e.id);
+      iface.mode(mode);
+      evictCollision(iface);
       RNS::Transport::register_interface(iface);
       iface.start();
       tcpIfaces.emplace(e.id, TcpIface{ iface, impl });
-      log_i("registered %s (%s)", name, modeName(settings.transport().wifiMode));
+      // A neighbour that has just appeared has heard nothing from this node,
+      // and the periodic announce can be ten minutes away. Announce shortly,
+      // once, however many peers arrive together — which is what makes a
+      // phone that has only just connected see the node at all.
+      announceSoon();
+      log_i("registered %s (%s)", name, modeNameOf(mode));
     } else {
       auto it = tcpIfaces.find(e.id);
       if (it != tcpIfaces.end()) {
@@ -440,6 +555,13 @@ size_t pathCount() {
   return n;
 }
 
+size_t interfaceCount() {
+  xSemaphoreTake(sSnapLock, portMAX_DELAY);
+  size_t n = sIfaces.size();             // likewise: a caller may read only a few rows
+  xSemaphoreGive(sSnapLock);
+  return n;
+}
+
 Tables tables() {
   xSemaphoreTake(sSnapLock, portMAX_DELAY);
   Tables t = sTables;
@@ -454,8 +576,11 @@ void loop() {
     drainTcp();
     reticulum.loop();                      // interface loops + housekeeping (jobs_interval = 1 s)
 
+    // sStarted is what says the schedule is valid; testing sNextAnnounceMs for
+    // truth as well used to mean that the one millis() in every 49 days that
+    // lands the next announce on zero switched announcing off for good.
     uint16_t interval = settings.radio().announceInterval;
-    if (interval && sNextAnnounceMs && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
+    if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
       char app[64];
       int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
       nodeDest.announce(Bytes((const uint8_t*)app, (size_t)max(n, 0)));

@@ -70,11 +70,14 @@ private:
   void onData(ClientCtx* ctx, const uint8_t* data, size_t len);
   void onDisconnect(ClientCtx* ctx);
 
+  static constexpr uint32_t OVERSIZE_LOG_MS = 5000;
+
   AsyncServer*            _server = nullptr;
   RingbufHandle_t         _tcpInRing = nullptr;
   std::vector<ClientCtx*> _clients;
   SemaphoreHandle_t       _lock   = nullptr;   // guards _clients + _frameBuf
   uint32_t                _nextId = 1;
+  uint32_t                _lastOversizeLogMs = 0;
 
   // Shared framing scratch: worst case 2 + 2*508 bytes.
   uint8_t _frameBuf[HDLC::frameCapacity(2 * LORA_FRAG_PAYLOAD)];

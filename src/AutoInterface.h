@@ -17,7 +17,7 @@
 // with RetiMesh Node. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================================
-//  AutoInterface.h — RNS AutoInterface peering over the SoftAP (spike)
+//  AutoInterface.h — RNS AutoInterface peering on the access point and the LAN
 //
 //  Reticulum's AutoInterface needs no addresses: every peer multicasts a
 //  discovery token every 1.6 s to an IPv6 link-local group derived from the
@@ -25,6 +25,16 @@
 //  29716. token = sha256(group_id + peer_link_local_address_as_text). A
 //  receiver recomputes it for the sender's address; on a match the sender
 //  is a peer for 22 s, and RNS packets flow as UDP unicast to port 42671.
+//
+//  The same token also goes out unicast to every known peer every 5.2 s, on
+//  port 29717 — RNS's reverse peering. It is what keeps peerings alive on a
+//  link that drops link-local multicast, which is most consumer access points
+//  between wireless clients, and any phone whose radio filters multicast while
+//  the screen is off. Multicast alone finds peers; unicast keeps them.
+//
+//  Peering runs on every Wi-Fi netif that has a link-local address — the
+//  node's own access point and the station link onto the LAN — and joins each
+//  as it appears, so neither has to be up first or at all.
 //
 //  Every peer becomes its own RNS interface on the Transport (registered
 //  and removed through RnsTransport's event queue, exactly like TCP
@@ -43,7 +53,7 @@ namespace AutoInterface {
 struct Peer {
   uint32_t id;                    // RnsTransport client id (AUTO_ID_BASE | n)
   char     addr[46];
-  int      ifindex;               // netif the peer was heard on (AP or STA)
+  int      ifindex;               // netif the peer was last heard on (AP or STA)
   uint32_t lastSeenMs;
   uint32_t datagrams;
 };
@@ -53,7 +63,7 @@ constexpr uint32_t AUTO_ID_BASE = 0x80000000UL;   // ids above this are AutoInte
 void begin(RingbufHandle_t inRing);   // starts the discovery/data task (core 0)
 size_t peers(Peer* out, size_t max);
 size_t peerCount();
-const char* localAddress();           // our link-local address text, "" until assigned
+const char* localAddress();           // our link-local on the first joined link, "" until one is
 bool enabled();
 
 // Called from the RNS task: one RNS packet as a UDP datagram to one peer.

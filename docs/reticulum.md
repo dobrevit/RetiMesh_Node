@@ -6,13 +6,16 @@
 | **LoRa** | radio | RNode-compatible: 1 header byte (random nibble + split flag), ≤255-byte frames, two-fragment packets up to the 500-byte RNS MTU | byte-compatible with RNode firmware — real RNodes on the same channel parameters interoperate |
 | **TCP :4242** | Wi-Fi | RNS TCPInterface HDLC (`0x7E` flags, `0x7D` escapes) | one RNS interface per connected client, like `rnsd`'s TCPServerInterface |
 | **Station uplink** | Wi-Fi (STA) | same TCP :4242 and AutoInterface, on your LAN | with a station network configured, Reticulum clients on the LAN reach the node at its LAN address or by discovery — the node is a LoRa uplink for the whole network |
-| **AutoInterface** | Wi-Fi | RNS AutoInterface: IPv6 link-local multicast discovery (UDP 29716), packets as UDP datagrams (42671) | zero-config — Sideband's *Local/LAN* finds the node by itself; one RNS interface per peer, sharing the *Wi-Fi clients mode* |
+| **AutoInterface** | Wi-Fi, on the access point and the LAN | RNS AutoInterface: IPv6 link-local discovery — multicast (UDP 29716) and unicast reverse peering (29717) — packets as UDP datagrams (42671) | zero-config — Sideband's *Local/LAN* finds the node by itself; one RNS interface per peer, under the *Peer interface mode* |
 
 ## Identity and announces
 The node has a persistent Reticulum identity (X25519 + Ed25519, NVS) used
 both as **transport identity** and for its `retimesh.node` destination. It
-announces on boot and every `announce_interval` (default 10 min) *through
-Transport*, so interface modes apply. `/api/status` shows `identity` and
+announces on boot, a couple of seconds after a client or peer registers, and
+every `announce_interval` (default 10 min) — all *through Transport*, so
+interface modes apply. The announce on registration is what a phone or a node
+that has just appeared hears; without it the first announce it could see was up
+to an interval away. `/api/status` shows `identity` and
 `destination`; `rnpath -t` on a peer lists the node once its announce arrives.
 
 Announce app_data is `"<callsign> <version>"` — other RetiMesh nodes show it in
@@ -40,15 +43,24 @@ Exactly rnsd's vocabulary; each interface has its own.
 
 | Mode | Announces onto it | Use |
 |---|---|---|
-| `full` | all | the mesh backbone; default for LoRa |
+| `full` | all | the mesh backbone; the default for all three kinds below |
 | `gateway` | not from other gateway interfaces | node bridging distinct networks |
-| `access_point` | **none** — clients discover via path requests; short path expiry | phones that come and go; default for Wi-Fi clients |
+| `access_point` | **none** — clients discover via path requests; short path expiry | phones that come and go, when announces are to be withheld from them |
 | `roaming` | limited; shorter path lifetime | a node that moves between networks |
 | `boundary` | not from roaming/internal | edge of an administrative domain |
 
-Practical consequence: with Wi-Fi clients in `access_point`, Sideband's
-*Announce stream* stays empty by design; messaging still works (path
-requests). Set `full` if you want phones to see announces.
+The node has three kinds of neighbour and a mode for each: the **LoRa
+interface**, the **clients** that connect to :4242, and the **AutoInterface
+peers** it discovers on the Wi-Fi links. They are separate settings because
+they are separate policies — one value covering both Wi-Fi kinds meant that
+choosing `access_point` for phones also stopped this node exchanging announces
+with the other nodes on its LAN.
+
+Practical consequence: an interface in `access_point` sends no announces at
+all, so Sideband's *Announce stream* stays empty on a node whose clients are in
+that mode, and a room of nodes whose peers are in that mode never learns of
+each other. Messaging still works through path requests, which is what the mode
+is for. The log says so once at boot for each kind that is set to it.
 
 ## Talking to an RNode + rnsd
 Configure the RNode's interface with the node's channel:
