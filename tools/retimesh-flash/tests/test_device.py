@@ -645,6 +645,29 @@ class WaitForApplicationTest(unittest.TestCase):
         self.assertEqual(r, COMPOSITE_INFO)
         self.assertNotIn("/dev/ttyACM9", asked)
 
+    def test_an_esptool_that_cannot_run_is_not_an_answer_about_the_port(self):
+        # A missing esptool returned the same "no downloader" as a silent
+        # port, which sent a caller down the bridge-reset path and left a
+        # node in its ROM. The verdict stays cautious; the log says why.
+        said = []
+        import subprocess
+        real = subprocess.run
+        try:
+            subprocess.run = lambda *a, **k: SimpleNamespace(returncode=1, stdout="",
+                                                             stderr="/usr/bin/python3: No module named esptool\n")
+            self.assertFalse(device.downloader_present("/dev/ttyACM5", log=said.append))
+        finally:
+            subprocess.run = real
+        self.assertTrue(any("not installed" in m for m in said), said)
+        # And a port that simply is not there is named as that, not as esptool's fault.
+        said.clear()
+        try:
+            subprocess.run = lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no such file"))
+            self.assertFalse(device.downloader_present("/dev/ttyACM5", log=said.append))
+        finally:
+            subprocess.run = real
+        self.assertTrue(any("could not be run" in m for m in said), said)
+
     def test_the_post_flash_wait_is_one_rule_for_every_caller(self):
         # The CLI, the PlatformIO hook and the HIL script each used to carry a
         # number of their own (20, 90 and 40 s); two were under what a bench

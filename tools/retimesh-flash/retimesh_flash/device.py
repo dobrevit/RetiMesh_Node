@@ -523,20 +523,36 @@ def esptool_args(chip: Optional[str], port: str, before: str, after: str, *cmd, 
 DEFAULT_ESPTOOL_CMD = [sys.executable, "-m", "esptool"]
 
 
-def downloader_present(device: str, timeout: float = 15.0, esptool_cmd: Optional[list[str]] = None) -> bool:
+def downloader_present(device: str, timeout: float = 15.0, esptool_cmd: Optional[list[str]] = None,
+                       log: Log = _quiet) -> bool:
     """Whether a ROM downloader answers on the port, asked the one way that is
     definitive: esptool's own sync, with no reset before or after. A silent
     console cannot tell a downloader from a dead node, and the difference
     decides what esptool must be told — a DTR/RTS reset performed on a chip
     already in its downloader re-enumerates the port under esptool's own
     open, which is how a node left in the downloader by one failed flash
-    failed the next one too."""
+    failed the next one too.
+
+    A tool that cannot run at all is not an answer about the port, and it is
+    said so: an esptool missing from the interpreter that was handed in
+    returns the same "no" as a silent port, and that "no" once sent a caller
+    down the bridge-reset path and left a node sitting in its ROM. The
+    verdict stays the cautious one either way — nothing here can confirm a
+    downloader it never reached — but the log says which of the two it was.
+    """
     import subprocess
+    cmd = [*(esptool_cmd or DEFAULT_ESPTOOL_CMD),
+           *esptool_args(None, device, "no_reset", "no_reset", "chip_id")]
     try:
-        rc = subprocess.run([*(esptool_cmd or DEFAULT_ESPTOOL_CMD),
-                             *esptool_args(None, device, "no_reset", "no_reset", "chip_id")],
-                            capture_output=True, text=True, timeout=timeout)
-    except Exception:
+        rc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        log(f"esptool could not be run ({exc}); the ROM downloader cannot be confirmed")
+        return False
+    except Exception as exc:
+        log(f"esptool did not finish on {device} ({exc}); the ROM downloader cannot be confirmed")
+        return False
+    if rc.returncode != 0 and "No module named" in (rc.stderr or ""):
+        log(f"esptool is not installed for {cmd[0]}; the ROM downloader cannot be confirmed")
         return False
     return rc.returncode == 0
 
@@ -604,7 +620,7 @@ def hand_off_to_bootloader(port: Optional[str] = None, node_url_text: Optional[s
     reset, which is the normal outcome on a bridge or USB-Serial/JTAG port and
     not a failure."""
     if probe_rom is None:
-        probe_rom = lambda dev: downloader_present(dev, esptool_cmd=esptool_cmd)  # noqa: E731
+        probe_rom = lambda dev: downloader_present(dev, esptool_cmd=esptool_cmd, log=log)  # noqa: E731
     ports = ports_fn()
     chosen = select_port(ports, device=port)
     if port and chosen is None:
