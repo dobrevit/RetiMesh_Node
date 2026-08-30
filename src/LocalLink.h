@@ -165,36 +165,46 @@ Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Sourc
 // written, because a node in that state can only be recovered by erasing it.
 bool lockedOut(const LinkSettings& l, bool consoleEnabled);
 
-// --- the Wi-Fi adapters -----------------------------------------------------
-// One body for both. They differ in the carrier probe and where the address
-// comes from, and a phase-machine fix made twice is a phase-machine fix made
-// once. WifiManager still owns the radio; these only observe it.
-class WifiLink : public Link {
+// --- the links this firmware drives -----------------------------------------
+// One body for all of them. They differ in the carrier probe, where the
+// address comes from and how the switch is read; the phase machine and what
+// it reports are the same, and a phase-machine fix made three times is a
+// phase-machine fix made once.
+class MachineLink : public Link {
 public:
   bool hardware() const override { return true; }
   bool firmware() const override { return true; }
-  // The switch as it was applied at boot, not as it is stored now. A Wi-Fi
-  // change takes effect at the restart that follows the save; for the second
-  // and a half in between, the access point is still on the air and reading
-  // the fresh setting reported it gone — which mis-answered the trust rule
-  // for the very client that had just saved it.
-  bool enabled() const override { return _applied; }
   void begin() override;
   void poll(uint32_t nowMs) override;
   Snapshot snapshot() const override;
   uint32_t address() const override;
   uint32_t netmask() const override;
 protected:
-  virtual bool       wanted() const = 0;        // the stored switch, read once at begin()
   virtual bool       carrier() const = 0;
   virtual IPAddress  ip() const = 0;
   virtual IPAddress  mask() const = 0;
   virtual Addressing addressing() const = 0;
   virtual bool       clientsKnown() const { return false; }
   virtual uint8_t    clients() const { return 0; }
+  virtual void       drive() {}                 // a driver of its own to move along before the machine looks
 private:
   Machine _m;
-  bool    _applied = false;
+};
+
+// The Wi-Fi adapters. WifiManager still owns the radio; these only observe it.
+class WifiLink : public MachineLink {
+public:
+  // The switch as it was applied at boot, not as it is stored now. A Wi-Fi
+  // change takes effect at the restart that follows the save; for the second
+  // and a half in between, the access point is still on the air and reading
+  // the fresh setting reported it gone — which mis-answered the trust rule
+  // for the very client that had just saved it.
+  bool enabled() const override { return _applied; }
+  void begin() override { _applied = wanted(); MachineLink::begin(); }
+protected:
+  virtual bool wanted() const = 0;              // the stored switch, read once at begin()
+private:
+  bool _applied = false;
 };
 
 class WifiApLink : public WifiLink {
@@ -232,20 +242,20 @@ protected:
 // and down is the network interface behind it, so the switch applies live —
 // no restart, unlike Wi-Fi.
 #if HAS_USB_NCM
-class UsbNcmLink : public Link {
+class UsbNcmLink : public MachineLink {
 public:
   Type type() const override { return Type::UsbNcm; }
   const char* name() const override { return "usb0"; }
-  bool hardware() const override { return true; }
-  bool firmware() const override { return true; }
-  bool enabled()  const override;
+  bool enabled() const override;                // the stored switch, live
   void begin() override;
-  void poll(uint32_t nowMs) override;
-  Snapshot snapshot() const override;
-  uint32_t address() const override;
-  uint32_t netmask() const override;
-private:
-  Machine _m;
+protected:
+  void       drive() override;                  // the driver follows the switch every pass
+  bool       carrier() const override;
+  IPAddress  ip() const override;
+  IPAddress  mask() const override;
+  Addressing addressing() const override { return Addressing::Static; }
+  bool       clientsKnown() const override { return true; }
+  uint8_t    clients() const override { return 1; }   // one host per cable: whether it is there
 };
 #endif
 

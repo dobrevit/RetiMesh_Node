@@ -21,6 +21,7 @@
 // ============================================================================
 #include "Display.h"
 #include "DisplayLayout.h"
+#include "esp32-hal-periman.h"
 #include <WiFi.h>
 #include "WifiManager.h"
 #include "Settings.h"
@@ -51,6 +52,12 @@ bool Display::ack(uint8_t addr) {
 // anything else touches it: up to nine pulses on SCL with SDA released, then
 // a STOP, all of which is a no-op on a bus that is idle.
 static void releaseBus(int sda, int scl) {
+  // Only where the display is first on its bus. The T-Beam's PMU has opened
+  // Wire on these pins before the display looks, and a pinMode() on a pin
+  // the core's peripheral manager has given to a driver tears that driver
+  // down, for Wire.begin() below to build again. There the bus is left as
+  // the PMU found it.
+  if (perimanGetPinBus(sda, ESP32_BUS_TYPE_I2C_MASTER_SDA) != nullptr) return;
   // Open-drain with the internal pull-ups, the same way Wire drives the
   // lines: a board with no external resistors gets its clocks that way too.
   pinMode(sda, INPUT_PULLUP);
