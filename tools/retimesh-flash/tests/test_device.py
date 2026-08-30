@@ -28,6 +28,11 @@ FT2232 = fake_comport("/dev/ttyUSB2", 0x0403, 0x6010, "AB12", "FT2232H Dual UART
 # serial-JTAG unit the ROM downloader comes up on — same MAC, spelt two ways.
 COMPOSITE = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, "1CDBD4821454", "RetiMesh Node", "1-11")
 S3_ROM = fake_comport("/dev/ttyACM5", 0x303A, 0x1001, "1C:DB:D4:82:14:54", "USB JTAG/serial debug unit", "1-11")
+COMPOSITE_INFO = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
+# A composite device with no usable serial (routine on Windows), and a
+# serial-JTAG unit that is some other chip's.
+COMPOSITE_NAMELESS = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, None, "RetiMesh Node", "1-11")
+OTHER_S3_ROM = fake_comport("/dev/ttyACM9", 0x303A, 0x1001, "AA:BB:CC:DD:EE:FF", "USB JTAG/serial debug unit", "1-12")
 
 
 class FakeSerial:
@@ -164,6 +169,15 @@ class PortsTest(unittest.TestCase):
         self.assertEqual(select_port(ports, device="/dev/ttyUSB0").kind, "CP2102")
         self.assertEqual(select_port(ports, serial="7C:DF:A1:12:34:56").device, "/dev/ttyACM0")
 
+    def test_a_serial_that_is_a_mac_names_the_chip_on_either_face(self):
+        # --serial copied from `list` in one face finds the chip in the other:
+        # the ROM's 1C:DB:D4:82:14:54 and the application's 1CDBD4821454 are
+        # one chip. A serial that is not a MAC is matched as written.
+        self.assertEqual(select_port(list_ports([S3_ROM, CP2102]), serial="1CDBD4821454").kind, "usb_serial_jtag")
+        self.assertEqual(select_port(list_ports([COMPOSITE, CP2102]), serial="1C:DB:D4:82:14:54").kind, "retimesh_composite")
+        self.assertEqual(select_port(list_ports([COMPOSITE, FT2232]), serial="AB12").kind, "unknown")
+        self.assertIsNone(select_port(list_ports([COMPOSITE, CP2102]), serial="AA:BB:CC:DD:EE:FF"))
+
     def test_cp2102_serial_0001_is_never_a_handle(self):
         # Every CP2102 says 0001, so two of them cannot be told apart by it.
         ports = list_ports([CP2102, CP2102_B])
@@ -261,7 +275,7 @@ class HandOffTest(unittest.TestCase):
         self.log = []
 
     def run_handoff(self, ports_seq, probe, request_http=None, port=None, node_url=None,
-                    serial_factory=None, opened=None, rom=None):
+                    serial_factory=None, opened=None, rom=None, touch=None):
         """ports_seq: list of port lists returned on successive scans (last repeats).
         `probe` answers the initial VERSION and the post-request "still
         answering?" check; it takes (device, timeout=..., console=...)."""
@@ -282,7 +296,7 @@ class HandOffTest(unittest.TestCase):
                                       ports_fn=ports_fn, probe=probe, open_console=open_console,
                                       request_http=request_http or (lambda *a, **k: (False, "no HTTP answer", 0)),
                                       probe_rom=probe_rom, sleep=self.clock.sleep, clock=self.clock.now,
-                                      reappear_timeout=8.0)
+                                      reappear_timeout=8.0, **({"touch": touch} if touch else {}))
 
     @staticmethod
     def answers(info):
@@ -335,8 +349,9 @@ class HandOffTest(unittest.TestCase):
 
     def test_a_silent_port_where_a_downloader_already_answers(self):
         # Left in the ROM downloader by an earlier attempt: no console, but
-        # esptool syncs. This must be no_reset — a DTR/RTS reset on top
-        # re-enumerates the port under esptool's own open.
+        # esptool syncs. esptool still runs its own reset at connect — on the
+        # serial-JTAG unit that is what keeps the ROM there through esptool's
+        # closing hard reset (HandOff.esptool_before).
         r = self.run_handoff([[S3]], probe=lambda dev, timeout=2.0, console=None: None, rom=True)
         self.assertTrue(r.entered)
         self.assertEqual((r.method, r.esptool_before), ("downloader", "default_reset"))
@@ -358,31 +373,44 @@ class HandOffTest(unittest.TestCase):
         # The console accepts; the composite port goes; the ROM comes up on
         # the serial-JTAG unit of the same chip, where esptool is pointed —
         # with its own reset at connect, which that downloader needs.
-        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
-        r = self.run_handoff([[COMPOSITE], [COMPOSITE], [], [S3_ROM]], probe=self.answers(info))
+        r = self.run_handoff([[COMPOSITE], [COMPOSITE], [], [S3_ROM]], probe=self.answers(COMPOSITE_INFO))
         self.assertTrue(r.entered)
         self.assertEqual((r.method, r.port, r.esptool_before), ("console", "/dev/ttyACM5", "default_reset"))
+        # The chip's identity travels with the answer: the downloader's port
+        # name carries none, and it is what the callers hold afterwards.
+        self.assertEqual(r.node_id, "1CDBD4821454")
+
+    def test_a_touch_that_cannot_open_the_port_is_reported_not_waited_for(self):
+        # No console (switched off, or the port is held by something else)
+        # and the touch cannot open the port either: that is an answer now,
+        # not three minutes of waiting for a downloader nobody asked for.
+        def touch(dev):
+            raise OSError("Device or resource busy")
+        r = self.run_handoff([[COMPOSITE]], probe=lambda dev, timeout=2.0, console=None: None, touch=touch)
+        self.assertFalse(r.entered)
+        self.assertEqual(r.method, "none")
+        self.assertIn("could not open /dev/ttyACM5", r.message)
+        self.assertIn("hold BOOT", r.message)
+        self.assertLess(self.clock.t, 5.0)
 
     def test_a_nameless_composite_device_is_followed_only_to_a_new_downloader(self):
         # No usable serial, so the chip cannot be known by MAC; a serial-JTAG
         # unit that was already on the bus is another chip's and is left
         # alone, and the one that appears after the request is taken.
-        nameless = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, None, "RetiMesh Node", "1-11")
-        other = fake_comport("/dev/ttyACM9", 0x303A, 0x1001, "AA:BB:CC:DD:EE:FF", "USB JTAG/serial debug unit", "1-12")
-        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
-        r = self.run_handoff([[nameless, other], [nameless, other], [other], [other], [other, S3_ROM]], probe=self.answers(info),
-                             port="/dev/ttyACM5")
+        nameless, other = COMPOSITE_NAMELESS, OTHER_S3_ROM
+        r = self.run_handoff([[nameless, other], [nameless, other], [other], [other], [other, S3_ROM]],
+                             probe=self.answers(COMPOSITE_INFO), port="/dev/ttyACM5")
         self.assertTrue(r.entered)
         self.assertEqual(r.port, "/dev/ttyACM5")     # S3_ROM's device, the newcomer — not /dev/ttyACM9
 
     def test_two_nameless_composite_devices_do_not_count_each_other_as_gone(self):
         # With the MAC unknown the port is followed by path: the neighbour
         # staying on the bus does not make ours look gone, nor the reverse.
-        ours = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, None, "RetiMesh Node", "1-11")
+        ours = COMPOSITE_NAMELESS
         neighbour = fake_comport("/dev/ttyACM6", 0x1209, 0x0001, None, "RetiMesh Node", "1-12")
-        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
         # ours never leaves: the node did not reset, and the console still answers
-        r = self.run_handoff([[ours, neighbour]] * 3, probe=lambda dev, timeout=2.0, console=None: info, port="/dev/ttyACM5")
+        r = self.run_handoff([[ours, neighbour]] * 3, probe=lambda dev, timeout=2.0, console=None: COMPOSITE_INFO,
+                             port="/dev/ttyACM5")
         self.assertFalse(r.entered)
         self.assertIn("still answers", r.message)
 
@@ -579,31 +607,42 @@ class WaitForApplicationTest(unittest.TestCase):
     def test_only_the_flashed_chip_is_asked_when_its_name_is_known(self):
         # The downloader was on the serial-JTAG unit of one chip; a soak node
         # on the bench must not be taken for the application coming back.
-        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
         asked = []
         def probe(dev, timeout=2.0, console=None):
-            asked.append(dev); return info if dev == "/dev/ttyACM5" else None
+            asked.append(dev); return COMPOSITE_INFO if dev == "/dev/ttyACM5" else None
         clock = Clock()
         seq = iter([list_ports([CP2102]), list_ports([CP2102]), list_ports([CP2102, COMPOSITE])] + [list_ports([CP2102, COMPOSITE])] * 20)
         r = device.wait_for_application("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_1C:DB:D4:82:14:54-if00", 30.0,
                                         probe=probe, ports_fn=lambda: next(seq), sleep=clock.sleep, clock=clock.now)
-        self.assertEqual(r, info)
+        self.assertEqual(r, COMPOSITE_INFO)
+        self.assertNotIn("/dev/ttyUSB0", asked)
+
+    def test_the_hand_offs_identity_names_the_chip_when_the_port_name_does_not(self):
+        # What the CLI and the hook hold after a hand-off is the downloader's
+        # pyserial name, which names no chip; the identity comes from the
+        # HandOff, in either spelling of the MAC.
+        asked = []
+        def probe(dev, timeout=2.0, console=None):
+            asked.append(dev); return COMPOSITE_INFO if dev == "/dev/ttyACM5" else None
+        clock = Clock()
+        seq = iter([list_ports([CP2102]), list_ports([CP2102, COMPOSITE])] + [list_ports([CP2102, COMPOSITE])] * 20)
+        r = device.wait_for_application("/dev/ttyACM5", 30.0, probe=probe, ports_fn=lambda: next(seq),
+                                        sleep=clock.sleep, clock=clock.now, node_id="1C:DB:D4:82:14:54")
+        self.assertEqual(r, COMPOSITE_INFO)
         self.assertNotIn("/dev/ttyUSB0", asked)
 
     def test_a_nameless_port_is_still_asked_for_the_flashed_chip(self):
         # The application came back as a composite device without a usable
         # serial (routine on Windows); it is asked, while a port naming
         # another chip is not.
-        info = device.NodeInfo("RetiMesh Node", "v0.3.0", "LilyGO T3-S3", "console:/dev/ttyACM5")
-        nameless = fake_comport("/dev/ttyACM5", 0x1209, 0x0001, None, "RetiMesh Node", "1-11")
-        other = fake_comport("/dev/ttyACM9", 0x303A, 0x1001, "AA:BB:CC:DD:EE:FF", "USB JTAG/serial debug unit", "1-12")
         asked = []
         def probe(dev, timeout=2.0, console=None):
-            asked.append(dev); return info if dev == "/dev/ttyACM5" else None
+            asked.append(dev); return COMPOSITE_INFO if dev == "/dev/ttyACM5" else None
         clock = Clock()
         r = device.wait_for_application("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_1C:DB:D4:82:14:54-if00", 30.0,
-                                        probe=probe, ports_fn=lambda: list_ports([other, nameless]), sleep=clock.sleep, clock=clock.now)
-        self.assertEqual(r, info)
+                                        probe=probe, ports_fn=lambda: list_ports([OTHER_S3_ROM, COMPOSITE_NAMELESS]),
+                                        sleep=clock.sleep, clock=clock.now)
+        self.assertEqual(r, COMPOSITE_INFO)
         self.assertNotIn("/dev/ttyACM9", asked)
 
     def test_the_application_may_come_back_under_another_name(self):

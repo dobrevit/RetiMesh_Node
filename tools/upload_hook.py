@@ -72,10 +72,14 @@ def before_upload(source, target, env):  # noqa: ARG001
         # name (ttyACM0 -> ttyACM1 on a busy host): point esptool at it.
         _log(f"using {result.port}" + (f" instead of {port}" if port else ""))
         env.Replace(UPLOAD_PORT=result.port)
+    # The chip's identity, for after_upload: the downloader's port name
+    # carries none, and on a native-USB board the application comes back as
+    # another device altogether.
+    env.Replace(RETIMESH_NODE_ID=result.node_id)
     if result.entered:
         # entered is only ever true once the node has been seen to go down
-        # and come back as the downloader: a DTR/RTS reset on top would kick
-        # it back to the application on a USB-Serial/JTAG port.
+        # and come back as the downloader; what esptool does at connect is
+        # the hand-off's answer, decided in one place (HandOff.esptool_before).
         _log(f"downloader ready on {result.port} via {result.method}")
         flags = list(env.get("UPLOADERFLAGS", []))
         if "--before" in flags:
@@ -94,7 +98,7 @@ def after_upload(source, target, env):  # noqa: ARG001
     # from the ROM is a new device on the bus, and a hub that was slow to
     # report the chip leaving is as slow to report it returning.
     wait = 90.0
-    info = device.wait_for_application(port=port, timeout=wait, log=_log)
+    info = device.wait_for_application(port=port, timeout=wait, log=_log, node_id=env.get("RETIMESH_NODE_ID"))
     if info:
         _log(f"application is back: {info}")
     else:

@@ -98,7 +98,7 @@ def main():
 
     # No pause first: wait_for_application asks VERSION rather than waiting
     # for a banner, so it is bounded by the node answering, not by a guess.
-    back = dev.wait_for_application(port, timeout=40.0)
+    back = dev.wait_for_application(port, timeout=40.0, node_id=r.node_id)
     report("return: application is back", back is not None, str(back) if back else "no VERSION within 40 s")
     sys.exit(report.fails)
 

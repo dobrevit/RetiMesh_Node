@@ -190,14 +190,17 @@ wired to EN and IO0. `POST /api/system/bootloader` answers `501` there and
 `BOOTLOADER CONFIRM` answers `RM ERR BOOTLOADER 501`, and the flashing tools
 fall through to esptool's own reset, which is what always worked.
 
-**A native-USB S3 (`t3s3` and its variants) answers `501` too**, and this
-was learned on the bench rather than read anywhere. Its console is the
-chip's own USB-Serial/JTAG unit, and that unit is not reset by the software
-reset `esp_restart()` performs: the host keeps its old enumeration while the
-ROM downloader comes up behind it expecting a fresh one, and the chip sits
-hung — no console, no downloader, no port drop. The RESET button did not
-recover it on the bench; only removing power did, so whatever is stuck lives
-in a domain EN does not reach. The same unit implements esptool's DTR/RTS handshake in hardware,
+**A native-USB S3 whose USB is the serial-JTAG unit alone answers `501`
+too**, and this was learned on the bench rather than read anywhere. That
+unit is not reset by the software reset `esp_restart()` performs: the host
+keeps its old enumeration while the ROM downloader comes up behind it
+expecting a fresh one, and the chip sits hung — no console, no downloader,
+no port drop. The RESET button did not recover it on the bench; only
+removing power did, so whatever is stuck lives in a domain EN does not
+reach. The shipped S3 images (`t3s3` and its variants, `esp32s3-qspi`) are
+not in this position: they present the composite device, whose OTG stack
+hands the peripheral back to the serial-JTAG unit before the restart, and
+they enter from software (the table above). The serial-JTAG unit implements esptool's DTR/RTS handshake in hardware,
 which works unaided and is what those boards offer. The software entry
 remains for the S3 behind a UART bridge (`heltec-v3`), where the downloader
 talks on UART0 and the bridge is untouched by the chip resetting; that path
@@ -254,7 +257,7 @@ find the node          the --upload-port, or the one ESP-looking port; several -
 ask the console        BOOTLOADER CONFIRM on the port (no credentials, names the board)
   or ask HTTP          POST /api/system/bootloader at $RETIMESH_NODE_URL, if the console is silent
 wait for the port      the USB-Serial/JTAG unit drops and returns (bounded, 8 s)
-esptool                PlatformIO's own invocation, --before no_reset when the downloader is known up
+esptool                PlatformIO's own invocation, its own reset at connect even into a downloader that is up
 wait for VERSION       the application announces itself again (20 s) — or the hook says what to press
 ```
 
