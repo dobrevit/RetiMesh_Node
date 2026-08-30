@@ -47,6 +47,7 @@
 #include "Bootloader.h"
 
 using LocalLink::usbNodeAddress;
+using LocalLink::usbHostAddress;
 using LocalLink::kUsbNetmask;
 
 #ifndef CFG_TUD_NCM
@@ -98,7 +99,17 @@ static uint16_t descriptor(uint8_t* dst, uint8_t* itf) {
   const uint8_t epNotify = tinyusb_get_free_in_endpoint();
   const uint8_t epIn     = tinyusb_get_free_in_endpoint();
   const uint8_t epOut    = tinyusb_get_free_out_endpoint();
-  if (!epNotify || !epIn || !epOut) return 0;
+  if (!epNotify || !epIn || !epOut) {
+    // The core's allocator reserves an endpoint as it hands it out and offers
+    // no way to hand one back, so a partial set is spent for the rest of the
+    // run and the next function to ask is short of one it should have had.
+    // Nothing here can undo that; what it can do is say which of the three
+    // was missing, because the core reports only that an interface failed to
+    // load.
+    log_e("usb0: no free USB endpoint (notify %u, in %u, out %u); the network interface will not load",
+          epNotify, epIn, epOut);
+    return 0;
+  }
   const uint8_t strName = tinyusb_add_string_descriptor(USB_NETWORK_INTERFACE);
   const uint8_t strMac  = tinyusb_add_string_descriptor(sHostMacStr);
   const uint8_t d[TUD_CDC_NCM_DESC_LEN] = {
@@ -161,6 +172,7 @@ static esp_netif_t*         sNetif = nullptr;
 static esp_netif_ip_info_t  sIpInfo;
 static std::atomic<bool>    sHostOpened{false};   // the host set its packet filter: it opened the interface
 static std::atomic<bool>    sEnabled{false};      // the operator's switch, as last applied
+static bool                 sMounted = false;     // the device was mounted on the last poll
 static std::atomic<bool>    sUp{false};           // the netif is started and connected; read on three tasks
 static std::atomic<uint32_t> sRx{0}, sTx{0}, sTxDropped{0};
 
@@ -303,6 +315,18 @@ void begin() {
   if (esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &none, sizeof(none)) != ESP_OK ||
       esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &none, sizeof(none)) != ESP_OK)
     log_w("usb0: could not strip router/DNS from the DHCP offer");
+  // One address in the pool, and it is the one the documentation names as the
+  // host's static fallback (LocalLinkState.h, usbHostAddress). Only one host
+  // is ever on this cable, so a range buys nothing — and left to itself the
+  // server hands out whatever IDF's default pool starts at, which is .2 today
+  // and is not a promise anybody made. A host configured by hand and a host
+  // that asked now land on the same address either way.
+  const IPAddress host(htonl(usbHostAddress(sMacLastOctet)));
+  dhcps_lease_t lease = {};
+  lease.enable = true;
+  lease.start_ip.addr = lease.end_ip.addr = htonl(usbHostAddress(sMacLastOctet));
+  if (esp_netif_dhcps_option(sNetif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease)) != ESP_OK)
+    log_w("usb0: could not pin the DHCP pool to %s", host.toString().c_str());
   esp_netif_attach(sNetif, &sDriver);
   log_i("usb0: composite device %s, host MAC %s, node at %s", USB_PRODUCT, sHostMacStr, address().toString().c_str());
 }
@@ -355,12 +379,19 @@ void poll(bool enabled) {
   // makes when it opens the interface is kept as a diagnostic.
   const bool mounted = tud_mounted() && !tud_suspended();
   if (!mounted) sHostOpened = false;
-  if (enabled != sEnabled) {
+  // Tell the host the carrier state — when the operator's switch moves, and
+  // again whenever the device has been mounted afresh. The class driver is
+  // reset on every bus reset and takes its link state from its own default,
+  // not from what we last sent: after a replug or a resume, a link this node
+  // still considers up was never announced to the host that just arrived, and
+  // its interface sits at NO-CARRIER until somebody toggles the switch. Sent
+  // from the USB task, like every other call into the class driver.
+  const bool remounted = mounted && !sMounted;
+  if (enabled != sEnabled || remounted) {
     sEnabled = enabled;
-    // Tell the host, so its interface shows the carrier the operator set —
-    // from the USB task, like every other call into the class driver.
     if (mounted) usbd_defer_func([](void*) { if (tud_mounted()) tud_network_link_state(0, sEnabled); }, nullptr, false);
   }
+  sMounted = mounted;
   const bool want = enabled && mounted;
   if (want && !sUp) {
     esp_netif_action_start(sNetif, nullptr, 0, nullptr);
