@@ -33,6 +33,7 @@
 #include <esp_heap_caps.h>
 #include <esp_mac.h>
 #include <esp_netif.h>
+#include <lwip/tcpip.h>
 #include <esp_netif_defaults.h>
 #include <esp_timer.h>
 #include <dhcpserver/dhcpserver.h>
@@ -45,6 +46,7 @@
 #include <soc/usb_wrap_struct.h>
 #include "LocalLinkState.h"
 #include "Bootloader.h"
+#include "LazyStart.h"
 
 using LocalLink::usbNodeAddress;
 using LocalLink::usbHostAddress;
@@ -177,6 +179,12 @@ static std::atomic<bool>    sHostOpened{false};   // the host set its packet fil
 static std::atomic<bool>    sEnabled{false};      // the operator's switch, as last applied
 static bool                 sMounted = false;     // the device was mounted on the last poll
 static std::atomic<bool>    sUp{false};           // the netif is started and connected; read on three tasks
+// Whoever is inside the interface right now: tud_network_recv_cb, on the USB
+// task. Counted for the same reason the ring's users are — the teardown nulls
+// the handle and then waits for this to reach zero before destroying it.
+static std::atomic<int>     sNetifUsers{0};
+// The build/teardown policy both lazy links share (LazyStart.h).
+static LocalLink::LazyStart sLazy;
 static std::atomic<uint32_t> sRx{0}, sTx{0}, sTxDropped{0};
 
 // Frames for the host wait here between the TCP/IP task and the USB task.
@@ -203,6 +211,15 @@ struct TxSlot { uint16_t len; uint32_t queuedMs; uint8_t data[CFG_TUD_NET_MTU]; 
 // which is the thing this file's switch was supposed to decide. On the heap
 // now, claimed when the link comes up and given back when it goes down.
 std::atomic<TxSlot*>  sTxSlots{nullptr};
+// Whoever is inside the ring right now, on the TCP/IP task (transmit) or the
+// USB task (drain). The teardown nulls the pointer and then waits for this to
+// reach zero, which is airtight in the one direction that matters: a user
+// that took its reference before the null is counted here and waited for, and
+// one that arrives after it reads null and leaves. Stopping the retry timer
+// is not enough on its own — esp_timer_stop disarms but does not wait for a
+// callback already dispatched, and that callback's whole job is to queue
+// another drain.
+std::atomic<int>      sRingUsers{0};
 std::atomic<uint32_t> sTxHead{0};       // next slot to fill: the TCP/IP task's
 std::atomic<uint32_t> sTxTail{0};       // next slot to send: the USB task's
 esp_timer_handle_t    sTxRetry = nullptr;
@@ -210,8 +227,12 @@ esp_timer_handle_t    sTxRetry = nullptr;
 // On the USB task: hands the ring to the class driver, as many frames as it
 // will take, and comes back for the rest once the NTB has gone out.
 void drain(void*) {
+  sRingUsers.fetch_add(1, std::memory_order_acq_rel);
   TxSlot* slots = sTxSlots.load(std::memory_order_acquire);
-  if (!slots) return;                              // the link went down; nothing to send from
+  if (!slots) {                                    // the link went down while this was queued
+    sRingUsers.fetch_sub(1, std::memory_order_acq_rel);
+    return;
+  }
   while (sTxTail.load(std::memory_order_acquire) != sTxHead.load(std::memory_order_acquire)) {
     TxSlot& s = slots[sTxTail % kTxSlots];
     if (!sUp || (int32_t)(millis() - s.queuedMs) > (int32_t)kTxStaleMs) {
@@ -220,13 +241,15 @@ void drain(void*) {
       continue;
     }
     if (!tud_network_can_xmit(s.len)) {
-      esp_timer_start_once(sTxRetry, kTxRetryUs);   // already running: the same moment
+      if (sTxRetry) esp_timer_start_once(sTxRetry, kTxRetryUs);   // already running: the same moment
+      sRingUsers.fetch_sub(1, std::memory_order_acq_rel);
       return;
     }
     tud_network_xmit(s.data, s.len);               // copied through xmit_cb, synchronously
     sTx++;
     sTxTail.fetch_add(1, std::memory_order_release);
   }
+  sRingUsers.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 void retryDrain(void*) { usbd_defer_func(drain, nullptr, false); }
@@ -234,11 +257,19 @@ void retryDrain(void*) { usbd_defer_func(drain, nullptr, false); }
 
 // On the TCP/IP task, which carries the portal and the RNS transport too.
 static esp_err_t transmit(void*, void* buffer, size_t len) {
+  sRingUsers.fetch_add(1, std::memory_order_acq_rel);
   TxSlot* slots = sTxSlots.load(std::memory_order_acquire);
-  if (!sUp || !slots || len > CFG_TUD_NET_MTU) return ESP_FAIL;
+  if (!sUp || !slots || len > CFG_TUD_NET_MTU) {
+    sRingUsers.fetch_sub(1, std::memory_order_acq_rel);
+    return ESP_FAIL;
+  }
   const uint32_t head = sTxHead.load(std::memory_order_relaxed);
   const bool waiting = head != sTxTail.load(std::memory_order_acquire);
-  if (head - sTxTail.load(std::memory_order_acquire) >= kTxSlots) { sTxDropped++; return ESP_FAIL; }
+  if (head - sTxTail.load(std::memory_order_acquire) >= kTxSlots) {
+    sTxDropped++;
+    sRingUsers.fetch_sub(1, std::memory_order_acq_rel);
+    return ESP_FAIL;
+  }
   TxSlot& s = slots[head % kTxSlots];
   memcpy(s.data, buffer, len);
   s.len = (uint16_t)len;
@@ -247,7 +278,8 @@ static esp_err_t transmit(void*, void* buffer, size_t len) {
   usbd_defer_func(drain, nullptr, false);
   // A kick can be lost when the USB task's queue is full; frames already
   // waiting get the timer as well, so nothing sits in the ring unannounced.
-  if (waiting) esp_timer_start_once(sTxRetry, kTxRetryUs);
+  if (waiting && sTxRetry) esp_timer_start_once(sTxRetry, kTxRetryUs);
+  sRingUsers.fetch_sub(1, std::memory_order_acq_rel);
   return ESP_OK;
 }
 
@@ -304,20 +336,34 @@ void begin() {
     .callback = retryDrain, .arg = nullptr, .dispatch_method = ESP_TIMER_TASK,
     .name = "usb0-tx", .skip_unhandled_events = true,
   };
-  if (esp_timer_create(&retry, &sTxRetry) != ESP_OK) log_e("usb0: no retry timer");
+  if (esp_timer_create(&retry, &sTxRetry) != ESP_OK) {
+    sTxRetry = nullptr;
+    log_e("usb0: the transmit retry timer could not be created; usb0 will not start");
+  }
 }
 
 // Everything the switch decides. Built on the way on; given back on the way
 // off, a step to a pass of the loop, because nothing here may be freed while
 // the USB task or the TCP/IP task can still be inside it (stepStop, below).
-static void startUsb() {
-  if (sNetif) return;
+// True when the link is up and whole. A false answer latches (LazyStart.h):
+// poll() runs hundreds of times a second, and a node out of RAM must not bury
+// the heap figures under its own complaint about them.
+static bool startUsb() {
+  if (sNetif) return true;
+  // Without the retry timer a frame the class driver refuses is never
+  // re-offered, and the link stalls until some later transmit happens to kick
+  // the drain. begin() says so when it cannot create it; this is what used to
+  // keep the interface from being built at all, and still does.
+  if (!sTxRetry) {
+    log_e("usb0: no retry timer, so the link would stall on the first busy frame; not starting");
+    return false;
+  }
   TxSlot* slots = (TxSlot*)heap_caps_malloc(sizeof(TxSlot) * kTxSlots,
                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!slots) {
     log_e("usb0: no room for the %u B transmit ring; the link stays down",
           (unsigned)(sizeof(TxSlot) * kTxSlots));
-    return;
+    return false;
   }
   sTxHead = sTxTail = 0;
   sIpInfo.ip.addr = sIpInfo.gw.addr = (uint32_t)address();
@@ -335,7 +381,7 @@ static void startUsb() {
   if (!netif) {
     log_e("usb0: the interface could not be created; the link stays down");
     heap_caps_free(slots);                 // nothing half-built is left behind
-    return;
+    return false;
   }
   esp_netif_set_mac(netif, sNodeMac);
   // A way to reach the node, not a way out: the offer carries no router, so
@@ -371,6 +417,7 @@ static void startUsb() {
   sNetif.store(netif, std::memory_order_release);
   log_i("usb0: composite device %s, host MAC %s, node at %s (ring %u B)", USB_PRODUCT, sHostMacStr,
         address().toString().c_str(), (unsigned)(sizeof(TxSlot) * kTxSlots));
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -411,68 +458,143 @@ uint32_t rxPackets() { return sRx; }
 uint32_t txPackets() { return sTx; }
 uint32_t txDropped() { return sTxDropped; }
 
-// Giving the interface and the ring back, a step to a pass of the loop. The
-// order is what makes it safe, and each step is a barrier on the task that
-// could still be inside what the next step frees:
+// Giving the interface and the ring back, a step to a pass of the loop. What
+// makes it safe is not one barrier but two different kinds, because there are
+// two different things that can still be holding what is about to be freed:
 //
-//   1. sUp = false        transmit(), drain() and recv_cb all bail on it
-//   2. esp_netif_action_stop   runs on the TCP/IP task, so when it returns
-//                         no earlier transmit() from lwIP is still running
-//   3. the retry timer stopped, so no further drain is dispatched
-//   4. a no-op posted through usbd_defer_func — it runs on the USB task, so
-//      when it has run, every drain queued before it has run too and any
-//      recv_cb that had started has finished
-//   5. only then are the netif and the ring destroyed
+//   1. sUp = false and the handles nulled — transmit(), drain() and recv_cb
+//      all read them and leave, so no new user can start.
+//   2. Wait for the users already inside to leave (sRingUsers, sNetifUsers).
+//      A count rather than a barrier, because esp_timer_stop only disarms the
+//      retry timer: a callback already dispatched still runs, and its whole
+//      job is to queue another drain, which a barrier posted before it would
+//      not cover.
+//   3. A no-op through lwIP's own mailbox. esp_netif_receive only *posts* the
+//      frame — CONFIG_LWIP_TCPIP_CORE_LOCKING is on and CORE_LOCKING_INPUT is
+//      not, so tcpip_input queues and returns, and esp_netif_action_stop runs
+//      inline on this task under the core lock and is therefore no barrier at
+//      all for what is already in that queue. tcpip_callback goes through the
+//      same mailbox, so when it runs, every frame posted before it has been
+//      consumed. Destroying the netif without this leaves the tcpip thread to
+//      dequeue a pbuf and run it against freed memory.
+//   4. Only then: stop, destroy, free.
 //
-// If the fourth step never fires the memory simply stays allocated: not
-// freeing is harmless, and freeing under a live callback is not.
-enum class Stop : uint8_t { Idle = 0, Barrier };
+// If a step never completes the machine stays in it. The memory stays
+// claimed, usb0 stays down and the warning is said once — not freeing is
+// harmless, and freeing under a live callback is not. It deliberately does
+// not give up and re-arm: that would re-post the barriers every few seconds
+// for as long as the switch stayed off, and a give-up that left the handles
+// nulled would let the next enable build a second interface over the first.
+enum class Stop : uint8_t { Idle = 0, Quiesce, Lwip, Finish };
 static Stop                 sStop = Stop::Idle;          // loop task only
 static uint32_t             sStopAskedMs = 0;
-static std::atomic<bool>    sBarrierPassed{false};
-static constexpr uint32_t   kBarrierWaitMs = 5000;
+static bool                 sStopWarned = false;
+static esp_netif_t*         sStopNetif = nullptr;        // held while the steps run
+static TxSlot*              sStopSlots = nullptr;
+static constexpr uint32_t   kStepWaitMs = 5000;
 
-static void barrier(void*) { sBarrierPassed.store(true, std::memory_order_release); }
+// Generation-stamped, so a no-op left over from an earlier teardown cannot
+// satisfy a later one: what matters is that a message posted *after* the
+// frames has been through the queue, and only the current generation's has.
+static std::atomic<uint32_t> sLwipAsked{0};
+static std::atomic<uint32_t> sLwipSeen{0};
+static void lwipBarrier(void*) { sLwipSeen.store(sLwipAsked.load(std::memory_order_acquire),
+                                                 std::memory_order_release); }
+
+static bool stalled(uint32_t nowMs, const char* what) {
+  if (nowMs - sStopAskedMs <= kStepWaitMs) return false;
+  if (!sStopWarned) {
+    sStopWarned = true;
+    log_w("usb0: %s has not finished; the interface is kept rather than freed under it", what);
+  }
+  return true;
+}
 
 static void stepStop(uint32_t nowMs) {
-  if (sStop != Stop::Barrier) return;
-  if (!sBarrierPassed.load(std::memory_order_acquire)) {
-    if (nowMs - sStopAskedMs > kBarrierWaitMs) {
-      // Said once, and then left alone: usb0 stays down and its memory stays
-      // claimed, which is the safe half of the choice.
-      log_w("usb0: the USB task did not answer; the interface is kept rather than freed under it");
+  switch (sStop) {
+    case Stop::Idle:
+      return;
+
+    case Stop::Quiesce:
+      // Everyone who took a reference before the handles were nulled.
+      if (sRingUsers.load(std::memory_order_acquire) > 0 ||
+          sNetifUsers.load(std::memory_order_acquire) > 0) {
+        stalled(nowMs, "a driver callback");
+        return;
+      }
+      sLwipAsked.fetch_add(1, std::memory_order_acq_rel);
+      if (tcpip_callback(lwipBarrier, nullptr) != ERR_OK) {
+        // The mailbox is full. Nothing is freed on a maybe; try again next
+        // pass, which is what leaving the state alone does.
+        stalled(nowMs, "lwIP's mailbox");
+        return;
+      }
+      sStop = Stop::Lwip;
+      return;
+
+    case Stop::Lwip:
+      if (sLwipSeen.load(std::memory_order_acquire) != sLwipAsked.load(std::memory_order_acquire)) {
+        stalled(nowMs, "the lwIP queue");
+        return;
+      }
+      sStop = Stop::Finish;
+      return;
+
+    case Stop::Finish:
+      if (sStopNetif) {
+        esp_netif_action_stop(sStopNetif, nullptr, 0, nullptr);
+        esp_netif_destroy(sStopNetif);
+        sStopNetif = nullptr;
+      }
+      if (sStopSlots) { heap_caps_free(sStopSlots); sStopSlots = nullptr; }
       sStop = Stop::Idle;
-    }
-    return;
+      sStopWarned = false;
+      log_i("usb0: switched off; the interface and its %u B ring are given back",
+            (unsigned)(sizeof(TxSlot) * kTxSlots));
+      return;
   }
-  if (esp_netif_t* n = sNetif.exchange(nullptr, std::memory_order_acq_rel)) esp_netif_destroy(n);
-  if (TxSlot* slots = sTxSlots.exchange(nullptr, std::memory_order_acq_rel)) heap_caps_free(slots);
-  sStop = Stop::Idle;
-  log_i("usb0: switched off; the interface and its %u B ring are given back",
-        (unsigned)(sizeof(TxSlot) * kTxSlots));
 }
 
 void poll(bool enabled) {
   const uint32_t now = millis();
   // The switch decides whether the interface exists at all, not merely
   // whether it answers (UsbNcm.h). A teardown once begun runs to its end
-  // before anything is built again.
-  if (sStop != Stop::Idle) {
+  // before anything is built again, and a build that failed is not retried
+  // every pass (LazyStart.h).
+  const bool busy = sStop != Stop::Idle;
+  if (busy) {
     stepStop(now);
     return;
   }
-  if (enabled && !sNetif) {
-    startUsb();
-  } else if (!enabled && sNetif) {
+  const bool built = sNetif.load(std::memory_order_acquire) != nullptr;
+  sLazy.idle(enabled, built, busy);
+  if (sLazy.shouldStart(enabled, built, busy)) {
+    sLazy.built(startUsb());
+    return;
+  }
+  if (sLazy.shouldStop(enabled, built, busy)) {
     // The host is told the carrier has gone before anything is taken apart.
     sEnabled = false;
     if (tud_mounted()) usbd_defer_func([](void*) { if (tud_mounted()) tud_network_link_state(0, false); }, nullptr, false);
     if (sUp) bringDown();
-    esp_timer_stop(sTxRetry);
-    sBarrierPassed = false;
+    if (sTxRetry) esp_timer_stop(sTxRetry);
+    // Frames still between the indices go nowhere, and an operator reading
+    // ncm_tx_dropped should see what the switch cost rather than a counter
+    // that quietly skipped them.
+    const uint32_t queued = sTxHead.load(std::memory_order_acquire) - sTxTail.load(std::memory_order_acquire);
+    if (queued) sTxDropped += queued;
+    // The host's side of the link goes with the interface; leaving this set
+    // reports host_opened=yes for something that no longer exists.
+    sHostOpened = false;
+    sMounted = false;
+    // Nulled here, before anything waits: from now on every callback reads
+    // them and leaves, so the count below can only fall.
+    sStopNetif = sNetif.exchange(nullptr, std::memory_order_acq_rel);
+    sStopSlots = sTxSlots.exchange(nullptr, std::memory_order_acq_rel);
     sStopAskedMs = now;
-    sStop = Stop::Barrier;
-    usbd_defer_func(barrier, nullptr, false);
+    sStopWarned = false;
+    sStop = Stop::Quiesce;
+    stepStop(now);                               // a pass is not wasted waiting to begin
     return;
   }
   if (!sNetif) return;
@@ -534,15 +656,21 @@ bool tud_network_recv_cb(const uint8_t* src, uint16_t size) {
     // Internal RAM: a frame lives microseconds, and on a PSRAM board plain
     // malloc() would put this copy where lwIP then reads it back through
     // the cache, twice.
+    sNetifUsers.fetch_add(1, std::memory_order_acq_rel);
     esp_netif_t* netif = sNetif.load(std::memory_order_acquire);
     void* copy = netif ? heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : nullptr;
     if (copy) {
       memcpy(copy, src, size);
       // From here the buffer belongs to the stack, which frees it through
-      // freeRxBuffer once the frame has been consumed.
-      if (esp_netif_receive(netif, copy, size, nullptr) == ESP_OK) sRx++;
-      else heap_caps_free(copy);           // refused: nobody else will free it
+      // freeRxBuffer once the frame has been consumed — on every path,
+      // including the ones where it refuses the frame. Freeing it here as
+      // well on a non-OK return would be a second free of the same block;
+      // this build cannot even see one, since esp_netif_receive reports no
+      // errors unless CONFIG_ESP_NETIF_RECEIVE_REPORT_ERRORS is set.
+      esp_netif_receive(netif, copy, size, nullptr);
+      sRx++;
     }
+    sNetifUsers.fetch_sub(1, std::memory_order_acq_rel);
   }
   tud_network_recv_renew();                         // the class buffer is ours no longer
   return true;

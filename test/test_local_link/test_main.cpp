@@ -11,6 +11,7 @@
 
 #include <unity.h>
 #include "LocalLinkState.h"
+#include "LazyStart.h"
 
 using namespace LocalLink;
 
@@ -184,8 +185,58 @@ static void test_with_the_console_off_and_no_link_there_is_no_way_in() {
   TEST_ASSERT_TRUE(wouldLockOut(false, false, false));
 }
 
+// --- when a link that is built on demand may be built ------------------------
+static void test_a_build_that_failed_is_not_retried_every_pass() {
+  // poll() runs hundreds of times a second. A node out of byte-addressable
+  // RAM would otherwise bury the heap figures an operator needs under
+  // thousands of copies of its own complaint about them.
+  LocalLink::LazyStart z;
+  TEST_ASSERT_TRUE(z.shouldStart(true, false, false));
+  z.built(false);
+  TEST_ASSERT_FALSE(z.shouldStart(true, false, false));
+  TEST_ASSERT_TRUE(z.failed());
+}
+
+static void test_the_switch_going_off_offers_another_try() {
+  // The only gesture an operator has for "try again".
+  LocalLink::LazyStart z;
+  z.built(false);
+  z.idle(true, false, false);                  // still on: the latch holds
+  TEST_ASSERT_FALSE(z.shouldStart(true, false, false));
+  z.idle(false, false, false);                 // off, and nothing left to give back
+  TEST_ASSERT_FALSE(z.failed());
+  TEST_ASSERT_TRUE(z.shouldStart(true, false, false));
+}
+
+static void test_nothing_is_built_or_torn_down_while_a_teardown_runs() {
+  // A switch flicked off and straight back on would otherwise leave two
+  // interfaces, or none, depending on the pass it landed in.
+  LocalLink::LazyStart z;
+  TEST_ASSERT_FALSE(z.shouldStart(true, false, true));
+  TEST_ASSERT_FALSE(z.shouldStop(false, true, true));
+  TEST_ASSERT_TRUE(z.shouldStop(false, true, false));
+}
+
+static void test_a_build_that_worked_clears_an_earlier_failure() {
+  LocalLink::LazyStart z;
+  z.built(false);
+  z.built(true);
+  TEST_ASSERT_FALSE(z.failed());
+}
+
+static void test_an_existing_link_is_not_built_again() {
+  LocalLink::LazyStart z;
+  TEST_ASSERT_FALSE(z.shouldStart(true, true, false));
+  TEST_ASSERT_FALSE(z.shouldStop(true, true, false));
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_a_build_that_failed_is_not_retried_every_pass);
+  RUN_TEST(test_the_switch_going_off_offers_another_try);
+  RUN_TEST(test_nothing_is_built_or_torn_down_while_a_teardown_runs);
+  RUN_TEST(test_a_build_that_worked_clears_an_earlier_failure);
+  RUN_TEST(test_an_existing_link_is_not_built_again);
   RUN_TEST(test_the_console_alone_is_a_way_in);
   RUN_TEST(test_with_the_console_off_a_link_needs_something_listening_on_it);
   RUN_TEST(test_with_the_console_off_and_no_link_there_is_no_way_in);

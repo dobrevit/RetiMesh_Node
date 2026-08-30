@@ -49,6 +49,7 @@
 #include <netif/ppp/ppp.h>
 #include <netif/ppp/ipcp.h>
 #include "LocalLinkState.h"
+#include "LazyStart.h"
 #include "LocalLink.h"
 #include "RnsTransport.h"
 #include "Diag.h"
@@ -437,23 +438,23 @@ static void readerTask(void*) {
 enum class Teardown : uint8_t { Idle, Session, Reader };
 static Teardown sTeardown = Teardown::Idle;             // loop task only
 static uint32_t sTeardownStartedMs = 0;
-// The interface could not be built. poll() runs hundreds of times a second,
-// so without this a node that is out of internal RAM would bury the heap
-// figures an operator needs under its own complaint about them. Lifted when
-// the switch goes off, which is how an operator asks for another try.
-static bool     sStartFailed = false;
+// The build/teardown policy, shared with UsbNcm so a correction to it is
+// made once (LazyStart.h): a build that failed is not retried on every pass,
+// and a teardown runs to its end before anything is built again.
+static LocalLink::LazyStart sLazy;
 // Longer than the grace the reader gives a session to end, so the reader's
 // own close always gets to run first.
 static constexpr uint32_t kTeardownMarginMs = 2000;
 
-static void startPpp() {
-  if (sNetif) return;
+// True when the interface is up and whole; a false answer latches until the
+// switch goes off (LazyStart.h).
+static bool startPpp() {
+  if (sNetif) return true;
   esp_netif_config_t cfg = ESP_NETIF_DEFAULT_PPP();
   esp_netif_t* netif = esp_netif_new(&cfg);
   if (!netif) {
-    sStartFailed = true;
     log_e("ppp0: the interface could not be created; the port stays the console's");
-    return;
+    return false;
   }
   esp_netif_attach(netif, &sDriver);
   esp_netif_ppp_config_t pc = {};
@@ -506,8 +507,7 @@ static void startPpp() {
     esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_LOST_IP, onLostIp);
     esp_event_handler_unregister(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, onStatus);
     esp_netif_destroy(netif);
-    sStartFailed = true;
-    return;                                             // Diag::startTask has said what the heap had left
+    return false;                                       // Diag::startTask has said what the heap had left
   }
   // The reader hands the console its bytes from here on, and it starts with
   // an empty ring: see ConsoleStream::drain.
@@ -515,6 +515,7 @@ static void startPpp() {
   Maintenance::useStream(sConsole);
   log_i("ppp0: PPP client on UART%d behind the %s bridge; asks the host's pppd for %s",
         (int)kUart, BOARD_USB_BRIDGE, ipOf(pppNodeAddress(sMacLastOctet)).toString().c_str());
+  return true;
 }
 
 // One step of the teardown, per pass of the loop. The order is fixed and each
@@ -605,17 +606,18 @@ void poll(bool enabled, uint32_t baud) {
   // whether it answers: off means nothing allocated (PppUart.h). A teardown
   // once begun runs to its end before anything is built again, so a switch
   // flicked off and straight back on cannot leave two interfaces or none.
-  if (sTeardown != Teardown::Idle) {
+  const bool busy = sTeardown != Teardown::Idle;
+  const bool built = sNetif != nullptr;
+  sLazy.idle(enabled, built, busy);
+  if (busy) {
     stepStopPpp(now);
-  } else if (enabled) {
-    if (!sNetif && !sStartFailed) startPpp();
-  } else if (sNetif) {
+  } else if (sLazy.shouldStart(enabled, built, busy)) {
+    sLazy.built(startPpp());
+  } else if (sLazy.shouldStop(enabled, built, busy)) {
     sTearingDown = true;                                // the reader allows no new session from here
     sTeardownStartedMs = now;
     sTeardown = Teardown::Session;
     stepStopPpp(now);
-  } else {
-    sStartFailed = false;                               // off lifts the latch: try again next time on
   }
   // The speed of the whole port while PPP is on; the console's otherwise.
   // Applied while the console owns the port, never under a session — a
