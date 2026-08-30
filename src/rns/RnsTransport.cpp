@@ -151,6 +151,11 @@ public:
       log_w("LoRa TX ring full, dropping %u bytes", (unsigned)data.size());
       return false;
     }
+    // What the interface has sent, for /api/status and the transport page.
+    // Handed to the ring rather than confirmed on the air: that is the
+    // boundary this interface owns, and the radio's own counters
+    // (g_stats.loraTxPackets) are what say whether it left.
+    handle_outgoing(data);
     return true;
   }
   void loop() override {
@@ -184,8 +189,14 @@ public:
     _bitrate = 10000000;                    // Wi-Fi; only used for airtime maths
   }
   bool send_outgoing(const Bytes& data) override {
-    if (_id & AutoInterface::AUTO_ID_BASE) return AutoInterface::sendTo(_id, data.data(), data.size());
-    return transportServer.sendTo(_id, data.data(), data.size());
+    const bool sent = (_id & AutoInterface::AUTO_ID_BASE)
+                    ? AutoInterface::sendTo(_id, data.data(), data.size())
+                    : transportServer.sendTo(_id, data.data(), data.size());
+    // Only what actually went: a peer whose socket has gone, or an
+    // AutoInterface datagram that could not be posted, is a send that did not
+    // happen and must not read as one.
+    if (sent) handle_outgoing(data);
+    return sent;
   }
   void incoming(const uint8_t* p, size_t len) {
     handle_incoming(Bytes(p, len));
