@@ -37,14 +37,16 @@
 
 namespace Maintenance {
 
-void begin(Stream& io);
+void begin(Stream& io);            // announces itself with "RM HELLO ..."
 
 // Point the console at another stream. The port is one thing and who hands
 // its bytes over is another: with PPP off the console reads the UART itself,
-// and when PPP takes the port over the reader that arbitrates between them
-// becomes the console's source instead (PppUart.h). Called from the loop
-// task, between polls, so no read is in progress.
-void useStream(Stream& io);        // announces itself with "RM HELLO ..."
-void poll();                   // from loop(); reads what has arrived, answers complete lines
+// and while PPP's reader has the port it arbitrates the bytes, so it becomes
+// the console's source instead (PppUart.h). Called from the loop task,
+// between polls, so no read is in progress. Says nothing on the way past: a
+// second HELLO would read as a node that had restarted, and the port has not
+// changed — only who hands its bytes over.
+void useStream(Stream& io);
+void poll();                       // from loop(); reads what has arrived, answers complete lines
 
 } // namespace Maintenance

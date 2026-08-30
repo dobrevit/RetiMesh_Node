@@ -28,10 +28,11 @@
 //      the arbiter while the console owns the port and to lwIP while PPP
 //      does, and carries out every change of ownership.
 //
-// Every esp_netif action — start, stop — runs on the reader task, so the
-// session's whole life is on one task; the loop task only sets the switch
-// and reads the mirrors, and the event handlers, on the system event task,
-// only set flags the reader acts on at its next pass.
+// Every esp_netif action that belongs to a session — start, stop — runs on
+// the reader task, so the session's whole life is on one task. The loop task
+// builds the interface and the reader before a session can start and destroys
+// them after the last one has ended, never during; the event handlers, on the
+// system event task, only set flags the reader acts on at its next pass.
 #include "PppUart.h"
 
 #if HAS_PPP
@@ -74,19 +75,29 @@ static constexpr uint32_t kStopGraceMs = 10000;
 
 // ---------------------------------------------------------------------------
 // State. The reader task owns the arbiter and the session; everything the
-// loop task, the console and the event task read or set is atomic.
+// loop task, the console and the event task read or set is atomic — the
+// interface handle included, since the switch now creates and destroys it
+// from the loop task while the reader is reading it.
 // ---------------------------------------------------------------------------
-static esp_netif_t*          sNetif = nullptr;
+static std::atomic<esp_netif_t*> sNetif{nullptr};
 static Arbiter               sArbiter(false);           // reader task only
 static std::atomic<Owner>    sOwner{Owner::Console};    // the arbiter's answer, for other tasks
 static std::atomic<bool>     sEnabled{false};           // the operator's switch, as last applied
-static std::atomic<bool>     sClosing{false};           // the node is restarting: end the session
+// Two reasons no new session may start, kept apart because they end
+// differently: the node is on its way down and will not come back to this
+// state, or the switch went off and the interface is being given back and may
+// be built again at any time. A single latch for both left PPP dead until the
+// next reboot after one switch-off.
+static std::atomic<bool>     sClosing{false};           // the node is restarting
+static std::atomic<bool>     sTearingDown{false};       // the switch went off; teardown in progress
 static std::atomic<bool>     sStarted{false};           // connect was asked of esp_netif; transmit allowed
 // The reader task exists only while PPP does. It is four kilobytes of DRAM,
-// which is what a Wireless Stick needs for the task that drives Reticulum,
-// and with PPP off it would only be forwarding console bytes the console can
-// read for itself.
-static TaskHandle_t          sReader = nullptr;
+// which is what a Wireless Stick needs for the task that drives Reticulum, and
+// with PPP off it would only be forwarding console bytes the console can
+// read for itself. Its handle is deliberately not kept: xTaskCreate writes one
+// after the new task has run, and a task that deleted itself first would leave
+// a dangling handle behind. The task publishes its own aliveness instead.
+static std::atomic<bool>     sReaderAlive{false};
 static std::atomic<bool>     sReaderStop{false};
 static std::atomic<bool>     sUp{false};                // IPCP done: address and peer are valid
 static std::atomic<bool>     sDead{false};              // the session reached PPP's dead phase
@@ -123,6 +134,13 @@ public:
     _head.store(head, std::memory_order_release);
   }
 
+  // Everything unread is dropped. Bytes belong to the stream the console was
+  // reading when they arrived: a line half-typed before PPP took the port is
+  // not the first line of the session after it, and a command left in the
+  // ring is a command executed at a time nobody typed it — which is the
+  // hazard Maintenance::poll's discard was written for.
+  void drain() { _tail.store(_head.load(std::memory_order_acquire), std::memory_order_release); }
+
   int available() override {
     const size_t head = _head.load(std::memory_order_acquire);
     const size_t tail = _tail.load(std::memory_order_relaxed);
@@ -157,8 +175,6 @@ private:
   std::atomic<size_t> _head{0}, _tail{0};
 };
 static ConsoleStream sConsole;
-
-Stream& console() { return sConsole; }
 
 // The log has three sources and three mutes. The core's log_* macros go
 // through ets_printf and the putc the core installed, which writes straight
@@ -291,7 +307,11 @@ static void onStatus(void*, esp_event_base_t, int32_t id, void*) {
 // ---------------------------------------------------------------------------
 // 4. The reader
 // ---------------------------------------------------------------------------
-static bool     sStopping = false;                    // reader task only
+// The reader's, while it lives: nobody else asks a session to end. Once it
+// has gone the teardown puts them right, since a reader that left mid-session
+// would otherwise leave the next one looking at an answer that was not about
+// it — and be torn down on its first pass for a close it never asked for.
+static bool     sStopping = false;
 static uint32_t sStopAskedMs = 0;
 
 // PPP has taken the port. The log is silenced first and the FIFO left to
@@ -315,6 +335,12 @@ static void takeOver() {
 // and the log resumes. The first line it prints says what happened, which
 // is the one line an operator watching the port wants.
 static void finish(const char* why) {
+  // esp_netif is told the interface is down whoever ended the session. When
+  // the peer closed it we never asked — the stop below runs only in the
+  // branch that did — and an interface esp_netif still holds started is one
+  // whose pcb accounting drifts a little further with every pppd that
+  // connects and disconnects, until it is destroyed in that state.
+  if (sStarted && !sStopping && sNetif) esp_netif_action_stop(sNetif, nullptr, 0, nullptr);
   sStarted = false;
   sStopping = false;
   sUp = false;
@@ -336,7 +362,7 @@ static void deliver(const Route& r) {
 
 // Every change of state the session can make, once per pass of the reader.
 static void service(uint32_t nowMs) {
-  const bool enabled = sEnabled && !sClosing;
+  const bool enabled = sEnabled && !sClosing && !sTearingDown;
   sArbiter.allowPpp(enabled && sNetif != nullptr);
   if (sArbiter.owner() != Owner::Ppp) { sDead = false; return; }
   const bool stop = !enabled || sArbiter.pppIdleDead(nowMs);
@@ -358,7 +384,10 @@ static void service(uint32_t nowMs) {
 static void readerTask(void*) {
   static uint8_t buf[256];
   for (;;) {
-    if (sReaderStop) { sReader = nullptr; sReaderStop = false; vTaskDelete(nullptr); }
+    // The loop task is waiting on this before it destroys the interface, and
+    // it asks only once the port is the console's again, so there is never a
+    // session to unwind here.
+    if (sReaderStop) { sReaderStop = false; sReaderAlive = false; vTaskDelete(nullptr); }
     // The driver returns early only once the buffer is full, so the wait
     // is the latency a short frame pays: ten milliseconds, a hundred idle
     // wake-ups a second when nothing arrives, each of which costs nothing.
@@ -389,30 +418,48 @@ static void readerTask(void*) {
 }
 
 // ---------------------------------------------------------------------------
-// The port's buffers cannot be resized once the driver is up: the core's
-// setRxBufferSize/setTxBufferSize only take effect before it installs, and
-// taking it down and putting it back — Serial.end() then Serial.begin() —
-// leaves the UART dead on this core. Measured, not assumed: the node kept
-// running and answering over Wi-Fi with its port silent, heartbeat included.
-// So the buffers are PPP's from boot on a board that carries PPP, and what
-// this unit gives back when the switch is off is the interface and the
-// reader task, not the twelve kilobytes of ring.
-// Everything PPP needs and the console does not: the interface, its events,
-// and the twelve kilobytes of port buffer. Built when the switch turns on and
-// given back when it turns off, so a node with PPP off pays nothing for it.
+// 5. The switch: what is built when PPP is on and given back when it is off
+// ---------------------------------------------------------------------------
+// The interface, its three event handlers and the four kilobytes of reader
+// task. Not the port's buffers: those are sized before the driver installs,
+// which is the only time they can be (main.cpp), and taking the driver down
+// to resize them — Serial.end() then Serial.begin() — leaves the UART dead on
+// this core. Measured, not assumed: the node kept running and answering over
+// Wi-Fi with its port silent, heartbeat included. So a board that carries PPP
+// pays for the twelve kilobytes of ring whether the switch is on or off, and
+// what the switch is worth is the interface and the task.
+//
+// Both of these run on the loop task, which must not block: giving the
+// interface back is a state machine (Teardown, below) driven a step to a
+// pass, because a session that has to be closed takes as long as the host's
+// pppd takes to answer and the heartbeat, the console and every other link's
+// state machine run on this task too.
+enum class Teardown : uint8_t { Idle, Session, Reader };
+static Teardown sTeardown = Teardown::Idle;             // loop task only
+static uint32_t sTeardownStartedMs = 0;
+// The interface could not be built. poll() runs hundreds of times a second,
+// so without this a node that is out of internal RAM would bury the heap
+// figures an operator needs under its own complaint about them. Lifted when
+// the switch goes off, which is how an operator asks for another try.
+static bool     sStartFailed = false;
+// Longer than the grace the reader gives a session to end, so the reader's
+// own close always gets to run first.
+static constexpr uint32_t kTeardownMarginMs = 2000;
+
 static void startPpp() {
   if (sNetif) return;
   esp_netif_config_t cfg = ESP_NETIF_DEFAULT_PPP();
-  sNetif = esp_netif_new(&cfg);
-  if (!sNetif) {
-    log_e("ppp0: esp_netif_new failed; the port stays the console's");
+  esp_netif_t* netif = esp_netif_new(&cfg);
+  if (!netif) {
+    sStartFailed = true;
+    log_e("ppp0: the interface could not be created; the port stays the console's");
     return;
   }
-  esp_netif_attach(sNetif, &sDriver);
+  esp_netif_attach(netif, &sDriver);
   esp_netif_ppp_config_t pc = {};
   pc.ppp_phase_event_enabled = true;
   pc.ppp_error_event_enabled = true;
-  esp_netif_ppp_set_params(sNetif, &pc);
+  esp_netif_ppp_set_params(netif, &pc);
   // What the node asks for in IPCP. esp_netif's public PPP configuration
   // carries addresses only in server builds, so the request goes to the pcb
   // lwIP keeps in the netif's state — the pointer pppos_create stored there —
@@ -420,7 +467,7 @@ static void startPpp() {
   // else is obeyed rather than argued with until LCP gives up. No DNS from
   // the peer either: the node resolves nothing over this link and must not
   // let pppd rewrite its resolver.
-  struct netif* impl = static_cast<struct netif*>(esp_netif_get_netif_impl(sNetif));
+  struct netif* impl = static_cast<struct netif*>(esp_netif_get_netif_impl(netif));
   ppp_pcb* pcb = impl ? static_cast<ppp_pcb*>(impl->state) : nullptr;
   if (pcb) {
     ip4_addr_t our;
@@ -432,41 +479,109 @@ static void startPpp() {
   esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_GOT_IP, onGotIp, nullptr);
   esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_LOST_IP, onLostIp, nullptr);
   esp_event_handler_register(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, onStatus, nullptr);
+  // A fresh interface starts with none of the last one's answers, the
+  // restart latch included: it belongs to a restart that is not happening,
+  // since a node on its way down never gets here.
+  sStarted = false;
+  sUp = false;
+  sDead = false;
+  sClosing = false;
+  sOurIp = 0;
+  sPeerIp = 0;
+  sNetif = netif;                                       // before the reader can look at it
   // Core 0 with the network stack, below the radio (5, on core 1) and level
   // with AutoInterface: it moves bytes and blocks on the driver; lwIP does
   // the work on its own task. From here it arbitrates the port, so the
   // console reads through it rather than from the UART.
-  if (!sReader && xTaskCreatePinnedToCore(readerTask, "ppp-uart", 4096, nullptr, 2, &sReader, 0) != pdPASS) {
-    sReader = nullptr;
-    log_e("ppp0: the reader task would not start; PPP cannot take the port");
+  sReaderStop = false;
+  sReaderAlive = true;                                  // the reader clears this as it goes
+  if (!Diag::startTask(readerTask, "ppp-uart", 4096, nullptr, 2, 0)) {
+    // Nothing half-built is left behind. Without the reader no byte ever
+    // reaches the arbiter, so an interface kept here could never carry a
+    // session — and poll() would never call this again to notice, since it
+    // builds one only when there is none.
+    sReaderAlive = false;
+    sNetif = nullptr;
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_GOT_IP, onGotIp);
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_LOST_IP, onLostIp);
+    esp_event_handler_unregister(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, onStatus);
+    esp_netif_destroy(netif);
+    sStartFailed = true;
+    return;                                             // Diag::startTask has said what the heap had left
   }
-  if (sReader) Maintenance::useStream(sConsole);
+  // The reader hands the console its bytes from here on, and it starts with
+  // an empty ring: see ConsoleStream::drain.
+  sConsole.drain();
+  Maintenance::useStream(sConsole);
   log_i("ppp0: PPP client on UART%d behind the %s bridge; asks the host's pppd for %s",
         (int)kUart, BOARD_USB_BRIDGE, ipOf(pppNodeAddress(sMacLastOctet)).toString().c_str());
 }
 
-static void stopPpp() {
-  if (!sNetif) return;
-  // A session in progress is ended first: the host is told rather than left
-  // to time out, and the port is the console's again before it is resized.
-  shutdown(1000);
-  esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_GOT_IP, onGotIp);
-  esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_LOST_IP, onLostIp);
-  esp_event_handler_unregister(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, onStatus);
-  // The console goes back to the UART before the reader that was feeding it
-  // is asked to leave, so there is no moment with no console at all.
-  Maintenance::useStream(Serial);
-  if (sReader) {
-    sReaderStop = true;
-    for (int i = 0; i < 50 && sReader; i++) delay(10);   // it deletes itself at the top of its loop
+// One step of the teardown, per pass of the loop. The order is fixed and each
+// step waits for the one before it, because every one of them undoes
+// something the others are still reading: the session ends, then the reader
+// goes, then the interface is destroyed.
+static void stepStopPpp(uint32_t nowMs) {
+  switch (sTeardown) {
+    case Teardown::Idle:
+      return;
+
+    case Teardown::Session:
+      // The reader sees sTearingDown and closes the session itself, telling
+      // the host rather than leaving it to time out. It is asked to leave
+      // only once the port is the console's again, so finish() — the one
+      // place that unmutes the log and tells the arbiter — always runs.
+      if (sOwner == Owner::Console) {
+        sReaderStop = true;
+        sTeardown = Teardown::Reader;
+        return;
+      }
+      if (nowMs - sTeardownStartedMs <= kStopGraceMs + kTeardownMarginMs) return;
+      // Past the grace the reader itself allows: it is not running the
+      // session's end, so this task will unwind what it left.
+      log_w("ppp0: the session has not ended after %lu ms; taking the port back regardless",
+            (unsigned long)(nowMs - sTeardownStartedMs));
+      sReaderStop = true;
+      sTeardown = Teardown::Reader;
+      return;
+
+    case Teardown::Reader: {
+      if (sReaderAlive) return;                         // it deletes itself at the top of its loop
+      // From here the reader is gone, so its state — the arbiter, the
+      // session flags — is this task's to put right, and no one is reading
+      // the interface but this line.
+      const bool sessionWasOpen = sStarted;
+      esp_netif_t* netif = sNetif.exchange(nullptr);
+      if (netif) {
+        if (sessionWasOpen) esp_netif_action_stop(netif, nullptr, 0, nullptr);
+        esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_GOT_IP, onGotIp);
+        esp_event_handler_unregister(IP_EVENT, IP_EVENT_PPP_LOST_IP, onLostIp);
+        esp_event_handler_unregister(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, onStatus);
+        esp_netif_destroy(netif);
+      }
+      if (sessionWasOpen) {
+        // The reader left without reaching finish(), so the log is still
+        // muted and the port still reads as PPP's. Neither may outlive the
+        // interface they belonged to.
+        sArbiter.pppDown();
+        sOwner = Owner::Console;
+        muteLog(false);
+      }
+      sStarted = false;
+      sStopping = false;
+      sUp = false;
+      sDead = false;
+      sOurIp = 0;
+      sPeerIp = 0;
+      // Only now: while the reader lived it was draining the port, and a
+      // console reading the UART behind it would have read nothing.
+      Maintenance::useStream(Serial);
+      sTearingDown = false;
+      sTeardown = Teardown::Idle;
+      log_i("ppp0: switched off; the interface and the reader task are given back");
+      return;
+    }
   }
-  esp_netif_destroy(sNetif);
-  sNetif = nullptr;
-  sStarted = false;
-  sUp = false;
-  sOurIp = 0;
-  sPeerIp = 0;
-  log_i("ppp0: switched off; the interface and its buffers are given back");
 }
 
 void begin() {
@@ -485,10 +600,23 @@ void begin() {
 
 void poll(bool enabled, uint32_t baud) {
   sEnabled = enabled;
+  const uint32_t now = millis();
   // The switch decides whether the interface exists at all, not merely
-  // whether it answers: off means nothing allocated (PppUart.h).
-  if (enabled && !sNetif)      startPpp();
-  else if (!enabled && sNetif) stopPpp();
+  // whether it answers: off means nothing allocated (PppUart.h). A teardown
+  // once begun runs to its end before anything is built again, so a switch
+  // flicked off and straight back on cannot leave two interfaces or none.
+  if (sTeardown != Teardown::Idle) {
+    stepStopPpp(now);
+  } else if (enabled) {
+    if (!sNetif && !sStartFailed) startPpp();
+  } else if (sNetif) {
+    sTearingDown = true;                                // the reader allows no new session from here
+    sTeardownStartedMs = now;
+    sTeardown = Teardown::Session;
+    stepStopPpp(now);
+  } else {
+    sStartFailed = false;                               // off lifts the latch: try again next time on
+  }
   // The speed of the whole port while PPP is on; the console's otherwise.
   // Applied while the console owns the port, never under a session — a
   // change saved over ppp0 would otherwise cut the reply that reports it —
@@ -508,7 +636,10 @@ void shutdown(uint32_t waitMs) {
   // The reader does the closing; this only asks and waits. The host's pppd
   // gets a Terminate-Request and answers within milliseconds, which is
   // what lets the flashing tool see the port freed at once rather than
-  // after its echo failures.
+  // after its echo failures. Blocking the loop task is the point here and
+  // nowhere else: the caller is the restart's quiesce step, and what follows
+  // it is the reboot. The switch does not come through here — it has its own
+  // teardown, which never blocks and never latches.
   sClosing = true;
   const uint32_t started = millis();
   while (sOwner == Owner::Ppp && millis() - started < waitMs) delay(10);

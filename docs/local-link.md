@@ -627,6 +627,26 @@ it in one piece into an 8 KB queue (`PPP_TX_QUEUE_BYTES`), so nothing can land
 inside it; a frame the queue cannot take is dropped whole, on the TCP/IP task,
 without waiting.
 
+**What the switch costs.** `links.ppp` does not merely decide whether PPP
+answers. With it off there is no interface and no reader task, so a node that
+never carries PPP pays nothing for the `esp_netif`, the lwIP control block
+behind it or the reader's 4 KB of stack — about 10 KB of byte-addressable
+internal RAM on a Heltec V3, measured across the switch. What a board with
+`HAS_PPP` still pays for whichever way the switch is set is the port's own
+buffers, the 12 KB of `PPP_RX_RING_BYTES` and `PPP_TX_QUEUE_BYTES`: the core
+fixes those before it installs the UART driver and that is the only moment
+they can be set. Taking the driver down to resize it — `Serial.end()` then
+`Serial.begin()` — leaves the port dead on this core, with the node still
+running and answering over Wi-Fi and its serial port silent, heartbeat
+included. A board too tight for those 12 KB wants a build without `HAS_PPP`
+rather than a switch left off; the Wireless Stick is one, and is built that
+way. Both directions of the switch run on the loop task without blocking it:
+switching on builds everything in one pass, and switching off is a state
+machine a step to a pass — the session is closed and the host told, then the
+reader is asked to leave, then the interface is destroyed — since closing a
+session takes as long as the host's pppd takes to answer, and the heartbeat
+and every other link run on that task too.
+
 The port comes back to the console when the session ends: pppd exits (LCP
 terminates), `PPP OFF` is saved (over HTTP — the console cannot hear it), or
 the node restarts, where the restart sequencer closes the session in its

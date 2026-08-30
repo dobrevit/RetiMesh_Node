@@ -57,16 +57,37 @@
 //              pppd exits, or the operator switches the link off — or when
 //              the host has sent no frame for kIdleDeadMs.
 //
-//  The reader is one task on core 0, below the radio task in priority, that
-//  blocks on the UART driver and never on anything else. The driver's own
-//  receive ring is the PPP receive ring, PPP_RX_RING_BYTES deep; the driver
-//  drops what does not fit and PPP retransmits, so the radio never waits
-//  for the serial port. Transmit gathers a frame from lwIP's output and
-//  writes it in one piece into a PPP_TX_QUEUE_BYTES queue, dropping a frame
-//  whole when the queue cannot take it. RTS/CTS are not driven: no board
-//  here brings the bridge's lines to the chip (boards.json uart.rts/cts),
-//  and the hooks are the two settings in this header's .cpp that would
-//  turn them on.
+//  While the switch is on, the reader is one task on core 0, below the radio
+//  task in priority, that blocks on the UART driver and never on anything
+//  else. The driver's own receive ring is the PPP receive ring,
+//  PPP_RX_RING_BYTES deep; the driver drops what does not fit and PPP
+//  retransmits, so the radio never waits for the serial port. Transmit
+//  gathers a frame from lwIP's output and writes it in one piece into a
+//  PPP_TX_QUEUE_BYTES queue, dropping a frame whole when the queue cannot
+//  take it. RTS/CTS are not driven: no board here brings the bridge's lines
+//  to the chip (boards.json uart.rts/cts), and the hooks are the two
+//  settings in this header's .cpp that would turn them on.
+//
+//  What the switch costs. links.ppp does not merely decide whether PPP
+//  answers: with it off the interface does not exist and neither does the
+//  reader, so a node that never carries PPP pays nothing for the esp_netif,
+//  the lwIP control block behind it or the four kilobytes of task stack.
+//  What it does still pay for is the port's own buffers — PPP_RX_RING_BYTES
+//  and PPP_TX_QUEUE_BYTES, twelve kilobytes between them — because the core
+//  sizes them before it installs the UART driver, which is the only moment
+//  they can be sized: taking the driver down to resize it leaves the port
+//  dead on this core, measured rather than assumed. A board too tight for
+//  those twelve kilobytes wants a build without HAS_PPP, not a switch left
+//  off.
+//
+//  Both directions of the switch are applied from the loop task and neither
+//  blocks it. On builds everything in one pass. Off is a state machine, a
+//  step to a pass — the session is closed and the host told, then the reader
+//  is asked to leave, then the interface is destroyed — because closing a
+//  session takes as long as the host's pppd takes to answer, and the
+//  heartbeat, the console and every other link run on that same task. Each
+//  step waits for the one before it: nothing the reader is still reading is
+//  ever freed under it.
 //
 //  The speed is settings.links.pppBaud, and it is the speed of the whole
 //  port — the console and the log included — while links.ppp is on. The
@@ -87,8 +108,11 @@
 
 namespace PppUart {
 
-// Creates the network interface and starts the UART reader. Once, after the
-// network stack exists (WifiManager::begin() brings it up whether or not
+// Reads the MAC the node's address is derived from and sets the port's flow
+// control. Nothing is allocated here and nothing is started: what PPP needs
+// is built when the switch turns on and given back when it turns off, so
+// with the switch off this unit costs the node nothing at all. Once, after
+// the network stack exists (WifiManager::begin() brings it up whether or not
 // Wi-Fi is on) and after settings are loaded.
 void begin();
 
@@ -121,10 +145,12 @@ void shutdown(uint32_t waitMs);
 // The speed the port runs at.
 uint32_t baud();
 
-// The stream the maintenance console reads and writes. Bytes the host
-// sends while the console owns the port arrive here; what the console
-// writes reaches the port while it owns it and is dropped while PPP does.
-Stream& console();
+// The console's source is not offered here. While PPP's reader has the port
+// the console must read through it, and while it does not the console must
+// read the UART itself; getting that wrong is a node whose log is perfect
+// and which answers nothing. So the switch points Maintenance at the right
+// one of the two as it goes (Maintenance::useStream), and no caller has to
+// know which it is.
 
 // Bytes moved and frames lost, and how many times a host has opened PPP.
 uint32_t rxBytes();

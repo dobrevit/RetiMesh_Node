@@ -127,7 +127,10 @@ void setup() {
     // driver is installed, which is the only time they can be: the switch
     // cannot give them back later, so a board that carries PPP pays for the
     // rings whether or not it is switched on. What the switch does give back
-    // is the interface and the reader task.
+    // is the interface and the reader task. Neither size may be zero, and a
+    // smaller pair for the console alone is not on offer for the same reason:
+    // setTxBufferSize(0) does not mean unbuffered, it means the driver never
+    // installs and the port goes silent — no console and no log at all.
     Serial.setRxBufferSize(PPP_RX_RING_BYTES);
     Serial.setTxBufferSize(PPP_TX_QUEUE_BYTES);
   #endif

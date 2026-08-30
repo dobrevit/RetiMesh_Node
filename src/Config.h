@@ -124,23 +124,11 @@
 #ifndef PPP_BAUD_DEFAULT
   #define PPP_BAUD_DEFAULT    115200
 #endif
-// What the port needs while PPP is switched off, which on most nodes is
-// always: a console line in and a console reply out. The PPP sizes above are
-// twelve kilobytes larger, and on a board with little byte-addressable RAM
-// to spare that is the difference between a task starting and not — a Heltec
-// Wireless Stick could not place the 16 KB rns stack while paying for PPP it
-// had switched off. The port carries these until the switch says otherwise
-// (PppUart.h).
-#ifndef CONSOLE_RX_RING_BYTES
-  #define CONSOLE_RX_RING_BYTES  512
-#endif
-// Not zero: the core's setTxBufferSize(0) does not mean "unbuffered", it means
-// the driver never installs, and the port goes silent — no console and no log
-// at all, which is how it was found. Big enough for a console reply in one
-// write, and a thirty-second of PPP's.
-#ifndef CONSOLE_TX_QUEUE_BYTES
-  #define CONSOLE_TX_QUEUE_BYTES 256
-#endif
+// There is no smaller pair for the console alone. A board that carries PPP
+// carries these sizes from boot whether the switch is on or off, because the
+// core fixes them before it installs the UART driver and they cannot be
+// resized afterwards (main.cpp, PppUart.h). What the switch gives back is the
+// interface and the reader task, not the ring.
 
 // ---------------------------------------------------------------------------
 // Firmware version — single-sourced from the git tag by CI
