@@ -645,6 +645,42 @@ class WaitForApplicationTest(unittest.TestCase):
         self.assertEqual(r, COMPOSITE_INFO)
         self.assertNotIn("/dev/ttyACM9", asked)
 
+    def test_the_post_flash_wait_is_one_rule_for_every_caller(self):
+        # The CLI, the PlatformIO hook and the HIL script each used to carry a
+        # number of their own (20, 90 and 40 s); two were under what a bench
+        # hub takes to report the device arriving. One rule now, and the
+        # native value is derived from the downloader wait so they cannot
+        # drift apart.
+        self.assertEqual(device._APPLICATION_BACK_NATIVE_S, device._COMPOSITE_DOWNLOADER_S)
+        by_id = "/dev/serial/by-id/usb-RetiMesh_RetiMesh_Node_1CDBD4821454-if00"
+        ports = lambda: list_ports([CP2102, COMPOSITE])
+        # A chip named by its MAC, or by a by-id path, or sitting on one of
+        # the two native-USB faces: the patient wait.
+        self.assertEqual(device.application_wait_s("1C:DB:D4:82:14:54", None, ports), device._APPLICATION_BACK_NATIVE_S)
+        self.assertEqual(device.application_wait_s(None, by_id, ports), device._APPLICATION_BACK_NATIVE_S)
+        self.assertEqual(device.application_wait_s(None, "/dev/ttyACM5", ports), device._APPLICATION_BACK_NATIVE_S)
+        # A bridge board's port never moves, so silence is a real failure.
+        self.assertEqual(device.application_wait_s(None, "/dev/ttyUSB0", ports), device._APPLICATION_BACK_BRIDGE_S)
+
+    def test_a_port_that_lingers_after_the_device_left_does_not_starve_the_chip(self):
+        # The hub has not yet reported the ROM's port going, so the name the
+        # caller holds still resolves — to a device that is not there. The
+        # chip answers under its other face, and must be asked: an earlier
+        # version took the named port as the only candidate and spent the
+        # whole wait on a port nobody was behind.
+        moved = fake_comport("/dev/ttyACM7", 0x1209, 0x0001, "1CDBD4821454", "RetiMesh Node", "1-11")
+        asked = []
+        def probe(dev, timeout=2.0, console=None):
+            asked.append(dev)
+            return COMPOSITE_INFO if dev == "/dev/ttyACM7" else None
+        clock = Clock()
+        r = device.wait_for_application("/dev/ttyACM5", 30.0, probe=probe,
+                                        ports_fn=lambda: list_ports([S3_ROM, moved]),
+                                        sleep=clock.sleep, clock=clock.now, node_id="1CDBD4821454")
+        self.assertEqual(r, COMPOSITE_INFO)
+        self.assertIn("/dev/ttyACM7", asked)
+        self.assertLess(clock.t, 5.0)
+
     def test_the_application_may_come_back_under_another_name(self):
         # The downloader was ttyACM1 because ttyACM0 was briefly held; the
         # application re-enumerates as ttyACM0 again. The named port is absent,

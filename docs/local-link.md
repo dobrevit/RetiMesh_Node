@@ -256,9 +256,9 @@ re-posts on retry cannot push a promised restart out indefinitely.
 find the node          the --upload-port, or the one ESP-looking port; several -> say which
 ask the console        BOOTLOADER CONFIRM on the port (no credentials, names the board)
   or ask HTTP          POST /api/system/bootloader at $RETIMESH_NODE_URL, if the console is silent
-wait for the port      the USB-Serial/JTAG unit drops and returns (bounded, 8 s)
+wait for the port      the port drops and returns (8 s; a composite device's downloader, up to 180 s behind a slow hub)
 esptool                PlatformIO's own invocation, its own reset at connect even into a downloader that is up
-wait for VERSION       the application announces itself again (20 s) — or the hook says what to press
+wait for VERSION       the application announces itself again (20 s on a bridge, up to 180 s on native USB) — or the hook says what to press
 ```
 
 Every step is bounded and every failure is a message, not a hang. When the

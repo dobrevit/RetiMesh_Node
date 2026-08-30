@@ -266,8 +266,10 @@ def cmd_install(args):
                 if r.port is None and not dev.select_port(dev.list_ports(), device=port):
                     sys.exit(f"  {port} is no longer there; nothing to flash")
         flash(board, tmp, port, args.mode, args.baud, before=before)
-        info = dev.wait_for_application(port, timeout=20.0, node_id=node_id)
-        print(f"\nBack up: {info}" if info else "\nThe node did not answer within 20 s; press RST if it stays quiet.")
+        wait = dev.application_wait_s(node_id, port)
+        info = dev.wait_for_application(port, timeout=wait, node_id=node_id, log=lambda m: print("  " + m))
+        print(f"\nBack up: {info}" if info else
+              f"\nThe node did not answer within {wait:.0f} s; press RST if it stays quiet.")
         print("\nDone. Join the Wi-Fi network \"retimesh-XXXXXX\" (last six hex digits of the board MAC)\n"
               "and open http://10.42.0.1/")
 

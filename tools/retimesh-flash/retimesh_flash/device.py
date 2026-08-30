@@ -726,6 +726,31 @@ _RESTART_SLACK_S = 1.5
 # is the whole cure: the ROM sits there for as long as it takes.
 _COMPOSITE_DOWNLOADER_S = 180.0
 
+# How long the application may take to answer after a flash. A bridge board's
+# port belongs to the bridge and never moves, so silence past a few seconds is
+# a real failure. A native-USB chip comes back as a new device on the bus, and
+# a host that was slow to notice it leave is as slow to notice it return — the
+# same hub behaviour _COMPOSITE_DOWNLOADER_S is set by, so this is derived
+# from it and the two cannot drift apart. One rule, because the CLI, the
+# PlatformIO hook and the HIL script each carried a number of their own (20,
+# 90 and 40 s) and two of the three were under what one bench hub takes to
+# report a device arriving at all.
+_APPLICATION_BACK_BRIDGE_S = 20.0
+_APPLICATION_BACK_NATIVE_S = _COMPOSITE_DOWNLOADER_S
+
+
+def application_wait_s(node_id: Optional[str] = None, port: Optional[str] = None,
+                       ports_fn=list_ports) -> float:
+    """How long to wait for the application, for this chip. See the constants
+    above; a chip known by its MAC is a native-USB chip, and so is a port that
+    is one of its two faces."""
+    if mac_node_id(node_id) or (port and node_id_from_path(port)):
+        return _APPLICATION_BACK_NATIVE_S
+    hit = select_port(ports_fn(), device=port) if port else None
+    if hit and hit.kind in ("retimesh_composite", "usb_serial_jtag"):
+        return _APPLICATION_BACK_NATIVE_S
+    return _APPLICATION_BACK_BRIDGE_S
+
 
 def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_rom, sleep, clock,
                       timeout: float, delay_ms: int = 600) -> HandOff:
@@ -840,7 +865,7 @@ def _port_of(ports: list[Port], kind: str, node_id: Optional[str]) -> Optional[P
     return hits[0] if len(hits) == 1 else None
 
 
-def wait_for_application(port: Optional[str], timeout: float, log: Log = _quiet,
+def wait_for_application(port: Optional[str], timeout: Optional[float] = None, log: Log = _quiet,
                          probe=probe_console, ports_fn=list_ports, sleep=time.sleep,
                          clock=time.monotonic, node_id: Optional[str] = None) -> Optional[NodeInfo]:
     """After a flash: ask VERSION until it answers or time runs out.
@@ -856,8 +881,12 @@ def wait_for_application(port: Optional[str], timeout: float, log: Log = _quiet,
     from the downloader (ttyACM1 -> ttyACM0 once the busy host lets go), and
     with no hint at all there may be several ESP-looking ports; every
     candidate is asked, since VERSION is what tells a node from the rest."""
-    deadline = clock() + timeout
+    if timeout is None:
+        timeout = application_wait_s(node_id, port, ports_fn)
+    started = clock()
+    deadline = started + timeout
     announced = set()
+    told = 0
     # The chip that was flashed is known by its MAC — the hand-off's
     # (HandOff.node_id, from the port the downloader answered on) or the one
     # in a by-id port name — on a native-USB board; when its port comes back
@@ -871,20 +900,31 @@ def wait_for_application(port: Optional[str], timeout: float, log: Log = _quiet,
     while clock() < deadline:
         ports = ports_fn()
         named = select_port(ports, device=port) if port else None
-        if named:
-            targets = [named]
-        elif node_id:
+        if node_id:
             # This chip by its MAC — and, failing that, any candidate that
             # names no chip at all (a port without a usable serial), which
             # may be it; never one that names another chip.
-            same = [p for p in ports if p.node_id == node_id]
             # A chip known by its MAC is a native-USB chip; it comes back as
             # the composite device or the serial-JTAG unit, never as a
             # bridge, so a bridge with no usable serial is not a candidate.
-            targets = same or [p for p in esp_candidates(ports)
-                               if p.node_id is None and p.kind in ("retimesh_composite", "usb_serial_jtag")]
+            targets = [p for p in ports if p.node_id == node_id] or \
+                      [p for p in esp_candidates(ports)
+                       if p.node_id is None and p.kind in ("retimesh_composite", "usb_serial_jtag")]
+            # The hinted port is asked as well, but last and never instead:
+            # a device node can sit in the host's list for a minute after the
+            # device behind it left (the hub above), and an earlier version
+            # asked that one port for the whole timeout while the chip was
+            # answering under another name.
+            if named and named not in targets:
+                targets = targets + [named]
+        elif named:
+            targets = [named]
         else:
             targets = esp_candidates(ports)
+        waited = clock() - started
+        if waited >= (told + 1) * 15.0:
+            told = int(waited // 15.0)
+            log(f"still waiting for the application ({waited:.0f} s)")
         for target in targets:
             if target.device not in announced:
                 log(f"asking VERSION on {target.device}")
