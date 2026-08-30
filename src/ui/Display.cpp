@@ -40,7 +40,7 @@ Display display;
 
 
 bool Display::begin() {
-#if DISPLAY_KIND == DISPLAY_KIND_OLED
+#if DISPLAY_KIND == DISPLAY_KIND_OLED || DISPLAY_KIND == DISPLAY_KIND_EINK
   _panel = &_panelImpl;
 #endif
   if (!_panel || !_panel->begin()) return false;

@@ -35,6 +35,8 @@
 
 #if HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_OLED
   #include "OledPanel.h"
+#elif HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_EINK
+  #include "EinkPanel.h"
 #endif
 
 class Display {
@@ -114,6 +116,8 @@ private:
 #if HAS_DISPLAY
   #if DISPLAY_KIND == DISPLAY_KIND_OLED
   OledPanel     _panelImpl;
+  #elif DISPLAY_KIND == DISPLAY_KIND_EINK
+  EinkPanel     _panelImpl;
   #endif
   Panel*        _panel = nullptr;        // the glass; null until begin() succeeds
   Adafruit_GFX* _gfx   = nullptr;        // what the pages draw on, from the panel
