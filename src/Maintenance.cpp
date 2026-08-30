@@ -93,6 +93,11 @@ static void doStatus() {
   dataf("STATUS", "heap_free=%lu heap_min=%lu largest_block=%lu psram_free=%lu",
         (unsigned long)h.freeInternal, (unsigned long)h.minFreeInternal,
         (unsigned long)h.largestBlock, (unsigned long)h.freePsram);
+  // What a stack or buffer can actually be placed in (Diag.h): the line above
+  // counts IRAM that no byte-addressed allocation can use.
+  dataf("STATUS", "dram_free=%lu dram_min=%lu dram_largest_block=%lu",
+        (unsigned long)h.freeDram, (unsigned long)h.minFreeDram,
+        (unsigned long)h.largestDramBlock);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
   // The armed restart, in the same words /api/status uses: what it is for,

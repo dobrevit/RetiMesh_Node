@@ -164,6 +164,10 @@ Heap heap() {
   h.freeInternal    = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   h.minFreeInternal = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
   h.largestBlock    = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  const uint32_t dram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  h.freeDram         = heap_caps_get_free_size(dram);
+  h.minFreeDram      = heap_caps_get_minimum_free_size(dram);
+  h.largestDramBlock = heap_caps_get_largest_free_block(dram);
   h.freePsram       = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   return h;
 }
@@ -218,6 +222,8 @@ bool report() {
   // The gap between free and largest-block is the fragmentation: an allocator
   // with 60 KB free and a 4 KB largest block will fail an 8 KB request while
   // looking healthy on the free figure alone.
+  log_i("dram: %lu free (min %lu, largest block %lu) — what a stack can use",
+        (unsigned long)h.freeDram, (unsigned long)h.minFreeDram, (unsigned long)h.largestDramBlock);
   log_i("heap: %lu free (min %lu, largest block %lu) psram %lu free",
         (unsigned long)h.freeInternal, (unsigned long)h.minFreeInternal,
         (unsigned long)h.largestBlock, (unsigned long)h.freePsram);

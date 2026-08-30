@@ -46,7 +46,22 @@ FIELDS = [
     "stack_lowest_task", "rx_packets", "tx_packets", "drop_ring", "drop_reasm",
     "drop_partial", "crc_errors", "bad_length", "spurious_irq", "paths", "links",
     "destinations", "announces", "neighbours", "airtime_long_pct",
+    # Liveness, not resources. A node can hold its heap flat and its stacks deep
+    # while doing nothing at all: a Heltec Wireless Stick reported "transport:
+    # online" for as long as anyone asked while no task was driving Reticulum,
+    # and only a person noticing it had not transmitted found it. Resources say
+    # whether a node is about to fail; these say whether it is working.
+    "transport_online", "announces_tx", "tasks_missing",
+    # The byte-addressable heap: what a stack or buffer must come from. The
+    # heap_* columns above count 32-bit-only IRAM as well and so read healthy on
+    # a board that cannot place another task (Diag.h).
+    "dram_free", "dram_min", "dram_largest",
 ]
+
+# Every task a healthy node of any board runs. A board without the hardware
+# never creates its own (no display, no GPS, no SD), so absence alone is not a
+# fault — but these three are on every board and their absence always is.
+ALWAYS_RUNNING = ("loopTask", "radio", "rns")
 
 
 def sample(host, timeout=8):
@@ -93,8 +108,27 @@ def sample(host, timeout=8):
         announces=tables.get("announces", ""),
         neighbours=len(d.get("neighbors", [])),
         airtime_long_pct=d.get("airtime", {}).get("long_pct", ""),
+        transport_online=int(bool(d.get("transport", {}).get("online"))),
+        announces_tx=radio.get("announces_tx", ""),
+        tasks_missing=" ".join(missing_tasks(diag)),
+        dram_free=heap.get("dram_free", ""),
+        dram_min=heap.get("dram_min_free", ""),
+        dram_largest=heap.get("dram_largest_block", ""),
     )
     return row
+
+
+def missing_tasks(diag):
+    """Which of the tasks every board runs are not there. `stacks` is a map of
+    task name to stack headroom carrying only the tasks that exist — a build
+    without a display or a GPS simply has no such key — so a name absent from
+    it is a task that is not running."""
+    stacks = diag.get("stacks")
+    # A node that does not report stacks at all is not evidence of a missing
+    # task; say nothing rather than accuse it.
+    if not isinstance(stacks, dict) or not stacks:
+        return []
+    return [t for t in ALWAYS_RUNNING if t not in stacks]
 
 
 def summarise(path):
@@ -109,6 +143,12 @@ def summarise(path):
             return float(v)
         except (TypeError, ValueError):
             return None
+
+    def parse_ts(v):
+        try:
+            return datetime.fromisoformat(v).timestamp()
+        except (TypeError, ValueError):
+            return 0.0
 
     for node in sorted({r["node"] for r in rows}):
         rs = [r for r in rows if r["node"] == node]
@@ -134,6 +174,29 @@ def summarise(path):
             print(f"   no restarts (boot #{boots[0] if boots else '?'}), "
                   f"uptime {last['uptime_s']}s")
 
+        # Liveness first, and loudly. Everything below this says whether a node
+        # is heading for trouble; this says whether it is doing its job at all,
+        # which is the failure that hides behind healthy resource figures.
+        missing = sorted({t for r in up for t in (r.get("tasks_missing") or "").split() if t})
+        if missing:
+            worst = max(sum(1 for r in up if t in (r.get("tasks_missing") or "").split())
+                        for t in missing)
+            print(f"   ⚠ TASK MISSING: {', '.join(missing)} — absent in up to "
+                  f"{worst}/{len(up)} samples; this node is not doing that work")
+        offline = [r for r in up if r.get("transport_online") == "0"]
+        if offline:
+            print(f"   ⚠ transport offline in {len(offline)}/{len(up)} samples")
+        ann = [num(r.get("announces_tx")) for r in up if num(r.get("announces_tx")) is not None]
+        if ann:
+            # From the timestamps, not the sample count: the interval is an
+            # argument, and a stated duration that assumes it would be wrong.
+            hours = (parse_ts(last["ts"]) - parse_ts(first["ts"])) / 3600.0
+            if ann[-1] == ann[0] and hours >= 1:
+                print(f"   ⚠ announced nothing in {hours:.0f}h (announces_tx stuck at {ann[0]:.0f}) — "
+                      "a node with announcing on should announce every ANNOUNCE_INTERVAL_S")
+            else:
+                print(f"   announces sent: {ann[0]:.0f} -> {ann[-1]:.0f}")
+
         # Memory. The trend matters more than any single reading.
         fr = [num(r["heap_free"]) for r in up if num(r["heap_free"]) is not None]
         lg = [num(r["heap_largest"]) for r in up if num(r["heap_largest"]) is not None]
@@ -143,6 +206,15 @@ def summarise(path):
                   f"(min seen {min(mn)/1024:.0f}K), largest block "
                   f"{lg[0]/1024:.0f}K -> {lg[-1]/1024:.0f}K, "
                   f"fragmentation {(fr[-1]-lg[-1])/1024:.0f}K")
+
+        # The byte-addressable heap, which is the one a task stack comes from:
+        # a node can look healthy on the line above and be unable to place one.
+        df = [num(r.get("dram_free")) for r in up if num(r.get("dram_free")) is not None]
+        dl = [num(r.get("dram_largest")) for r in up if num(r.get("dram_largest")) is not None]
+        if df and dl:
+            print(f"   dram free {df[0]/1024:.0f}K -> {df[-1]/1024:.0f}K, "
+                  f"largest block {dl[0]/1024:.0f}K -> {dl[-1]/1024:.0f}K"
+                  + ("   ⚠ under 16K: the rns stack would not fit today" if dl[-1] < 16384 else ""))
 
         st = [(num(r["stack_lowest"]), r["stack_lowest_task"]) for r in up if num(r["stack_lowest"])]
         if st:
