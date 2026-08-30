@@ -514,6 +514,20 @@ class HttpTest(unittest.TestCase):
         info = probe_http("http://10.42.0.1/", fetch=fetch)
         self.assertEqual((info.version, info.board), ("v1", "Heltec"))
 
+    def test_the_board_is_read_from_either_shape(self):
+        # It moved to the top of the document; a node running older firmware
+        # still answers with it under "power", and both must name the board.
+        def fetch_for(doc):
+            return lambda url, body=None, auth=None, timeout=3.0: (200, doc)
+        new = {"firmware": "RetiMesh Node", "version": "v1", "board": "LilyGO T3-S3",
+               "power": {"profile": "performance"}}
+        old = {"firmware": "RetiMesh Node", "version": "v1", "power": {"board": "LilyGO T3-S3"}}
+        for doc in (new, old):
+            self.assertEqual(probe_http("http://10.42.0.1", fetch=fetch_for(doc)).board, "LilyGO T3-S3")
+        # Neither shape: a question mark, never a traceback.
+        bare = {"firmware": "RetiMesh Node", "version": "v1"}
+        self.assertEqual(probe_http("http://10.42.0.1", fetch=fetch_for(bare)).board, "?")
+
     def test_probe_rejects_other_devices(self):
         fetch = lambda url, body=None, auth=None, timeout=3.0: (200, {"firmware": "Something Else"})
         self.assertIsNone(probe_http("http://10.42.0.1", fetch=fetch))

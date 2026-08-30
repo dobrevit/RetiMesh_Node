@@ -456,7 +456,10 @@ def probe_http(base_url: str, timeout: float = 3.0, fetch=_http) -> Optional[Nod
     doc = _doc(doc)
     if code != 200 or doc.get("firmware") != RETIMESH_PRODUCT:
         return None
-    return NodeInfo(doc["firmware"], doc.get("version", "?"), (doc.get("power") or {}).get("board", "?"), base_url)
+    # The board moved to the top of the document, where a node's make and model
+    # belongs; older firmware answers with it under "power" and is still read.
+    board = doc.get("board") or (doc.get("power") or {}).get("board") or "?"
+    return NodeInfo(doc["firmware"], doc.get("version", "?"), board, base_url)
 
 
 def _int(v, default: int) -> int:
