@@ -26,9 +26,10 @@ using Action = RefreshPolicy::Action;
 
 // An OLED affords an update twice a second and never needs a full refresh.
 static RefreshPolicy oled() { return RefreshPolicy(500, 0); }
-// An e-paper panel: no more than one update every five seconds, and a
-// whole-panel refresh every ten minutes to clear the ghosting.
-static RefreshPolicy eink() { return RefreshPolicy(5000, 600000); }
+// An e-paper panel: no more than one update every five seconds while somebody
+// is watching a page, and a whole-panel refresh every five partial ones to
+// clear the ghosting they leave behind.
+static RefreshPolicy eink() { return RefreshPolicy(5000, 5); }
 
 static void test_the_first_frame_always_reaches_the_glass() {
   // Whatever the previous firmware left on the panel is not something we can
@@ -72,16 +73,29 @@ static void test_a_value_that_flickers_does_not_drive_the_panel() {
   TEST_ASSERT_EQUAL_INT(0, pushes);
 }
 
-static void test_a_full_refresh_comes_due_on_its_own() {
-  // Ten minutes of an unchanging page still earns a whole-panel refresh:
-  // e-paper ghosts, and nothing about the content says so.
+static void test_the_ghosting_is_cleared_every_five_partial_updates() {
+  // Counted in updates, not in minutes: the ghosting is left behind by the
+  // partial updates themselves, so it is those that have to be counted.
+  RefreshPolicy p = eink();
+  TEST_ASSERT_EQUAL((int)Action::Full, (int)p.decide(0, 0));     // first frame
+  uint32_t t = 0;
+  for (int i = 1; i <= 5; i++) {
+    t += 5000;
+    TEST_ASSERT_EQUAL((int)Action::Partial, (int)p.decide(t, (uint32_t)i));
+  }
+  t += 5000;
+  TEST_ASSERT_EQUAL((int)Action::Full, (int)p.decide(t, 99));    // the sixth clears it
+  t += 5000;
+  TEST_ASSERT_EQUAL((int)Action::Partial, (int)p.decide(t, 100));// and the count restarts
+}
+
+static void test_a_panel_left_alone_owes_no_full_refresh() {
+  // An unchanging page produces no partial updates, so it accrues no
+  // ghosting: hours of it must not add up to a flash nobody needed.
   RefreshPolicy p = eink();
   p.decide(0, 7);
-  TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(599000, 7));
-  TEST_ASSERT_EQUAL((int)Action::Full, (int)p.decide(600000, 7));
-  // And the clock for the next one starts there, not at the last change.
-  TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(900000, 7));
-  TEST_ASSERT_EQUAL((int)Action::Full, (int)p.decide(1200000, 7));
+  for (uint32_t t = 5000; t <= 3600000; t += 60000)
+    TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(t, 7));
 }
 
 static void test_a_panel_that_never_needs_one_never_gets_a_full_refresh() {
@@ -89,6 +103,20 @@ static void test_a_panel_that_never_needs_one_never_gets_a_full_refresh() {
   p.decide(0, 7);
   for (uint32_t t = 1000; t <= 3600000; t += 60000)
     TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(t, 7));
+  // Even through changes: an OLED has nothing to clear, so a full refresh is
+  // never what it wants.
+  for (uint32_t t = 3601000; t <= 3660000; t += 1000)
+    TEST_ASSERT_EQUAL((int)Action::Partial, (int)p.decide(t, t));
+}
+
+static void test_the_resting_cadence_can_be_changed_for_an_attended_page() {
+  // The node rests at five minutes; a page somebody turned to runs at five
+  // seconds. Same policy, told which it is.
+  RefreshPolicy p(300000, 5);
+  p.decide(0, 1);
+  TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(60000, 2));   // resting: not yet
+  p.interval(5000);
+  TEST_ASSERT_EQUAL((int)Action::Partial, (int)p.decide(60001, 2));
 }
 
 static void test_forgetting_makes_the_next_frame_go_out() {
@@ -112,12 +140,45 @@ static void test_the_interval_does_not_hold_across_a_forget() {
   TEST_ASSERT_EQUAL((int)Action::Full, (int)p.decide(1, 8));
 }
 
+static void test_a_press_does_not_wait_out_the_panels_gap() {
+  // Turning the page is a person asking. On a panel that keeps five seconds
+  // between updates, making them wait for the tick reads as a dropped press.
+  RefreshPolicy p = eink();
+  p.decide(0, 1);
+  TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(200, 2));   // ordinary change: waits
+  p.urgent();
+  // Partial, not full: the glass is not unknown, it shows the page before
+  // this one, so the press must not cost a whole-panel flash.
+  TEST_ASSERT_EQUAL((int)Action::Partial, (int)p.decide(300, 3));
+}
+
+static void test_urgency_is_spent_on_the_frame_it_showed() {
+  // One press, one frame out of turn — not a licence to ignore the gap for
+  // everything that follows it.
+  RefreshPolicy p = eink();
+  p.decide(0, 1);
+  p.urgent();
+  TEST_ASSERT_EQUAL((int)Action::Partial, (int)p.decide(100, 2));
+  TEST_ASSERT_EQUAL((int)Action::Skip,    (int)p.decide(200, 3));
+}
+
+static void test_urgency_lapses_when_the_frame_it_asked_for_is_unchanged() {
+  // A press that turns to a page which draws exactly what was already there
+  // has nothing to show. The exemption must not survive to be spent minutes
+  // later on a reading that ticked over with nobody watching.
+  RefreshPolicy p = eink();
+  p.decide(0, 1);
+  p.urgent();
+  TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(100, 1));   // identical: nothing to show
+  TEST_ASSERT_EQUAL((int)Action::Skip, (int)p.decide(200, 2));   // and the gap is back in force
+}
+
 static void test_the_clock_wrapping_does_not_freeze_the_panel() {
   // millis() wraps every 49 days. Unsigned differences carry through it, and
   // a soak run that spans one must not stop updating.
   RefreshPolicy p = eink();
   const uint32_t nearWrap = 0xFFFFFF00u;
-  TEST_ASSERT_EQUAL((int)Action::Full,    (int)p.decide(nearWrap, 1));   // first frame
+  TEST_ASSERT_EQUAL((int)Action::Full,    (int)p.decide(nearWrap, 1));   // first frame is always full
   TEST_ASSERT_EQUAL((int)Action::Skip,    (int)p.decide(nearWrap + 1000, 2));
   TEST_ASSERT_EQUAL((int)Action::Partial, (int)p.decide(nearWrap + 6000, 2));   // wrapped
 }
@@ -145,10 +206,15 @@ int main() {
   RUN_TEST(test_an_unchanged_frame_is_not_pushed);
   RUN_TEST(test_a_changed_frame_waits_for_what_the_panel_can_afford);
   RUN_TEST(test_a_value_that_flickers_does_not_drive_the_panel);
-  RUN_TEST(test_a_full_refresh_comes_due_on_its_own);
+  RUN_TEST(test_the_ghosting_is_cleared_every_five_partial_updates);
+  RUN_TEST(test_a_panel_left_alone_owes_no_full_refresh);
+  RUN_TEST(test_the_resting_cadence_can_be_changed_for_an_attended_page);
   RUN_TEST(test_a_panel_that_never_needs_one_never_gets_a_full_refresh);
   RUN_TEST(test_forgetting_makes_the_next_frame_go_out);
   RUN_TEST(test_the_interval_does_not_hold_across_a_forget);
+  RUN_TEST(test_a_press_does_not_wait_out_the_panels_gap);
+  RUN_TEST(test_urgency_is_spent_on_the_frame_it_showed);
+  RUN_TEST(test_urgency_lapses_when_the_frame_it_asked_for_is_unchanged);
   RUN_TEST(test_the_clock_wrapping_does_not_freeze_the_panel);
   RUN_TEST(test_the_hash_tells_frames_apart_and_repeats_itself);
   return UNITY_END();

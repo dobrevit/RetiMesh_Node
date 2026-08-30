@@ -71,6 +71,12 @@ public:
   // stays lit; the caller has already stopped drawing to it either way.
   virtual void blank(bool on) = 0;
 
+  // Whether blanking saves anything. False on a panel that holds its image
+  // without power — blanking that costs nothing to skip, and skipping it is
+  // what keeps a shelf node readable. The display's sleep timer asks before
+  // it stops painting, because on such a panel stopping is all it would do.
+  virtual bool blanks() const = 0;
+
   // The frame as bytes, so the caller can tell whether it differs from what
   // was last shown and skip an update that would change nothing. A panel that
   // keeps no buffer we can see returns nullptr, and then every frame is

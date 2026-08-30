@@ -19,15 +19,12 @@
 #pragma once
 // Heltec Wireless Paper — ESP32-S3 with an SX1262 and a 2.13" e-ink panel.
 //
-// The panel is not driven yet, and this header says so by leaving its pins
-// out rather than writing down numbers nothing has proved. An e-ink display
-// is not an OLED with different dimensions: it is written in whole frames,
-// takes the better part of a second to do it, and cannot be repainted on a
-// timer the way Display.cpp repaints the panels this firmware already has.
-// Bringing it up means abstracting the display behind something that can say
-// "this is a slow display, coalesce", so this board starts headless and gets
-// its panel when that abstraction exists. Everything else about the board —
-// the radio, Wi-Fi, the console, the store — works today.
+// The panel is driven (src/ui/EinkPanel.h). An e-ink display is not an OLED
+// with different dimensions: it is written in whole frames, takes the better
+// part of a second to do it, and cannot be repainted on the timer the other
+// panels use — so it is drawn every pass into memory and shown only when the
+// result differs and the panel can afford it. The pins below are the driver
+// library's own, and EinkPanel.h holds the two to each other at compile time.
 //
 // Pin sourcing, which on this bench is worth stating: the SPI four and Vext
 // come from the Arduino core's own variant for this exact board
@@ -59,10 +56,29 @@
 // twice, so prove the interrupt line before trusting a quiet channel.
 #define RADIO_SELFTEST_ON_BOOT 1
 
-// Headless until the display is abstracted. HAS_DISPLAY_VEXT stays off with
-// it: Vext here is GPIO 45 (the V3's 36 is this board's something else), and
-// switching a rail nothing is drawing on only costs a pin.
-#define HAS_DISPLAY         0
+// The 2.13" panel, driven since the display grew an interface that can
+// express what an update costs (EinkPanel.h). 250x122 landscape; the panel is
+// 128x250 in its own orientation and the driver rotates it.
+//
+// The display pins are the Heltec platform's own, from the driver library's
+// board header (heltec-eink-modules, Platforms/WirelessPaper) — which also
+// states the LoRa pins above, and states them as 12/13/14, so the three that
+// were inferred from the V3 when this board was added now have their second
+// source and it agrees with the bench.
+#define HAS_DISPLAY         1
+#define DISPLAY_KIND        DISPLAY_KIND_EINK
+#define DISPLAY_WIDTH       250
+#define DISPLAY_HEIGHT      122
+#define PIN_EPD_MOSI        2
+#define PIN_EPD_SCK         3
+#define PIN_EPD_CS          4
+#define PIN_EPD_DC          5
+#define PIN_EPD_RST         6
+#define PIN_EPD_BUSY        7
+// Vext feeds every peripheral on this PCB and is active low, as on the other
+// Heltec boards. HAS_DISPLAY_VEXT is what the display module keys on.
+#define HAS_DISPLAY_VEXT    1
+#define PIN_DISPLAY_VEXT    45
 
 // No SD slot, no GNSS, no PMU — the same shape as the V3.
 

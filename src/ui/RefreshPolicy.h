@@ -51,14 +51,32 @@ public:
   };
 
   // `minIntervalMs` is the shortest gap between updates the panel can afford.
-  // `fullEveryMs` is how often it wants a whole-panel refresh regardless — 0
-  // on a panel that never needs one, which is every panel that is not e-paper.
-  RefreshPolicy(uint16_t minIntervalMs = 0, uint32_t fullEveryMs = 0)
-    : _minIntervalMs(minIntervalMs), _fullEveryMs(fullEveryMs) {}
+  //
+  // `fullEveryUpdates` is how many partial updates it will take before it
+  // wants a whole-panel one — 0 on a panel that never needs any, which is
+  // every panel that is not e-paper. It is counted in updates and not in time because that is
+  // how the ghosting accrues: it is left behind by each partial update, so a
+  // panel that has sat unchanged for an hour owes nothing and one that has
+  // been pressed through twenty pages in a minute owes several. Good Display,
+  // who make this family of panels, suggest one full refresh per five partial.
+  RefreshPolicy(uint32_t minIntervalMs = 0, uint16_t fullEveryUpdates = 0)
+    : _minIntervalMs(minIntervalMs), _fullEvery(fullEveryUpdates) {}
+
+  // The gap changes with what the panel is showing: a page somebody has just
+  // turned to is worth keeping current, the one a node rests on for days is
+  // not (Display.cpp).
+  void interval(uint32_t ms) { _minIntervalMs = ms; }
 
   // `frame` identifies what was just drawn — a hash of the buffer. Equal
   // frames mean the glass is already right.
   Action decide(uint32_t nowMs, uint32_t frame) {
+    // Urgency is spent by asking, not by showing. A press paints immediately
+    // and this call is that frame; if it turns out to be identical to what is
+    // already on the glass there is nothing to show and nothing to carry
+    // forward — leaving the flag set would hand the exemption to whatever
+    // changed next, minutes later, with nobody at the panel.
+    const bool urgent = _urgent;
+    _urgent = false;
     // The first frame after forget() (or after boot) always goes out: the
     // panel holds whatever the last firmware left in it, and an identical
     // hash proves nothing about glass we have not written to. On a panel that
@@ -66,19 +84,24 @@ public:
     // on the glass is not ours and may be a ghost of it forever otherwise.
     const bool unknown  = !_shown;
     const bool changed  = unknown || frame != _frame;
-    const bool fullDue  = _fullEveryMs &&
-                          (unknown || (uint32_t)(nowMs - _lastFull) >= _fullEveryMs);
+    const bool fullDue  = _fullEvery && (unknown || _sinceFull >= _fullEvery);
     if (!changed && !fullDue) return Action::Skip;
     // Deliberately not "flush the moment it changes": a value that flickers
     // between two states — a signal reading, a countdown — would otherwise
     // update the panel as fast as it changes. The gap is what the panel can
     // afford, so it applies to the change as much as to the repeat.
-    if (_shown && (uint32_t)(nowMs - _last) < _minIntervalMs) return Action::Skip;
+    //
+    // Unless somebody asked. The gap is there to keep data churn off the
+    // panel, not to make a person wait: a button press that turns the page
+    // and then shows nothing for five seconds reads as a node that did not
+    // notice the press.
+    if (_shown && !urgent && (uint32_t)(nowMs - _last) < _minIntervalMs) return Action::Skip;
 
-    _frame = frame;
-    _shown = true;
-    _last  = nowMs;
-    if (fullDue) { _lastFull = nowMs; return Action::Full; }
+    _frame  = frame;
+    _shown  = true;
+    _last   = nowMs;
+    if (fullDue) { _sinceFull = 0; return Action::Full; }
+    _sinceFull++;
     return Action::Partial;
   }
 
@@ -86,6 +109,13 @@ public:
   // down, or is about to show something a page did not draw (a boot notice),
   // so what we believe is on the glass is no longer true.
   void forget() { _shown = false; }
+
+  // The next differing frame goes out without waiting out the panel's gap.
+  // For a change a person asked for — turning the page — where the gap is
+  // the difference between a panel that responds and one that appears stuck.
+  // Not forget(): the glass is not unknown, it shows the page before this
+  // one, so this stays a quiet partial update rather than a full flash.
+  void urgent() { _urgent = true; }
 
   // For a panel that cannot show its buffer: every frame counts as new.
   static uint32_t alwaysNew(uint32_t counter) { return counter; }
@@ -100,10 +130,11 @@ public:
   }
 
 private:
-  uint16_t _minIntervalMs;
-  uint32_t _fullEveryMs;
+  uint32_t _minIntervalMs;
+  uint16_t _fullEvery;             // partial updates taken before a full one
+  uint16_t _sinceFull = 0;
   uint32_t _frame    = 0;
   uint32_t _last     = 0;
-  uint32_t _lastFull = 0;
   bool     _shown    = false;      // anything known to be on the glass yet
+  bool     _urgent   = false;      // somebody is waiting on the next frame
 };
