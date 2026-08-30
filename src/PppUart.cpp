@@ -186,8 +186,10 @@ static void muteLog(bool mute) {
 // cannot take is dropped whole, and so is one longer than the largest
 // escaped 1500-byte packet, which cannot occur with the MRU lwIP
 // negotiates. This runs on the TCP/IP task, which carries the portal and
-// the transport too: it never waits for the UART, because a host that has
-// stopped draining the bridge must not stall the radio.
+// the transport too: a full queue is waited on briefly — kTxWaitMs, below,
+// which is where PPP's backpressure belongs — but never indefinitely,
+// because a host that has stopped draining the bridge must not stall the
+// radio.
 static constexpr size_t kFrameMax = 3200;
 static uint8_t sFrame[kFrameMax];
 static size_t  sFrameLen = 0;

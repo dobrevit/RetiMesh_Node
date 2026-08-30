@@ -555,7 +555,7 @@ sends its own Configure-Request. The reader is one task on core 0, priority
 receive ring is PPP's receive ring (`PPP_RX_RING_BYTES`, 4 KB), what does not
 fit is dropped and PPP retransmits, and the radio never waits for the serial
 port. Transmit gathers each frame from the pieces lwIP hands over and writes
-it in one piece into a 4 KB queue (`PPP_TX_QUEUE_BYTES`), so nothing can land
+it in one piece into an 8 KB queue (`PPP_TX_QUEUE_BYTES`), so nothing can land
 inside it; a frame the queue cannot take is dropped whole, on the TCP/IP task,
 without waiting.
 

@@ -36,7 +36,7 @@
 //  pppNodeAddress(<last MAC octet>) — 10.65.<n>.1, the rule in
 //  LocalLinkState.h — while the host's pppd is told to take .2 and offer .1:
 //
-//      pppd /dev/ttyUSB0 115200 noauth local nodetach lcp-echo-interval 5 \
+//      pppd /dev/ttyUSB0 115200 noauth local nodetach \
 //           nocrtscts lcp-echo-interval 5 lcp-echo-failure 4 10.65.<n>.2:10.65.<n>.1
 //
 //  When the two agree nothing is negotiated at all; when the host chooses
