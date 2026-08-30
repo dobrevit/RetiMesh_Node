@@ -72,6 +72,7 @@
 #include "Bootloader.h"
 #include "Leds.h"
 #include "Maintenance.h"
+#include "ConsoleServer.h"
 #include "PppUart.h"
 
 NodeStats g_stats;
@@ -342,6 +343,9 @@ void loop() {
   static uint32_t lastBeat = 0;
   wifiManager.tick();
   Bootloader::tick();                      // may not return: this is where restarts happen
+  // Before the console reads: this is what hands it a network session when
+  // one arrives, and takes it back when the caller goes (ConsoleServer.h).
+  ConsoleServer::poll();
   Maintenance::poll();
   LocalLink::poll(millis());
   Leds::tick(millis());

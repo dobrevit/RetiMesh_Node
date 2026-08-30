@@ -50,6 +50,17 @@ bool canEnterAutomatically();
 // answer alike.
 Refusal request(Target target, Source source, uint32_t delayMs, const char** whyNot = nullptr);
 
+// Whether a request that did not arrive over the cable may ask for the ROM
+// downloader at all: maintenance.bootloader_api, and — unless the caller is
+// on a link the node is the host end of — maintenance.bootloader_from_lan.
+// The HTTP API and the console's network sessions ask this same question in
+// this one place, because a command that drops a relay into its ROM and
+// leaves it there must not be easier to reach over one than over the other.
+// *whyNot receives the words for a refusal; the status for it is 403. The
+// rule itself is the overload in BootloaderPlan.h; this asks it about the
+// settings as they stand.
+bool remoteEntryAllowed(bool hostFacing, const char** whyNot);
+
 // The restart every settings save and store move asks for. The delay is the
 // one Config.h documents for that case and is folded in here so no caller
 // can quietly shorten the window the reply needs to leave.

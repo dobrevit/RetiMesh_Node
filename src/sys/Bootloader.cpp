@@ -57,6 +57,7 @@
 #endif
 #include "Config.h"
 #include "Diag.h"
+#include "Settings.h"
 #include "PppUart.h"
 
 namespace Bootloader {
@@ -132,6 +133,13 @@ static void disarmDownloadBoot() {
 Plan plan() { return Bootloader::plan(caps()); }
 bool canEnterAutomatically() { return Bootloader::canEnterAutomatically(caps()); }
 const char* manualRecovery() { return kRecovery; }
+
+bool remoteEntryAllowed(bool hostFacing, const char** whyNot) {
+  // The rule is in BootloaderPlan.h, where it can be held to its cases; this
+  // asks it about the settings as they stand.
+  return remoteEntryAllowed(hostFacing, settings.maintenance().bootloaderApi,
+                            settings.maintenance().bootloaderFromLan, whyNot);
+}
 
 Refusal request(Target target, Source source, uint32_t delayMs, const char** whyNot) {
   if (target == Target::Bootloader && !canEnterAutomatically()) {

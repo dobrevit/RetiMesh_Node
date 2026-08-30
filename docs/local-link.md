@@ -215,6 +215,68 @@ state on every board here — both lines high is what the kernel sets on open,
 and asking for either low passes through the reset handshake. A terminal program that
 asserts them will reset it, which is the same as it always was.
 
+### The console over TCP
+
+The same console answers on port 4243, over the access point, the station
+link, `usb0` and `ppp0` alike — everything above, `GET`/`SET` included. It is
+one caller at a time and it exists so a node can be configured from a distance
+*without* a resident web server, which is a large thing to carry: on a Heltec
+Wireless Stick `http + dns + mdns` costs **28 616 B** of byte-addressable
+internal RAM, on a board that finishes booting with about 27 KB of it, while
+the Reticulum TCP listener beside it costs **272 B**. A line protocol on a
+socket is the second of those. The switch is `maintenance.console_tcp`, and
+off means the socket does not exist.
+
+**Every caller authenticates.** Unauthenticated, a session answers `HELP`,
+`VERSION` and `AUTH`, and refuses everything else with `401` — `STATUS`
+included, since it names the node and reports its radio. The credential is
+the admin password, the same one the web API takes, so there is one to change
+and not two:
+
+```
+$ nc 10.42.0.1 4243
+VERSION
+RM VERSION firmware="RetiMesh Node" version=v0.0.9 board="Heltec Wireless Stick V2" …
+STATUS
+RM ERR STATUS 401 authenticate first: AUTH <password>
+AUTH hunter2
+RM OK AUTH lines=0
+GET radio.sf
+RM GET radio.sf=8
+RM OK GET lines=1
+```
+
+`tools/console.py` speaks both transports and works out which from what it is
+given — a path or a `COM` name is a port, anything else is a host:
+
+```sh
+python tools/console.py /dev/ttyUSB0 STATUS        # over the cable
+python tools/console.py 192.168.1.50 STATUS        # over the network
+python tools/console.py 192.168.1.50 SET radio.sf 9
+python tools/console.py retimesh-52a7f8.local      # interactive
+```
+
+It authenticates only on the network transport, and refuses `--password` on
+the cable rather than sending it: the cable needs none, and a typo there
+would spend a failure the next network caller has to pay for. The password
+comes from `--password`, then `RETIMESH_PASSWORD`, then a prompt. The
+protocol reader is `retimesh_flash.device.Console`, the one the flashing tool
+already used — one client, two transports, as in the firmware.
+
+The cable is trusted without a password and the socket is not, which is the
+one place the two transports differ. Physical access already allows dumping
+the firmware and reflashing it — strictly more than editing a setting, and the
+console already answers `BOOTLOADER CONFIRM` — but a socket on an open access
+point is not physical access and that reasoning does not carry across it.
+
+Wrong passwords are counted for the node rather than for the connection,
+because a limit a caller resets by hanging up is not a limit: three failures
+and the node stops answering `AUTH` for thirty seconds, correct password or
+not. The cable is never locked out, so no lockout can strand the operator. A
+session that says nothing for two minutes is dropped, since it is holding the
+only slot there is; a second caller is turned away with `RM ERR ? 503`
+rather than left waiting.
+
 ## The bootloader manager
 
 `Bootloader.h` is the one place that restarts the node. Every restart — a

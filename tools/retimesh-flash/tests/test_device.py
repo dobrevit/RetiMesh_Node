@@ -843,5 +843,66 @@ class WaitForApplicationTest(unittest.TestCase):
         self.assertEqual(info.via, "console:/dev/ttyACM0")
 
 
+
+class TargetNaming(unittest.TestCase):
+    """Which transport a target names. The console answers on a cable and on
+    a socket, and a client is handed one string for either."""
+
+    def test_a_path_or_a_com_name_is_a_port(self):
+        for t in ("/dev/ttyUSB0", "/dev/serial/by-id/usb-x", "COM7", "com3"):
+            self.assertTrue(device.is_device_path(t), t)
+
+    def test_everything_else_is_a_host(self):
+        for t in ("192.168.1.50", "retimesh.local", "node", "::1", "[::1]:4243"):
+            self.assertFalse(device.is_device_path(t), t)
+
+    def test_a_port_that_does_not_exist_is_still_a_port(self):
+        # Otherwise a typo'd path is quietly dialled as a hostname and the
+        # error names DNS instead of the port the operator meant.
+        self.assertTrue(device.is_device_path("/dev/ttyUSB9"))
+
+    def test_a_bare_host_takes_the_default_port(self):
+        self.assertEqual(("192.168.1.50", 4243), device.split_host_port("192.168.1.50"))
+        self.assertEqual(("retimesh.local", 4243), device.split_host_port("retimesh.local"))
+
+    def test_a_port_may_be_given(self):
+        self.assertEqual(("192.168.1.50", 9999), device.split_host_port("192.168.1.50:9999"))
+        self.assertEqual(("node", 22), device.split_host_port("node:22"))
+
+    def test_ipv6_keeps_its_colons(self):
+        # "::1" is an address, not a host called ":" on port 1; a port comes
+        # with brackets, which is the only way to tell them apart.
+        self.assertEqual(("::1", 4243), device.split_host_port("::1"))
+        self.assertEqual(("fe80::1%eth0", 4243), device.split_host_port("fe80::1%eth0"))
+        self.assertEqual(("::1", 4243), device.split_host_port("[::1]:4243"))
+        self.assertEqual(("::1", 9999), device.split_host_port("[::1]:9999"))
+
+
+class ConsoleKeepsWhatTheNodeSaid(unittest.TestCase):
+    def test_the_raw_reply_lines_survive_parsing(self):
+        # A client showing an operator the reply shows the node's words, not
+        # a reconstruction of them from the parsed pairs — and the log line
+        # the port carries is not one of them.
+        con = Console(FakeSerial(board="Heltec V3"), timeout=1.0)
+        status, _, data = con.command("VERSION")
+        self.assertEqual("OK", status)
+        self.assertEqual(1, len(data))
+        self.assertTrue(all(l.startswith("RM ") for l in con.last_lines), con.last_lines)
+        self.assertTrue(con.last_lines[0].startswith("RM VERSION "))
+        self.assertTrue(con.last_lines[-1].startswith("RM OK VERSION"))
+        self.assertIn("Heltec V3", con.last_lines[0])
+
+    def test_the_lines_are_the_last_command_s_only(self):
+        con = Console(FakeSerial(), timeout=1.0)
+        con.command("VERSION")
+        first = list(con.last_lines)
+        con.command("VERSION")
+        self.assertEqual(first, con.last_lines)      # not appended to
+
+    def test_a_cable_session_does_not_authenticate(self):
+        # The cable is trusted; only a socket session sends AUTH, and a
+        # client that got this wrong would spend the node's failure budget.
+        self.assertFalse(Console(FakeSerial(), timeout=1.0).networked)
+
 if __name__ == "__main__":
     unittest.main()

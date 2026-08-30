@@ -37,6 +37,7 @@
 #include "Mdns.h"
 #include "Diag.h"
 #include "SettingsRules.h"
+#include "SettingsFields.h"
 #include "SdCard.h"
 #include "StoreHome.h"
 #include "AutoInterface.h"
@@ -139,6 +140,8 @@ static const MaintField kMaintFields[] = {
   { "bootloader_api",      &MaintenanceSettings::bootloaderApi },
   { "bootloader_from_lan", &MaintenanceSettings::bootloaderFromLan },
   { "console_enabled",     &MaintenanceSettings::consoleEnabled },
+  { "console_tcp",         &MaintenanceSettings::consoleTcp },
+  { "web_ui",              &MaintenanceSettings::webUi },
 };
 
 void WifiManager::begin() {
@@ -176,16 +179,30 @@ void WifiManager::begin() {
   // the server lazy would be worth, on the board it is running on.
   Diag::cost(wifiEnabled() ? "wifi radio" : "netif stack (wifi off)");
 
-  setupRoutes();
-  // Where the USB link exists the resolver runs whether or not Wi-Fi does:
-  // the link's lease names the node as DNS (CaptiveDns.h), and with the
-  // access point off there would otherwise be nothing on port 53 to refuse
-  // the host's queries — a timeout where a refusal was promised. A board
-  // with neither has nothing to answer, and AsyncUDP's task goes unmade.
+  // The portal is the largest thing a small board can decline: 28624 B of
+  // byte-addressable RAM with Wi-Fi on, measured on a Heltec Wireless Stick
+  // that has about 213 KB of it and needs 53 KB for Reticulum. Off means the
+  // routes are never registered and nothing listens on port 80; an operator
+  // reaches the node over the console's own listener instead, which costs a
+  // few hundred bytes to do the same job (ConsoleServer.h).
+  const bool webUi = settings.maintenance().webUi;
+  // The resolver is not the portal's, and does not go off with it. Where the
+  // USB link exists it runs whether or not Wi-Fi does: the link's lease names
+  // the node as DNS and ESP-IDF's server cannot be told to name nobody
+  // (UsbNcm.cpp), so with nothing on port 53 an attached host waits out its
+  // full resolver timeout on every lookup instead of being refused and
+  // moving on — which is the failure CaptiveDns exists to prevent. A board
+  // with neither link has nothing to answer, and AsyncUDP's task goes unmade.
   if (wifiEnabled() || HAS_USB_NCM) {
     if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
   }
-  _http.begin();
+  if (!webUi) {
+    log_w("the web portal is switched off; HTTP :%d does not answer. The console does, "
+          "on the cable and on TCP :%d", HTTP_PORT, CONSOLE_TCP_PORT);
+  } else {
+    setupRoutes();
+    _http.begin();
+  }
 
   // http://retimesh.local/ (and http://<ssid>.local/) for clients whose
   // captive-portal detection does not fire.
@@ -214,28 +231,43 @@ void WifiManager::begin() {
 
   deriveHostname();
   if (!wifiEnabled()) {
-    Diag::cost("http + dns");
-    log_i("HTTP :%d and RNS TCP :%d listening on every local link; Wi-Fi off", HTTP_PORT, RNS_TCP_PORT);
+    Diag::cost(webUi ? "http + dns" : "dns (no portal)");
+    if (webUi) log_i("HTTP :%d and RNS TCP :%d listening on every local link; Wi-Fi off",
+                     HTTP_PORT, RNS_TCP_PORT);
+    else       log_i("RNS TCP :%d listening on every local link; Wi-Fi and the portal are off, "
+                     "and the console answers on TCP :%d", RNS_TCP_PORT, CONSOLE_TCP_PORT);
     return;
   }
   if (MDNS.begin(_hostname)) {
-    MDNS.addService("http", "tcp", HTTP_PORT);
+    // Only the services that actually answer: a browser sent to _http._tcp on
+    // a node whose portal is off gets a connection refused and no
+    // explanation. Named once, and walked once, rather than the rule being
+    // spelled again inside the loop.
+    const char* services[2] = { "rns", nullptr };
+    size_t nServices = 1;
     MDNS.addService("rns", "tcp", RNS_TCP_PORT);
+    if (webUi) {
+      MDNS.addService("http", "tcp", HTTP_PORT);
+      services[nServices++] = "http";
+    }
     // So a browser or a script can tell the nodes apart without opening each
     // one: the same identity the portal and the announce carry.
-    for (const char* svc : { "http", "rns" }) {
+    for (size_t i = 0; i < nServices; i++) {
+      const char* svc = services[i];
       MDNS.addServiceTxt(svc, "tcp", "name",  _ssid);
       MDNS.addServiceTxt(svc, "tcp", "node",  nodeIdentity.destHex());
       MDNS.addServiceTxt(svc, "tcp", "fw",    FW_VERSION);
       MDNS.addServiceTxt(svc, "tcp", "board", BOARD_NAME);
     }
-    log_i("mDNS: http://%s.local (rns on :%d) — browse _rns._tcp to find every node",
-          _hostname, RNS_TCP_PORT);
+    if (webUi) log_i("mDNS: http://%s.local (rns on :%d) — browse _rns._tcp to find every node",
+                     _hostname, RNS_TCP_PORT);
+    else       log_i("mDNS: %s.local, rns on :%d — no portal is advertised, it is switched off",
+                     _hostname, RNS_TCP_PORT);
   } else {
     log_w("mDNS start failed");
   }
 
-  Diag::cost("http + dns + mdns");
+  Diag::cost(webUi ? "http + dns + mdns" : "dns + mdns (no portal)");
   log_i("SoftAP \"%s\" (%s) up at %s (http:%d, rns:%d)", _ssid, _securityName,
         WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
 }
@@ -1166,12 +1198,26 @@ void WifiManager::handleMaintenancePost(AsyncWebServerRequest* request, const ch
   MaintenanceSettings m = settings.maintenance();
   for (const MaintField& f : kMaintFields)
     if (in[f.key].is<bool>()) m.*(f.on) = in[f.key];
-  if (LocalLink::lockedOut(settings.links(), m.consoleEnabled)) {
-    sendError(request, 400, "refused: no local link is enabled, so switching the console off would leave no way to reach the node");
-    return;
+  // Through the same commit the console uses, so both refuse alike and the
+  // restart the portal's switch needs is asked for once rather than twice.
+  char detail[160] = "";
+  const SettingsFields::Result res = SettingsFields::commitMaintenance(m, detail, sizeof(detail));
+  switch (res) {
+    case SettingsFields::Result::Ok:
+      request->send(200, "application/json", "{\"ok\":true}");
+      return;
+    case SettingsFields::Result::OkRestart:
+    case SettingsFields::Result::OkNextBoot:
+      request->send(200, "application/json", "{\"ok\":true,\"restart\":true}");
+      return;
+    // 503, as every settings POST answers while a restart is pending
+    // (docs/api.md). The gate in setupRoutes answers it first, so this is
+    // the same answer from the other side of it rather than a second one.
+    case SettingsFields::Result::Busy:      sendError(request, 503, detail[0] ? detail : "the node is restarting"); return;
+    case SettingsFields::Result::Refused:   sendError(request, 400, detail); return;
+    case SettingsFields::Result::NvsFailed: sendError(request, 500, "nvs"); return;
+    default:                                sendError(request, 400, detail[0] ? detail : "refused"); return;
   }
-  if (!settings.saveMaintenance(m)) { sendError(request, 500, "nvs"); return; }
-  request->send(200, "application/json", "{\"ok\":true}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,16 +1245,15 @@ void WifiManager::handleBootloaderGet(AsyncWebServerRequest* request) {
 // POST /api/system/bootloader {"confirm":"BOOTLOADER"} -> 202 and, 600 ms
 // later, the ROM downloader. The reply carries what the tool needs next.
 void WifiManager::handleBootloaderPost(AsyncWebServerRequest* request, const char* body, size_t len) {
-  if (!settings.maintenance().bootloaderApi) {
-    sendError(request, 403, "the bootloader API is switched off in maintenance settings"); return;
+  // The switch and the link, asked of Bootloader so the network console
+  // refuses on exactly these terms too (Bootloader.h).
+  const char* denied = nullptr;
+  if (!Bootloader::remoteEntryAllowed(fromHostFacingLink(request), &denied)) {
+    sendError(request, 403, denied); return;
   }
   JsonDocument in;
   if (deserializeJson(in, body, len) != DeserializationError::Ok || strcmp(in["confirm"] | "", "BOOTLOADER") != 0) {
     sendError(request, 400, "send {\"confirm\":\"BOOTLOADER\"} to restart into the ROM downloader"); return;
-  }
-  if (!fromHostFacingLink(request) && !settings.maintenance().bootloaderFromLan) {
-    sendError(request, 403, "only from a directly attached link (access point, USB, PPP); "
-                            "set bootloader_from_lan to allow it from the station network"); return;
   }
   const char* why = nullptr;
   const Bootloader::Refusal r = Bootloader::request(Bootloader::Target::Bootloader, Bootloader::Source::Http, RESTART_ACK_DELAY_MS, &why);
@@ -1559,7 +1604,7 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
       JsonObject mt = in["maintenance"];
       for (const MaintField& f : kMaintFields) ms.*(f.on) = mt[f.key] | ms.*(f.on);
     }
-    if ((haveLinks || haveMaint) && LocalLink::lockedOut(ls, ms.consoleEnabled)) {
+    if ((haveLinks || haveMaint) && LocalLink::lockedOut(ls, ms.consoleEnabled, ms.webUi)) {
       sendError(request, 400, "refused: this file would leave the node with every local link off and the console off, and no way back in");
       return;
     }

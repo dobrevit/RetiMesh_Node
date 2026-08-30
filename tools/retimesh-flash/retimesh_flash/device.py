@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
+import socket
 import sys
 import time
 import urllib.error
@@ -55,6 +57,9 @@ ESP_VENDORS = {0x303A, 0x10C4, 0x1A86, 0x0403}
 RETIMESH_PRODUCT = "RetiMesh Node"
 
 CONSOLE_BAUD = 115200
+# The console's TCP transport (ConsoleServer.h). The same protocol, one
+# difference: a caller that arrived over the network sends AUTH first.
+CONSOLE_TCP_PORT = 4243
 REPLY_PREFIX = "RM "
 # The admin credentials the firmware ships with (ADMIN_USER / ADMIN_PASSWORD_DEFAULT
 # in the firmware). Written once here; the CLI's --password default and both
@@ -262,6 +267,96 @@ def node_url(text: str) -> str:
 # ---------------------------------------------------------------------------
 # The maintenance console
 # ---------------------------------------------------------------------------
+# The console answers on a cable and on a socket, and the protocol is the
+# same on both (docs/local-link.md). So is this reader: the transport is a
+# parameter, and TCP is one more thing with read()/write()/in_waiting.
+class _Socket:
+    """A socket dressed as the serial port Console expects."""
+
+    def __init__(self, sock, poll: float = 0.2):
+        self._sock = sock
+        self._poll = poll
+        self.port = None
+        # A closed socket is readable for ever and recv() returns b'' every
+        # time, so "nothing yet" and "gone" look identical from the outside.
+        # Told apart once and remembered, or the reader spins at full tilt
+        # until the command timeout and then blames a timeout for a hangup.
+        self.closed_by_peer = False
+
+    @property
+    def in_waiting(self) -> int:
+        # select() says readable, not how much; the chunk size is a hint and
+        # read() below returns whatever actually arrived.
+        if self.closed_by_peer:
+            return 0
+        r, _, _ = select.select([self._sock], [], [], 0)
+        return 512 if r else 0
+
+    def read(self, n: int = 1) -> bytes:
+        if self.closed_by_peer:
+            time.sleep(self._poll)               # no busy loop on a dead socket
+            return b""
+        r, _, _ = select.select([self._sock], [], [], self._poll)
+        if not r:
+            return b""
+        try:
+            chunk = self._sock.recv(max(1, n))
+        except (BlockingIOError, InterruptedError):
+            return b""
+        except OSError:
+            self.closed_by_peer = True
+            return b""
+        if not chunk:
+            self.closed_by_peer = True           # orderly close: end of stream
+        return chunk
+
+    def write(self, data: bytes) -> int:
+        if self.closed_by_peer:
+            raise ConnectionResetError("the node closed the connection")
+        self._sock.sendall(data)
+        return len(data)
+
+    def flush(self) -> None:
+        pass                                   # sendall already has
+
+    def close(self) -> None:
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def is_device_path(text: str) -> bool:
+    """Whether this names a serial port rather than a host.
+
+    A path, or a Windows COM name. Anything else is a host — including a
+    name that happens not to exist, which should fail as the port it was
+    meant to be rather than be dialled as a hostname.
+    """
+    if not text:
+        return False
+    if text.startswith("/") or text.startswith("\\\\.\\"):
+        return True
+    return bool(re.fullmatch(r"COM\d+", text, re.IGNORECASE))
+
+
+def split_host_port(text: str, default: int = CONSOLE_TCP_PORT) -> tuple[str, int]:
+    """`host`, `host:port`, `[v6]:port`. The bare form takes the default."""
+    if text.startswith("["):                   # [::1]:4243
+        host, _, rest = text[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") and rest[1:].isdigit() else ""
+        return host, int(port) if port else default
+    # A bare IPv6 address is all colons and no brackets, so the last one is
+    # part of the address and not a port: "::1" is a host, not host ":" on
+    # port 1. Brackets are how a port is given with one.
+    if text.count(":") > 1:
+        return text, default
+    host, sep, port = text.rpartition(":")
+    if sep and port.isdigit() and host:
+        return host, int(port)
+    return text, default
+
+
 class Console:
     """One request/reply exchange at a time on an open serial port. The
     transport is injectable: anything with read()/write()/in_waiting. So is
@@ -274,6 +369,7 @@ class Console:
         self.device = device or getattr(ser, "port", None) or "?"
         self.clock = clock
         self._pending = bytearray()
+        self.last_lines: list[str] = []
 
     @staticmethod
     def open(device: str, timeout: float = 2.0) -> "Console":
@@ -301,6 +397,35 @@ class Console:
         # needed, which cost every probe of a silent port a timeout and still
         # could not tell a whole reply from a short one.
         return Console(ser, timeout, device)
+
+    @staticmethod
+    def connect(host: str, port: int = CONSOLE_TCP_PORT, timeout: float = 4.0) -> "Console":
+        """The console over TCP. Same protocol, same reader; the caller
+        authenticates before anything but HELP, VERSION and AUTH."""
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
+        return Console(_Socket(sock), timeout, "%s:%d" % (host, port))
+
+    @property
+    def networked(self) -> bool:
+        """Whether this session arrived over the network, and so has to
+        authenticate. The cable does not (Maintenance.h)."""
+        return isinstance(self.ser, _Socket)
+
+    def authenticate(self, password: str) -> tuple[bool, str]:
+        """AUTH on this session. Returns (accepted, message). Does not retry:
+        the node counts wrong passwords and stops answering after a few."""
+        status, kv, _ = self.command("AUTH " + password)
+        if status == "OK":
+            return True, "authenticated"
+        if status == "ERR":
+            return False, "%s (%s)" % (kv.get("text", "refused"), kv.get("code", "?"))
+        if status == "CLOSED":
+            # Most often the node refusing a second caller: it says so and
+            # hangs up, and last_lines has the words it used.
+            said = self.last_lines[-1] if self.last_lines else ""
+            return False, said or "the node closed the connection"
+        return False, status.lower()
 
     def close(self) -> None:
         try:
@@ -335,7 +460,7 @@ class Console:
 
     def command(self, line: str) -> tuple[str, dict, list[dict]]:
         """Send one command. Returns (status, kv, data_lines) where status is
-        "OK", "ERR", "SHORT" or "TIMEOUT"; kv are the key=value pairs of the
+        "OK", "ERR", "SHORT", "TIMEOUT" or "CLOSED"; kv are the pairs of the
         final line (for ERR: code and text); data_lines are the RM <CMD> lines
         before it.
 
@@ -345,32 +470,55 @@ class Console:
         is SHORT, its data handed back for what it is worth rather than passed
         off as complete. A node that does not count (protocol 1) is taken at
         its word."""
+        cmd = line.split()[0].upper() if line.split() else ""
+        kept = []
         for attempt in (1, 2):
             status, kv, data = self._exchange(line)
-            if status == "ERR" and kv.get("cmd") == "?" and attempt == 1:
-                # The node refused a line it could not even name: ours, glued
-                # onto bytes a port prober left in its buffer. The node has
-                # discarded them with that reply; once more and it is clean.
+            kept = self.last_lines or kept
+            # An "ERR ?" is only worth another try when it is the node
+            # discarding a line it could not name — ours, glued onto bytes a
+            # port prober left in its buffer, which it answers with a 400.
+            # A 503 is a refusal the node meant, and repeating it writes to a
+            # socket the node has already closed and reports the timeout
+            # instead of what it actually said. AUTH is never repeated at all:
+            # a second try spends one of the three the node allows.
+            garbled = (status == "ERR" and kv.get("cmd") == "?"
+                       and int(kv.get("code", 0) or 0) == 400 and cmd != "AUTH")
+            if garbled and attempt == 1:
                 continue
             if status != "OK":
+                self.last_lines = kept
                 return status, kv, data
             expected = kv.pop("lines", None)
             if expected is None or not expected.isdigit() or int(expected) == len(data):
                 return status, kv, data
+        self.last_lines = kept
         return "SHORT", kv, data
 
     def _exchange(self, line: str) -> tuple[str, dict, list[dict]]:
         cmd = line.split()[0].upper()
-        self.ser.write((line.strip() + "\n").encode())
-        self.ser.flush()
+        self.last_lines = []
+        try:
+            self.ser.write((line.strip() + "\n").encode())
+            self.ser.flush()
+        except OSError:
+            # The node hung up between the last reply and this line. Saying
+            # so beats "no reply within 4s", which sends the operator looking
+            # for a timeout that never happened.
+            return "CLOSED", {}, []
         deadline = self.clock() + self.timeout
         data = []
+        # What the node actually said, kept beside what was parsed out of it:
+        # a client showing an operator the reply should show the node's words,
+        # not this file's reconstruction of them.
         while True:
             reply = self._readline(deadline)
             if reply is None:
-                return "TIMEOUT", {}, data
+                return ("CLOSED" if getattr(self.ser, "closed_by_peer", False)
+                        else "TIMEOUT"), {}, data
             if not reply.startswith(REPLY_PREFIX):
                 continue                       # a log line sharing the port
+            self.last_lines.append(reply)
             words = reply[len(REPLY_PREFIX):]
             if words.startswith("OK " + cmd):
                 return "OK", parse_kv(words[len("OK " + cmd):]), data

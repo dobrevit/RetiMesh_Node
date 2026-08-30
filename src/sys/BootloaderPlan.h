@@ -179,6 +179,32 @@ inline Plan plan(const Caps& c) {
 // ---------------------------------------------------------------------------
 // The request sequence
 // ---------------------------------------------------------------------------
+// Whether a request that did not arrive over the cable may ask for the ROM
+// downloader. Two switches: whether the API answers at all, and — unless the
+// caller is on a link the node is the host end of (the access point, usb0,
+// ppp0) — whether the station network is allowed to ask.
+//
+// Here rather than in the HTTP handler because the console answers on a
+// socket too, and a command that drops a relay into its ROM and leaves it
+// there must not be easier to reach over one transport than the other. The
+// cable does not come through here at all: physical access already means
+// dumping the firmware and reflashing it, which is strictly more than this.
+// *whyNot receives the words for a refusal, and the status for it is 403.
+inline bool remoteEntryAllowed(bool hostFacing, bool apiEnabled, bool fromLanAllowed,
+                               const char** whyNot = nullptr) {
+  if (whyNot) *whyNot = "";
+  if (!apiEnabled) {
+    if (whyNot) *whyNot = "the bootloader API is switched off in maintenance settings";
+    return false;
+  }
+  if (!hostFacing && !fromLanAllowed) {
+    if (whyNot) *whyNot = "only from a directly attached link (access point, USB, PPP); "
+                          "set bootloader_from_lan to allow it from the station network";
+    return false;
+  }
+  return true;
+}
+
 enum class Target : uint8_t { App = 0, Bootloader = 1 };
 enum class Source : uint8_t { Http = 0, Console, Settings, Touch };   // Touch: the 1200-baud touch on the USB console port
 
