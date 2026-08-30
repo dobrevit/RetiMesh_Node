@@ -61,7 +61,7 @@ past the checks on the way in.
 ## `GET /api/status` (public)
 ```json
 {
-  "firmware": "RetiMesh Node", "version": "v0.0.3",
+  "firmware": "RetiMesh Node", "version": "v0.0.3", "board": "LilyGO T3-S3",
   "ssid": "retimesh-8249CC", "hostname": "retimesh-8249cc", "security": "open", "display": true,
   "station": { "configured": true, "ssid": "home", "connected": true, "ip": "192.168.1.42", "rssi": -61 },
   "power": { "profile": "performance", "cpu_mhz": 240, "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
@@ -222,10 +222,18 @@ allowance less a safety margin, or a stricter `duty_manual_pct` when set);
 transmissions are being held until `retry_after_s` seconds from now. The CSMA
 slot and contention-window band come from the same figures.
 
+`board` is the make and model this firmware was built for. A node's name is
+derived from its MAC, so a bench of eight nodes is eight hex strings; this is
+the half a person can match to the board in front of them, and the portal puts
+it in the page header and in the browser tab. `GET /api/settings` carries it
+too, so the page that changes a node's settings can name the node it is about
+to change.
+
 `power` reports the profile, CPU clock and the cell:
 `{"profile":"performance","cpu_mhz":240,"battery_present":true,
-"battery_charging":true,"battery_v":3.53,"battery_pct":10,"pmu":"AXP2101",
-"board":"LilyGO T-Beam"}`. `battery_charging` and a trustworthy
+"battery_charging":true,"battery_v":3.53,"battery_pct":10,"pmu":"AXP2101"}`.
+The board's make and model used to sit here too; it is `board` at the top of
+the document now, beside the firmware that runs on it. `battery_charging` and a trustworthy
 `battery_present` need a power-management chip; boards reading an ADC divider
 report `false` and infer presence from the voltage.
 

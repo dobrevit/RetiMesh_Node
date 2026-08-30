@@ -481,6 +481,13 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
 
   doc["firmware"]     = FW_NAME;
   doc["version"]      = FW_VERSION;
+  // What this node is, in words a person recognises. The name a node answers
+  // to is derived from its MAC, and a bench with eight of them is eight hex
+  // strings; the make and model is the half a human can match to the thing on
+  // the desk. It sits at the top of the document beside the firmware it runs,
+  // not inside "power", where it only ever was because the PMU line was next
+  // to it.
+  doc["board"]        = BOARD_NAME;
   doc["ssid"]         = _ssid;
   doc["hostname"]     = _hostname;      // reachable as <hostname>.local
   doc["security"]     = _securityName;
@@ -518,7 +525,6 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     if (b.chargeKnown) pw["battery_charging"] = b.charging;
     else               pw["battery_charging"] = nullptr;
     pw["pmu"] = Pmu::model();          // "AXP192" / "AXP2101" / "none"
-    pw["board"] = BOARD_NAME;
     pw["battery_v"] = b.volts;
     pw["battery_pct"] = b.percent;
   }
@@ -917,6 +923,10 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   const RadioSettings& rs = settings.radio();
   const WifiSettings&  ws = settings.wifi();
   JsonDocument doc;
+
+  // The board, so the page that changes this node's settings can say which
+  // node it is about to change.
+  doc["board"] = BOARD_NAME;
 
   JsonObject radio   = doc["radio"].to<JsonObject>();
   radio["freq_mhz"]  = rs.freqMhz;

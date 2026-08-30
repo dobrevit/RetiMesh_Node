@@ -40,7 +40,7 @@
 </head>
 <body>
   <h1><span class="dot">&#9679;</span> Settings <span id="ssid" style="color:var(--dim);font-weight:400"></span></h1>
-  <div class="sub"><a href="/">&larr; status</a> &middot; signed in as <b>admin</b></div>
+  <div class="sub"><b id="board"></b><span id="boardsep" hidden> &middot; </span><a href="/">&larr; status</a> &middot; signed in as <b>admin</b></div>
 
   <div class="card banner" id="pwBanner" hidden>&#9888; The admin password is still the factory default. Change it below.</div>
 
@@ -364,6 +364,10 @@ function rnsSnippet(r) {
 async function load() {
   cfg = await api("/api/settings");
   $("ssid").textContent = cfg.wifi.ssid_active;
+  // Which node these settings belong to — the page that changes a node should
+  // say which one it is changing, in the header and in the tab.
+  if (cfg.board) { $("board").textContent = cfg.board; $("boardsep").hidden = false; }
+  document.title = [cfg.wifi.ssid_active, cfg.board].filter(Boolean).join(" · ") + " — Settings";
   $("autoSsid").textContent = "(" + cfg.wifi.ssid_active.replace(/^([^-]+)-.*/, "$1-XXXXXX") + ")";
   $("pwBanner").hidden = !cfg.admin.default_password;
 

@@ -50,7 +50,7 @@
 </head>
 <body>
   <h1><span class="dot">&#9679;</span> <span id="ssid">RetiMesh Node</span></h1>
-  <div class="sub">Standalone Reticulum LoRa gateway &mdash; connect your RNS client to <b>10.42.0.1:4242</b> (TCPClientInterface)
+  <div class="sub"><b id="board"></b><span id="boardsep" hidden> &middot; </span>Standalone Reticulum LoRa gateway &mdash; connect your RNS client to <b>10.42.0.1:4242</b> (TCPClientInterface)
     &middot; <a href="/settings.html">&#9881; settings</a></div>
 
   <div class="grid" id="stats"></div>
@@ -127,6 +127,14 @@ async function refreshStatus() {
     const s = await (await fetch("/api/status")).json();
     $("ver").textContent = s.version || "";
     if (s.ssid) $("ssid").textContent = s.ssid;
+    // Which node this is, in the two ways a person looks for it: the make and
+    // model beside the name, and both in the tab, because somebody with eight
+    // of these open cannot tell them apart from "RetiMesh Node" eight times.
+    if (s.board) {
+      $("board").textContent = s.board;
+      $("boardsep").hidden = false;
+    }
+    document.title = [s.ssid, s.board].filter(Boolean).join(" · ") || "RetiMesh Node";
     const g = $("stats");
     g.replaceChildren(
       // Only when the two halves disagree — there is nothing useful to say when
