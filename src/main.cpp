@@ -118,6 +118,11 @@ void setup() {
     // as it rode the USB-Serial/JTAG port before. The core routes it there
     // for the JTAG unit on its own and for the OTG CDC only when asked.
     Serial.setDebugOutput(true);
+    // And the port's own reboot — the 1200-baud touch, esptool's DTR/RTS
+    // pattern — is off from here, the first moment the sketch has: the core
+    // would otherwise restart into the ROM from inside its USB task, past
+    // the sequencer, the detach and the marks (UsbNcm.cpp, onLineCoding).
+    Serial.enableReboot(false);
   #endif
   delay(300);                              // let the USB CDC host attach
   log_i("%s %s on %s (IDF %s)", FW_NAME, FW_VERSION, BOARD_NAME, esp_get_idf_version());
@@ -126,7 +131,6 @@ void setup() {
   // The reset register survives the reboot but not a second one, so it is only
   // ever readable here.
   Diag::begin();
-  Bootloader::begin();                   // the previous run's restart timings, from RTC memory
 
   Leds::begin();                           // claimed and off until the services are up
 

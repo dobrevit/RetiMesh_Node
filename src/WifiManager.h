@@ -22,8 +22,8 @@
 //  Runs entirely on core 0 (next to the ESP32 Wi-Fi/LwIP stack):
 //    - SoftAP "retimesh-XXXXXX" (prefix + last 3 MAC octets, or a custom
 //      SSID from settings) at 10.42.0.1 — open, WPA2, WPA2/WPA3 or WPA3
-//    - a resolver bound to 10.42.0.1 answering every A query with it (captive portal);
-//      polled from a small task pinned to core 0
+//    - a resolver answering every A query that arrives at 10.42.0.1 with it
+//      (captive portal), from AsyncUDP's callback; no task of its own
 //    - AsyncWebServer on port 80:
 //        /                 single-page app from LittleFS (data/index.html)
 //        /api/status       JSON node stats (uptime, RSSI/SNR, peers, ...)

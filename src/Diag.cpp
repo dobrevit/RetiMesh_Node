@@ -21,17 +21,19 @@
 #include <Preferences.h>
 #include <esp_attr.h>
 #include <esp_heap_caps.h>
+#include <esp_rtc_time.h>
 #include <esp_system.h>
 
 namespace Diag {
 
-// Placed in RTC RAM and deliberately not zeroed at startup, so the value
-// written by the run that just died is still here. A power cut or brownout
-// drops the RTC domain and leaves this as noise, which the magic detects.
-RTC_NOINIT_ATTR static uint32_t sRtcMagic;
-RTC_NOINIT_ATTR static uint32_t sRtcUptimeS;
+// Placed in RTC RAM and deliberately not zeroed at startup, so what the run
+// that just died wrote is still here: its length, and the marks a deliberate
+// restart left on its way out. A power cut or brownout drops the RTC domain
+// and leaves this as noise, which the magic detects.
+struct RtcRecord { uint32_t magic; uint32_t uptimeS; RestartMarks restart; };
+RTC_NOINIT_ATTR static RtcRecord sRtc;
 
-static const uint32_t kRtcMagic = 0x52544D31;   // "RTM1"
+static const uint32_t kRtcMagic = 0x52544D32;   // "RTM2": the record grew the restart marks
 
 static Boot sBoot;
 
@@ -42,7 +44,7 @@ static Boot sBoot;
 // of them while carrying the smallest stack of the lot.
 static const char* const kTasks[] = {
   "loopTask",     // Arduino: the heartbeat and scheduled restarts
-  "dns",          // captive-portal DNS
+  "async_udp",    // AsyncUDP: the captive resolver's callbacks (CaptiveDns.h)
   "radio",        // LoRa RX/TX
   "display",      // panel + button
   "rns",          // everything inside microReticulum
@@ -76,12 +78,19 @@ void begin() {
   sBoot.clean = (r == ESP_RST_POWERON || r == ESP_RST_EXT ||
                  r == ESP_RST_SW      || r == ESP_RST_DEEPSLEEP);
 
-  if (sRtcMagic == kRtcMagic) {
+  if (sRtc.magic == kRtcMagic) {
     sBoot.prevUptimeKnown = true;
-    sBoot.prevUptimeS     = sRtcUptimeS;
+    sBoot.prevUptimeS     = sRtc.uptimeS;
+    if (sRtc.restart.entryMs) {
+      const RestartMarks m = sRtc.restart;
+      sBoot.lastRestart.toPersistMs = m.persistMs ? m.persistMs - m.entryMs : 0;
+      sBoot.lastRestart.toBootMs    = rtcMs() - (m.persistMs ? m.persistMs : m.entryMs);
+      sBoot.lastRestart.known       = true;
+    }
   }
-  sRtcMagic   = kRtcMagic;
-  sRtcUptimeS = 0;
+  sRtc.magic   = kRtcMagic;
+  sRtc.uptimeS = 0;
+  sRtc.restart = RestartMarks{0, 0};
 
   // One small NVS write per boot. This is the counter that tells a node which
   // has been up all week apart from one that has quietly been restarting.
@@ -108,11 +117,17 @@ void begin() {
           sBoot.reasonName, ran,
           sBoot.prevUptimeKnown ? "" : " (run length lost: the RTC domain was not held up)");
   }
+  if (sBoot.lastRestart.known)
+    log_i("last restart: %lu ms to the core's persist-restart, %lu ms from there to this boot",
+          (unsigned long)sBoot.lastRestart.toPersistMs, (unsigned long)sBoot.lastRestart.toBootMs);
 }
 
 const Boot& boot() { return sBoot; }
 
-void tick(uint32_t uptimeS) { sRtcUptimeS = uptimeS; }
+void tick(uint32_t uptimeS) { sRtc.uptimeS = uptimeS; }
+
+RestartMarks& restartMarks() { return sRtc.restart; }
+uint32_t rtcMs() { return (uint32_t)(esp_rtc_get_time_us() / 1000); }
 
 Heap heap() {
   Heap h;
