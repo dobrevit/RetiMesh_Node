@@ -66,6 +66,11 @@ const char* resetReasonName(uint8_t reason) {
     case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
     case ESP_RST_BROWNOUT:  return "brownout";
     case ESP_RST_SDIO:      return "SDIO";
+    case ESP_RST_USB:       return "USB peripheral";
+    case ESP_RST_JTAG:      return "JTAG";
+    case ESP_RST_EFUSE:     return "efuse error";
+    case ESP_RST_PWR_GLITCH: return "power glitch";
+    case ESP_RST_CPU_LOCKUP: return "CPU lock-up (double exception)";
     default:                return "unknown";
   }
 }
@@ -75,8 +80,14 @@ void begin() {
   sBoot.reason     = (uint8_t)r;
   sBoot.reasonName = resetReasonName((uint8_t)r);
   // A deliberate restart is not a fault; everything else is worth a warning.
+  // The two a flashing tool causes count as deliberate: esptool resets the
+  // chip over the USB peripheral at the end of every upload on a native-USB
+  // board (ESP_RST_USB) and over JTAG on a debugger's. Without them a normal
+  // flash reported "previous run ended: unknown" and was counted unclean,
+  // which is the log saying a crash where there was a tool doing its job.
   sBoot.clean = (r == ESP_RST_POWERON || r == ESP_RST_EXT ||
-                 r == ESP_RST_SW      || r == ESP_RST_DEEPSLEEP);
+                 r == ESP_RST_SW      || r == ESP_RST_DEEPSLEEP ||
+                 r == ESP_RST_USB     || r == ESP_RST_JTAG);
 
   if (sRtc.magic == kRtcMagic) {
     sBoot.prevUptimeKnown = true;
