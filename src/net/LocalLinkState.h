@@ -197,6 +197,15 @@ inline uint32_t ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
 // network manager that does not ask. IPv4 link-local alone was rejected:
 // phones and older managers get the probe wrong often enough that a fixed
 // address beside it is worth having.
+// The subnet is one byte of MAC, so two nodes can pick the same one. It is
+// the best byte to pick — Espressif hands out MACs sequentially, so boards
+// from one batch differ here — but it is still eight bits: three boards
+// collide 1.2 % of the time, eight 10.5 %, ten 16.3 %. It only bites when
+// both are plugged into the same host at once, where the host then has two
+// interfaces on one /24 and routes to whichever it likes. Nothing detects
+// it: a node cannot see the other link. The address is in the boot log, in
+// NETWORK_STATUS and in /api/status, so an operator can read it off both
+// boards; there is no override yet, and that is what would fix it.
 inline uint32_t usbNodeAddress(uint8_t macLastOctet) { return ipv4(10, 64, macLastOctet, 1); }
 inline uint32_t usbHostAddress(uint8_t macLastOctet) { return ipv4(10, 64, macLastOctet, 2); }
 constexpr uint32_t kUsbNetmask = 0xFFFFFF00u;

@@ -689,6 +689,19 @@ it in one piece into an 8 KB queue (`PPP_TX_QUEUE_BYTES`), so nothing can land
 inside it; a frame the queue cannot take is dropped whole, on the TCP/IP task,
 without waiting.
 
+**What the USB switch costs.** `links.usb` does not merely decide whether
+`usb0` answers: with it off the interface, its DHCP server and the 6 KB
+transmit ring do not exist. Measured on a T3-S3 by switching it off and on,
+four cycles: **6 748 B** of byte-addressable internal RAM each time, returning
+to the same figure on every re-enable. Before that the ring was `.bss` and the
+interface was built unconditionally, so the switch was worth 68 bytes. What it
+does not give back is the composite device: the descriptors are assembled once
+before `setup()` runs and the host keeps its ACM port either way — only the
+network function behind it comes and goes, which is what the host sees as the
+carrier going down. Switching off is stepped across passes of the loop and
+never blocks it; nothing is freed until the tasks that could be inside it have
+been through a barrier.
+
 **What the switch costs.** `links.ppp` does not merely decide whether PPP
 answers. With it off there is no interface and no reader task, so a node that
 never carries PPP pays nothing for the `esp_netif`, the lwIP control block
