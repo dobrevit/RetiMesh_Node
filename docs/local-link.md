@@ -524,8 +524,8 @@ build by `tools/board_caps.py`; the ACM interface is the core's function and
 carries the core's own name for it. `USB_STATUS` says whether the PID is the
 test allocation, and every release says so too: `tools/check_boards.py
 --release`, the first step of the release workflow, warns about it in the
-build log without holding the release up — six of the eight boards a tag
-builds never present the composite device, and blocking their firmware over
+build log without holding the release up — most of the boards a tag builds
+never present the composite device, and blocking their firmware over
 a PID they do not carry helps nobody. The VID:PID is not ours to choose: Espressif
 allocates PIDs under 0x303A to open-source projects on request
 (github.com/espressif/usb-pids), and until one is granted the registry

@@ -2,7 +2,11 @@
 
 **Console:** the USB port at 115200 baud prints everything (`pio device
 monitor` or any terminal) and answers commands — type `HELP`, `VERSION`,
-`STATUS` or `NETWORK_STATUS`; replies start with `RM `. Boot lines to expect:
+`STATUS` or `NETWORK_STATUS`; replies start with `RM `. The same console
+answers on TCP :4243 over any link the node has, where it wants the admin
+password first (`AUTH …`). `tools/console.py <port-or-host> STATUS` takes
+either, and unlike a terminal it does not reset the board when it opens the
+cable. It is the way in when the portal is off, or gone. Boot lines to expect:
 `RM HELLO …`, identity, `SSD1306 found`, `SoftAP … up`, `SX12xx online`,
 `Reticulum transport up`.
 
@@ -13,6 +17,13 @@ ROM, and a power cycle boots whatever is in flash.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| The portal will not open, connection refused, but the node answers otherwise | `maintenance.web_ui` is off — the routes are never registered and nothing listens on port 80. Deliberate on a board too small to host a portal | reach it over the console instead (`tools/console.py <host>`), and `SET maintenance.web_ui on` if you want it back; it restarts to apply |
+| Asking for the portal *reboots* the node | it ran out of byte-addressable RAM serving the page: `esp_littlefs: Unable to allocate FD`, then `abort()`, then a boot with `reason="panic or unhandled exception"` | the page did not fail, the request did. Check `dram_free` and `dram_largest_block`; on a tight board switch the portal off and use the console. See the row below |
+| Plenty of heap reported, but a task will not start or an allocation fails | `heap_free` counts 32-bit-only IRAM that no byte-addressed allocation can use — a board can read 46 KB free with 4 KB usable | read `dram_free`, `dram_min`, `dram_largest_block`: those decide. The boot log bills every subsystem (`cost: …`), so what is spending the RAM is a line to read rather than a guess |
+| The TCP console refuses everything with `401` | the session has not authenticated; only `VERSION` and `AUTH` work before it does | `AUTH <admin password>` — the same password the web API takes |
+| The TCP console answers `429 too many attempts` | three wrong passwords; the node stops answering `AUTH` for 30 s, counted for the node rather than the connection, so reconnecting does not clear it | wait it out, or use the cable, which is never locked out |
+| The TCP console answers `503 another session has the console` | one caller at a time, by design | close the other session, or wait: an idle one is dropped after 2 minutes, an unauthenticated one after 20 s |
+| The portal is missing a control the firmware supports, or names a wrong version | firmware and filesystem came from different builds — `-t upload` writes only the application | `-t uploadfs` as well; `/api/status` `assets.match` says whether the halves agree. On a board with no SD card this erases the Reticulum store and its identity |
 | `SX1262 init failed, code -2` / `No LoRa transceiver found` | wrong pins/board variant, or a v0.0.1 build on an SX127x board | ≥ v0.0.2 auto-detects; check wiring/`PIN_LORA_*` for custom boards; TCXO voltage for SX1262 modules |
 | OLED shows the previous firmware's screen | panel never re-initialised | ≥ v0.0.2 re-inits at boot |
 | Web flasher needs BOOT held | previous firmware's USB stack ignored the reset sequence | one-time; RetiMesh firmware resets hands-free |

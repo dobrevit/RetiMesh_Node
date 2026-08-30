@@ -97,6 +97,8 @@ belong to no unit: one is the board's shape, the other is the boot order.
 | `CaptiveDns.*` | the access point's resolver, and only the access point's |
 | `UsbNcm.*` | the S3's composite USB device and the network link behind it |
 | `PppArbiter.h`, `PppUart.*` | PPP over the bridge UART, sharing the port with the console |
+| `ConsoleServer.*` | the maintenance console on TCP :4243, one caller at a time, authenticated |
+| `LazyStart.h` | when a link built on demand may be built: the failure latch and the teardown gate, shared by PPP and USB-NCM (pure, unit-tested) |
 | `RetiTransportServer.*` | TCP :4242, HDLC, per-client ids, announce bookkeeping |
 | `HDLC.h` | RNS TCP framing (pure, unit-tested) |
 | `Mdns.h` | node name to a legal DNS label (pure, unit-tested) |
@@ -113,7 +115,11 @@ belong to no unit: one is the board's shape, the other is the boot order.
 ### `src/ui/` — what the node shows
 | File | What |
 |---|---|
-| `Display.*` | SSD1306 pages, button navigation, sleep |
+| `Display.*` | the pages, button navigation and sleep — drawn through `Panel`, so the same page code serves any panel |
+| `Panel.h` | what a panel has to offer a page: a canvas, a flush, and what its ink costs |
+| `OledPanel.*` | SSD1306 over I2C |
+| `EinkPanel.*` | 2.13" e-paper, whose update costs hundreds of milliseconds and whose image survives power off |
+| `RefreshPolicy.h` | whether a drawn frame is worth pushing to the glass, and how (pure, unit-tested) |
 | `DisplayLayout.h` | panel geometry and refresh cost, per board |
 | `DisplayIcons.h` | procedural glyphs, sized at the call site |
 | `Leds.*` | what the board's LEDs say: dark is normal, lit is worth a glance |
@@ -125,7 +131,7 @@ belong to no unit: one is the board's shape, the other is the boot order.
 | `Settings.*` | NVS-backed runtime settings (radio, Wi-Fi, transport, links, admin) |
 | `SettingsRules.h` | what a settings value may be — one home, shared by the API and the console (pure, unit-tested) |
 | `SettingsFields.*` | every setting by name, for the console's `GET`/`SET` |
-| `MaintenanceProtocol.h`, `Maintenance.*` | the serial maintenance console: line protocol (pure), commands |
+| `MaintenanceProtocol.h`, `Maintenance.*` | the maintenance console: line protocol (pure), commands, and one session per way in — the cable and the socket are served in the same pass |
 | `BootloaderPlan.h`, `Bootloader.*` | every restart: request → quiesce → restart; software entry into the ROM downloader on S2/S3/C3 |
 | `Diag.*` | reset reason, boot counter, previous run length, per-task stack headroom, heap and DRAM |
 | `StoreHome.*` | where the Reticulum store lives, the card's ownership marker, and moving it |
