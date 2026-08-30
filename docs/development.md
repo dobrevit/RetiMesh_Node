@@ -169,9 +169,15 @@ ring sizes were chosen as though PSRAM would absorb them, and the fallback path
 leaked its control block every time. Boards without PSRAM now take 4096 B per
 ring rather than 8192 (`RING_BYTES` in `Config.h`, overridable per board), the
 leak is gone, and the boot log names where the storage came from. On the Stick
-that is 13 720 B instead of 26 916, it ends boot with 17 428 B free instead of
-4548, and it stops crash-looping — 15 minutes with no panic, no `bad_alloc` and
-no dropped packets, against a reboot every 35 seconds before.
+that is 13 720 B instead of 26 916, and it ends boot with 17 428 B free instead
+of 4548 — the difference between a board that panicked twice in seventy seconds
+and one that ran ten minutes with no panic and no `bad_alloc`.
+
+It is not the difference between broken and well, and it is worth being exact
+about that: over those ten minutes the same board's low-water mark still fell
+to **956 bytes**, and it still aborted once under load. Twelve kilobytes back
+buys a board this tight some room, not health. What it needs next is the 28 KB
+web server made lazy, and probably more after that.
 
 The trade is deliberate: 4096 B holds about eight RNS packets, which is seconds
 of backlog at LoRa speeds, and a ring that turns out to be too small says so
