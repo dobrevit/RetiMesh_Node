@@ -41,6 +41,8 @@
 
 #pragma once
 
+#include <exception>
+
 #include <Arduino.h>
 #include "Config.h"
 
@@ -142,6 +144,76 @@ size_t stacks(TaskStack* out, size_t max);
 // `name` is set to nullptr — not to a placeholder — when no task was found:
 // zero headroom and no reading at all must not look the same.
 uint32_t lowestHeadroom(const char** name);
+
+// --- running out of memory, survivably ---------------------------------------
+// An allocation that fails must degrade the thing that failed, not restart the
+// node under whoever was using it. Measured, on a Heltec Wireless Stick with
+// an operator connected to its access point and asking for the portal:
+// `esp_littlefs: Unable to allocate FD`, then abort() on core 0, then a boot
+// with reason "panic or unhandled exception". The page did not fail to render;
+// the request rebooted the board out from under the person making it. And the
+// only evidence afterwards was a backtrace: nothing said the node had been
+// short of memory at all.
+//
+// Three parts, because the paths differ in what can be done about them:
+//
+//   guard()    wraps work this firmware owns — every task loop it starts, and
+//              the API handlers, which run on a framework task. What throws
+//              there is caught, counted and logged, and that piece of work is
+//              skipped rather than the node dying.
+//   the new-handler   fires the moment any allocation fails, anywhere,
+//              including inside the framework and the libraries. It cannot
+//              stop the failure, but it makes it *say so* — with the figures
+//              that explain it — before anything downstream throws.
+//   the terminate handler   is the last word when something we do not own
+//              throws where nobody catches it, which is still possible:
+//              serveStatic reads the filesystem on the async_tcp task and
+//              neither the task nor the code is ours to wrap. The node still
+//              dies, but it dies explaining itself instead of leaving a bare
+//              backtrace.
+//
+// What that is worth, measured on the board that provokes it. A Wireless
+// Stick with its portal on sits at about 10 KB of byte-addressable RAM and
+// falls to a few hundred bytes under a page request. It served eight portal
+// requests and survived twenty-two allocation failures, each named as it
+// happened with the figures behind it, before one landed in serveStatic and
+// took the node down — and that death now reads
+//
+//   about to abort: an allocation failed and nobody caught it.
+//   1992 B free / 692 B largest block of 8-bit internal RAM, 23 since boot
+//
+// rather than a bare `abort() was called at PC 0x...`. So this makes a
+// starved node diagnosable and considerably more durable. It does not make
+// it safe: a throw inside framework code on a framework task still ends the
+// run, and the answer for a board that small is not to host a portal
+// (maintenance.web_ui).
+//
+// Installed by begin(), so they are in place before anything else allocates.
+
+// How many allocations are known to have failed since boot, and when the last
+// one was. Reported in STATUS and /api/status: a node under memory pressure
+// should be visible as such while it is still running, rather than inferred
+// afterwards from a restart.
+struct Faults { uint32_t allocFailures; uint32_t lastMs; uint32_t caught; };
+Faults faults();
+
+void noteCaught(const char* what, const char* why);   // guard()'s reporting half
+
+// Run `body`, and survive what it throws. Returns false when something was
+// caught, so a caller can back off rather than retry into the same wall.
+// `what` names the work in the log line — a task, or an API route.
+template <typename F>
+bool guard(const char* what, F&& body) {
+  try {
+    body();
+    return true;
+  } catch (const std::exception& e) {
+    noteCaught(what, e.what());
+  } catch (...) {
+    noteCaught(what, "an exception of no known type");
+  }
+  return false;
+}
 
 // Logs the heartbeat's diagnostic lines and warns when headroom or heap has
 // fallen past the thresholds in Config.h. Returns true if anything warned.

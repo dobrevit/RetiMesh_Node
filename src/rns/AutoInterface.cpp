@@ -361,32 +361,42 @@ void task(void*) {
 
   uint32_t lastAnnounce = 0, lastReverse = 0, lastSecond = 0;
   uint8_t buf[RNS_MTU + 64];
+  // Guarded whole rather than per statement: the loop below uses continue,
+  // which cannot cross a lambda. A throw leaves the inner loop, is
+  // reported, and the outer one goes back in (Diag.h).
   for (;;) {
-    uint32_t now = millis();
-    if (now - lastAnnounce >= kAnnounceMs) { lastAnnounce = now; sendDiscovery(); }
-    if (now - lastReverse  >= kReverseMs)  { lastReverse  = now; sendReversePeering(); }
-    if (now - lastSecond   >= 1000)        { lastSecond   = now; expirePeers(); refreshLinks(); }
-
-    fd_set rd;
-    FD_ZERO(&rd);
-    FD_SET(sDisc, &rd); FD_SET(sUni, &rd); FD_SET(sData, &rd);
-    int maxfd = sDisc;
-    if (sUni  > maxfd) maxfd = sUni;
-    if (sData > maxfd) maxfd = sData;
-    timeval tv = { 0, (int)(kSelectMs * 1000) };
-    if (select(maxfd + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
-
-    bool more = false;
-    if (FD_ISSET(sDisc, &rd))
-      more |= drain(sDisc, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
-        handleDiscovery(b, n, s, "discovery"); });
-    if (FD_ISSET(sUni, &rd))
-      more |= drain(sUni, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
-        handleDiscovery(b, n, s, "reverse peering"); });
-    if (FD_ISSET(sData, &rd))
-      more |= drain(sData, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
-        handleData(b, n, s); });
-    if (more) vTaskDelay(1);                         // let core 0 breathe under a flood
+    Diag::guard("the autointerface task", [&] {
+      for (;;) {
+        uint32_t now = millis();
+        if (now - lastAnnounce >= kAnnounceMs) { lastAnnounce = now; sendDiscovery(); }
+        if (now - lastReverse  >= kReverseMs)  { lastReverse  = now; sendReversePeering(); }
+        if (now - lastSecond   >= 1000)        { lastSecond   = now; expirePeers(); refreshLinks(); }
+  
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(sDisc, &rd); FD_SET(sUni, &rd); FD_SET(sData, &rd);
+        int maxfd = sDisc;
+        if (sUni  > maxfd) maxfd = sUni;
+        if (sData > maxfd) maxfd = sData;
+        timeval tv = { 0, (int)(kSelectMs * 1000) };
+        if (select(maxfd + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
+  
+        bool more = false;
+        if (FD_ISSET(sDisc, &rd))
+          more |= drain(sDisc, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
+            handleDiscovery(b, n, s, "discovery"); });
+        if (FD_ISSET(sUni, &rd))
+          more |= drain(sUni, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
+            handleDiscovery(b, n, s, "reverse peering"); });
+        if (FD_ISSET(sData, &rd))
+          more |= drain(sData, buf, sizeof(buf), [](const uint8_t* b, int n, const sockaddr_in6& s) {
+            handleData(b, n, s); });
+        if (more) vTaskDelay(1);                         // let core 0 breathe under a flood
+      }
+    });
+    // Something threw and was contained. A short wait, then back in:
+    // retrying at full speed into the same wall helps nobody.
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 

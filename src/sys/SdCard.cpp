@@ -146,7 +146,7 @@ const char* SdCard::requestFormat() {
 void SdCard::task(void* self) {
   auto* sd = static_cast<SdCard*>(self);
   for (;;) {
-    sd->poll();
+    Diag::guard("the sd card task", [sd] { sd->poll(); });
     vTaskDelay(pdMS_TO_TICKS(SD_POLL_MS));
   }
 }

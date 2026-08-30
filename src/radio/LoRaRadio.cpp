@@ -19,6 +19,7 @@
 // ============================================================================
 //  LoRaRadio.cpp — see LoRaRadio.h for the framing / flow description.
 // ============================================================================
+#include "Diag.h"
 #include "LoRaRadio.h"
 #include <esp_random.h>
 #include "Neighbors.h"
@@ -379,7 +380,10 @@ bool LoRaRadio::applySettings(const RadioSettings& s) {
 // ---------------------------------------------------------------------------
 void LoRaRadio::radioTask(void* self) {
   s_taskHandle = xTaskGetCurrentTaskHandle();
-  static_cast<LoRaRadio*>(self)->taskLoop();
+  // The radio is the one thing a relay exists to do, so it is the last thing
+  // that should be allowed to end the node (Diag.h). taskLoop() does not
+  // return; the guard is here for what it throws on the way.
+  Diag::guard("the radio task", [self] { static_cast<LoRaRadio*>(self)->taskLoop(); });
 }
 
 void LoRaRadio::taskLoop() {

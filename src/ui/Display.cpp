@@ -19,6 +19,7 @@
 // ============================================================================
 //  Display.cpp — see Display.h
 // ============================================================================
+#include "Diag.h"
 #include "Display.h"
 #include "DisplayLayout.h"
 #include "esp32-hal-periman.h"
@@ -92,6 +93,10 @@ void Display::displayTask(void* self) {
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   d->_lastActivityMs = millis();
   for (;;) {
+    // A page that cannot allocate skips that pass rather than taking the node
+    // with it: the display is the least important thing on a node under
+    // pressure and must be the first to give way (Diag.h).
+    Diag::guard("the display task", [d] {
     d->pollButton();
     uint32_t now = millis();
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
@@ -122,6 +127,7 @@ void Display::displayTask(void* self) {
       d->_paintDue = false;
       d->paint();
     }
+    });
     vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
   }
 }

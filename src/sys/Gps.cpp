@@ -155,34 +155,42 @@ void resetState() {
 }
 
 void task(void*) {
+  // Guarded whole rather than per statement: the loop below uses continue,
+  // which cannot cross a lambda. A receiver that cannot be parsed for want
+  // of memory costs a fix, not the node (Diag.h).
   for (;;) {
-    // The lock is taken before the enabled test, not after it: setEnabled()
-    // closes the UART while holding the same lock, and a reader that decided
-    // to run just before that would otherwise go on to read a port that has
-    // since been shut down.
-    xSemaphoreTake(sLock, portMAX_DELAY);
-    if (sFix.enabled) {
-      // Bounded per pass so a chatty receiver cannot monopolise the task.
-      // 9600 baud is under 1 KB/s, and this runs ten times a second.
-      uint16_t budget = 256;
-      while (sSerial.available() && budget--) {
-        char c = sSerial.read();
-        if (c == '$') { sLen = 0; sOverflow = false; }
-        if (c == '\r' || c == '\n') {
-          if (!sOverflow && sLen > 5) { sLine[sLen] = 0; parse(sLine, sLen); }
-          sLen = 0; sOverflow = false;
-          continue;
+    Diag::guard("the gps task", [&] {
+      for (;;) {
+        // The lock is taken before the enabled test, not after it: setEnabled()
+        // closes the UART while holding the same lock, and a reader that decided
+        // to run just before that would otherwise go on to read a port that has
+        // since been shut down.
+        xSemaphoreTake(sLock, portMAX_DELAY);
+        if (sFix.enabled) {
+          // Bounded per pass so a chatty receiver cannot monopolise the task.
+          // 9600 baud is under 1 KB/s, and this runs ten times a second.
+          uint16_t budget = 256;
+          while (sSerial.available() && budget--) {
+            char c = sSerial.read();
+            if (c == '$') { sLen = 0; sOverflow = false; }
+            if (c == '\r' || c == '\n') {
+              if (!sOverflow && sLen > 5) { sLine[sLen] = 0; parse(sLine, sLen); }
+              sLen = 0; sOverflow = false;
+              continue;
+            }
+            if (sLen < NMEA_MAX - 1) sLine[sLen++] = c;
+            else                     sOverflow = true;
+          }
+          // Drop a stale fix rather than reporting a position the receiver no
+          // longer stands behind.
+          if (sFix.valid && millis() - sLastFixMs >= FIX_TIMEOUT) sFix.valid = false;
+          sFix.ageMs = sFix.sentences ? millis() - sLastSentenceMs : 0;
         }
-        if (sLen < NMEA_MAX - 1) sLine[sLen++] = c;
-        else                     sOverflow = true;
+        xSemaphoreGive(sLock);
+        vTaskDelay(pdMS_TO_TICKS(100));
       }
-      // Drop a stale fix rather than reporting a position the receiver no
-      // longer stands behind.
-      if (sFix.valid && millis() - sLastFixMs >= FIX_TIMEOUT) sFix.valid = false;
-      sFix.ageMs = sFix.sentences ? millis() - sLastSentenceMs : 0;
-    }
-    xSemaphoreGive(sLock);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    });
+    vTaskDelay(pdMS_TO_TICKS(100));      // contained: wait, then back in
   }
 }
 
