@@ -1250,8 +1250,12 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (in["duty_cycle_pct"].is<int>()) r.dutyCyclePct = in["duty_cycle_pct"];
   if (in["gps_enabled"].is<bool>())   r.gpsEnabled   = in["gps_enabled"];
   if (in["gps_share_position"].is<bool>()) r.gpsSharePosition = in["gps_share_position"];
+  char msg0[160];
   if (in["callsign"].is<const char*>()) {
     String c = in["callsign"].as<String>(); c.trim();
+    // Checked before the copy: the field is fixed-width, so a check after it
+    // would see a truncated callsign and pass.
+    if (!SettingsRules::validateCallsign(c.c_str(), msg0, sizeof(msg0))) { sendError(request, 400, msg0); return; }
     strlcpy(r.callsign, c.c_str(), sizeof(r.callsign));
   }
   if (in["region"].is<const char*>()) {
@@ -1338,8 +1342,8 @@ void WifiManager::handleAdminPost(AsyncWebServerRequest* request, const char* bo
     sendError(request, 400, "bad json"); return;
   }
   const char* p = in["password"];
-  size_t pl = strlen(p);
-  if (pl < 4 || pl > 32) { sendError(request, 400, "password must be 4-32 characters"); return; }
+  char amsg[160];
+  if (!SettingsRules::validateAdminPassword(p, amsg, sizeof(amsg))) { sendError(request, 400, amsg); return; }
   if (!settings.saveAdminPassword(p)) { sendError(request, 500, "nvs"); return; }
   request->send(200, "application/json", "{\"ok\":true}");
 }
@@ -1376,9 +1380,8 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
     if (g.length() > 32) { sendError(request, 400, "group id must be at most 32 characters"); return; }
     strlcpy(t.autoGroupId, g.c_str(), sizeof(t.autoGroupId));
   }
-  if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5
-      || t.autoMode < 1 || t.autoMode > 5) { sendError(request, 400, "mode must be 1-5"); return; }
-  if (t.announceCap < 1 || t.announceCap > 100) { sendError(request, 400, "announce cap must be 1-100 %"); return; }
+  char tmsg[160];
+  if (!SettingsRules::validateTransport(t, tmsg, sizeof(tmsg))) { sendError(request, 400, tmsg); return; }
   TransportSettings before = settings.transport();
   if (!settings.saveTransport(t)) { sendError(request, 500, "nvs"); return; }
   Power::apply((Power::Profile)t.powerProfile);                  // live

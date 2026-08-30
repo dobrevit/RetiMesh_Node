@@ -30,6 +30,7 @@
 #include "LoRaRadio.h"
 #include "Bootloader.h"
 #include "Gps.h"
+#include "Power.h"
 
 extern Settings settings;
 extern LoRaRadio loraRadio;
@@ -66,7 +67,27 @@ bool parseFloat(const char* v, float& out) {
   char* end = nullptr;
   const float f = strtof(v, &end);
   if (end == v || *end) return false;
+  // "nan" parses cleanly and then passes every bound, because each comparison
+  // against a NaN is false: it would be stored and handed to the radio as a
+  // frequency no probe can set. "inf" is caught by the upper bound; this is
+  // the one that slips past.
+  if (!isfinite(f)) return false;
   out = f;
+  return true;
+}
+
+// An unsigned value that has to fit the field it is going into. Without the
+// ceiling the cast wraps and the stored value is not the one that was typed:
+// preamble 65542 becomes 6, which then passes its own 6-1000 bound.
+bool parseU32Max(const char* v, uint32_t max, uint32_t& out, char* err, size_t n) {
+  if (!parseU32(v, out)) { snprintf(err, n, "expected a whole number"); return false; }
+  if (out > max) { snprintf(err, n, "value out of range: at most %lu here", (unsigned long)max); return false; }
+  return true;
+}
+
+bool parseI32Range(const char* v, int32_t lo, int32_t hi, int32_t& out, char* err, size_t n) {
+  if (!parseI32(v, out)) { snprintf(err, n, "expected a whole number"); return false; }
+  if (out < lo || out > hi) { snprintf(err, n, "value out of range: %ld to %ld here", (long)lo, (long)hi); return false; }
   return true;
 }
 
@@ -75,7 +96,18 @@ bool parseFloat(const char* v, float& out) {
 // does after its own parse: validate against the shared rule, save, and apply
 // whatever applies without a restart.
 // ---------------------------------------------------------------------------
+// Nothing is written while a restart is on its way. Every settings POST is
+// refused with 503 in that state and LocalLink::applyLinks refuses with
+// RefusedBusy for the reason it gives: a setting saved now might not reach
+// flash before the restart does.
+bool restartPending(char* err, size_t n) {
+  if (!Bootloader::pending()) return false;
+  snprintf(err, n, "a restart is already in progress");
+  return true;
+}
+
 Result commitRadio(RadioSettings& r, char* err, size_t n) {
+  if (restartPending(err, n)) return Result::Busy;
   const int8_t maxDbm = loraRadio.online() ? loraRadio.maxTxDbm() : 22;
   if (!SettingsRules::validateRadio(r, loraRadio.caps(), maxDbm, err, n)) return Result::BadValue;
   if (!settings.saveRadio(r)) return Result::NvsFailed;
@@ -90,6 +122,7 @@ Result commitRadio(RadioSettings& r, char* err, size_t n) {
 // the request that changed it, which is the same reason the web API answers
 // "restart": true rather than switching the radio there and then.
 Result commitWifi(WifiSettings& w, char* err, size_t n) {
+  if (restartPending(err, n)) return Result::Busy;
   if (!SettingsRules::validateWifi(w, err, n)) return Result::BadValue;
   if (!settings.saveWifi(w)) return Result::NvsFailed;
   return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
@@ -98,18 +131,26 @@ Result commitWifi(WifiSettings& w, char* err, size_t n) {
 // The interface modes are registered with Transport at boot, so they need a
 // restart too; the power profile and the store's home are read at boot as well.
 Result commitTransport(TransportSettings& t, char* err, size_t n) {
-  if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5 ||
-      t.autoMode < 1 || t.autoMode > 5) {
-    snprintf(err, n, "mode must be 1-5 (full, gateway, access_point, roaming, boundary)");
-    return Result::BadValue;
-  }
-  if (t.announceCap > 100) { snprintf(err, n, "announce cap must be 0-100 %%"); return Result::BadValue; }
-  if (t.powerProfile > 2)  { snprintf(err, n, "power profile must be 0 performance, 1 balanced, 2 battery"); return Result::BadValue; }
+  if (restartPending(err, n)) return Result::Busy;
+  if (!SettingsRules::validateTransport(t, err, n)) return Result::BadValue;
+  const TransportSettings before = settings.transport();
   if (!settings.saveTransport(t)) return Result::NvsFailed;
+  Power::apply((Power::Profile)t.powerProfile);              // live, as the web API applies it
+  // Only the fields the interfaces are built from need a restart; the rest —
+  // the announce rate limits, the power profile — take effect as they are
+  // saved. Restarting for all of them would drop every client and this very
+  // console session to change a rate limit.
+  const bool needRestart = before.enabled != t.enabled || before.loraMode != t.loraMode ||
+                           before.wifiMode != t.wifiMode || before.autoMode != t.autoMode ||
+                           before.autoEnabled != t.autoEnabled ||
+                           strcmp(before.autoGroupId, t.autoGroupId) != 0 ||
+                           before.announceCap != t.announceCap;
+  if (!needRestart) return Result::Ok;
   return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
 }
 
 Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n) {
+  if (restartPending(err, n)) return Result::Busy;
   // The console can switch itself off, but not into a node with no way in.
   if (LocalLink::lockedOut(settings.links(), m.consoleEnabled)) {
     snprintf(err, n, "refused: no local link is enabled, so switching the console off "
@@ -121,8 +162,8 @@ Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n) {
 }
 
 Result commitAdmin(const char* password, char* err, size_t n) {
-  const size_t len = strlen(password);
-  if (len < 8 || len > 32) { snprintf(err, n, "admin password must be 8-32 characters"); return Result::BadValue; }
+  if (restartPending(err, n)) return Result::Busy;
+  if (!SettingsRules::validateAdminPassword(password, err, n)) return Result::BadValue;
   if (!settings.saveAdminPassword(password)) return Result::NvsFailed;
   return Result::Ok;
 }
@@ -139,13 +180,15 @@ Result commitLinks(const LinkSettings& want, const bool* changed, char* err, siz
     case LocalLink::Apply::SavedRestarting:  return Result::OkRestart;
     case LocalLink::Apply::SavedNextBoot:    return Result::OkNextBoot;
     case LocalLink::Apply::RefusedUnusable:
+      snprintf(err, n, "%s", detail ? detail : "this board or build has no such link");
+      return Result::Unsupported;
     case LocalLink::Apply::RefusedLockedOut:
     case LocalLink::Apply::RefusedBaud:
       snprintf(err, n, "%s", detail ? detail : "refused");
       return Result::Refused;
     case LocalLink::Apply::RefusedBusy:
       snprintf(err, n, "a restart is already in progress");
-      return Result::Refused;
+      return Result::Busy;
     default:                                 return Result::NvsFailed;
   }
 }
@@ -199,39 +242,43 @@ const Entry kFields[] = {
       RadioSettings r = settings.radio(); r.bwKhz = f; return commitRadio(r, e, n); } },
   { "radio.sf",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.radio().sf); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a spreading factor"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       RadioSettings r = settings.radio(); r.sf = (uint8_t)u; return commitRadio(r, e, n); } },
   { "radio.cr",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.radio().cr); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a coding rate"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       RadioSettings r = settings.radio(); r.cr = (uint8_t)u; return commitRadio(r, e, n); } },
   { "radio.tx_dbm",
     [](char* o, size_t n) { snprintf(o, n, "%d", (int)settings.radio().txDbm); },
-    [](const char* v, char* e, size_t n) { int32_t i; if (!parseI32(v, i)) { snprintf(e, n, "expected a power in dBm"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { int32_t i; if (!parseI32Range(v, -128, 127, i, e, n)) return Result::BadValue;
       RadioSettings r = settings.radio(); r.txDbm = (int8_t)i; return commitRadio(r, e, n); } },
   { "radio.sync_word",
     [](char* o, size_t n) { snprintf(o, n, "0x%02X", (unsigned)settings.radio().syncWord); },
-    [](const char* v, char* e, size_t n) { uint32_t u = strtoul(v, nullptr, 0);
+    [](const char* v, char* e, size_t n) { char* end = nullptr; const unsigned long u = strtoul(v, &end, 0);
+      if (end == v || *end || u > 255) { snprintf(e, n, "expected a sync word 0-255, decimal or 0x hex"); return Result::BadValue; }
       RadioSettings r = settings.radio(); r.syncWord = (uint8_t)u; return commitRadio(r, e, n); } },
   { "radio.preamble",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.radio().preamble); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a symbol count"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 65535, u, e, n)) return Result::BadValue;
       RadioSettings r = settings.radio(); r.preamble = (uint16_t)u; return commitRadio(r, e, n); } },
   { "radio.beacon_interval",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.radio().beaconInterval); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected seconds, or 0 for off"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 65535, u, e, n)) return Result::BadValue;
       RadioSettings r = settings.radio(); r.beaconInterval = (uint16_t)u; return commitRadio(r, e, n); } },
   { "radio.announce_interval",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.radio().announceInterval); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected seconds, or 0 for off"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 65535, u, e, n)) return Result::BadValue;
       RadioSettings r = settings.radio(); r.announceInterval = (uint16_t)u; return commitRadio(r, e, n); } },
   { "radio.duty_cycle_pct",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.radio().dutyCyclePct); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a percentage, or 0 for unlimited"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       RadioSettings r = settings.radio(); r.dutyCyclePct = (uint8_t)u; return commitRadio(r, e, n); } },
   { "radio.callsign",
     [](char* o, size_t n) { renderStr(o, n, settings.radio().callsign); },
     [](const char* v, char* e, size_t n) { RadioSettings r = settings.radio();
+      // Checked before the copy: the field is fixed-width, so afterwards the
+      // overlong value is already a truncated one that passes.
+      if (!SettingsRules::validateCallsign(v, e, n)) return Result::BadValue;
       strlcpy(r.callsign, v, sizeof(r.callsign)); return commitRadio(r, e, n); } },
   { "radio.gps_enabled",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.radio().gpsEnabled ? "on" : "off"); },
@@ -246,6 +293,7 @@ const Entry kFields[] = {
   { "wifi.ssid",
     [](char* o, size_t n) { renderStr(o, n, settings.wifi().ssid); },
     [](const char* v, char* e, size_t n) { WifiSettings w = settings.wifi();
+      if (!SettingsRules::validateSsid(v, false, e, n)) return Result::BadValue;
       strlcpy(w.ssid, v, sizeof(w.ssid)); return commitWifi(w, e, n); } },
   { "wifi.password",
     [](char* o, size_t n) { renderSecret(o, n, settings.wifi().password); },
@@ -258,11 +306,11 @@ const Entry kFields[] = {
       return commitWifi(w, e, n); } },
   { "wifi.channel",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.wifi().channel); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a channel number"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       WifiSettings w = settings.wifi(); w.channel = (uint8_t)u; return commitWifi(w, e, n); } },
   { "wifi.max_stations",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.wifi().maxStations); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a station count"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       WifiSettings w = settings.wifi(); w.maxStations = (uint8_t)u; return commitWifi(w, e, n); } },
   { "wifi.hidden",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.wifi().hidden ? "on" : "off"); },
@@ -273,6 +321,7 @@ const Entry kFields[] = {
     [](const char* v, char* e, size_t n) { WifiSettings w = settings.wifi();
       // The station's password goes with its network: leaving the old one
       // against a new SSID is how a node ends up in an AUTH_FAIL loop.
+      if (!SettingsRules::validateSsid(v, true, e, n)) return Result::BadValue;
       strlcpy(w.staSsid, v, sizeof(w.staSsid));
       if (!w.staSsid[0]) w.staPassword[0] = '\0';
       return commitWifi(w, e, n); } },
@@ -299,7 +348,7 @@ const Entry kFields[] = {
       return commitLinks(want, changed, e, n); } },
 
   // --- maintenance -------------------------------------------------------
-  { "maintenance.console",
+  { "maintenance.console_enabled",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().consoleEnabled ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       MaintenanceSettings m = settings.maintenance(); m.consoleEnabled = b; return commitMaintenance(m, e, n); } },
@@ -319,15 +368,15 @@ const Entry kFields[] = {
       TransportSettings t = settings.transport(); t.enabled = b; return commitTransport(t, e, n); } },
   { "transport.lora_mode",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().loraMode); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a mode 1-5"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       TransportSettings t = settings.transport(); t.loraMode = (uint8_t)u; return commitTransport(t, e, n); } },
   { "transport.wifi_mode",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().wifiMode); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a mode 1-5"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       TransportSettings t = settings.transport(); t.wifiMode = (uint8_t)u; return commitTransport(t, e, n); } },
   { "transport.auto_mode",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().autoMode); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a mode 1-5"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       TransportSettings t = settings.transport(); t.autoMode = (uint8_t)u; return commitTransport(t, e, n); } },
   { "transport.auto_enabled",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.transport().autoEnabled ? "on" : "off"); },
@@ -336,27 +385,32 @@ const Entry kFields[] = {
   { "transport.auto_group_id",
     [](char* o, size_t n) { renderStr(o, n, settings.transport().autoGroupId); },
     [](const char* v, char* e, size_t n) { TransportSettings t = settings.transport();
+      if (!SettingsRules::validateGroupId(v, e, n)) return Result::BadValue;
       strlcpy(t.autoGroupId, v, sizeof(t.autoGroupId)); return commitTransport(t, e, n); } },
   { "transport.announce_cap",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().announceCap); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a percentage"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       TransportSettings t = settings.transport(); t.announceCap = (uint8_t)u; return commitTransport(t, e, n); } },
   { "transport.announce_rate_target",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().announceRateTarget); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected seconds, or 0 for off"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 65535, u, e, n)) return Result::BadValue;
       TransportSettings t = settings.transport(); t.announceRateTarget = (uint16_t)u; return commitTransport(t, e, n); } },
   { "transport.announce_rate_grace",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().announceRateGrace); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected a count"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
       TransportSettings t = settings.transport(); t.announceRateGrace = (uint8_t)u; return commitTransport(t, e, n); } },
   { "transport.announce_rate_penalty",
     [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().announceRatePenalty); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected seconds"); return Result::BadValue; }
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 65535, u, e, n)) return Result::BadValue;
       TransportSettings t = settings.transport(); t.announceRatePenalty = (uint16_t)u; return commitTransport(t, e, n); } },
   { "transport.power_profile",
-    [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().powerProfile); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32(v, u)) { snprintf(e, n, "expected 0, 1 or 2"); return Result::BadValue; }
-      TransportSettings t = settings.transport(); t.powerProfile = (uint8_t)u; return commitTransport(t, e, n); } },
+    // By name, as the web API takes it: "2" means nothing to a person reading
+    // a settings dump, and the two interfaces should not disagree about what
+    // this value looks like.
+    [](char* o, size_t n) { snprintf(o, n, "%s", Power::profileName((Power::Profile)settings.transport().powerProfile)); },
+    [](const char* v, char* e, size_t n) { Power::Profile pp;
+      if (!Power::profileFromName(v, pp)) { snprintf(e, n, "power_profile must be performance|balanced|battery"); return Result::BadValue; }
+      TransportSettings t = settings.transport(); t.powerProfile = (uint8_t)pp; return commitTransport(t, e, n); } },
 
   // --- admin -------------------------------------------------------------
   { "admin.password",
@@ -407,9 +461,11 @@ const char* resultText(Result r) {
     case Result::Ok:         return "saved";
     case Result::OkRestart:  return "saved; restarting to apply it";
     case Result::OkNextBoot: return "saved; a restart is already in progress, so it applies at the next boot";
-    case Result::Unknown:    return "no such setting";
-    case Result::BadValue:   return "bad value";
-    case Result::Refused:    return "refused";
+    case Result::Unknown:     return "no such setting";
+    case Result::BadValue:    return "bad value";
+    case Result::Refused:     return "refused";
+    case Result::Unsupported: return "not on this board";
+    case Result::Busy:        return "a restart is already in progress";
     case Result::NvsFailed:  return "the settings store would not take it";
   }
   return "unknown";

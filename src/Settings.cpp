@@ -41,12 +41,15 @@ const char* Settings::securityName(ApSecurity s) {
   }
 }
 
+// Case-insensitively: every other value this node accepts is, the console
+// uppercases its tokens, and "WPA2" being refused where "wpa2" is taken is
+// the kind of difference nobody can guess at from the error message.
 bool Settings::securityFromName(const char* name, ApSecurity& out) {
   if (!name) return false;
-  if (!strcmp(name, "open"))     { out = ApSecurity::Open;      return true; }
-  if (!strcmp(name, "wpa2"))     { out = ApSecurity::WPA2;      return true; }
-  if (!strcmp(name, "wpa2wpa3")) { out = ApSecurity::WPA2_WPA3; return true; }
-  if (!strcmp(name, "wpa3"))     { out = ApSecurity::WPA3;      return true; }
+  if (!strcasecmp(name, "open"))     { out = ApSecurity::Open;      return true; }
+  if (!strcasecmp(name, "wpa2"))     { out = ApSecurity::WPA2;      return true; }
+  if (!strcasecmp(name, "wpa2wpa3")) { out = ApSecurity::WPA2_WPA3; return true; }
+  if (!strcasecmp(name, "wpa3"))     { out = ApSecurity::WPA3;      return true; }
   return false;
 }
 

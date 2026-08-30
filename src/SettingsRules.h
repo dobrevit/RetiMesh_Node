@@ -43,6 +43,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "Settings.h"
 #include "RadioCaps.h"
 #include "Airtime.h"
@@ -56,16 +57,16 @@ namespace SettingsRules {
 inline bool validateRadio(const RadioSettings& r, const RadioCaps::Caps& caps,
                           int8_t maxDbm, char* err, size_t errLen) {
   char bwlist[96];
-  // The callsign travels as text and is checked as text: printable ASCII
-  // without spaces, because it is put into an announce and read back out of
-  // one by things that split on whitespace.
-  for (const char* p = r.callsign; *p; p++)
-    if (*p < 0x21 || *p > 0x7E) {
-      snprintf(err, errLen, "callsign: printable ASCII without spaces only");
-      return false;
-    }
-  if (strlen(r.callsign) > 32) {
-    snprintf(err, errLen, "callsign must be at most 32 characters");
+  // The callsign is checked by validateCallsign before it is copied in — a
+  // length check here would be dead, because RadioSettings::callsign is 33
+  // bytes and strlcpy has already truncated anything longer.
+
+  // A frequency or a bandwidth that is not a number passes every bound below,
+  // because each comparison against a NaN is false — it would be stored and
+  // handed to the driver as a channel no probe can set. The parsers refuse it
+  // too; this is the rule refusing it whatever route the value took.
+  if (!isfinite(r.freqMhz) || !isfinite(r.bwKhz)) {
+    snprintf(err, errLen, "frequency and bandwidth must be numbers");
     return false;
   }
 
@@ -127,19 +128,77 @@ inline bool validateRadio(const RadioSettings& r, const RadioCaps::Caps& caps,
   return true;
 }
 
+// Text that is length-checked before it is copied, not after: the fields it
+// lands in are fixed arrays, so a check on the stored value can never see the
+// overflow — it sees the truncation. The web API used to refuse an overlong
+// callsign with a 400 and would have started silently shortening it.
+inline bool validateCallsign(const char* raw, char* err, size_t errLen) {
+  // Printable ASCII without spaces, because it goes into an announce and is
+  // read back out of one by things that split on whitespace.
+  for (const char* p = raw; *p; p++)
+    if (*p < 0x21 || *p > 0x7E) {
+      snprintf(err, errLen, "callsign: printable ASCII without spaces only");
+      return false;
+    }
+  if (strlen(raw) > 32) {
+    snprintf(err, errLen, "callsign must be at most 32 characters");
+    return false;
+  }
+  return true;
+}
+
+inline bool validateGroupId(const char* raw, char* err, size_t errLen) {
+  if (strlen(raw) > 32) {
+    snprintf(err, errLen, "group id must be at most 32 characters");
+    return false;
+  }
+  return true;
+}
+
+inline bool validateSsid(const char* raw, bool station, char* err, size_t errLen) {
+  if (strlen(raw) > 32) {
+    snprintf(err, errLen, station ? "station ssid must be at most 32 characters"
+                                  : "ssid must be at most 32 characters");
+    return false;
+  }
+  return true;
+}
+
+// The admin password. The bound is the web API's, to the character: a node
+// whose password was set over HTTP has to be settable to the same value over
+// the cable, or the two disagree about what this node's password may be.
+inline bool validateAdminPassword(const char* raw, char* err, size_t errLen) {
+  const size_t len = strlen(raw);
+  if (len < 4 || len > 32) {
+    snprintf(err, errLen, "password must be 4-32 characters");
+    return false;
+  }
+  return true;
+}
+
+// Transport. Modes are rnsd's 1-5; the announce cap is a percentage of the
+// interface's bandwidth and 0 would be a node that never announces, which is
+// what the switch is for rather than the cap.
+inline bool validateTransport(const TransportSettings& t, char* err, size_t errLen) {
+  if (t.loraMode < 1 || t.loraMode > 5 || t.wifiMode < 1 || t.wifiMode > 5 ||
+      t.autoMode < 1 || t.autoMode > 5) {
+    snprintf(err, errLen, "mode must be 1-5");
+    return false;
+  }
+  if (t.announceCap < 1 || t.announceCap > 100) {
+    snprintf(err, errLen, "announce cap must be 1-100 %%");
+    return false;
+  }
+  return validateGroupId(t.autoGroupId, err, errLen);
+}
+
 // Wi-Fi. The lengths are the 802.11 ones and the rest is what the access point
 // can be asked for; the password rule is checked against the security in the
 // same set of values, because "open with a short password" and "secured with
 // none" are the two ways to end up with an access point nobody can join.
 inline bool validateWifi(const WifiSettings& w, char* err, size_t errLen) {
-  if (strlen(w.ssid) > 32) {
-    snprintf(err, errLen, "ssid must be at most 32 characters");
-    return false;
-  }
-  if (strlen(w.staSsid) > 32) {
-    snprintf(err, errLen, "station ssid must be at most 32 characters");
-    return false;
-  }
+  if (!validateSsid(w.ssid, false, err, errLen)) return false;
+  if (!validateSsid(w.staSsid, true, err, errLen)) return false;
   if (w.password[0] && (strlen(w.password) < 8 || strlen(w.password) > 63)) {
     snprintf(err, errLen, "password must be 8-63 characters");
     return false;

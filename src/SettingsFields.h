@@ -55,7 +55,9 @@ enum class Result : uint8_t {
   OkNextBoot,  // saved; a restart is already in progress, so it lands at the next boot
   Unknown,     // no such key
   BadValue,    // refused by the rule for that setting; `err` says why
-  Refused,     // would leave the node unreachable, or this board cannot do it
+  Refused,     // would leave the node unreachable
+  Unsupported, // this board or build has no such link
+  Busy,        // a restart is already in progress, so nothing was written
   NvsFailed,   // the store would not take it
 };
 
