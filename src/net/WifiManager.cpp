@@ -170,6 +170,11 @@ void WifiManager::begin() {
     Network.begin();
     log_w("Wi-Fi is switched off in settings; the access point will not start");
   }
+  // Split in two on purpose (Diag.h). The radio is what the switch is
+  // supposed to buy, and the server below is what a node pays whether the
+  // switch is on or off — so a node with Wi-Fi off shows exactly what making
+  // the server lazy would be worth, on the board it is running on.
+  Diag::cost(wifiEnabled() ? "wifi radio" : "netif stack (wifi off)");
 
   setupRoutes();
   // Where the USB link exists the resolver runs whether or not Wi-Fi does:
@@ -209,6 +214,7 @@ void WifiManager::begin() {
 
   deriveHostname();
   if (!wifiEnabled()) {
+    Diag::cost("http + dns");
     log_i("HTTP :%d and RNS TCP :%d listening on every local link; Wi-Fi off", HTTP_PORT, RNS_TCP_PORT);
     return;
   }
@@ -229,6 +235,7 @@ void WifiManager::begin() {
     log_w("mDNS start failed");
   }
 
+  Diag::cost("http + dns + mdns");
   log_i("SoftAP \"%s\" (%s) up at %s (http:%d, rns:%d)", _ssid, _securityName,
         WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
 }

@@ -153,6 +153,9 @@ void setup() {
   // The reset register survives the reboot but not a second one, so it is only
   // ever readable here.
   Diag::begin();
+  // From here every subsystem says what it cost in the RAM that decides
+  // (Diag.h). The bill is per board and is read, not estimated.
+  Diag::costStart();
 
   Leds::begin();                           // claimed and off until the services are up
 
@@ -160,8 +163,10 @@ void setup() {
   if (!LittleFS.begin(true)) {
     log_e("LittleFS mount failed even after format");
   }
+  Diag::cost("littlefs");
 
   settings.load();                         // NVS: radio channel, AP, admin
+  Diag::cost("settings");
   #if HAS_PMU
     // Before anything touches SPI or I2C: on boards with a power-management
     // chip the transceiver and display rails come up off, so probing the
@@ -169,19 +174,32 @@ void setup() {
     Pmu::begin();
   #endif
   Power::begin();                          // profile (CPU clock, Wi-Fi sleep) + battery gauge
+  Diag::cost("power");
 
   txRing = psramRing(TX_RING_BYTES);
   rxRing = psramRing(RX_RING_BYTES);
   tcpInRing = psramRing(TCP_IN_RING_BYTES);
-  log_i("memory: internal %u free, PSRAM %u free (threshold %d B)",
-        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), PSRAM_MALLOC_THRESHOLD);
+  {
+    // Both figures, because only one of them can hold a task stack and it is
+    // not the larger one (Diag.h). The rings themselves are PSRAM's where
+    // there is PSRAM, which is why this line is worth reading beside the cost
+    // of the subsystem that follows it.
+    const Diag::Heap h = Diag::heap();
+    log_i("memory: %lu B internal free (%lu of it 8-bit, %lu largest block), %lu B PSRAM free "
+          "(threshold %d B)",
+          (unsigned long)h.freeInternal, (unsigned long)h.freeDram, (unsigned long)h.largestDramBlock,
+          (unsigned long)h.freePsram, PSRAM_MALLOC_THRESHOLD);
+  }
   configASSERT(txRing && rxRing && tcpInRing);
+  Diag::cost("packet rings");
 
   nodeIdentity.begin();                    // Reticulum identity keys (NVS)
+  Diag::cost("identity");
 
   // Bring up services. Radio failure is survivable: the AP + web UI stay
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
+  Diag::cost("display");
   #if HAS_SD
     // Before the card task exists: it is the task that reads the card's
     // ownership marker for everyone else, and it needs somewhere to put it.
@@ -216,14 +234,18 @@ void setup() {
     // removal check answers a read it lost to that traffic by unmounting the
     // card out from under whoever is using it.
     sdCard.startPolling();                 // optional; hot-plug polled on core 0
+    Diag::cost("sd card");
   #endif
   #if HAS_GPS
     Gps::begin();                          // NMEA reader task; powers the receiver rail
+    Diag::cost("gps");
   #endif
   LocalLink::add(&apLink);
   LocalLink::add(&staLink);
   LocalLink::add(&usbLink);
   LocalLink::add(&pppLink);
+  // The one to watch, and it bills itself in two parts: the radio the switch
+  // is meant to buy, and the web server every node pays for either way.
   wifiManager.begin();                     // radio + web server, or web server alone with Wi-Fi off
   // Before the links, not after: PPP hands the console its own reader when
   // it takes the port (PppUart.h), and a begin() that ran afterwards would
@@ -240,20 +262,25 @@ void setup() {
   Maintenance::begin(Serial);
 
   LocalLink::begin();
+  Diag::cost("local links");
   g_stats.radioOnline = loraRadio.begin(txRing, rxRing, settings.radio());
+  Diag::cost("lora radio");
   // Transport first, then the things that hand it peers. It builds the queue
   // those peers are announced on, and it takes long enough — mounting and
   // walking the store — that a client which was connected before the restart
   // reconnects inside the gap. Accepting first meant that client's arrival was
   // posted to a queue that did not exist yet.
   g_stats.transportOnline = RnsTransport::begin(txRing, rxRing, tcpInRing);
+  Diag::cost("reticulum");
   transportServer.begin(tcpInRing);
+  Diag::cost("rns tcp server");
   #if HAS_AUTOINTERFACE
     // Zero-config peering on the Wi-Fi links (RNS AutoInterface). Always
     // begun, even with Wi-Fi off: the heartbeat and /api/status ask it for a
     // peer count, and the lock they take exists only once begin() has run. It
     // decides for itself whether there is a netif worth joining.
     AutoInterface::begin(tcpInRing);
+    Diag::cost("autointerface");
   #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
@@ -279,6 +306,9 @@ void setup() {
     g_stats.transportOnline = false;
     log_e("Reticulum is not being driven: the rns task did not start");
   }
+
+  // Last, so the figure beside it is what the node has left to run on.
+  Diag::cost("tasks");
 
   if (settings.links().wifiEnabled)
     log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",

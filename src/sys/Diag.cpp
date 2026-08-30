@@ -154,6 +154,31 @@ bool startTask(TaskFunction_t fn, const char* name, uint32_t stackBytes,
   return false;
 }
 
+// The bill, in 8-bit internal RAM: the origin costStart() took, and where the
+// last cost() left it.
+static uint32_t sCostOrigin = 0;
+static uint32_t sCostMark   = 0;
+
+static uint32_t freeDram() {
+  return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+void costStart() { sCostOrigin = sCostMark = freeDram(); }
+
+void cost(const char* what) {
+  const uint32_t now = freeDram();
+  // Signed: a subsystem that hands memory back — a probe that finds nothing
+  // and frees what it took to look — is worth seeing as a credit rather than
+  // as an unsigned number the size of the address space.
+  const long spent = (long)sCostMark - (long)now;
+  const long total = (long)sCostOrigin - (long)now;
+  log_i("cost: %-14s %+7ld B  (%lu free, %lu largest, %+ld B since boot)",
+        what, spent, (unsigned long)now,
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        total);
+  sCostMark = now;
+}
+
 void tick(uint32_t uptimeS) { sRtc.uptimeS = uptimeS; }
 
 RestartMarks& restartMarks() { return sRtc.restart; }

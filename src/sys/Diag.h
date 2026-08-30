@@ -116,6 +116,21 @@ struct Heap {
 };
 Heap heap();
 
+// What each subsystem cost to build, in the RAM that decides. costStart()
+// takes the origin and every cost() after it names what has just been built
+// and logs what it took, where DRAM now stands and the bill so far.
+//
+// This exists because the alternative is estimating, and estimating is how a
+// Heltec Wireless Stick came to be paying about sixteen kilobytes for a PPP
+// link whose switch was off — nobody had a per-board figure for what any of
+// it cost, so nobody looked there. A boot log that carries the bill turns
+// "which switch is worth making lazy" into something read rather than
+// guessed, and it differs enough between boards that one board's answer is
+// not another's. Costs nothing after boot: two heap queries per subsystem,
+// all of them before the node is up.
+void costStart();
+void cost(const char* what);
+
 // Bytes of stack never used, per task. `present` is false for a task this
 // build did not create (no GNSS receiver, no SD card) or that has exited.
 struct TaskStack { const char* name; uint32_t headroom; bool present; };
