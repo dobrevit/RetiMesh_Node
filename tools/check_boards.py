@@ -18,7 +18,8 @@ boards = json.loads((ROOT / "boards.json").read_text())
 ini = configparser.ConfigParser(interpolation=None)
 ini.read(ROOT / "platformio.ini")
 
-problems = []
+problems = []      # a failed check: the exit code is non-zero
+warnings = []      # said out loud, but the check still passes
 for env, meta in boards.items():
     if env.startswith("_"):
         continue
@@ -64,12 +65,19 @@ if isinstance(ident, dict):
             problems.append(f"_usb_identity.{key} missing")
     if ident.get("pid_is_test_allocation") is None:
         problems.append("_usb_identity.pid_is_test_allocation missing — say whether the PID may ship")
-    # A release may not ship pid.codes' test allocation: the rule the registry
-    # states gets its teeth here, from the release workflow (--release).
+    # pid.codes' test allocation is for development and their policy does not
+    # permit shipping it, which is a thing to say loudly at every release
+    # (--release) and not a thing to stop one over: the tag builds eight
+    # boards and six of them never present the composite device at all. The
+    # release notes carry the warning; obtaining a PID is the fix.
     if "--release" in sys.argv[1:] and ident.get("pid_is_test_allocation"):
-        problems.append("_usb_identity: the PID is a test allocation and may not ship in a release")
+        warnings.append("_usb_identity: the PID is pid.codes' test allocation, which is not for shipping "
+                        "— request one per github.com/espressif/usb-pids before this release is published")
 
 for p in problems:
     print("boards.json:", p)
-print(f"{len([k for k in boards if not k.startswith('_')])} boards checked, {len(problems)} problem(s)")
+for w in warnings:
+    print("boards.json: warning:", w)
+print(f"{len([k for k in boards if not k.startswith('_')])} boards checked, "
+      f"{len(problems)} problem(s), {len(warnings)} warning(s)")
 sys.exit(1 if problems else 0)
