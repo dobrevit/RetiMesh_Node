@@ -548,7 +548,7 @@ def downloader_present(device: str, timeout: float = 15.0, esptool_cmd: Optional
 class HandOff:
     entered: bool                     # the ROM downloader is known to be up on `port`
     method: str                       # "console", "touch", "http", "downloader", "auto_reset_dtr_rts", "none"
-    port: Optional[str]
+    port: Optional[str]               # where to point esptool; None when there is nowhere
     message: str
     node_id: Optional[str] = None     # the chip's MAC where its port reported one: what wait_for_application follows
 
@@ -805,7 +805,11 @@ def _await_downloader(port: Port, method: str, log: Log, ports_fn, probe, probe_
         # busy host); accept a single port of the same kind.
         back = wait_for_port(lambda ps: _port_of(ps, port.kind, None), 2.0, ports_fn, sleep, clock)
     if back is None:
-        return HandOff(False, method, port.device,
+        # No port: the one that was there has gone and nothing came back in
+        # its place. Naming the path it used to be on would read as somewhere
+        # esptool could open — the composite branch above answers None for the
+        # same situation, and both mean the same thing.
+        return HandOff(False, method, None,
                        f"{port.device} did not reappear within {timeout:.0f} s after the bootloader request; {RECOVERY}")
     return _confirm_downloader(back, method, log, probe_rom)
 

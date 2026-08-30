@@ -259,6 +259,12 @@ def cmd_install(args):
             before, port, node_id = r.esptool_before, r.port or port, r.node_id
             if not r.entered:
                 print("  " + r.message)
+                # A hand-off that ends with no port is one whose port has gone:
+                # the node was asked, went down, and nothing came back. Running
+                # esptool against the path it used to be on fails with an open
+                # error that reads like a different fault altogether.
+                if r.port is None and not dev.select_port(dev.list_ports(), device=port):
+                    sys.exit(f"  {port} is no longer there; nothing to flash")
         flash(board, tmp, port, args.mode, args.baud, before=before)
         info = dev.wait_for_application(port, timeout=20.0, node_id=node_id)
         print(f"\nBack up: {info}" if info else "\nThe node did not answer within 20 s; press RST if it stays quiet.")
