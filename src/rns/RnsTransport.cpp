@@ -35,6 +35,7 @@
 #include "LxmfCommands.h"
 #include "Telemetry.h"
 #include "NomadNet.h"
+#include "Diag.h"
 #include "Power.h"
 #include "Gps.h"
 #include <LittleFS.h>
@@ -704,6 +705,11 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
   return true;
 }
 
+// A page costs one packet and one proof; two seconds between them is far
+// below what a person reading costs and far above what a flood needs to be
+// stopped.
+static const uint32_t kPageCooldownMs = 2000;
+
 // The node's own page, generated when it is asked for.
 //
 // The request generator hands back the msgpack-encoded value, not the text:
@@ -731,7 +737,13 @@ static RNS::Bytes serveIndex(const RNS::Bytes& path, const RNS::Bytes& data,
   st.radioOnline = g_stats.radioOnline;
   st.radioModel = g_stats.radioModel;
   st.freqMhz = r.freqMhz; st.bwKhz = r.bwKhz; st.sf = r.sf; st.cr = r.cr; st.txDbm = r.txDbm;
-  st.heardAnything = g_stats.loraRxPackets > 0;
+  // Any reception at all, not only a reassembled RNS packet: lastRssi is
+  // written on every CRC-good frame, so a node sitting beside a beaconing
+  // neighbour holds a real reading while loraRxPackets is still zero — and
+  // would have printed "nothing heard", which is the falsehood this branch
+  // exists to avoid.
+  st.heardAnything = g_stats.loraRxPackets || g_stats.beaconsRx || g_stats.loraRxDropRing;
+  st.channelRefused = g_stats.radioApplyError != 0;
   st.lastRssi = g_stats.lastRssi; st.lastSnr = g_stats.lastSnr;
   st.rxPackets = g_stats.loraRxPackets; st.txPackets = g_stats.loraTxPackets;
 
@@ -747,15 +759,27 @@ static RNS::Bytes serveIndex(const RNS::Bytes& path, const RNS::Bytes& data,
   st.batteryPct = b.percent;
   st.charging = b.charging;
   st.chargeKnown = b.chargeKnown;
-  // Byte-addressable internal RAM, the same capability mask Diag uses. Asked
-  // without MALLOC_CAP_INTERNAL the largest block came back as 1.9 MB of
-  // PSRAM, which is a true figure about the wrong memory: what decides whether
-  // a node survives is the kind a task stack has to come from, and a page
-  // saying 1919 KB where the honest answer is 42 KB is worse than saying
-  // nothing (Diag.cpp).
-  const uint32_t dram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-  st.heapFree = heap_caps_get_free_size(dram);
-  st.heapLargest = heap_caps_get_largest_free_block(dram);
+  // Asked of Diag rather than measured again here. Which heap figure is the
+  // honest one — byte-addressable internal RAM, not the total including PSRAM
+  // — is a rule with a reason, and it was written out in three places; two of
+  // them could drift.
+  const Diag::Heap heap = Diag::heap();
+  st.heapFree = heap.freeDram;
+  st.heapLargest = heap.largestDramBlock;
+
+  // Answering costs airtime on a duty-limited radio, and anyone who can route
+  // here can ask. The commands next door hold a per-sender cooldown for the
+  // same reason; a page has no sender to key on — a request carries an
+  // identity only if the client chose to identify — so the limit is on the
+  // node: one page at a time, and not again within the cooldown. A reader
+  // refreshing gets the page they already have from their own client, which
+  // is why it also carries a no-cache header (NomadNet.h).
+  static uint32_t sLastPageMs = 0;
+  if (sLastPageMs && (uint32_t)(millis() - sLastPageMs) < kPageCooldownMs) {
+    log_d("nomadnet: not serving another page so soon");
+    return {RNS::Bytes::NONE};
+  }
+  sLastPageMs = millis();
 
   // Bounded on purpose: this runs on the RNS task because a stranger asked,
   // and the buffer is what says how much of that task's stack a request can
@@ -765,9 +789,11 @@ static RNS::Bytes serveIndex(const RNS::Bytes& path, const RNS::Bytes& data,
   // reserved ahead of the text rather than the whole page being copied into a
   // second buffer to be encoded — which halves what a request costs the stack
   // of the task that also drives the radio and the whole Reticulum loop.
-  uint8_t out[3 + 900];
+  // Sized to what leaves in one packet (NomadNet.h), so the answer is one
+  // transmission and one proof rather than a resource transfer.
+  uint8_t out[3 + Rns::NomadNet::kPageMax];
   const size_t n = Rns::NomadNet::index(st, (char*)out + 3, sizeof(out) - 3);
-  if (!n || n > 0xFFFF) return {RNS::Bytes::NONE};
+  if (!n) return {RNS::Bytes::NONE};
   out[0] = 0xC5;                                  // bin16: fixed width, so the text never moves
   out[1] = (uint8_t)(n >> 8);
   out[2] = (uint8_t)n;
@@ -903,6 +929,12 @@ static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
   RNS::Bytes whole(lxmfDest.hash());
   whole.append(data);
   proveIfTaken(packet, handleLxmfMessage(whole, Rns::ViaPacket, signalOf(packet)));
+}
+
+const char* nomadAddress() {
+  static char hex[33] = "";
+  if (sStarted && nomadDest) strlcpy(hex, nomadDest.hash().toHex().c_str(), sizeof(hex));
+  return hex;
 }
 
 LxmfState lxmf() {
@@ -1456,8 +1488,13 @@ void loop() {
     uint16_t interval = settings.radio().announceInterval;
     if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
       char app[64];
-      int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
-      nodeDest.announce(Bytes((const uint8_t*)app, (size_t)max(n, 0)));
+      // snprintf returns the length it *would* have written. A 32-character
+      // callsign and a git-describe version exceed this buffer, and the
+      // untruncated length would have put a stray byte from the stack into a
+      // signed announce.
+      const int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
+      const size_t appLen = n < 0 ? 0 : ((size_t)n < sizeof(app) - 1 ? (size_t)n : sizeof(app) - 1);
+      nodeDest.announce(Bytes((const uint8_t*)app, appLen));
       // And the same node under its LXMF address, so it appears in the
       // clients people actually use. The app_data is the shape LXMF expects
       // rather than the free text above — the two announces describe one node
@@ -1468,11 +1505,13 @@ void loop() {
       // And as something to browse. NomadNet announces its node name as plain
       // UTF-8 rather than the msgpack array LXMF uses — a third audience, and
       // the third shape, from one node.
-      if (nomadDest) {
-        const char* nn = loraRadio.callsign();
-        nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
-      }
-      g_stats.announcesTx += lxLen ? 2 : 1;
+      const char* nn = loraRadio.callsign();
+      nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
+      // Every announce this node makes, including the page's. The counter is
+      // how an operator tells a node whose mesh side has quietly stopped from
+      // one that is merely quiet (roadmap/04-backlog.md), so it must not
+      // under-report.
+      g_stats.announcesTx += 1 + (lxLen ? 1 : 0) + (nomadDest ? 1 : 0);
       // Scattered, not on the dot. Two nodes flashed together boot together
       // and would then announce together for as long as they both run: the
       // interval is fixed and nothing else moves the phase, so their packets

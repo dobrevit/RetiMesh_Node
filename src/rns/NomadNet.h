@@ -53,6 +53,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "LxmfFormat.h"      // displayableName: the one field an operator writes
+
 namespace Rns {
 namespace NomadNet {
 
@@ -69,6 +71,7 @@ struct Status {
   uint32_t    uptimeS = 0;
 
   bool        radioOnline = false;
+  bool        channelRefused = false;   // the chip would not take the configured channel
   const char* radioModel = "";
   float       freqMhz = 0, bwKhz = 0;
   uint8_t     sf = 0, cr = 0;
@@ -115,6 +118,28 @@ private:
   bool   _ok = true;
 };
 
+// What a page has to fit in to leave in one packet.
+//
+// A link's MDU is 431 bytes. The response is [request_id, <payload>]: one byte
+// of array header, two of bin header and sixteen of request id, so 412 bytes
+// of payload, of which three are this page's own bin16 header. Past this the
+// answer becomes a Resource — an advertisement, a hash map, parts and proofs,
+// several transmissions and several seconds of a duty-limited radio's hour,
+// for a page somebody is reading.
+//
+// It is a target rather than a cap, and the difference is deliberate. An
+// ordinary node's page is about 350 bytes and leaves in one packet; a node
+// with a thirty-character callsign, a git-describe version, a hundred days of
+// uptime and counters in the billions runs to about 490 and costs a resource.
+// Cutting that node's page to hold the line would be the wrong trade — it is
+// still a page, it is just a dearer one — so the buffer is sized for it and
+// the budget is what the tests hold the *ordinary* page to. A new section that
+// pushes a typical page past this is the thing worth catching.
+static const size_t kOnePacketMax = 409;
+
+// What the generator is given. Large enough that no realistic node is cut.
+static const size_t kPageMax = 560;
+
 // The node's page. Returns bytes written, and always leaves a readable page:
 // if the buffer runs out the text ends on a whole line and says so, because a
 // page truncated mid-figure reads as a node that failed halfway through
@@ -133,60 +158,75 @@ inline size_t index(const Status& s, char* out, size_t cap) {
   if (cap < cutLen + 64) { out[0] = '\0'; return 0; }
   Page p(out, cap - cutLen);
 
-  p.line(">%s\n\n", s.name && s.name[0] ? s.name : "RetiMesh Node");
+  // Do not cache this. Without a cache header NomadNet keeps a page for twelve
+  // hours and stops asking the node at all (Browser.DEFAULT_CACHE_TIME), so an
+  // operator who looked at their node in the morning would see the same
+  // uptime, the same heap and the same counters that evening — a live status
+  // readout is the one page that must never be served from a cache. The header
+  // has to be the first four bytes, and a `#` line is a micron comment, so it
+  // costs nothing on screen.
+  p.line("#!c=0\n");
+
+  // The name is the operator's own text, and it is the only thing here that
+  // did not come from a number. A backtick opens a micron escape and `>` heads
+  // a section, so a callsign carrying either would rewrite the page in every
+  // visitor's browser — including into a followable link. Neither is a
+  // plausible thing to want in a node name.
+  char name[40];
+  displayableName((const uint8_t*)(s.name && s.name[0] ? s.name : "RetiMesh Node"),
+                  strlen(s.name && s.name[0] ? s.name : "RetiMesh Node"), name, sizeof(name));
+  for (char* c = name; *c; c++) if (*c == '`' || *c == '>') *c = ' ';
+  p.line(">%s\n\n", name[0] ? name : "RetiMesh Node");
   p.line("`!%s`` on `!%s``\n", s.version, s.board);
   p.line("Up %lu d %lu h %lu m\n\n",
          (unsigned long)(s.uptimeS / 86400),
          (unsigned long)((s.uptimeS % 86400) / 3600),
          (unsigned long)((s.uptimeS % 3600) / 60));
 
-  p.line(">>Reach me\n");
-  p.line("Message this node over LXMF at\n`!%s``\n\n", s.lxmfAddress);
-  p.line("This page is at\n`!%s``\n\n", s.address);
+  // The address to message it at. The address to *browse* it at is not here:
+  // whoever is reading this page already has it.
+  p.line(">>Reach me\n`!%s``\n\n", s.lxmfAddress);
 
   p.line(">>Radio\n");
   if (!s.radioOnline) {
     p.line("The transceiver is `!offline``.\n\n");
   } else {
-    p.line("%s at %.3f MHz, %.0f kHz, SF%u, CR 4/%u, %d dBm\n",
+    p.line("%s %.3f MHz BW%.0f SF%u CR4/%u %d dBm\n",
            s.radioModel, (double)s.freqMhz, (double)s.bwKhz,
            (unsigned)s.sf, (unsigned)s.cr, (int)s.txDbm);
+    // Those are the settings the node was asked for. Where the chip refused
+    // them the page says so rather than stating a channel it is not on — the
+    // same disclosure /api/status makes with apply_error beside the figures.
+    if (s.channelRefused) p.line("`!the chip refused these settings``\n");
     // Only where something has actually been heard. A node that has heard
     // nobody reports no signal rather than 0 dBm, which reads as a very loud
     // neighbour.
-    if (s.heardAnything)
-      p.line("Last heard at %.0f dBm, %.1f dB SNR\n", (double)s.lastRssi, (double)s.lastSnr);
-    else
-      p.line("Nothing heard yet on this channel\n");
-    p.line("%lu received, %lu sent\n\n",
-           (unsigned long)s.rxPackets, (unsigned long)s.txPackets);
+    if (s.heardAnything) p.line("Heard %.0f dBm / %.1f dB SNR\n", (double)s.lastRssi, (double)s.lastSnr);
+    else                 p.line("Nothing heard yet\n");
+    p.line("%lu rx, %lu tx\n\n", (unsigned long)s.rxPackets, (unsigned long)s.txPackets);
   }
 
-  p.line(">>Transport\n");
-  p.line("%lu interface%s, %lu path%s known, %lu link%s open\n\n",
+  p.line(">>Transport\n%lu interface%s, %lu path%s, %lu link%s\n\n",
          (unsigned long)s.interfaces, s.interfaces == 1 ? "" : "s",
          (unsigned long)s.paths, s.paths == 1 ? "" : "s",
          (unsigned long)s.links, s.links == 1 ? "" : "s");
 
-  p.line(">>Messages\n");
-  p.line("%lu received\n", (unsigned long)s.lxmfRx);
   // The three standings kept apart, as everywhere else: a sender this node
   // never heard announce is a different thing from one whose signature did
   // not match, and collapsing them is what hid a real defect for a release.
-  p.line("%lu from a sender it could not check, %lu that did not match\n\n",
-         (unsigned long)s.lxmfUnverified, (unsigned long)s.lxmfMismatched);
+  p.line(">>Messages\n%lu in, %lu unchecked, %lu mismatched\n\n",
+         (unsigned long)s.lxmfRx, (unsigned long)s.lxmfUnverified,
+         (unsigned long)s.lxmfMismatched);
 
   p.line(">>Health\n");
   if (s.haveBattery) {
-    if (s.chargeKnown)
-      p.line("Battery %u%%, %s\n", (unsigned)s.batteryPct, s.charging ? "charging" : "discharging");
-    else
-      // The board can measure the cell and cannot see the charger. Saying
-      // "discharging" would send somebody looking for a fault in a working
-      // cable (Power.h).
-      p.line("Battery %u%%\n", (unsigned)s.batteryPct);
+    // A board that cannot see its charger gives the charge and stops. "Not
+    // charging" sends somebody looking for a fault in a working cable.
+    if (s.chargeKnown) p.line("Battery %u%% %s\n", (unsigned)s.batteryPct,
+                              s.charging ? "charging" : "discharging");
+    else               p.line("Battery %u%%\n", (unsigned)s.batteryPct);
   }
-  p.line("%lu KB heap free, largest block %lu KB\n",
+  p.line("%lu KB free, %lu KB largest\n",
          (unsigned long)(s.heapFree / 1024), (unsigned long)(s.heapLargest / 1024));
 
   if (!p.ok()) {
