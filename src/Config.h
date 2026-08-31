@@ -729,6 +729,11 @@ struct NodeStats {
   volatile uint32_t loraRxCrcErrors   = 0;  // readData() refused it: bad CRC or spurious IRQ
   volatile uint32_t loraRxBadLength   = 0;  // frame shorter than a header or longer than the max
   volatile uint32_t loraRxSpuriousIrq = 0;  // woken with no completed reception to collect
+  // Passes where the radio task was made to yield because its interrupt line
+  // never went quiet. Nonzero means the radio was holding its core against
+  // Reticulum and the console, and something upstream is not clearing an
+  // interrupt (LoRaRadio::taskLoop).
+  volatile uint32_t loraIrqYields = 0;
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
 };

@@ -158,6 +158,13 @@ private:
   Airtime  _airtime;                     // time on air, duty cycle, CSMA sizing
   uint32_t _statsAtMs = 0;               // last publish into g_stats
 
+  // Passes in a row where the interrupt notification was already waiting, so
+  // the 10 ms block did not block. This task is priority 5 on the core that
+  // also carries Reticulum (3) and the Arduino loop (1), so a run of those is
+  // not a slow node, it is a stopped one — see taskLoop().
+  uint16_t _irqSpin = 0;
+  bool     _irqStorm = false;
+  uint32_t _irqYields = 0;               // forced yields, for /api/status
   uint32_t _lastTxMs  = 0;               // any transmission (packet or beacon)
   uint32_t _helloAtMs = 0;               // boot probe due time (0 = done)
   uint32_t _replyAtMs = 0;               // pending reply to someone's hello

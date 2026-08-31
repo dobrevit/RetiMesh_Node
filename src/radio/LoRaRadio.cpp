@@ -393,6 +393,11 @@ void LoRaRadio::radioTask(void* self) {
   }
 }
 
+// Passes in a row with a notification already waiting before this task is
+// made to yield. High enough that an ordinary burst of packets is not
+// interrupted, low enough that a stuck line cannot hold the core for long.
+static const uint16_t kIrqSpinYieldAfter = 64;
+
 void LoRaRadio::taskLoop() {
   if (!_online) { vTaskDelete(nullptr); return; }
 
@@ -422,8 +427,45 @@ void LoRaRadio::taskLoop() {
 
     // (1) Service the radio: block up to 10 ms for an IRQ notification.
     //     This doubles as the poll interval for the TX ring below.
-    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0) {
+    //
+    //     ...and it only doubles as that while it actually blocks. A
+    //     notification already waiting on every pass makes this return at
+    //     once, and then nothing in this loop yields: at priority 5, pinned to
+    //     the core that also carries the Reticulum task (3) and the Arduino
+    //     loop (1), that does not slow them down, it stops them. A node was
+    //     found in exactly that state — the radio still logging beacons while
+    //     the transport had not drained a packet and the console had not run
+    //     for ten minutes, with the loop task parked inside its own
+    //     vTaskDelay because it was never scheduled again (LoopWatch.h).
+    //
+    //     So a run of passes that never waited is broken by force. The cause
+    //     is upstream of here — an interrupt line that is not going quiet —
+    //     and this does not fix that; it stops one stuck line from taking the
+    //     whole core down with it, and says so, which is what turns a node
+    //     that looks dead into one that can be asked what is wrong.
+    const bool notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0;
+    if (notified) {
       handleRadioIrq();
+      if (_irqSpin < kIrqSpinYieldAfter) _irqSpin++;
+    } else {
+      if (_irqStorm) {
+        log_w("radio: the interrupt line went quiet again after %lu forced yields",
+              (unsigned long)_irqYields);
+        _irqStorm = false;
+      }
+      _irqSpin = 0;
+    }
+    if (_irqSpin >= kIrqSpinYieldAfter) {
+      if (!_irqStorm) {
+        _irqStorm = true;
+        log_e("radio: an interrupt notification has been waiting on every one of the last %u "
+              "passes, so this task never blocks. Yielding a tick per pass so Reticulum and "
+              "the console keep running; the node stays up but the radio is busy",
+              (unsigned)kIrqSpinYieldAfter);
+      }
+      _irqYields++;
+      g_stats.loraIrqYields = _irqYields;
+      vTaskDelay(1);                     // one tick, every pass, until it goes quiet
     }
 
     // (1a) Channel-use figures, and the duty-cycle verdict they feed.

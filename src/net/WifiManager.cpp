@@ -851,6 +851,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   radio["rx_crc_errors"]           = g_stats.loraRxCrcErrors;
   radio["rx_bad_length"]           = g_stats.loraRxBadLength;
   radio["rx_spurious_irq"]         = g_stats.loraRxSpuriousIrq;
+  // Nonzero means the radio task was starving its own core and had to be made
+  // to yield. Read it beside loop.stalled: together they say whether a node
+  // that looks dead is being held down by its radio (LoRaRadio::taskLoop).
+  radio["irq_yields"]              = g_stats.loraIrqYields;
 
   radio["beacon_interval"] = rs.beaconInterval;
   radio["callsign"]   = loraRadio.callsign();
