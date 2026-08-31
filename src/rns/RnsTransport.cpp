@@ -468,6 +468,19 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
                    : "UNVERIFIED (the signature does not match the key this node holds)",
         source.toHex().c_str(), how,
         (unsigned)m.contentLen, (int)(m.contentLen > 80 ? 80 : m.contentLen), (const char*)m.content);
+  // Most of what LXMF carries is not the text: an image, a file, a telemetry
+  // reading and a command all travel in the fields map, and a message that is
+  // only those arrives with nothing to read. Saying so is the difference
+  // between "somebody sent an empty message" and "somebody sent a photo this
+  // node does not open". An empty map is a single byte, so anything longer
+  // means the message brought something with it.
+  //
+  // The stored record does not carry this yet — it is a fixed two hundred
+  // bytes with no room left (LxmfInbox.h), and changing that layout is a
+  // decision for whoever owns the format.
+  if (m.fieldsLen > 1)
+    log_i("lxmf: ...and %u bytes of fields this node does not read (attachment, telemetry "
+          "or a command)", (unsigned)m.fieldsLen);
   return true;
 }
 
