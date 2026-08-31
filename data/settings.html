@@ -235,6 +235,10 @@
         <select name="console_tcp"><option value="1">On &mdash; after AUTH</option><option value="0">Off &mdash; nothing listens</option></select></div>
       <div><label>Web portal (this page)</label>
         <select name="web_ui"><option value="1">On</option><option value="0">Off &mdash; administer over the console</option></select></div>
+      <div><label>mDNS (&lt;name&gt;.local)</label>
+        <select name="mdns"><option value="1">On</option><option value="0">Off &mdash; reach the node by address</option></select>
+        <div class="note">Answers <code>&lt;hostname&gt;.local</code> and advertises the Reticulum port. About 6 KB
+          of byte-addressable RAM, so the boards with least of it start without it. Applies at the next restart.</div></div>
     </div>
     <button type="submit">Save maintenance settings</button>
     <div class="msg" id="maintMsg"></div>
@@ -457,7 +461,7 @@ async function load() {
   const mt = cfg.maintenance || {}, bl = cfg.bootloader || {};
   fill($("maintForm"), { bootloader_api: mt.bootloader_api ? "1" : "0", bootloader_from_lan: mt.bootloader_from_lan ? "1" : "0",
     console_enabled: mt.console_enabled ? "1" : "0", console_tcp: mt.console_tcp ? "1" : "0",
-    web_ui: mt.web_ui ? "1" : "0" });
+    web_ui: mt.web_ui ? "1" : "0", mdns: mt.mdns ? "1" : "0" });
   $("bootloaderBtn").disabled = !(bl.software_entry && mt.bootloader_api);
   $("maintNote").textContent = (bl.software_entry
       ? "This board can restart into its ROM downloader from software."
@@ -547,7 +551,8 @@ $("maintForm").addEventListener("submit", async ev => {
                  "administered over the console — on the cable, or on TCP port 4243 with the admin password.")) return;
     const r = await api("/api/settings/maintenance", { bootloader_api: f.bootloader_api.value === "1",
       bootloader_from_lan: f.bootloader_from_lan.value === "1", console_enabled: f.console_enabled.value === "1",
-      console_tcp: f.console_tcp.value === "1", web_ui: f.web_ui.value === "1" });
+      console_tcp: f.console_tcp.value === "1", web_ui: f.web_ui.value === "1",
+      mdns: f.mdns.value === "1" });
     setMsg("maintMsg", r.restart ? "Saved. Restarting…" : "Saved.", r.restart ? "warn" : "ok");
     if (!r.restart) setTimeout(load, 500);
   } catch (e) { setMsg("maintMsg", e.message, "bad"); }

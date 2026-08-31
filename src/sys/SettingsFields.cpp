@@ -179,7 +179,12 @@ Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n) {
                      "off it needs a link switched on and the web portal to answer on it");
     return Result::Refused;
   }
-  const bool needRestart = m.webUi != settings.maintenance().webUi;
+  // Both are started once, at boot, and neither can be taken down under the
+  // request that asked for it — so both land at the next boot, as Wi-Fi's
+  // changes do. A setting that silently did nothing until the next restart
+  // would be worse than one that says it needs one.
+  const bool needRestart = m.webUi != settings.maintenance().webUi
+                        || m.mdns  != settings.maintenance().mdns;
   if (!settings.saveMaintenance(m)) return Result::NvsFailed;
   Rns::Admin::reload();      // the switch and the list apply now, not next boot
   // The portal cannot be taken down under the request that asked for it, and
@@ -382,6 +387,10 @@ const Entry kFields[] = {
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().consoleEnabled ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       MaintenanceSettings m = settings.maintenance(); m.consoleEnabled = b; return commitMaintenance(m, e, n); } },
+  { "maintenance.mdns",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().mdns ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
+      MaintenanceSettings m = settings.maintenance(); m.mdns = b; return commitMaintenance(m, e, n); } },
   { "maintenance.web_ui",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().webUi ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }

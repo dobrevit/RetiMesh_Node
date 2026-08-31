@@ -147,7 +147,8 @@ cost: packet rings    +26916 B  (186320 free, 110580 largest, +29284 B since boo
 cost: identity            +0 B  (186320 free, 110580 largest, +29284 B since boot)
 cost: display          +2484 B  (183836 free, 110580 largest, +31768 B since boot)
 cost: wifi radio      +52500 B  (131336 free, 110580 largest, +84268 B since boot)
-cost: http + dns + mdns  +28424 B  (102912 free, 102388 largest, +112692 B since boot)
+cost: http + dns         +22028 B  (118764 free, 110580 largest, +95080 B since boot)
+cost: mdns                +6368 B  (112396 free, 110580 largest, +101448 B since boot)
 cost: local links         +0 B  (102912 free, 102388 largest, +112692 B since boot)
 cost: lora radio       +1216 B  (101696 free,  98292 largest, +113908 B since boot)
 cost: reticulum       +52668 B  ( 49028 free,  45044 largest, +166576 B since boot)
@@ -165,7 +166,7 @@ was left is 32-bit-only IRAM that no allocation can use.
 
 Read the rest as the answer to "which switch is worth making cost nothing when
 it is off", per board. Wi-Fi is billed in two parts on purpose: the **radio**
-is what the switch is meant to buy, and **http + dns + mdns** is what a node
+is what the switch is meant to buy, and **http + dns** plus **mdns** is what a node
 pays whether Wi-Fi is on or off — so on this board, switching Wi-Fi off saves
 52 KB and still leaves 28 KB on the table for a web server nobody can reach.
 That, and not USB-NCM, is where lazy allocation is worth the work.

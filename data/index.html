@@ -145,7 +145,11 @@ async function refreshStatus() {
           + (s.assets.filesystem || "unstamped") + " vs " + s.assets.firmware
           + ") — upload the filesystem to match", "offline"),
       ]),
-      card("Address", (s.hostname ? s.hostname + ".local" : "") +
+      // Only while mDNS is running: the name resolves because that service
+      // answers for it, and the boards with least memory start without it.
+      // Showing it regardless sends an operator to a browser to be told the
+      // name does not exist.
+      card("Address", ((s.hostname && s.mdns) ? s.hostname + ".local" : "") +
         (s.station && s.station.connected ? " · " + s.station.ip : "")),
       card("Uptime", fmtUptime(s.uptime_s)),
       card("Radio " + (s.radio.model || ""), s.radio.online

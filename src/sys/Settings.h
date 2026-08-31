@@ -144,6 +144,10 @@ struct MaintenanceSettings {
   // Wi-Fi on, against 272 B for a console listener that does the same job for
   // an operator (ConsoleServer.h). Restart-applied, like Wi-Fi itself.
   bool webUi             = true;
+  // mDNS answers <hostname>.local and advertises the RNS port. A convenience
+  // rather than something a node depends on, and one of the more expensive
+  // ones — which is why the default comes from the board class (Config.h).
+  bool mdns              = MDNS_ENABLED_DEFAULT;
   // Whether a message from a listed identity may run a console command
   // (RnsAdmin.h). Off, and an empty list is off however this reads: the
   // delivery address is reachable by anyone who can route to it, so this is

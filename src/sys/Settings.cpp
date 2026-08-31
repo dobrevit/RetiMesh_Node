@@ -115,6 +115,7 @@ void Settings::load() {
   LOAD(_maintenance.consoleEnabled,    "m_con",  getBool("m_con"));
   LOAD(_maintenance.consoleTcp,        "m_ctcp", getBool("m_ctcp"));
   LOAD(_maintenance.webUi,             "m_web",  getBool("m_web"));
+  LOAD(_maintenance.mdns,              "m_mdns", getBool("m_mdns"));
   LOAD(_maintenance.rnsAdmin,          "m_rns",  getBool("m_rns"));
   if (_prefs.isKey("m_radm")) _prefs.getString("m_radm", _maintenance.rnsAdmins, sizeof(_maintenance.rnsAdmins));
   if (_admin.password[0] == '\0') strlcpy(_admin.password, ADMIN_PASSWORD_DEFAULT, sizeof(_admin.password));
@@ -203,6 +204,7 @@ bool Settings::saveMaintenance(const MaintenanceSettings& m) {
          && _prefs.putBool("m_con",  m.consoleEnabled)    > 0
          && _prefs.putBool("m_ctcp", m.consoleTcp)         > 0
          && _prefs.putBool("m_web",  m.webUi)              > 0
+         && _prefs.putBool("m_mdns", m.mdns)               > 0
          && _prefs.putBool("m_rns",  m.rnsAdmin)           > 0;
   // putString returns a size_t, so the ">= 0" this used to be was true
   // whatever happened — an NVS failure writing the administrator list reported

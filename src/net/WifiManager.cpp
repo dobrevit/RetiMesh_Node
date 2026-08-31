@@ -144,6 +144,7 @@ static const MaintField kMaintFields[] = {
   { "console_enabled",     &MaintenanceSettings::consoleEnabled },
   { "console_tcp",         &MaintenanceSettings::consoleTcp },
   { "web_ui",              &MaintenanceSettings::webUi },
+  { "mdns",                &MaintenanceSettings::mdns },
   { "rns_admin",           &MaintenanceSettings::rnsAdmin },
 };
 
@@ -189,6 +190,10 @@ void WifiManager::begin() {
   // reaches the node over the console's own listener instead, which costs a
   // few hundred bytes to do the same job (ConsoleServer.h).
   const bool webUi = settings.maintenance().webUi;
+  // Named once. Both boot paths — Wi-Fi off and Wi-Fi on — bill the same
+  // thing, and two copies of the words meant a later change to one of them
+  // would have made the bill disagree with itself depending on the path.
+  const char* const kHttpDnsLabel = webUi ? "http + dns" : "dns (no portal)";
   // The resolver is not the portal's, and does not go off with it. Where the
   // USB link exists it runs whether or not Wi-Fi does: the link's lease names
   // the node as DNS and ESP-IDF's server cannot be told to name nobody
@@ -234,14 +239,22 @@ void WifiManager::begin() {
 
   deriveHostname();
   if (!wifiEnabled()) {
-    Diag::cost(webUi ? "http + dns" : "dns (no portal)");
+    Diag::cost(kHttpDnsLabel);
     if (webUi) log_i("HTTP :%d and RNS TCP :%d listening on every local link; Wi-Fi off",
                      HTTP_PORT, RNS_TCP_PORT);
     else       log_i("RNS TCP :%d listening on every local link; Wi-Fi and the portal are off, "
                      "and the console answers on TCP :%d", RNS_TCP_PORT, CONSOLE_TCP_PORT);
     return;
   }
-  if (MDNS.begin(_hostname)) {
+  // Billed apart from the resolver above it. The two used to share a line, so
+  // the one number covered a service the node needs and a convenience it does
+  // not — which is no use at all when the question is what a board with eight
+  // kilobytes left can afford to decline.
+  Diag::cost(kHttpDnsLabel);
+  if (!settings.maintenance().mdns) {
+    log_i("mDNS: off — this node answers on its address, not by name "
+          "(6 KB of byte-addressable RAM a small board can spend elsewhere)");
+  } else if (MDNS.begin(_hostname)) {
     // Only the services that actually answer: a browser sent to _http._tcp on
     // a node whose portal is off gets a connection refused and no
     // explanation. Named once, and walked once, rather than the rule being
@@ -270,7 +283,7 @@ void WifiManager::begin() {
     log_w("mDNS start failed");
   }
 
-  Diag::cost(webUi ? "http + dns + mdns" : "dns + mdns (no portal)");
+  Diag::cost(settings.maintenance().mdns ? "mdns" : "mdns (off)");
   log_i("SoftAP \"%s\" (%s) up at %s (http:%d, rns:%d)", _ssid, _securityName,
         WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
 }
@@ -635,7 +648,13 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   // to it.
   doc["board"]        = BOARD_NAME;
   doc["ssid"]         = _ssid;
-  doc["hostname"]     = _hostname;      // reachable as <hostname>.local
+  // Reachable as <hostname>.local only while mDNS is running, which is a
+  // setting and is off by default on the boards that cannot afford it. The
+  // flag travels with the name so a page does not have to guess: printing
+  // "<name>.local" on a node that answers nothing by that name sends an
+  // operator to a browser to be told it does not exist.
+  doc["hostname"]     = _hostname;
+  doc["mdns"]         = settings.maintenance().mdns;
   doc["security"]     = _securityName;
   {
     JsonObject st = doc["station"].to<JsonObject>();
@@ -1678,6 +1697,7 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     settings.saveWifi(ws);
   }
   bool storeHomeIgnored = false;
+  bool mdnsTurnedOn = false;
   if (in["transport"].is<JsonObject>()) {
     JsonObject t = in["transport"]; TransportSettings ts = settings.transport();
     ts.enabled = t["enabled"] | ts.enabled; ts.loraMode = t["lora_mode"] | ts.loraMode; ts.wifiMode = t["wifi_mode"] | ts.wifiMode;
@@ -1731,7 +1751,14 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     }
     if (haveMaint) {
       JsonObject mt = in["maintenance"];
+      const bool mdnsWas = ms.mdns;
       for (const MaintField& f : kMaintFields) ms.*(f.on) = mt[f.key] | ms.*(f.on);
+      // A file exported from a roomier board carries mDNS on, and this board
+      // may be one that starts without it for a reason (Config.h). The import
+      // is the operator's own act so it is honoured — but not silently, since
+      // the memory it costs is the memory this board did not have.
+      if (ms.mdns && !mdnsWas && !MDNS_ENABLED_DEFAULT)
+        mdnsTurnedOn = true;
     }
     if ((haveLinks || haveMaint) && LocalLink::lockedOut(ls, ms.consoleEnabled, ms.webUi)) {
       sendError(request, 400, "refused: this file would leave the node with every local link off and the console off, and no way back in");
@@ -1748,6 +1775,9 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
   out["ok"] = true;
   out["restart"] = Bootloader::reboot();
   if (storeHomeIgnored) out["note"] = "the store's location was not imported; move it with the SD card actions";
+  else if (mdnsTurnedOn)
+    out["note"] = "this file switched mDNS on, which this board starts without: it costs about 6 KB of "
+                  "byte-addressable RAM, and this board has little to spare (maintenance.mdns turns it off again)";
   sendJson(request, 200, out);
 }
 

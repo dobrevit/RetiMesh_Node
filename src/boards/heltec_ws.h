@@ -86,3 +86,8 @@
 // Once a cell is on hand the pin can be found the same way the SX1280's were —
 // sample the ADC-capable pins and see which one tracks half the pack voltage.
 #define HAS_BATTERY_ADC     0
+
+// This board is the one BOARD_DRAM_TIGHT selects (Config.h): a classic ESP32
+// with no PSRAM to escape into, which is why its defaults for mDNS and the
+// client cap differ from every other board's. Nothing to set here — the rule
+// is a property of the silicon, not of this file.
