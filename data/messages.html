@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Messages — RetiMesh Node</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #3fb950; --warn: #f85149;
+    --caution: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, sans-serif;
+    max-width: 640px; margin: 0 auto; padding: 16px;
+  }
+  h1 { font-size: 1.25rem; margin: 8px 0 2px; }
+  h1 .dot { color: var(--accent); }
+  .sub { color: var(--dim); font-size: .8rem; margin-bottom: 16px; }
+  a { color: var(--accent); text-decoration: none; }
+  .addr {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 16px;
+  }
+  .addr .k { color: var(--dim); font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; }
+  .addr .v { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; margin-top: 2px; }
+  #list { display: flex; flex-direction: column; gap: 8px; }
+  .msg { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .msg .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: .78rem; }
+  .msg .from {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent); overflow-wrap: anywhere;
+  }
+  .msg .when { color: var(--dim); margin-left: auto; white-space: nowrap; }
+  .msg .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; }
+  .badge {
+    font-size: .68rem; text-transform: uppercase; letter-spacing: .05em;
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; color: var(--dim);
+  }
+  .badge.verified { color: var(--accent); border-color: var(--accent); }
+  .badge.unverified { color: var(--caution); border-color: var(--caution); }
+  .badge.mismatch { color: var(--warn); border-color: var(--warn); }
+  .note { color: var(--dim); font-size: .75rem; margin-top: 6px; }
+  .empty { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 12px; color: var(--dim); }
+  button {
+    background: var(--accent); color: #04140a; cursor: pointer;
+    border: 0; border-radius: 6px; padding: 8px 10px; font: inherit; font-weight: 600;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  #more { margin: 12px auto 0; display: block; }
+  .failed { color: var(--warn); }
+  footer { color: var(--dim); font-size: .72rem; margin: 24px 0 8px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1><span class="dot">&#9679;</span> Messages</h1>
+  <div class="sub">What this node has been sent over LXMF &middot; <a href="/">&larr; back to the node</a></div>
+
+  <div class="addr">
+    <div class="k">This node's delivery address</div>
+    <div class="v" id="address">&hellip;</div>
+    <div class="note" id="counts"></div>
+  </div>
+
+  <div id="list"></div>
+  <button id="more" hidden>Show older</button>
+
+  <footer id="foot"></footer>
+
+<script>
+"use strict";
+
+// The node's own count of milliseconds, and which run of it produced them. A
+// message taken in before the last restart cannot be given an age — millis()
+// started again — so those are shown by the sender's clock instead of being
+// handed a number that quietly lies.
+let bootId = 0;
+let uptimeMs = 0;
+let oldestShown = 0;
+let viewingOlder = false;
+let slots = 50;                 // until the node says; it owns the ring's depth
+
+const list = document.getElementById("list");
+const moreBtn = document.getElementById("more");
+
+function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+function notice(words) {
+  const d = document.createElement("div");
+  d.className = "empty";
+  d.textContent = words;
+  return d;
+}
+
+function ago(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+}
+
+// The sender's own clock, as seconds since the epoch. It is their word for
+// when they wrote it and not this node's, which is why it is shown as a date
+// rather than as an age: a wrong clock on their side should look like a wrong
+// date, not like a message from the future.
+function sentWhen(t) {
+  if (!t || t < 1e9) return "";
+  return new Date(t * 1000).toLocaleString();
+}
+
+const explain = {
+  verified: "This node has heard the sender announce, and the signature matched.",
+  unverified: "This node has never heard the sender announce, so there was no key to check the signature against.",
+  mismatch: "This node holds a key for the sender, and the signature did not match it."
+};
+
+function badge(cls, words, title) {
+  const b = document.createElement("span");
+  b.className = cls;
+  b.textContent = words;
+  if (title) b.title = title;
+  return b;
+}
+
+function row(m) {
+  const el = document.createElement("div");
+  el.className = "msg";
+
+  const head = document.createElement("div");
+  head.className = "head";
+  head.appendChild(badge("badge " + m.standing, m.standing, explain[m.standing] || ""));
+
+  const from = document.createElement("span");
+  from.className = "from";
+  from.textContent = m.from;
+  head.appendChild(from);
+
+  head.appendChild(badge("badge", m.via, "How it reached the node."));
+
+  const when = document.createElement("span");
+  when.className = "when";
+  const sent = sentWhen(m.sent_at);
+  when.textContent = m.boot_id === bootId ? ago(uptimeMs - m.boot_ms) : (sent || "before the last restart");
+  if (sent) when.title = "Sender's clock: " + sent;
+  head.appendChild(when);
+
+  el.appendChild(head);
+
+  const text = document.createElement("div");
+  text.className = "text";
+  text.textContent = m.text;        // textContent, never markup: this is a stranger's text
+  el.appendChild(text);
+  return el;
+}
+
+function render(messages, append) {
+  if (!append) clear(list);
+  if (!messages.length && !append) {
+    list.appendChild(notice("Nothing yet. Send this node a message from Sideband or MeshChat using the address above, and it will appear here."));
+    return;
+  }
+  for (const m of messages) {
+    list.appendChild(row(m));
+    oldestShown = m.seq;
+  }
+}
+
+// A failure while paging back must not throw away what is already on screen:
+// the reader has clicked twice to get here, and replacing forty messages with
+// a one-line apology loses all of it. On a first load there is nothing to
+// keep, so the notice takes the list; on an append it goes underneath.
+function failed(words, append) {
+  if (append) {
+    const d = notice(words);
+    d.className = "empty failed";
+    list.appendChild(d);
+  } else {
+    clear(list);
+    list.appendChild(notice(words));
+  }
+}
+
+async function load(before) {
+  const append = !!before;
+  try {
+    const r = await fetch("/api/messages" + (append ? "?before=" + before : ""), { cache: "no-store" });
+    if (!r.ok) {
+      failed("Could not read the messages (HTTP " + r.status + ").", append);
+      return;
+    }
+    const d = await r.json();
+    bootId = d.boot_id;
+    uptimeMs = d.uptime_ms;
+    if (d.slots) slots = d.slots;
+    document.getElementById("address").textContent = d.address || "the transport is not up yet";
+    document.getElementById("counts").textContent =
+      d.stored + " kept" + (d.stored >= slots ? " — the ring is full, so older ones have been overwritten" : "");
+    document.getElementById("foot").textContent =
+      "The last " + slots + " messages are kept on the node. Older ones are overwritten.";
+    render(d.messages, append);
+    moreBtn.hidden = !d.more;
+  } catch (e) {
+    failed("The node did not answer.", append);
+  } finally {
+    // On every way out. It used to be set only on the path that succeeded, so
+    // one failed fetch left the button disabled for good — and with the
+    // refresh suppressed while paging, the page could not recover without a
+    // reload.
+    moreBtn.disabled = false;
+  }
+}
+
+moreBtn.addEventListener("click", () => {
+  moreBtn.disabled = true;
+  viewingOlder = true;
+  load(oldestShown);
+});
+
+load();
+// Only while the newest page is on screen. Refreshing under someone who has
+// paged back would throw away what they were reading.
+setInterval(() => { if (!viewingOlder) load(); }, 10000);
+</script>
+</body>
+</html>

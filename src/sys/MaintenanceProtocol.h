@@ -73,7 +73,7 @@ constexpr size_t MAX_ARG  = 40;
 
 enum class Cmd : uint8_t {
   Help = 0, Status, Version, Reset, Bootloader, UsbStatus, NetworkStatus, Links, Wifi, Ppp,
-  Get, Set, Auth,
+  Get, Set, Auth, Messages,
   Unknown,
 };
 
@@ -88,6 +88,7 @@ inline const CmdInfo* commands(size_t& count) {
     { Cmd::UsbStatus,     "USB_STATUS",     "",        "how the host is attached" },
     { Cmd::NetworkStatus, "NETWORK_STATUS", "",        "every local link: phase, address, counters" },
     { Cmd::Links,         "LINKS",          "",        "which links this board offers and which are enabled" },
+    { Cmd::Messages,      "MESSAGES",       "[n]",     "the last LXMF messages, newest first (default 10, up to 50)" },
     { Cmd::Wifi,          "WIFI",           "ON|OFF",  "enable or disable Wi-Fi (saves, restarts)" },
     { Cmd::Ppp,           "PPP",            "ON|OFF",  "enable or disable PPP on this port (saves, applies live)" },
     { Cmd::Get,           "GET",            "[key]",   "read settings: all, one section (radio), or one key (radio.sf)" },
@@ -212,6 +213,11 @@ inline ParseError parse(const char* line, Request& out) {
       break;
     case Cmd::Get:
       // No argument reads everything; one names a section or a single key.
+      if (out.argc > 1) return ParseError::BadArgument;
+      break;
+    case Cmd::Messages:
+      // No argument shows a screenful; one says how many. What counts as a
+      // number is the handler's business, not the parser's.
       if (out.argc > 1) return ParseError::BadArgument;
       break;
     case Cmd::Set:

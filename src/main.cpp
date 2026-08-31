@@ -60,6 +60,7 @@
 #include "LoRaRadio.h"
 #include "Display.h"
 #include "RnsAnnounce.h"
+#include "LxmfInbox.h"
 #include "RnsTransport.h"
 #include "SdCard.h"
 #include "StoreHome.h"
@@ -351,6 +352,10 @@ void loop() {
   ConsoleServer::poll();
   Maintenance::poll();
   LocalLink::poll(millis());
+  // Messages that arrived on the Reticulum task, written here. Flash is slow
+  // enough that doing it where they arrive delayed the delivery proof and
+  // stalled the job loop that link and receipt timeouts run on (LxmfInbox.h).
+  Rns::Inbox::poll();
   Leds::tick(millis());
   // Every pass, not on the heartbeat: a crash 29 s after the last beat would
   // otherwise be recorded as having happened 29 s earlier, and a node stuck in

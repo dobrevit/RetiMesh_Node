@@ -20,6 +20,7 @@
 //  Maintenance.cpp — see Maintenance.h and MaintenanceProtocol.h.
 // ============================================================================
 #include "RnsTransport.h"
+#include "LxmfInbox.h"
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
@@ -155,25 +156,36 @@ static void doStatus() {
   // out.
   if (lx.address[0]) dataf("STATUS", "lxmf_address=%s", lx.address);
   if (lx.received || lx.rejected) {
-    dataf("STATUS", "lxmf_rx=%lu lxmf_unverified=%lu lxmf_mismatched=%lu lxmf_rejected=%lu last_from=%s last_verified=%s last_ago_ms=%lu",
-          (unsigned long)lx.received, (unsigned long)lx.unverified, (unsigned long)lx.mismatched, (unsigned long)lx.rejected,
-          lx.lastFrom[0] ? lx.lastFrom : "-", lx.lastVerified ? "yes" : "no",
-          (unsigned long)lx.lastAgoMs);
-    // The message itself, on a line of its own and last on it. It is someone
-    // else's text: it has spaces in it, and putting it in the key=value line
-    // above would make every field after it unparseable. Control characters
-    // are flattened for the same reason a console never prints what arrives
-    // verbatim — an escape sequence in a message is the sender deciding what
-    // the operator's terminal does.
-    if (lx.lastText[0]) {
-      char text[sizeof(lx.lastText)];
+    dataf("STATUS", "lxmf_rx=%lu lxmf_unverified=%lu lxmf_mismatched=%lu lxmf_rejected=%lu lxmf_not_stored=%lu",
+          (unsigned long)lx.received, (unsigned long)lx.unverified, (unsigned long)lx.mismatched,
+          (unsigned long)lx.rejected, (unsigned long)lx.notStored);
+    // The newest message, read from the inbox rather than from a second copy
+    // kept beside it. There used to be one: a shorter text buffer and a bool
+    // where the inbox has three standings, so the same message read one way
+    // here and another through MESSAGES. One message, one record, one answer.
+    Rns::InboxRecord m;
+    if (Rns::Inbox::read(Rns::Inbox::newest(), m)) {
+      char from[33];
+      for (int i = 0; i < 16; i++) snprintf(from + i * 2, 3, "%02x", m.from[i]);
+      const bool thisBoot = m.bootId == Rns::Inbox::bootId();
+      dataf("STATUS", "last_from=%s last_standing=%s last_via=%s last_boot=%s last_ago_ms=%lu",
+            from, Rns::standingName(m.standing), Rns::viaName(m.via),
+            thisBoot ? "this" : "earlier",
+            (unsigned long)(thisBoot ? millis() - m.bootMs : 0));
+      // The message itself, on a line of its own and last on it. It is someone
+      // else's text: it has spaces in it, and putting it in the key=value line
+      // above would make every field after it unparseable. Control characters
+      // are flattened for the same reason a console never prints what arrives
+      // verbatim — an escape sequence in a message is the sender deciding what
+      // the operator's terminal does.
+      char text[Rns::kInboxTextMax + 1];
       size_t i = 0;
-      for (; lx.lastText[i] && i < sizeof(text) - 1; i++) {
-        const unsigned char c = (unsigned char)lx.lastText[i];
+      for (; i < m.textLen; i++) {
+        const unsigned char c = (unsigned char)m.text[i];
         text[i] = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
       }
       text[i] = '\0';
-      dataf("STATUS", "lxmf_last_text=%s", text);
+      if (i) dataf("STATUS", "lxmf_last_text=%s", text);
     }
   }
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
@@ -192,6 +204,56 @@ static void doStatus() {
         wifiManager.dnsListening() ? "listening" : "down",
         p.armed() ? "true" : "false", restart);
   ok("STATUS");
+}
+
+// One message, as two lines. The split is not tidiness — a message is someone
+// else's text, with spaces in it, and putting it on the line with the fields
+// would make every field after it unparseable while also clipping the text
+// against the line limit.
+static void emitMessage(const Rns::InboxRecord& m, void* ctx) {
+  const uint32_t boot = *(const uint32_t*)ctx;
+  char from[33];
+  for (int i = 0; i < 16; i++) snprintf(from + i * 2, 3, "%02x", m.from[i]);
+  // "ago" is only true within the run that took the message in, because
+  // millis() starts again at every restart. Said rather than implied: a node
+  // that has been up ten minutes must not report a message from last week as
+  // ten minutes old.
+  const bool thisBoot = m.bootId == boot;
+  dataf("MESSAGES", "seq=%lu from=%s standing=%s via=%s sent=%lu boot=%s ago_ms=%lu",
+        (unsigned long)m.seq, from, Rns::standingName(m.standing), Rns::viaName(m.via),
+        (unsigned long)m.sentAt, thisBoot ? "this" : "earlier",
+        (unsigned long)(thisBoot ? millis() - m.bootMs : 0));
+  char text[Rns::kInboxTextMax + 1];
+  size_t k = 0;
+  for (; k < m.textLen; k++) {
+    const unsigned char c = (unsigned char)m.text[k];
+    text[k] = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+  }
+  text[k] = '\0';
+  dataf("MESSAGES", "seq=%lu text=%s", (unsigned long)m.seq, text);
+}
+
+// The stored messages, newest first.
+static void doMessages(const Request& r) {
+  size_t want = 0;
+  if (!Rns::inboxPageSize(r.argc == 1 ? r.args[0] : nullptr, want)) {
+    // The same rule the page applies, from the same place, so an operator
+    // comparing the two is not told different things about one node.
+    char why[64];
+    snprintf(why, sizeof(why), "n must be a whole number from 1 to %u", (unsigned)Rns::kInboxPageMax);
+    err("MESSAGES", 400, why);
+    return;
+  }
+  // What is stored, said before the messages. What is *shown* is not claimed
+  // here: it used to be, computed before the loop that produces it, so a read
+  // that failed part way through left the header promising lines that never
+  // came. The OK line's lines= count is derived from what was actually sent.
+  dataf("MESSAGES", "stored=%lu newest=%lu not_stored=%lu",
+        (unsigned long)Rns::Inbox::stored(), (unsigned long)Rns::Inbox::newest(),
+        (unsigned long)Rns::Inbox::dropped());
+  uint32_t boot = Rns::Inbox::bootId();
+  Rns::Inbox::readPage(0, want, emitMessage, &boot);
+  ok("MESSAGES");
 }
 
 static void doUsbStatus() {
@@ -404,6 +466,7 @@ static void dispatch(const char* line) {
     case Cmd::UsbStatus:     doUsbStatus(); break;
     case Cmd::NetworkStatus: doNetworkStatus(); break;
     case Cmd::Links:         doLinks(); break;
+    case Cmd::Messages:      doMessages(r); break;
     case Cmd::Wifi:          doLinkSwitch(r, "wifi"); break;
     case Cmd::Ppp:           doLinkSwitch(r, "ppp"); break;
     case Cmd::Auth:          doAuth(r); break;
