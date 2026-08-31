@@ -58,12 +58,13 @@ See [reticulum.md](reticulum.md#interface-modes) for what the modes do.
 A switch the board cannot honour is refused by the API rather than saved.
 See [local-link.md](local-link.md).
 
-## Maintenance (saves, applies live — except the web portal, which restarts)
+## Maintenance (saves, applies live — except the web portal and mDNS, which restart)
 | Setting | Default | Notes |
 |---|---|---|
 | Bootloader API | on | `POST /api/system/bootloader` answers; off = flash by hand only |
 | …also from the station network | no | by default only a directly attached link (AP, USB, PPP) may ask; the upstream LAN is refused |
-| Web portal (`maintenance.web_ui`) | on | off means the routes are never registered and nothing listens on port 80. The largest single thing a small board can decline: `28 624 B` of byte-addressable RAM with Wi-Fi on, measured on a Heltec Wireless Stick that has ~213 KB of it and needs 53 KB for Reticulum. Administer it over the console instead, on the cable or on TCP. Restart-applied, like Wi-Fi. Refused if it would leave no way in — with the console off, the portal is the only thing answering on a link |
+| mDNS (`maintenance.mdns`) | from the board | answers `<hostname>.local` and advertises the Reticulum port. `6 368 B` of byte-addressable RAM, measured on a Heltec Wireless Stick — the largest single thing a node can decline and still be a node, which is why the boards with least of it start without one. Nothing depends on it; reach the node by address instead. Restart-applied |
+| Web portal (`maintenance.web_ui`) | on | off means the routes are never registered and nothing listens on port 80. The largest single thing a small board can decline: `http + dns` bills `22 028 B` of byte-addressable RAM with the portal on against `5 324 B` for the resolver alone, so the portal is about `16 700 B` — measured on a Heltec Wireless Stick that has ~213 KB of it and needs 53 KB for Reticulum. (Older notes quote `28 624 B`; that was the portal, the resolver and mDNS billed on one line.) Administer it over the console instead, on the cable or on TCP. Restart-applied, like Wi-Fi. Refused if it would leave no way in — with the console off, the portal is the only thing answering on a link |
 | Console over TCP (`maintenance.console_tcp`) | on | the same console on `CONSOLE_TCP_PORT` (4243), reachable over the access point, the station link, `usb0` and `ppp0`. Every caller sends `AUTH <admin password>` first and gets `HELP`, `VERSION` and nothing else until it succeeds; the cable needs no password, because physical access is already more than one. This is the cheap way to configure a node from a distance — the web portal costs 28 616 B of internal RAM on a Heltec Wireless Stick against 272 B for a listener of this shape. Off means the socket does not exist |
 | Serial maintenance console | on | the port answers `VERSION`, `STATUS`, `GET`/`SET`, `BOOTLOADER CONFIRM`, …; off = log only. `GET` and `SET` reach every setting in this document by its API name with the section in front (`radio.sf`, `wifi.sta_ssid`) — see [local-link.md](local-link.md#settings-over-the-console) |
 

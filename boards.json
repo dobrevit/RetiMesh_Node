@@ -66,7 +66,7 @@
     "name": "LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262)",
     "chip": "esp32",
     "chip_family": "ESP32",
-    "mcu": "ESP32: 4 MB flash, no PSRAM",
+    "mcu": "ESP32: 4 MB flash, 4 MB PSRAM",
     "radio": "SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot",
     "display": "0.96\" SSD1306 (I²C)",
     "extras": "18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot**",

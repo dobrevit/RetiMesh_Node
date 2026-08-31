@@ -138,9 +138,10 @@
 //
 // The console over a socket is what lets a node be configured from a
 // distance without a resident web server: measured on a Heltec Wireless
-// Stick, "http + dns + mdns" costs 28616 B of byte-addressable RAM against
-// 272 B for the Reticulum TCP listener beside it, on a board that finishes
-// booting with about 27 KB. Same parser, same settings rules, same refusals
+// Stick, the portal and the resolver beside it cost about 22 KB of
+// byte-addressable RAM ("http + dns" in the boot bill, with mDNS billed
+// separately at 6 368 B) against 272 B for the Reticulum TCP listener, on a
+// board that finishes booting with about 27 KB. Same parser, same settings rules, same refusals
 // as the cable — a second transport, not a second implementation.
 // ---------------------------------------------------------------------------
 #ifndef CONSOLE_TCP_PORT
@@ -228,6 +229,32 @@
 #define DIAG_STACK_WARN_B   768                 // headroom below this: name the task
 #define DIAG_HEAP_WARN_B    20480               // internal heap low-water below this
 
+// A classic ESP32 splits its internal memory, and much of what the heap
+// reports is 32-bit-only IRAM that cannot hold a buffer or a stack. With PSRAM
+// there is somewhere else to put things; without it, the byte-addressable half
+// is all a node has, and on a Wireless Stick that is about 213 KB against
+// 200 KB spent before it has finished starting.
+//
+// A class rather than a board: today it selects the Wireless Stick alone — the
+// Wireless Bridge is the same silicon with 8 MB of PSRAM, and the T-Beam's
+// board file brings 4 MB — and it will select the next board like it without
+// anybody remembering to add one.
+#if defined(CONFIG_IDF_TARGET_ESP32) && !defined(BOARD_HAS_PSRAM)
+  #define BOARD_DRAM_TIGHT 1
+#else
+  #define BOARD_DRAM_TIGHT 0
+#endif
+
+// Whether a board starts mDNS by default. It answers <hostname>.local and
+// advertises the RNS port: a convenience, not a service anything depends on,
+// and 6 368 B of byte-addressable RAM measured with Diag::cost(). On a board
+// with ten kilobytes left it is the largest single thing that can be declined
+// while still being a node, so the tight ones start without it. It stays a
+// setting either way (docs/hardware.md).
+#ifndef MDNS_ENABLED_DEFAULT
+  #define MDNS_ENABLED_DEFAULT (BOARD_DRAM_TIGHT ? 0 : 1)
+#endif
+
 #ifndef MDNS_HOSTNAME
   // Fallback only. The name a node actually answers to is derived from its
   // access-point name — see WifiManager::deriveHostname() — so that two nodes
@@ -251,7 +278,10 @@
   #define RNS_TCP_PORT      4242
 #endif
 #ifndef RNS_MAX_CLIENTS
-  #define RNS_MAX_CLIENTS   4               // simultaneous Sideband/RNS peers
+  // Two on a board with no room to spare: past the cap a client is refused,
+  // which an operator sees and which costs the node nothing (see
+  // RetiTransportServer). Contrast AUTOIF_MAX_PEERS below, which evicts.
+  #define RNS_MAX_CLIENTS   (BOARD_DRAM_TIGHT ? 2 : 4)   // simultaneous Sideband/RNS peers
 #endif
 
 // ---------------------------------------------------------------------------

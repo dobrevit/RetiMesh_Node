@@ -7,7 +7,7 @@
 |---|---|---|---|---|---|---|
 | `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
 | `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
-| `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, no PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot** | verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board |
+| `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, 4 MB PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot** | verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board |
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
@@ -15,6 +15,44 @@
 | `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
 | `heltec-wp` | Heltec Wireless Paper | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 2.13" e-ink (250x122, E0213A367), driven | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board |
 <!-- boards.json:end -->
+
+### The Wireless Stick's memory
+
+`heltec-ws` is the tightest board here and the only one whose defaults differ
+because of it. A classic ESP32 splits its internal memory, and much of what the
+heap reports is 32-bit-only IRAM that cannot hold a buffer or a stack — so the
+number that matters is the byte-addressable half, which `STATUS` reports as
+`dram_free` and `Diag::cost()` bills per subsystem at boot. The Wireless Bridge
+is the same silicon with 8 MB of PSRAM and the T-Beam's board file brings 4 MB,
+so neither is in this class; `BOARD_DRAM_TIGHT` in `Config.h` selects it by
+what the silicon has rather than by name.
+
+Measured on the board: about 213 KB of it exists, and starting a node spent
+200 KB, leaving 7 604 B with a low-water mark of 816 bytes and a largest free
+block of 4 084 B. That is what took it down with `std::bad_alloc` more than
+once. Two defaults differ here:
+
+| | Default | This board | Why |
+|---|---|---|---|
+| mDNS | on | off | `6 368 B`, and nothing depends on it. A setting (`maintenance.mdns`) |
+| `RNS_MAX_CLIENTS` | 4 | 2 | past the cap a client is **refused**, which is a trade an operator can see. Compile-time |
+
+That takes it to 12 220 B free, the low-water mark to 1 264 B and the largest
+free block to 4 596 B. Only mDNS is a setting; the client cap is a `#define`
+and changing it needs a rebuild.
+
+`AUTOIF_MAX_PEERS` is deliberately **not** reduced here, though it looks like
+the obvious next one. Past the cap `AutoInterface::touchPeer()` evicts the
+oldest peer rather than refusing the newest, and each eviction deregisters an
+RNS interface and drops its stored paths — so a smaller table on a busy bench
+buys memory with continuous path flapping, which is a worse failure than the
+one being fixed and a much harder one to recognise.
+
+The memory it would have bought is real, though, and points at where the next
+work is: `RNS_MAX_INTERFACES` is `1 + RNS_MAX_CLIENTS + AUTOIF_MAX_PEERS`, and
+the snapshot buffers are sized from it — so a node pays for peers it may never
+have rather than for the ones it has. Sizing those to what is actually
+registered would give the board the same memory without touching the cap.
 
 Both Heltec boards use `partitions/huge_app_8mb.csv` rather than the stock
 table, which maps only the first 4 MB of an 8 MB part. Neither has an SD slot,

@@ -222,7 +222,7 @@ The same console answers on port 4243, over the access point, the station
 link, `usb0` and `ppp0` alike — everything above, `GET`/`SET` included. It is
 one caller at a time and it exists so a node can be configured from a distance
 *without* a resident web server, which is a large thing to carry: on a Heltec
-Wireless Stick `http + dns + mdns` costs **28 616 B** of byte-addressable
+Wireless Stick the portal, the resolver and mDNS cost **28 616 B** of byte-addressable
 internal RAM, on a board that finishes booting with about 27 KB of it, while
 the Reticulum TCP listener beside it costs **272 B**. A line protocol on a
 socket is the second of those. The switch is `maintenance.console_tcp`, and
