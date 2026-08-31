@@ -297,19 +297,6 @@ static uint8_t wifiPercent(float rssi) {
   return (uint8_t)((rssi - lo) * 100.0f / (hi - lo));
 }
 
-// Link quality from SNR, against a floor that moves with the spreading factor:
-// SF12 decodes far below the noise where SF7 cannot, so the same SNR means
-// something different on each. The floor is the SX127x demodulation limit at
-// each factor — -7.5 dB at SF7 down to -20 dB at SF12, i.e. 10 - 2.5*SF.
-// Below it the chip cannot decode at all, so a dead link now reads empty
-// rather than showing four of seven bars.
-static uint8_t qualityPercent(float snr, uint8_t sf) {
-  const float lo = 10.0f - 2.5f * (float)sf, hi = 6.0f;
-  if (snr <= lo) return 0;
-  if (snr >= hi) return 100;
-  return (uint8_t)((snr - lo) * 100.0f / (hi - lo));
-}
-
 // The header carries the page name and, on the right, the cell — the one
 // reading that means the same thing on every page. Signal strength does not
 // belong here: a bar chart with no label and no number is decoration, so the
@@ -728,7 +715,7 @@ void Display::paintRadio() {
     snprintf(line, sizeof(line), "%.0fdBm", (double)g_stats.lastRssi);
     meter(2, "sig", line, signalPercent(g_stats.lastRssi));
     snprintf(line, sizeof(line), "%.1fdB", (double)g_stats.lastSnr);
-    meter(3, "snr", line, qualityPercent(g_stats.lastSnr, r.sf));
+    meter(3, "snr", line, loraQualityPercent(g_stats.lastSnr, r.sf));
   } else {
     _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("sig  no RX yet");
   }

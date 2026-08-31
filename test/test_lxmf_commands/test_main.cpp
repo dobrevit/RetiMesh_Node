@@ -51,22 +51,51 @@ static void test_an_echo_is_bounded_and_cut_between_characters() {
 
   // Two-byte characters, cut so that the limit falls inside one.
   char accents[200];
-  for (size_t i = 0; i + 1 < sizeof(accents) - 1; i += 2) { accents[i] = (char)0xC3; accents[i+1] = (char)0xA9; }
+  // Every byte written: the old bound left the last one untouched and strlen
+  // then read it.
+  for (size_t i = 0; i + 2 < sizeof(accents); i += 2) { accents[i] = (char)0xC3; accents[i+1] = (char)0xA9; }
   accents[sizeof(accents) - 1] = '\0';
   const size_t k = Commands::reply(cmd(kCommandEcho, accents), {}, out, sizeof(out));
   const size_t body = k - strlen("Echo reply: ");
   TEST_ASSERT_EQUAL_size_t(0, body % 2);        // whole characters only
 }
 
-// A body that is not text is not reflected back over the radio at all.
-static void test_an_echo_of_something_that_is_not_text_carries_none_of_it() {
-  char out[Commands::kReplyMax] = "";
-  LxmfCommand c{};
-  c.id = kCommandEcho;
-  c.text = (const uint8_t*)"\xFF\xFE\x01";
-  c.textLen = 3;
-  Commands::reply(c, {}, out, sizeof(out));
-  TEST_ASSERT_EQUAL_STRING("Echo reply: ", out);
+// The echoed bytes come from a stranger and leave over this node's signature,
+// so what is reflected is text and only text. Anything else is shown as a dot
+// rather than dropped, so the reply says something arrived without repeating
+// it verbatim into whatever is reading.
+static void test_an_echo_reflects_text_and_nothing_else() {
+  struct { const char* in; size_t len; const char* want; const char* what; } cases[] = {
+    { "\xFF\xFE\x01", 3, "Echo reply: ...", "bytes that are not UTF-8" },
+    { "\x1b[2J", 4, "Echo reply: .[2J", "a screen-clearing escape sequence" },
+    // The literal is split because a C hex escape is maximal-munch: "a\x07b"
+    // is 'a' followed by 0x7B, not a bell followed by 'b'.
+    { "a\x07" "b", 3, "Echo reply: a.b", "a bell" },
+    { "a\xE2\x80\xAE" "b", 5, "Echo reply: a...b", "U+202E, which reverses the line" },
+    { "ok\nnext", 7, "Echo reply: ok.next", "a newline, since a reply is one line" },
+  };
+  for (auto& c : cases) {
+    char out[Commands::kReplyMax] = "";
+    LxmfCommand k{};
+    k.id = kCommandEcho;
+    k.text = (const uint8_t*)c.in;
+    k.textLen = c.len;
+    Commands::reply(k, {}, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(c.want, out, c.what);
+  }
+}
+
+// Every branch that returns 0 leaves an empty string behind. The signal branch
+// used to measure by writing into the caller's buffer, so a buffer too small
+// for the fallback was left holding half a line beside a return of nothing.
+static void test_returning_nothing_leaves_nothing_behind() {
+  Signal s; s.rssi = -104.0f; s.snr = 8.75f; s.q = 100.0f;
+  for (size_t cap = 1; cap < 28; cap++) {
+    char buf[64];
+    memset(buf, '#', sizeof(buf));
+    const size_t n = Commands::reply(cmd(kCommandSignal), s, buf, cap);
+    if (n == 0) TEST_ASSERT_EQUAL_CHAR('\0', buf[0]);
+  }
 }
 
 static void test_a_signal_report_reads_like_the_one_a_phone_sends() {
@@ -126,7 +155,8 @@ int main() {
   RUN_TEST(test_a_ping_is_answered_the_way_sideband_answers_one);
   RUN_TEST(test_an_echo_comes_back_with_what_was_sent);
   RUN_TEST(test_an_echo_is_bounded_and_cut_between_characters);
-  RUN_TEST(test_an_echo_of_something_that_is_not_text_carries_none_of_it);
+  RUN_TEST(test_an_echo_reflects_text_and_nothing_else);
+  RUN_TEST(test_returning_nothing_leaves_nothing_behind);
   RUN_TEST(test_a_signal_report_reads_like_the_one_a_phone_sends);
   RUN_TEST(test_a_figure_the_node_does_not_have_is_left_out);
   RUN_TEST(test_a_message_with_no_reading_at_all_says_so);

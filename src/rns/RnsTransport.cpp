@@ -188,12 +188,23 @@ public:
     size_t sz = 0;
     uint8_t* item;
     while ((item = (uint8_t*)xRingbufferReceive(sRxRing, &sz, 0)) != nullptr) {
-      // Signal stats are private to InterfaceImpl; the wrapper exposes setters.
-      std::shared_ptr<RNS::InterfaceImpl> sp = shared_from_this();
-      RNS::Interface self(sp);
-      self.r_stat_rssi(g_stats.lastRssi);
-      self.r_stat_snr(g_stats.lastSnr);
-      handle_incoming(Bytes(item, sz));
+      // The reading the radio took of this frame, carried with it rather than
+      // sampled now: draining three at once used to stamp all three with the
+      // newest one's RSSI (Config.h, LoRaRxFrame).
+      if (sz > sizeof(LoRaRxFrame)) {
+        LoRaRxFrame hdr;
+        memcpy(&hdr, item, sizeof(hdr));
+        // Signal stats are private to InterfaceImpl; the wrapper exposes setters.
+        std::shared_ptr<RNS::InterfaceImpl> sp = shared_from_this();
+        RNS::Interface self(sp);
+        self.r_stat_rssi(hdr.rssi);
+        self.r_stat_snr(hdr.snr);
+        // Quality is not a figure any radio reports; RNS derives it, and so
+        // does the panel. Nothing set it before, so the line a signal report
+        // promised could never appear.
+        self.r_stat_q((float)loraQualityPercent(hdr.snr, settings.radio().sf));
+        handle_incoming(Bytes(item + sizeof(hdr), sz - sizeof(hdr)));
+      }
       vRingbufferReturnItem(sRxRing, item);
     }
   }
@@ -405,9 +416,9 @@ static void rememberProvenKey(const Bytes& source, const Bytes& key) {
 // everywhere else, which is what a signal report should say.
 static Rns::Commands::Signal signalOf(const RNS::Packet& packet) {
   Rns::Commands::Signal s;
-  s.rssi = const_cast<RNS::Packet&>(packet).rssi();
-  s.snr  = const_cast<RNS::Packet&>(packet).snr();
-  s.q    = const_cast<RNS::Packet&>(packet).q();
+  s.rssi = packet.rssi();
+  s.snr  = packet.snr();
+  s.q    = packet.q();
   return s;
 }
 
@@ -422,15 +433,21 @@ static const uint32_t kCommandCooldownMs = 10000;
 struct CommandSeen { uint8_t hash[16]; uint32_t atMs; bool used; };
 static CommandSeen sCommandSeen[8];
 
-static bool commandAllowedNow(const uint8_t* sourceHash) {
-  const uint32_t now = millis();
+// Asking and recording are separate on purpose. Recording inside the question
+// spent a sender's cooldown on a command this node does not answer, so a
+// telemetry request — which Sideband sends and this node cannot answer yet —
+// made the ping after it look like the node had gone quiet.
+static bool commandCooldownActive(const uint8_t* sourceHash) {
+  for (const auto& e : sCommandSeen)
+    if (e.used && memcmp(e.hash, sourceHash, 16) == 0)
+      return (uint32_t)(millis() - e.atMs) < kCommandCooldownMs;
+  return false;
+}
+
+static void noteCommandAnswered(const uint8_t* sourceHash) {
   CommandSeen* slot = nullptr;
   for (auto& e : sCommandSeen) {
-    if (e.used && memcmp(e.hash, sourceHash, 16) == 0) {
-      if ((uint32_t)(now - e.atMs) < kCommandCooldownMs) return false;
-      e.atMs = now;
-      return true;
-    }
+    if (e.used && memcmp(e.hash, sourceHash, 16) == 0) { slot = &e; break; }
     if (!e.used && !slot) slot = &e;
   }
   if (!slot) {
@@ -438,9 +455,26 @@ static bool commandAllowedNow(const uint8_t* sourceHash) {
     for (auto& e : sCommandSeen) if ((int32_t)(e.atMs - slot->atMs) < 0) slot = &e;
   }
   memcpy(slot->hash, sourceHash, 16);
-  slot->atMs = now;
+  slot->atMs = millis();
   slot->used = true;
-  return true;
+}
+
+// The key this node holds for a source hash, wherever it came from: an announce
+// it heard, or a link on which the sender proved who they are. Asked in one
+// place because the receiving side and the answering side must not disagree
+// about whether a sender is known — they did, and a signal report from someone
+// who had identified on a link but never announced was verified on the way in
+// and then dropped on the way out with "no key for ...", which is the one user
+// the feature is justified by.
+static RNS::Identity senderKey(const uint8_t sourceHash[16]) {
+  RNS::Identity known = RNS::Identity::recall(RNS::Bytes(sourceHash, 16));
+  if (known) return known;
+  if (const ProvenKey* proven = provenKeyFor(sourceHash)) {
+    RNS::Identity fromLink(false);
+    fromLink.load_public_key(RNS::Bytes(proven->key, 32));
+    return fromLink;
+  }
+  return {RNS::Type::NONE};
 }
 
 static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
@@ -471,16 +505,7 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
   // exactly what announcing one was meant to stop. They are taken, marked
   // unverified, and never trusted with more than being read.
   const RNS::Bytes source(m.sourceHash, 16);
-  RNS::Identity sender = RNS::Identity::recall(source);
-  if (!sender) {
-    // Nothing announced — but the sender may have proved who it is on a link,
-    // which is the same proof an announce carries and arrives sooner.
-    if (const ProvenKey* proven = provenKeyFor(m.sourceHash)) {
-      RNS::Identity fromLink(false);
-      fromLink.load_public_key(RNS::Bytes(proven->key, 32));
-      sender = fromLink;
-    }
-  }
+  RNS::Identity sender = senderKey(m.sourceHash);
   bool verified = false;
   if (sender) {
     // What LXMF actually signs is the two hashes and the payload *and then
@@ -608,29 +633,51 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
   Rns::Admin::offer(m.sourceHash, standing, m.sentAt, (const char*)text, textLen);
 
   // And the questions that are not administration: is this node there, say
-  // this back, how well did it hear me. Answered for anyone, on purpose —
-  // requiring the admin list would defeat the point, since the person who most
-  // needs a signal report is the one at the edge of coverage whose announce
-  // may not have arrived. They disclose nothing the asker did not already
-  // know, the reply is one packet for one packet, and a cooldown keeps one
-  // peer off the radio (LxmfCommands.h).
-  if (settings.maintenance().lxmfCommands && m.fieldsCount) {
+  // this back, how well did it hear me (LxmfCommands.h).
+  //
+  // Only for a verified sender, and the reason is not the one the admin gate
+  // has. It is that a source hash on an unverified message is a *claim* — the
+  // sender wrote it into the payload and nothing checked it — so a reply goes
+  // to whoever the claim named rather than to whoever sent it. Answering one
+  // would have made this node a way to put attacker-chosen text, over its own
+  // signature, into a stranger's conversation, and to aim its transmitter at a
+  // third party. RnsAdmin refuses to answer an unverified hash for exactly
+  // this reason (RnsAdmin.cpp); the rule is the node's, not that feature's.
+  //
+  // It also gives the cooldown below something real to key on: a rate limit on
+  // a hash anybody can fabricate limits nobody.
+  //
+  // The person at the edge of coverage is still served, which was the worry:
+  // a sender who never announced but identified on its link is verified from
+  // that (senderKey), which is the case a signal report is most wanted in.
+  if (settings.maintenance().lxmfCommands && verified && m.fieldsCount) {
     const uint8_t* val = nullptr; size_t valLen = 0;
     if (Rns::lxmfField(m.fields, m.fieldsLen, Rns::kFieldCommands, val, valLen)) {
       Rns::LxmfCommand cmds[4];
       const size_t n = Rns::lxmfCommands(val, valLen, cmds, 4);
-      if (n && !commandAllowedNow(m.sourceHash)) {
-        log_d("lxmf: not answering %s so soon after the last time",
-              source.toHex().c_str());
+      if (n && commandCooldownActive(m.sourceHash)) {
+        log_d("lxmf: not answering %s so soon after the last time", source.toHex().c_str());
       } else {
+        // One answer per message, whatever was asked. The reply queue is two
+        // deep and shared with remote administration, so a message carrying
+        // three commands used to queue three replies, drop the third, and be
+        // able to push an admin answer out of the way. It also keeps the claim
+        // this feature is defended by true: one short reply for one short
+        // request, never four.
         for (size_t k = 0; k < n; k++) {
           char answer[Rns::Commands::kReplyMax];
           if (!Rns::Commands::reply(cmds[k], signal, answer, sizeof(answer))) continue;
-          if (queueLxmfReply(m.sourceHash, answer))
+          if (queueLxmfReply(m.sourceHash, answer)) {
+            // Stamped only now. Stamping before knowing an answer exists spent
+            // the sender's ten seconds on a command this node does not answer,
+            // so a telemetry request made the ping after it look like silence.
+            noteCommandAnswered(m.sourceHash);
             log_i("lxmf: answering command 0x%02X from %s", (unsigned)cmds[k].id,
                   source.toHex().c_str());
-          else
+          } else {
             log_w("lxmf: could not queue an answer for %s", source.toHex().c_str());
+          }
+          break;
         }
       }
     }
@@ -802,7 +849,7 @@ bool queueLxmfReply(const uint8_t destHash[16], const char* text) {
 
 static bool sendLxmf(const uint8_t destHash[16], const char* text) {
   if (!sStarted || !lxmfDest) return false;
-  RNS::Identity peer = RNS::Identity::recall(RNS::Bytes(destHash, 16));
+  RNS::Identity peer = senderKey(destHash);
   if (!peer) {
     log_w("lxmf: no key for %s; cannot answer", RNS::Bytes(destHash, 16).toHex().c_str());
     return false;

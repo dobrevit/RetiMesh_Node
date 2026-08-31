@@ -94,18 +94,23 @@ inline size_t reply(const LxmfCommand& c, const Signal& s, char* out, size_t cap
   }
 
   if (c.id == kCommandEcho) {
-    // The sender's own bytes, back. They chose them, so there is nothing here
-    // to leak — but they arrive from a stranger and go out over this node's
-    // radio, so what is echoed is trimmed to a character boundary and capped.
-    // A body that is not text is not echoed at all rather than reflected raw.
+    // The sender's own bytes, back — but they arrive from a stranger and leave
+    // over this node's signature, so they are copied the way any text bound
+    // for a console is: anything not printable becomes a dot, cut on a
+    // character boundary (LxmfFormat.h).
+    //
+    // Trimming to a character boundary alone was not enough, and the comment
+    // that said "a body that is not text is not echoed" was only true of
+    // invalid UTF-8. An escape sequence is perfectly good UTF-8, and U+202E is
+    // too — so a node would have reflected either into whatever is reading the
+    // reply, signed by itself.
     static const char* kPrefix = "Echo reply: ";
     const size_t plen = strlen(kPrefix);
     if (cap <= plen + 1) return 0;
-    const size_t room = cap - plen - 1;
-    const size_t n = utf8TrimLen(c.text, c.textLen, room < 64 ? room : 64);
+    const size_t room = cap - plen;                  // utf8SafeCopy keeps its own NUL
     memcpy(out, kPrefix, plen);
-    if (n) memcpy(out + plen, c.text, n);
-    out[plen + n] = '\0';
+    const size_t n = utf8SafeCopy(c.text, c.textLen, out + plen,
+                                  room < 64 ? room : 64);
     return plen + n;
   }
 
@@ -115,9 +120,17 @@ inline size_t reply(const LxmfCommand& c, const Signal& s, char* out, size_t cap
     // left out rather than filled in.
     size_t i = 0;
     auto line = [&](const char* fmt, float v) {
-      if (isnan(v) || i >= cap) return;
-      const int k = snprintf(out + i, cap - i, fmt, (double)v);
-      if (k > 0 && (size_t)k < cap - i) i += (size_t)k;
+      if (isnan(v)) return;
+      // Formatted aside first. snprintf writes what it can before telling you
+      // it did not fit, so measuring in the output buffer left a half-written
+      // line behind on a return of zero — and every other branch here promises
+      // an empty string when it returns nothing.
+      char tmp[32];
+      const int k = snprintf(tmp, sizeof(tmp), fmt, (double)v);
+      if (k <= 0 || (size_t)k >= sizeof(tmp) || i + (size_t)k + 1 > cap) return;
+      memcpy(out + i, tmp, (size_t)k);
+      i += (size_t)k;
+      out[i] = '\0';
     };
     line("Link Quality: %.0f%%\n", s.q);
     line("RSSI: %.0f dBm\n", s.rssi);
@@ -125,7 +138,7 @@ inline size_t reply(const LxmfCommand& c, const Signal& s, char* out, size_t cap
     if (i == 0) {
       static const char* none = "No reception info available";
       const size_t n = strlen(none);
-      if (cap <= n) return 0;
+      if (cap <= n) { out[0] = '\0'; return 0; }
       memcpy(out, none, n + 1);
       return n;
     }

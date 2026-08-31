@@ -343,15 +343,26 @@ find where the node stops hearing them. Without it that takes two people and
 two radios. A figure the node does not have is left out rather than reported as
 zero, so a request that arrived over Wi-Fi says only what it can.
 
-These are not administration and share none of its gating: they change nothing,
-and they tell a stranger only what they already knew — that the node is there,
-which they learned by reaching it, and how strong their own signal was, which
-their own radio could tell them. Requiring the administrator list would deny a
-signal report to precisely the person at the edge of coverage who needs one.
+**Only for a verified sender** — one whose key this node holds and whose
+signature over the message matched it. Not because the questions are
+privileged, but because a source hash on an unverified message is a *claim*:
+the sender wrote it into the payload and nothing checked it, so the answer
+would go to whoever the claim named rather than to whoever sent it. Answering
+one would make the node a way to put attacker-chosen text, over the node's own
+signature, into a stranger's conversation — and to aim its transmitter at a
+third party. Remote administration refuses unverified hashes for the same
+reason.
 
-What they cost is airtime: one short reply for one short request, no
-amplification. A per-sender cooldown of ten seconds keeps one peer off the
-radio, and the duty-cycle accounting bounds the rest. `SET
+That is a different bar from the administrator list, and deliberately lower:
+being verified needs only that the node has heard you announce, or that you
+identified on the link you opened. The person at the edge of coverage is still
+served — a client that has opened a link has proved who it is, which is the
+case a signal report is most wanted in.
+
+What they cost is airtime: **one reply per message**, whatever was asked, so
+three commands in one message get one answer rather than three. A per-sender
+cooldown of ten seconds keeps one peer off the radio, counted only when an
+answer actually went out, and the duty-cycle accounting bounds the rest. `SET
 maintenance.lxmf_commands off` (or `"lxmf_commands": false` over HTTP) declines
 to spend it on a crowded channel. A telemetry request is parsed but not
 answered — the node has no telemetry to send yet, and saying nothing leaves the
