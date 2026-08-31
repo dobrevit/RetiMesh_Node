@@ -156,6 +156,10 @@ static void doStatus() {
   // now the only way to learn it was to be listening when an announce went
   // out.
   if (lx.address[0]) dataf("STATUS", "lxmf_address=%s", lx.address);
+  // Where it can be browsed, beside where it can be messaged. Both are
+  // addresses an operator has to be able to hand somebody.
+  if (RnsTransport::nomadAddress()[0])
+    dataf("STATUS", "nomadnet_address=%s", RnsTransport::nomadAddress());
   if (lx.received || lx.rejected) {
     dataf("STATUS", "lxmf_rx=%lu lxmf_unverified=%lu lxmf_mismatched=%lu lxmf_rejected=%lu lxmf_not_stored=%lu",
           (unsigned long)lx.received, (unsigned long)lx.unverified, (unsigned long)lx.mismatched,

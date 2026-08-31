@@ -405,6 +405,28 @@ with the reading of a neighbour who spoke in between.
 The document is built when the answer goes out, not when the request arrives,
 so the readings are current.
 
+## A page over Reticulum (NomadNet)
+
+The node answers `/page/index.mu` on a `nomadnetwork.node` destination, so it
+can be **browsed from NomadNet** — over the LoRa channel, a TCP peer or
+AutoInterface, with nothing installed and no web server involved.
+
+That matters for the node the portal cannot serve. The HTTP status page needs
+Wi-Fi association, an IP and a browser next to the antenna; the node that most
+needs asking how it is doing is the one on a hill. This is the same figures
+over the mesh instead.
+
+The page is generated, not authored: identity and addresses, uptime, the
+channel it is actually on, what it last heard, interfaces and paths, message
+counts with the three standings kept apart, battery and heap. Nothing is
+claimed that the board cannot measure — a node that has heard nobody says so
+rather than reporting 0 dBm, and a board that cannot see its charger gives the
+charge and stops. Serving operator-authored pages and files from storage is a
+separate feature and not in this.
+
+Its address is announced alongside the LXMF one, as plain UTF-8 — a third
+audience and a third announce shape from one node.
+
 ## Remote administration over RNS (off by default)
 A node can be administered by messaging it, which is the only way in when its
 cable is dead. The delivery address is reachable by anyone who can route to it

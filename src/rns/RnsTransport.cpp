@@ -34,6 +34,8 @@
 #include "LxmfInbox.h"
 #include "LxmfCommands.h"
 #include "Telemetry.h"
+#include "NomadNet.h"
+#include "Diag.h"
 #include "Power.h"
 #include "Gps.h"
 #include <LittleFS.h>
@@ -59,6 +61,11 @@ static RNS::Destination nodeDest({RNS::Type::NONE});
 // everything else, so its announce stream stays empty however many nodes are
 // in earshot (docs/troubleshooting.md).
 static RNS::Destination lxmfDest({RNS::Type::NONE});
+// And the node as something to *read* rather than message. NomadNet browses
+// over Reticulum, so a page answers over whatever carried the request — the
+// LoRa channel included, which is the one surface the HTTP portal can never
+// reach (NomadNet.h).
+static RNS::Destination nomadDest({RNS::Type::NONE});
 
 // The last message this node was sent, and how many have arrived. Not an
 // inbox — a node that announces an LXMF address and then silently drops what
@@ -698,6 +705,102 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
   return true;
 }
 
+// A page costs one packet and one proof; two seconds between them is far
+// below what a person reading costs and far above what a flood needs to be
+// stopped.
+static const uint32_t kPageCooldownMs = 2000;
+
+// The node's own page, generated when it is asked for.
+//
+// The request generator hands back the msgpack-encoded value, not the text:
+// microReticulum appends it after the response envelope's array header, so
+// what goes on the wire has to be the encoded form. Bytes, because NomadNet
+// reads a page with .decode("utf-8") — the same str-against-bin distinction
+// that made this node nameless for a release, answered the other way here.
+static RNS::Bytes serveIndex(const RNS::Bytes& path, const RNS::Bytes& data,
+                             const RNS::Bytes& request_id, const RNS::Bytes& link_id,
+                             const RNS::Identity& remote_identity, double requested_at) {
+  (void)path; (void)data; (void)request_id; (void)link_id;
+  (void)remote_identity; (void)requested_at;
+
+  Rns::NomadNet::Status st;
+  const RadioSettings& r = settings.radio();
+  st.name = loraRadio.callsign();
+  st.version = FW_VERSION;
+  st.board = BOARD_NAME;
+  const std::string self = nomadDest ? nomadDest.hash().toHex() : std::string();
+  const std::string lxmf = lxmfDest ? lxmfDest.hash().toHex() : std::string();
+  st.address = self.c_str();
+  st.lxmfAddress = lxmf.c_str();
+  st.uptimeS = (uint32_t)(millis() / 1000);
+
+  st.radioOnline = g_stats.radioOnline;
+  st.radioModel = g_stats.radioModel;
+  st.freqMhz = r.freqMhz; st.bwKhz = r.bwKhz; st.sf = r.sf; st.cr = r.cr; st.txDbm = r.txDbm;
+  // Any reception at all, not only a reassembled RNS packet: lastRssi is
+  // written on every CRC-good frame, so a node sitting beside a beaconing
+  // neighbour holds a real reading while loraRxPackets is still zero — and
+  // would have printed "nothing heard", which is the falsehood this branch
+  // exists to avoid.
+  st.heardAnything = g_stats.loraRxPackets || g_stats.beaconsRx || g_stats.loraRxDropRing;
+  st.channelRefused = g_stats.radioApplyError != 0;
+  st.lastRssi = g_stats.lastRssi; st.lastSnr = g_stats.lastSnr;
+  st.rxPackets = g_stats.loraRxPackets; st.txPackets = g_stats.loraTxPackets;
+
+  const Tables t = tables();
+  st.interfaces = (uint32_t)interfaceCount();
+  st.paths = t.paths;
+  st.links = t.activeLinks;
+
+  st.lxmfRx = sLxmfRx; st.lxmfUnverified = sLxmfUnverified; st.lxmfMismatched = sLxmfMismatched;
+
+  const Power::Battery b = Power::battery();
+  st.haveBattery = b.present;
+  st.batteryPct = b.percent;
+  st.charging = b.charging;
+  st.chargeKnown = b.chargeKnown;
+  // Asked of Diag rather than measured again here. Which heap figure is the
+  // honest one — byte-addressable internal RAM, not the total including PSRAM
+  // — is a rule with a reason, and it was written out in three places; two of
+  // them could drift.
+  const Diag::Heap heap = Diag::heap();
+  st.heapFree = heap.freeDram;
+  st.heapLargest = heap.largestDramBlock;
+
+  // Answering costs airtime on a duty-limited radio, and anyone who can route
+  // here can ask. The commands next door hold a per-sender cooldown for the
+  // same reason; a page has no sender to key on — a request carries an
+  // identity only if the client chose to identify — so the limit is on the
+  // node: one page at a time, and not again within the cooldown. A reader
+  // refreshing gets the page they already have from their own client, which
+  // is why it also carries a no-cache header (NomadNet.h).
+  static uint32_t sLastPageMs = 0;
+  if (sLastPageMs && (uint32_t)(millis() - sLastPageMs) < kPageCooldownMs) {
+    log_d("nomadnet: not serving another page so soon");
+    return {RNS::Bytes::NONE};
+  }
+  sLastPageMs = millis();
+
+  // Bounded on purpose: this runs on the RNS task because a stranger asked,
+  // and the buffer is what says how much of that task's stack a request can
+  // spend. A page longer than this is cut with a line saying so.
+  //
+  // One buffer, not two. The msgpack header is written into three bytes
+  // reserved ahead of the text rather than the whole page being copied into a
+  // second buffer to be encoded — which halves what a request costs the stack
+  // of the task that also drives the radio and the whole Reticulum loop.
+  // Sized to what leaves in one packet (NomadNet.h), so the answer is one
+  // transmission and one proof rather than a resource transfer.
+  uint8_t out[3 + Rns::NomadNet::kPageMax];
+  const size_t n = Rns::NomadNet::index(st, (char*)out + 3, sizeof(out) - 3);
+  if (!n) return {RNS::Bytes::NONE};
+  out[0] = 0xC5;                                  // bin16: fixed width, so the text never moves
+  out[1] = (uint8_t)(n >> 8);
+  out[2] = (uint8_t)n;
+  log_i("nomadnet: served the index page (%u bytes)", (unsigned)n);
+  return RNS::Bytes(out, 3 + n);
+}
+
 // A message can reach a delivery address two ways, and a node that handles
 // only one of them looks broken to a client that chose the other.
 //
@@ -826,6 +929,12 @@ static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
   RNS::Bytes whole(lxmfDest.hash());
   whole.append(data);
   proveIfTaken(packet, handleLxmfMessage(whole, Rns::ViaPacket, signalOf(packet)));
+}
+
+const char* nomadAddress() {
+  static char hex[33] = "";
+  if (sStarted && nomadDest) strlcpy(hex, nomadDest.hash().toHex().c_str(), sizeof(hex));
+  return hex;
 }
 
 LxmfState lxmf() {
@@ -1121,6 +1230,14 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
     lxmfDest.set_packet_callback(onLxmfPacket);
     lxmfDest.set_link_established_callback(onLxmfLink);
     log_i("lxmf: this node can be messaged at %s", lxmfDest.hash().toHex().c_str());
+
+    // The page. NomadNet asks for /page/index.mu on a bare node address, so
+    // that is the one path a browser needs to find anything here.
+    nomadDest = RNS::Destination(nodeRnsIdentity, RNS::Type::Destination::IN,
+                                 RNS::Type::Destination::SINGLE, "nomadnetwork", "node");
+    nomadDest.register_request_handler("/page/index.mu", serveIndex,
+                                       RNS::Type::Destination::ALLOW_ALL);
+    log_i("nomadnet: this node can be browsed at %s", nomadDest.hash().toHex().c_str());
     sStarted = true;
     sAnnounceFloorMs = millis() + ANNOUNCE_BOOT_DELAY_MS;
     sNextAnnounceMs  = sAnnounceFloorMs;
@@ -1371,8 +1488,13 @@ void loop() {
     uint16_t interval = settings.radio().announceInterval;
     if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
       char app[64];
-      int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
-      nodeDest.announce(Bytes((const uint8_t*)app, (size_t)max(n, 0)));
+      // snprintf returns the length it *would* have written. A 32-character
+      // callsign and a git-describe version exceed this buffer, and the
+      // untruncated length would have put a stray byte from the stack into a
+      // signed announce.
+      const int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
+      const size_t appLen = n < 0 ? 0 : ((size_t)n < sizeof(app) - 1 ? (size_t)n : sizeof(app) - 1);
+      nodeDest.announce(Bytes((const uint8_t*)app, appLen));
       // And the same node under its LXMF address, so it appears in the
       // clients people actually use. The app_data is the shape LXMF expects
       // rather than the free text above — the two announces describe one node
@@ -1380,7 +1502,16 @@ void loop() {
       uint8_t lx[64];
       const size_t lxLen = Rns::lxmfAppData(loraRadio.callsign(), 0, lx, sizeof(lx));
       if (lxLen) lxmfDest.announce(Bytes(lx, lxLen));
-      g_stats.announcesTx += lxLen ? 2 : 1;
+      // And as something to browse. NomadNet announces its node name as plain
+      // UTF-8 rather than the msgpack array LXMF uses — a third audience, and
+      // the third shape, from one node.
+      const char* nn = loraRadio.callsign();
+      nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
+      // Every announce this node makes, including the page's. The counter is
+      // how an operator tells a node whose mesh side has quietly stopped from
+      // one that is merely quiet (roadmap/04-backlog.md), so it must not
+      // under-report.
+      g_stats.announcesTx += 1 + (lxLen ? 1 : 0) + (nomadDest ? 1 : 0);
       // Scattered, not on the dot. Two nodes flashed together boot together
       // and would then announce together for as long as they both run: the
       // interval is fixed and nothing else moves the phase, so their packets

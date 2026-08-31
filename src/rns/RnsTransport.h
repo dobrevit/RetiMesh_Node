@@ -120,6 +120,12 @@ struct LxmfState {
 
 LxmfState lxmf();
 
+// Where this node can be browsed from NomadNet, hex; empty until up. The
+// delivery address has been readable since it existed; this one lived in a
+// boot log line, so an operator who was not watching serial had no way to
+// learn the address to give anybody.
+const char* nomadAddress();
+
 // Hands one LXMF message to the Reticulum task to send — the answer to a
 // command that arrived the same way (RnsAdmin.h). Opportunistic when it goes:
 // one packet, no link, which suits a short reply and still works when the only

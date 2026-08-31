@@ -679,6 +679,11 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   }
   doc["identity"]     = nodeIdentity.identityHex();
   doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
+  // The two addresses a person is given: one to message the node at, one to
+  // browse it at. Both are derived from the same identity and neither is
+  // guessable from the other.
+  doc["lxmf_address"]    = RnsTransport::lxmf().address;
+  doc["nomadnet_address"] = RnsTransport::nomadAddress();
   doc["uptime_s"]     = millis() / 1000;
   {
     Power::Battery b = Power::battery();

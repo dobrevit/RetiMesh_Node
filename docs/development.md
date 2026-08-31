@@ -234,6 +234,7 @@ them on every push.
 | `test_rns_admin` | who may command a node — each test is a way in that must stay shut |
 | `test_lxmf_commands` | what the node says back to a ping, an echo and a signal report, and that nothing a stranger sends can overrun the reply |
 | `test_telemetry` | what the node says about itself: sensor shapes, msgpack str against bin, and that a document too big is not sent half-written |
+| `test_nomadnet` | the node's own page: what it says, what it refuses to claim, and that a page never overruns the buffer a stranger asked it to fill |
 
 ### LXMF vectors
 
