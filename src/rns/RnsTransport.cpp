@@ -547,8 +547,22 @@ static void onLxmfLink(RNS::Link& link) {
   link.set_resource_concluded_callback(onLxmfResourceConcluded);
 }
 
+// A message sent as one packet straight at the delivery address — which is
+// what a client uses for something short when it already has a path — does
+// not carry the destination hash. The sender strips it, because the receiver
+// is the destination and already knows it; LXMF's own router puts it back
+// before parsing, and so must this.
+//
+// Without that the parse ran sixteen bytes out of step and failed, so the
+// message was counted as "not an LXMF message", never proved, and the sender
+// was left showing it undelivered. Only this callback needs it: it is
+// registered on the destination, and microReticulum reaches it only for
+// packets addressed to the destination itself. Link packets arrive whole,
+// through onLxmfLinkPacket.
 static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
-  proveIfTaken(packet, handleLxmfMessage(data, Rns::ViaPacket));
+  RNS::Bytes whole(lxmfDest.hash());
+  whole.append(data);
+  proveIfTaken(packet, handleLxmfMessage(whole, Rns::ViaPacket));
 }
 
 LxmfState lxmf() {
