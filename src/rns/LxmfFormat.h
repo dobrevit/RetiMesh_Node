@@ -49,10 +49,15 @@ namespace Rns {
 //
 //   destination hash (16) | source hash (16) | signature (64) | payload
 //
-// and the payload is msgpack [timestamp, title, content, fields]. The
-// signature is over destination hash + source hash + payload, so it binds the
-// message to the pair it was sent between: a message replayed at another node
-// does not verify, and neither does one whose text was altered.
+// and the payload is msgpack [timestamp, title, content, fields].
+//
+// What the signature covers is not those three but those three *and their own
+// hash*: hashed_part = dest || source || payload, and the signed data is
+// hashed_part || SHA256(hashed_part). Getting that wrong does not fail
+// safely — it refuses every message a real client sent, as a forgery, which
+// accuses the honest sender. It binds the message to the pair of addresses
+// either way: replayed at another node it does not verify, and neither does
+// an altered text.
 struct LxmfMessage {
   const uint8_t* destHash;               // 16 bytes
   const uint8_t* sourceHash;             // 16

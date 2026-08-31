@@ -104,11 +104,14 @@ const char* storagePath();                 // VFS path, e.g. "/sd/rns"
 // address can be seen to be answering, and that a message refused for want of
 // a verifiable sender is visible as refused rather than as silence.
 struct LxmfState {
-  uint32_t received;                     // verified, proved, and shown here
-  uint32_t rejected;                     // unparseable, unknown sender, or bad signature
+  uint32_t received;                     // taken, proved and shown
+  uint32_t unverified;                   // ...of which this many had no sender key to check against
+  uint32_t mismatched;                   // ...and this many had a key that did not match the signature
+  uint32_t rejected;                     // not an LXMF message at all
   char     lastFrom[33];                 // source hash, hex; empty if none
   char     lastText[121];
   uint32_t lastAgoMs;                    // 0 when nothing has arrived
+  bool     lastVerified;
 };
 LxmfState lxmf();
 

@@ -150,9 +150,9 @@ static void doStatus() {
   // that has never been written to is noise.
   const RnsTransport::LxmfState lx = RnsTransport::lxmf();
   if (lx.received || lx.rejected)
-    dataf("STATUS", "lxmf_rx=%lu lxmf_rejected=%lu last_from=%s",
-          (unsigned long)lx.received, (unsigned long)lx.rejected,
-          lx.lastFrom[0] ? lx.lastFrom : "-");
+    dataf("STATUS", "lxmf_rx=%lu lxmf_unverified=%lu lxmf_mismatched=%lu lxmf_rejected=%lu last_from=%s last_verified=%s",
+          (unsigned long)lx.received, (unsigned long)lx.unverified, (unsigned long)lx.mismatched, (unsigned long)lx.rejected,
+          lx.lastFrom[0] ? lx.lastFrom : "-", lx.lastVerified ? "yes" : "no");
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
         ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),
         !ConsoleServer::connected() ? "none" : ConsoleServer::authenticated() ? "authenticated" : "unauthenticated");

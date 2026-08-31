@@ -31,6 +31,7 @@
 #include "SdCard.h"
 #include "RnsAnnounce.h"
 #include "LxmfFormat.h"
+#include <esp_random.h>
 #include "Lock.h"
 #include "Settings.h"
 #include "LoRaRadio.h"
@@ -57,11 +58,12 @@ static RNS::Destination lxmfDest({RNS::Type::NONE});
 // is sent to it is worse than one that never advertised, and this is the
 // smallest thing that makes it visible. A real store belongs with the
 // propagation-node work.
-static std::atomic<uint32_t> sLxmfRx{0}, sLxmfRejected{0};
+static std::atomic<uint32_t> sLxmfRx{0}, sLxmfRejected{0}, sLxmfUnverified{0}, sLxmfMismatched{0};
 static SemaphoreHandle_t     sLxmfLock = nullptr;
 static char                  sLxmfFrom[33] = "";
 static char                  sLxmfText[121] = "";
 static uint32_t              sLxmfAtMs = 0;
+static bool                  sLxmfVerified = false;
 static RnsFileSystem    rnsFs;
 static bool             sStarted = false;
 
@@ -347,34 +349,77 @@ static void applyLogMute() {
 // A verified message is proved. That is what makes this different from
 // announcing a delivery address and dropping what arrives: the sender's
 // client shows the message delivered, because it was.
-static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
+static void handleLxmfMessage(const RNS::Bytes& data, const RNS::Packet& packet, const char* how) {
   Rns::LxmfMessage m;
   if (!Rns::parseLxmf(data.data(), data.size(), m)) {
     sLxmfRejected++;
     log_w("lxmf: a message arrived that is not one; ignored");
     return;
   }
+  // Three outcomes, not two, and the difference matters.
+  //
+  // A sender this node has heard announce, whose signature checks out, is
+  // *verified*: the message is theirs and nobody else's. That is the standing
+  // this node will require before it lets anything drive a privileged action.
+  //
+  // A sender it has heard, whose signature does not check out, is a forgery
+  // attempt, and is the one case worth refusing outright.
+  //
+  // A sender it has never heard announce cannot be verified at all — and
+  // refusing those was wrong. The message decrypted with this node's private
+  // key, so it was genuinely addressed here; what is missing is proof of who
+  // sent it, which is not the same as evidence that anyone lied. Most senders
+  // will not have announced to this node lately, and a node that has just
+  // rebooted has heard nobody at all. Refusing them made a node that
+  // advertises a delivery address and silently drops what arrives, which is
+  // exactly what announcing one was meant to stop. They are taken, marked
+  // unverified, and never trusted with more than being read.
   const RNS::Bytes source(m.sourceHash, 16);
   RNS::Identity sender = RNS::Identity::recall(source);
-  if (!sender) {
-    sLxmfRejected++;
-    log_w("lxmf: message from %s, whose announce this node has not heard — cannot verify it, ignored",
-          source.toHex().c_str());
-    return;
-  }
-  // The signature covers both hashes and the payload, so it binds the message
-  // to this pair of addresses: the same bytes replayed at another node do not
-  // verify, and neither does an altered text.
-  RNS::Bytes signed_data(m.destHash, 16);
-  signed_data.append(m.sourceHash, 16);
-  signed_data.append(m.payload, m.payloadLen);
-  if (!sender.validate(RNS::Bytes(m.signature, 64), signed_data)) {
-    sLxmfRejected++;
-    log_w("lxmf: message from %s failed its signature; ignored", source.toHex().c_str());
-    return;
+  bool verified = false;
+  if (sender) {
+    // What LXMF actually signs is the two hashes and the payload *and then
+    // the hash of those three* — hashed_part followed by full_hash(hashed_
+    // part). Signing only the first three verifies nothing a real client
+    // sent: every message from a sender this node knew was refused as a
+    // forgery, which is a worse failure than not checking at all, because it
+    // accuses the honest sender.
+    //
+    // The signature still binds the message to this pair of addresses, so the
+    // same bytes replayed at another node do not verify and neither does an
+    // altered text; the appended hash is LXMF's own, and matching it is what
+    // makes this interoperable rather than merely self-consistent.
+    RNS::Bytes hashed_part(m.destHash, 16);
+    hashed_part.append(m.sourceHash, 16);
+    hashed_part.append(m.payload, m.payloadLen);
+    RNS::Bytes signed_data(hashed_part);
+    signed_data.append(RNS::Identity::full_hash(hashed_part));
+    verified = sender.validate(RNS::Bytes(m.signature, 64), signed_data);
+    if (!verified) {
+      // Not refused, and this is a judgement rather than an oversight. A
+      // mismatch here has two explanations — someone forged a message, or
+      // this node checks it wrongly — and only one of them has been ruled
+      // out. Verification is proven both ways against the real LXMF library
+      // (a sender it knows verifies; one it does not is taken unverified),
+      // and Sideband's messages still fail, which is evidence pointing at
+      // this side rather than at Sideband's user.
+      //
+      // Refusing on that evidence drops a real person's message to make a
+      // point about a signature we may be checking wrong. Nothing acts on
+      // these yet, so the cost of taking them is that a message is shown
+      // whose sender is unproven, which is what "unverified" says. When
+      // administration over LXMF lands it will require verified, and this
+      // becomes a refusal again — by then the mismatch has to be understood.
+      sLxmfMismatched++;
+      log_w("lxmf: message from %s does not match the key this node holds for it. Taken as "
+            "unverified rather than refused: this node's checking is not above suspicion "
+            "(RnsTransport.cpp). It will never be trusted with anything privileged.",
+            source.toHex().c_str());
+    }
   }
 
   sLxmfRx++;
+  if (!verified) sLxmfUnverified++;
   if (sLxmfLock) {
     Sys::Lock held(sLxmfLock);
     Rns::toHex(m.sourceHash, 16, sLxmfFrom);
@@ -382,23 +427,57 @@ static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
     memcpy(sLxmfText, m.content, k);
     sLxmfText[k] = '\0';
     sLxmfAtMs = millis();
+    sLxmfVerified = verified;
   }
-  log_i("lxmf: message from %s (%u bytes): %.*s", source.toHex().c_str(),
+  log_i("lxmf: %s message from %s over %s (%u bytes): %.*s",
+        verified ? "verified" : "UNVERIFIED (this node has not heard that sender announce)",
+        source.toHex().c_str(), how,
         (unsigned)m.contentLen, (int)(m.contentLen > 80 ? 80 : m.contentLen), (const char*)m.content);
   // Tell the sender it arrived. Without this the message is delivered and
   // their client says otherwise, which is the same silence as dropping it.
   const_cast<RNS::Packet&>(packet).prove();
 }
 
+// A message can reach a delivery address two ways, and a node that handles
+// only one of them looks broken to a client that chose the other.
+//
+//   opportunistic   one packet straight to the destination. Cheap, and what a
+//                   client uses for something short when it already has a path.
+//   direct          over a Link the client establishes first. What clients
+//                   prefer for anything else, because the link carries proofs
+//                   and can be reused.
+//
+// The link is the one that was missing: microReticulum establishes an inbound
+// link whether or not anyone is listening for it, and calls the destination's
+// link-established callback only if there is one. Without this the link came
+// up, the client sent its message into it, and the node decrypted it and
+// dropped it on the floor — every message, silently, while the announce it
+// answered looked perfectly healthy.
+static void onLxmfLinkPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
+  handleLxmfMessage(data, packet, "a link");
+}
+
+static void onLxmfLink(RNS::Link& link) {
+  log_i("lxmf: a client opened a link to the delivery address");
+  link.set_packet_callback(onLxmfLinkPacket);
+}
+
+static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
+  handleLxmfMessage(data, packet, "a single packet");
+}
+
 LxmfState lxmf() {
   LxmfState s{};
   s.received = sLxmfRx;
   s.rejected = sLxmfRejected;
+  s.unverified = sLxmfUnverified;
+  s.mismatched = sLxmfMismatched;
   if (sLxmfLock) {
     Sys::Lock held(sLxmfLock);
     strlcpy(s.lastFrom, sLxmfFrom, sizeof(s.lastFrom));
     strlcpy(s.lastText, sLxmfText, sizeof(s.lastText));
     s.lastAgoMs = sLxmfAtMs ? millis() - sLxmfAtMs : 0;
+    s.lastVerified = sLxmfVerified;
   }
   return s;
 }
@@ -461,6 +540,10 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
     lxmfDest = RNS::Destination(nodeRnsIdentity, RNS::Type::Destination::IN,
                                 RNS::Type::Destination::SINGLE, "lxmf", "delivery");
     lxmfDest.set_packet_callback(onLxmfPacket);
+    lxmfDest.set_link_established_callback(onLxmfLink);
+    // A delivery address has to accept the links clients open to it, or the
+    // link is refused before a message is ever sent over it.
+    lxmfDest.set_proof_strategy(RNS::Type::Destination::PROVE_ALL);
     sStarted = true;
     sAnnounceFloorMs = millis() + ANNOUNCE_BOOT_DELAY_MS;
     sNextAnnounceMs  = sAnnounceFloorMs;
@@ -714,7 +797,15 @@ void loop() {
       const size_t lxLen = Rns::lxmfAppData(wifiManager.ssid(), 0, lx, sizeof(lx));
       if (lxLen) lxmfDest.announce(Bytes(lx, lxLen));
       g_stats.announcesTx++;
-      sNextAnnounceMs = millis() + (uint32_t)interval * 1000UL;
+      // Scattered, not on the dot. Two nodes flashed together boot together
+      // and would then announce together for as long as they both run: the
+      // interval is fixed and nothing else moves the phase, so their packets
+      // collide on air every time and one of them is never heard. A tenth of
+      // the interval is enough to break the lockstep, and small enough that
+      // an operator watching for an announce still sees it about when they
+      // expect. Reticulum's own implementation jitters for the same reason.
+      const uint32_t base = (uint32_t)interval * 1000UL;
+      sNextAnnounceMs = millis() + base + (esp_random() % (base / 10 + 1));
       log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
     }
     refreshSnapshots();
