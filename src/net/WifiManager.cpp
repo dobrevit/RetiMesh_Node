@@ -1317,17 +1317,15 @@ void WifiManager::handleMaintenancePost(AsyncWebServerRequest* request, const ch
   MaintenanceSettings m = settings.maintenance();
   for (const MaintField& f : kMaintFields)
     if (in[f.key].is<bool>()) m.*(f.on) = in[f.key];
-  // Checked here rather than at the moment a command arrives: a list that does
-  // not parse is a list nobody can get through, and finding that out when you
-  // need it is finding out too late (RnsAdmin.h).
+  // Through the same rule the console's SET uses, so the two cannot disagree
+  // about what a valid list is — which they already did: "-" cleared it at the
+  // console and was a 400 here (SettingsFields.h).
   if (in["rns_admins"].is<const char*>()) {
-    const char* v = in["rns_admins"];
-    Rns::Admin::List parsed;
-    if (strlen(v) >= sizeof(m.rnsAdmins) || !Rns::Admin::parseAdmins(v, parsed)) {
-      sendError(request, 400, "rns_admins: up to four source hashes of 32 hex digits, comma separated");
+    char why[128] = "";
+    if (!SettingsFields::setRnsAdmins(m, in["rns_admins"], why, sizeof(why))) {
+      sendError(request, 400, why);
       return;
     }
-    strlcpy(m.rnsAdmins, v, sizeof(m.rnsAdmins));
   }
   // Through the same commit the console uses, so both refuse alike and the
   // restart the portal's switch needs is asked for once rather than twice.

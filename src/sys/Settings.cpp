@@ -203,8 +203,17 @@ bool Settings::saveMaintenance(const MaintenanceSettings& m) {
          && _prefs.putBool("m_con",  m.consoleEnabled)    > 0
          && _prefs.putBool("m_ctcp", m.consoleTcp)         > 0
          && _prefs.putBool("m_web",  m.webUi)              > 0
-         && _prefs.putBool("m_rns",  m.rnsAdmin)           > 0
-         && _prefs.putString("m_radm", m.rnsAdmins)        >= 0;
+         && _prefs.putBool("m_rns",  m.rnsAdmin)           > 0;
+  // putString returns a size_t, so the ">= 0" this used to be was true
+  // whatever happened — an NVS failure writing the administrator list reported
+  // a clean save, and the list was quietly gone at the next boot on a node
+  // that might have no other way in. An empty list is a removal rather than a
+  // zero-length write, because a zero-length write cannot be told from a
+  // failed one.
+  if (m.rnsAdmins[0] == '\0')
+    ok = ok && (!_prefs.isKey("m_radm") || _prefs.remove("m_radm"));
+  else
+    ok = ok && _prefs.putString("m_radm", m.rnsAdmins) == strlen(m.rnsAdmins);
   if (!ok) log_e("NVS write failed (maintenance)");
   return ok;
 }

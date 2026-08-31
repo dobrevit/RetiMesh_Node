@@ -457,20 +457,19 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
     signed_data.append(RNS::Identity::full_hash(hashed_part));
     verified = sender.validate(RNS::Bytes(m.signature, 64), signed_data);
     if (!verified) {
-      // Not refused, and this is a judgement rather than an oversight. A
-      // mismatch here has two explanations — someone forged a message, or
-      // this node checks it wrongly — and only one of them has been ruled
-      // out. Verification is proven both ways against the real LXMF library
-      // (a sender it knows verifies; one it does not is taken unverified),
-      // and Sideband's messages still fail, which is evidence pointing at
-      // this side rather than at Sideband's user.
+      // Still taken rather than refused, and now for a settled reason rather
+      // than an open question. The mismatch that used to be unexplained was
+      // the stamp: LXMF signs the four-element payload as it stood before one
+      // was appended, so the same text from the same sender verified or did
+      // not depending on whether a stamp came with it. That is understood and
+      // handled where the signed bytes are worked out (LxmfFormat.h).
       //
-      // Refusing on that evidence drops a real person's message to make a
-      // point about a signature we may be checking wrong. Nothing acts on
-      // these yet, so the cost of taking them is that a message is shown
-      // whose sender is unproven, which is what "unverified" says. When
-      // administration over LXMF lands it will require verified, and this
-      // becomes a refusal again — by then the mismatch has to be understood.
+      // What is left is a genuine failure to match, and it is shown rather
+      // than dropped because dropping it tells the operator nothing: a
+      // message whose sender cannot be proved is worth reading and worth
+      // marking. Nothing privileged follows from it — remote administration
+      // requires `verified` and refuses these outright, which is the refusal
+      // this comment used to promise (RnsAdmin.h).
       sLxmfMismatched++;
       log_w("lxmf: message from %s does not match the key this node holds for it. Taken as "
             "unverified rather than refused: this node's checking is not above suspicion "
@@ -706,7 +705,23 @@ LxmfState lxmf() {
 // Every part of the layout comes from LxmfFormat.h — the file that learned,
 // over three bugs, exactly which bytes those are — so the two directions
 // cannot come to different conclusions about it.
-bool sendLxmf(const uint8_t destHash[16], const char* text) {
+// One answer waiting to go out. microReticulum keeps its tables in plain std::
+// containers with no lock of its own, and everything else in this firmware
+// enters it from the Reticulum task only — so a reply composed on the loop
+// task is handed over rather than sent there. The inbox does the same thing in
+// the other direction, for the same reason.
+struct PendingReply { uint8_t dest[16]; char text[256]; };
+static QueueHandle_t sReplyQueue = nullptr;
+
+bool queueLxmfReply(const uint8_t destHash[16], const char* text) {
+  if (!sReplyQueue) return false;
+  PendingReply r{};
+  memcpy(r.dest, destHash, 16);
+  strlcpy(r.text, text ? text : "", sizeof(r.text));
+  return xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
+}
+
+static bool sendLxmf(const uint8_t destHash[16], const char* text) {
   if (!sStarted || !lxmfDest) return false;
   RNS::Identity peer = RNS::Identity::recall(RNS::Bytes(destHash, 16));
   if (!peer) {
@@ -759,6 +774,7 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   // once and still leave room for churn. Eight was under half of that, and a
   // full queue lost peers silently.
   sEvents = xQueueCreate(RNS_MAX_INTERFACES + 8, sizeof(Event));
+  sReplyQueue = xQueueCreate(2, sizeof(PendingReply));
   sSnapLock = xSemaphoreCreateMutex();
 
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
@@ -1051,6 +1067,13 @@ void loop() {
   if (!sStarted) { vTaskDelay(pdMS_TO_TICKS(500)); return; }
   try {
     applyLogMute();
+    // Answers other tasks composed, sent from here because this is the task
+    // that owns the library (queueLxmfReply above).
+    if (sReplyQueue) {
+      PendingReply r;
+      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE && !sendLxmf(r.dest, r.text))
+        log_w("lxmf: could not send an answer to %s", RNS::Bytes(r.dest, 16).toHex().c_str());
+    }
     processEvents();
     drainTcp();
     reticulum.loop();                      // interface loops + housekeeping (jobs_interval = 1 s)

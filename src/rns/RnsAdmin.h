@@ -58,6 +58,16 @@
 //       strictly increasing timestamp, which their own clock provides and an
 //       attacker replaying an old message cannot.
 //
+//       The floor each administrator has reached is kept on its own terms, in
+//       its own store, written when a command is accepted. It was derived
+//       from the inbox at first, and that was wrong twice over: the inbox
+//       stores what *anybody* sends, so a stranger could put a record dated
+//       2096 under an administrator's source hash and lock the real one out
+//       until then; and the inbox is a fifty-slot ring, so an attacker who
+//       filled it could erase the evidence of a command and replay it after
+//       the next restart. A floor that authorises has to be authorisation
+//       state, not a by-product of a message log anybody can write to.
+//
 //  What a command may then do is not decided here. It goes to the same parser
 //  the console uses, as a session that is not host-facing — so the vocabulary,
 //  the argument checking and the refusals are the ones already written and
@@ -96,6 +106,8 @@ enum Verdict : uint8_t {
   NotAdmin,        // proved, but not somebody this node takes orders from
   Replayed,        // not newer than the last command accepted from them
   Empty,           // nothing to run
+  TooLong,         // longer than a command line, so what ran would not be what was sent
+  NoConsole,       // the console this would run on is switched off
 };
 
 inline const char* verdictName(Verdict v) {
@@ -105,6 +117,8 @@ inline const char* verdictName(Verdict v) {
        : v == NotAdmin    ? "not an administrator"
        : v == Replayed    ? "replayed"
        : v == Empty       ? "empty command"
+       : v == TooLong     ? "command too long"
+       : v == NoConsole   ? "the console is switched off"
                           : "unknown";
 }
 
@@ -188,6 +202,12 @@ inline Verdict judge(bool enabled, const List& list, const Caller& who,
   // distinguish a repeat from a replay.
   if (!(who.sentAt > list.lastSeen[i])) return Replayed;
   if (who.textLen == 0) return Empty;
+  // Refused rather than cut down to fit. The console's line limit is the same
+  // number, so a command trimmed to it parses perfectly and runs — which means
+  // "SET admin.password <a long passphrase>" would set a password neither the
+  // sender nor the operator knows, and answer OK. What runs must be what was
+  // sent, or nothing.
+  if (who.textLen > kMaxCommand) return TooLong;
   which = i;
   return Allowed;
 }

@@ -86,6 +86,13 @@ Result set(const char* key, const char* value, char* err, size_t errLen);
 // what the portal's switch costs, has one home and this is it.
 Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n);
 
+// Puts the remote-administration list into `m`, or says why it will not. Both
+// the console's SET and the HTTP endpoint ask this rather than each checking
+// for itself: they had a copy each and the copies already disagreed — "-"
+// cleared the list at the console and was a 400 over HTTP — and the next rule
+// added to one would silently not apply to the other.
+bool setRnsAdmins(MaintenanceSettings& m, const char* value, char* err, size_t n);
+
 // The words for a result, for the console and anything else that reports one.
 const char* resultText(Result r);
 

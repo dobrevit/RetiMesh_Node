@@ -232,6 +232,22 @@ static void test_every_refusal_has_words_of_its_own() {
   TEST_ASSERT_EQUAL_STRING("not an administrator", verdictName(NotAdmin));
   TEST_ASSERT_EQUAL_STRING("replayed", verdictName(Replayed));
   TEST_ASSERT_EQUAL_STRING("empty command", verdictName(Empty));
+  TEST_ASSERT_EQUAL_STRING("command too long", verdictName(TooLong));
+  TEST_ASSERT_EQUAL_STRING("the console is switched off", verdictName(NoConsole));
+}
+
+static void test_a_command_longer_than_a_command_line_is_refused_not_trimmed() {
+  // The console's line limit is the same number, so a command cut down to fit
+  // parses perfectly and runs. "SET admin.password <long passphrase>" would
+  // then set a password neither the sender nor the operator knows, and answer
+  // OK. What runs has to be what was sent, or nothing.
+  uint8_t src[16]; fill(src, kAdminHex);
+  const List l = oneAdmin();
+  size_t which = 0;
+  TEST_ASSERT_EQUAL(TooLong, judge(true, l, caller(src, StandingVerified, 100, kMaxCommand + 1),
+                                   StandingVerified, which));
+  TEST_ASSERT_EQUAL(Allowed, judge(true, l, caller(src, StandingVerified, 100, kMaxCommand),
+                                   StandingVerified, which));
 }
 
 int main() {
@@ -253,6 +269,7 @@ int main() {
   RUN_TEST(test_several_administrators_separated_by_commas);
   RUN_TEST(test_a_malformed_list_is_refused_whole_not_partly_accepted);
   RUN_TEST(test_more_administrators_than_the_node_holds_is_refused);
+  RUN_TEST(test_a_command_longer_than_a_command_line_is_refused_not_trimmed);
   RUN_TEST(test_every_refusal_has_words_of_its_own);
   return UNITY_END();
 }

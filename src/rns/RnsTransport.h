@@ -119,12 +119,15 @@ struct LxmfState {
 
 LxmfState lxmf();
 
-// Sends one LXMF message to a delivery address this node holds a key for —
-// the answer to a command that arrived the same way (RnsAdmin.h). Opportunistic:
-// one packet, no link, which is what suits a short reply and what still works
-// when the only route is several LoRa hops. False when there is no key for that
-// address, when the text will not fit in a packet, or when the transport is
-// down.
-bool sendLxmf(const uint8_t destHash[16], const char* text);
+// Hands one LXMF message to the Reticulum task to send — the answer to a
+// command that arrived the same way (RnsAdmin.h). Opportunistic when it goes:
+// one packet, no link, which suits a short reply and still works when the only
+// route is several LoRa hops.
+//
+// Queued rather than sent, and callable from any task for that reason:
+// microReticulum keeps its tables in plain containers with no lock, and every
+// other call into it in this firmware is made from the task that runs its
+// loop. False when the queue is full, which means the node is already behind.
+bool queueLxmfReply(const uint8_t destHash[16], const char* text);
 
 } // namespace RnsTransport

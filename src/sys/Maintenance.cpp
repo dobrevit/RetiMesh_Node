@@ -609,7 +609,17 @@ void useStream(Stream& io) {
 }
 
 bool openSession(Stream& io, bool hostFacing, bool preAuthed) {
-  for (Session& s : sNet) {
+  // The last slots are kept for callers the transport proved. A socket takes
+  // its slot the moment it connects and holds it without ever authenticating,
+  // so without this one idle TCP console — or one client parked there on
+  // purpose — is enough to keep every remote command out.
+  // A proved caller takes the reserved slots first, so that using this path
+  // does not itself deny the socket the other one.
+  const size_t usable = preAuthed ? MAINT_NET_SESSIONS
+                                  : MAINT_NET_SESSIONS - MAINT_RESERVED_SESSIONS;
+  for (size_t k = 0; k < usable; k++) {
+    const size_t i = preAuthed ? usable - 1 - k : k;
+    Session& s = sNet[i];
     if (s.io) continue;
     s = Session();                       // nothing of the last caller's survives: not the
     s.io = &io;                          // half-typed line, and above all not the authentication

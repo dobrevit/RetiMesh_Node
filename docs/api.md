@@ -360,9 +360,21 @@ curl -su admin:retimesh -X POST http://10.42.0.1/api/settings/maintenance \
   -d '{"rns_admins":"acb001b427409e8ae73daef126b39866","rns_admin":true}'
 ```
 
+The floor each administrator has reached is kept in its own store, written
+when a command is accepted. It is not derived from the message log: anybody can
+put a record there, so a stranger could otherwise date one 2096 under an
+administrator's hash and lock the real one out, or fill the ring to erase the
+record of a command and replay it after a restart.
+
+A command longer than a console line is refused rather than trimmed, and one
+that arrives while the console is switched off is refused with that as the
+reason. Refusals reach the sender as `RM ERR ADMIN …`, except the three that
+would tell a stranger something they do not already know.
+
 `GET /api/settings` returns both under `maintenance`. The console spells them
-`SET maintenance.rns_admins <hash>[,<hash>…]` (`-` clears the list) and
-`SET maintenance.rns_admin on|off`; both apply at once, without a restart.
+`SET maintenance.rns_admins <hash>[,<hash>…]` (`-` clears the list, and so does
+`"-"` over HTTP) and `SET maintenance.rns_admin on|off`; both apply at once,
+without a restart.
 `STATUS` reports `rns_admin=`, how many are listed, how many commands were
 offered and run, and the verdict on the last one — which names which of the
 four questions it failed rather than leaving them all as "no".

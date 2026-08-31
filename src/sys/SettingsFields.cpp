@@ -152,6 +152,25 @@ Result commitTransport(TransportSettings& t, char* err, size_t n) {
 
 }  // namespace — commitMaintenance is the web API's too (SettingsFields.h)
 
+// Refused here rather than at the moment a command arrives: a list that does
+// not parse is a list that lets nobody in, and finding that out when you need
+// it is finding out too late (RnsAdmin.h).
+bool setRnsAdmins(MaintenanceSettings& m, const char* value, char* err, size_t n) {
+  const char* text = (value && strcmp(value, "-") == 0) ? "" : (value ? value : "");
+  if (strlen(text) >= sizeof(m.rnsAdmins)) {
+    snprintf(err, n, "too long: at most %u administrators", (unsigned)Rns::Admin::kMaxAdmins);
+    return false;
+  }
+  Rns::Admin::List parsed;
+  if (!Rns::Admin::parseAdmins(text, parsed)) {
+    snprintf(err, n, "expected up to %u source hashes of 32 hex digits, comma separated, or - to clear",
+             (unsigned)Rns::Admin::kMaxAdmins);
+    return false;
+  }
+  strlcpy(m.rnsAdmins, text, sizeof(m.rnsAdmins));
+  return true;
+}
+
 Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n) {
   if (restartPending(err, n)) return Result::Busy;
   // The console can switch itself off, but not into a node with no way in.
@@ -378,19 +397,8 @@ const Entry kFields[] = {
   { "maintenance.rns_admins",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().rnsAdmins); },
     [](const char* v, char* e, size_t n) {
-      // Refused here rather than at the point a command arrives: a list that
-      // does not parse is a list that lets nobody in, and finding that out
-      // when you need it is finding out too late.
-      const char* text = (v && strcmp(v, "-") == 0) ? "" : v;      // "-" clears it
-      Rns::Admin::List parsed;
-      if (!Rns::Admin::parseAdmins(text, parsed)) {
-        snprintf(e, n, "expected up to %u source hashes of 32 hex digits, comma separated, or - to clear",
-                 (unsigned)Rns::Admin::kMaxAdmins);
-        return Result::BadValue;
-      }
       MaintenanceSettings m = settings.maintenance();
-      if (strlen(text) >= sizeof(m.rnsAdmins)) { snprintf(e, n, "too long"); return Result::BadValue; }
-      strlcpy(m.rnsAdmins, text, sizeof(m.rnsAdmins));
+      if (!setRnsAdmins(m, v, e, n)) return Result::BadValue;
       return commitMaintenance(m, e, n); } },
   { "maintenance.console_tcp",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().consoleTcp ? "on" : "off"); },
