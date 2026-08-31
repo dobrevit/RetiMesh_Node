@@ -330,6 +330,44 @@ public. `/messages.html` is the page that renders it, and is gated the same way.
   `STATUS` counts what was refused. The delivery address is reachable by
   anyone who can reach the node, and every stored message is a flash write.
 
+## Answering a client's ping, echo and signal report (on by default)
+Sideband and the clients that follow it have buttons for three questions, sent
+in a message's fields rather than as text: **ping**, **echo**, and **signal
+report**. The node answers all three with an ordinary message going back, so
+they work from an unmodified client with nothing to configure on the phone.
+
+The signal report is the one worth having. It returns what *this node's* radio
+measured of the packet that carried the request — link quality, RSSI and SNR,
+in Sideband's own layout — so one person with a phone can walk a valley and
+find where the node stops hearing them. Without it that takes two people and
+two radios. A figure the node does not have is left out rather than reported as
+zero, so a request that arrived over Wi-Fi says only what it can.
+
+**Only for a verified sender** — one whose key this node holds and whose
+signature over the message matched it. Not because the questions are
+privileged, but because a source hash on an unverified message is a *claim*:
+the sender wrote it into the payload and nothing checked it, so the answer
+would go to whoever the claim named rather than to whoever sent it. Answering
+one would make the node a way to put attacker-chosen text, over the node's own
+signature, into a stranger's conversation — and to aim its transmitter at a
+third party. Remote administration refuses unverified hashes for the same
+reason.
+
+That is a different bar from the administrator list, and deliberately lower:
+being verified needs only that the node has heard you announce, or that you
+identified on the link you opened. The person at the edge of coverage is still
+served — a client that has opened a link has proved who it is, which is the
+case a signal report is most wanted in.
+
+What they cost is airtime: **one reply per message**, whatever was asked, so
+three commands in one message get one answer rather than three. A per-sender
+cooldown of ten seconds keeps one peer off the radio, counted only when an
+answer actually went out, and the duty-cycle accounting bounds the rest. `SET
+maintenance.lxmf_commands off` (or `"lxmf_commands": false` over HTTP) declines
+to spend it on a crowded channel. A telemetry request is parsed but not
+answered — the node has no telemetry to send yet, and saying nothing leaves the
+asker's client showing it unanswered, which is true.
+
 ## Remote administration over RNS (off by default)
 A node can be administered by messaging it, which is the only way in when its
 cable is dead. The delivery address is reachable by anyone who can route to it

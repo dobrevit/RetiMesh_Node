@@ -134,6 +134,26 @@ def main():
     src = RNS.Destination(src_id, RNS.Destination.IN, RNS.Destination.SINGLE, "lxmf", "delivery")
     dst = RNS.Destination(dst_id, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
 
+    # Commands, in the shape Sideband's buttons send them: FIELD_COMMANDS
+    # holding a list of one-entry dicts. Built here rather than described,
+    # so what the node parses is what the app actually emits.
+    cases_commands = [
+        ("cmd_ping",   {0x09: [{0x02: True}]}),
+        ("cmd_echo",   {0x09: [{0x03: b"are you there"}]}),
+        ("cmd_signal", {0x09: [{0x04: True}]}),
+        ("cmd_all",    {0x09: [{0x03: b"hello"}, {0x04: True}, {0x02: True}]}),
+        # A command this node has never heard of, beside one it knows: the
+        # unknown one must not cost it the one it understands.
+        ("cmd_unknown_first", {0x09: [{0x7E: b"whatever"}, {0x02: True}]}),
+        # Telemetry requests carry a timebase and a collector flag rather than
+        # a bare true, and this node does not answer them yet — but it must
+        # still parse the message and see the others.
+        ("cmd_telemetry", {0x09: [{0x01: [0, False]}, {0x02: True}]}),
+        # A commands field beside ordinary ones, so the map walk has to keep
+        # its place past values it does not read.
+        ("cmd_among_fields", {0x0F: 0x00, 0x09: [{0x02: True}], 0x08: b"\x22" * 32}),
+    ]
+
     cases = [
         ("plain",          dict(content="hello from a real client")),
         ("titled",         dict(content="body text here", title="Subject line")),
@@ -150,6 +170,7 @@ def main():
     ]
 
     vectors = [(tag, build(dst, src, **kw)) for tag, kw in cases]
+    commands = [(tag, build(dst, src, content="", fields=f)) for tag, f in cases_commands]
 
     out = []
     out.append("// SPDX-License-Identifier: GPL-3.0-or-later")
@@ -184,6 +205,21 @@ def main():
         out.append(f'    kHashed_{tag}, sizeof(kHashed_{tag}),')
         out.append(f'    {cstring(v["content"])}, {cstring(v["title"])}, '
                    f'{"true" if v["stamped"] else "false"} }},')
+    out.append("};")
+
+    # Messages carrying commands, so the field walk is held to what a client
+    # sends rather than to what we imagined it sends.
+    out.append("")
+    for tag, v in commands:
+        out.append(carray(f"kWire_{tag}", v["wire"]))
+    out.append("struct LxmfCommandVector {")
+    out.append("  const char*    tag;")
+    out.append("  const uint8_t* wire; size_t wireLen;")
+    out.append("};")
+    out.append("")
+    out.append("static const LxmfCommandVector kLxmfCommandVectors[] = {")
+    for tag, _ in commands:
+        out.append(f'  {{ "{tag}", kWire_{tag}, sizeof(kWire_{tag}) }},')
     out.append("};")
 
     # The announce direction.

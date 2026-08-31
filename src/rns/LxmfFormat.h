@@ -103,6 +103,31 @@ struct LxmfMessage {
   bool           stamped;                       // a stamp was present, and is excluded above
 };
 
+// How many members a map or array claims, and where the first one starts.
+// Counted in 64 bits and bounded against the buffer before use, for the reason
+// msgpackNext learned: on a 32-bit target a claimed count near 2^31 wraps when
+// doubled, and a header that should have been refused is skipped as empty.
+inline bool msgpackContainerHeader(const uint8_t* p, size_t n, size_t i, bool wantMap,
+                                   size_t& count, size_t& first) {
+  if (i >= n) return false;
+  const uint8_t t = p[i];
+  const uint8_t fixMask = wantMap ? 0x80 : 0x90;
+  const uint8_t wide16  = wantMap ? 0xDE : 0xDC;
+  const uint8_t wide32  = wantMap ? 0xDF : 0xDD;
+  if ((t & 0xF0) == fixMask) { count = t & 0x0F; first = i + 1; return true; }
+  if (t == wide16) {
+    if (i + 3 > n) return false;
+    count = ((size_t)p[i + 1] << 8) | p[i + 2]; first = i + 3;
+  } else if (t == wide32) {
+    if (i + 5 > n) return false;
+    const uint64_t c = ((uint64_t)p[i + 1] << 24) | ((uint64_t)p[i + 2] << 16) |
+                       ((uint64_t)p[i + 3] << 8) | p[i + 4];
+    if (c > n) return false;
+    count = (size_t)c; first = i + 5;
+  } else return false;
+  return count <= n;
+}
+
 // One msgpack element: its value where it is a string or binary, and where it
 // ends either way. Only the types LXMF puts in a message payload are
 // understood — a timestamp, two texts and a map — and anything else is
@@ -136,46 +161,31 @@ inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
   else if (t == 0xCD || t == 0xD1)     next = i + 3;
   else if (t == 0xCE || t == 0xD2 || t == 0xCA) next = i + 5;                                   // u32/i32/float32
   else if (t == 0xCF || t == 0xD3 || t == 0xCB) next = i + 9;                                   // u64/i64/float64
-  else if (t == 0xDC || t == 0xDD || t == 0xDE || t == 0xDF) {
-    // array16/32 and map16/32. A fields dict with sixteen or more entries is
-    // no longer a fixmap, and refusing it aborted the whole parse — so a
-    // message a real client considered ordinary was counted as not-an-LXMF-
-    // message and went unproven. The header widths differ; the walk does not.
-    const bool wide = (t == 0xDD || t == 0xDF);
-    const bool map  = (t == 0xDE || t == 0xDF);
-    const size_t hdr = wide ? 5 : 3;
-    if (!need(hdr)) return false;
-    uint64_t count = wide ? (((uint64_t)p[i+1] << 24) | ((uint64_t)p[i+2] << 16) |
-                             ((uint64_t)p[i+3] << 8) | p[i+4])
-                          : (((uint64_t)p[i+1] << 8) | p[i+2]);
-    // Bound the count before doubling it. size_t is 32 bits on the target, so
-    // a map32 header claiming 0x80000000 pairs used to multiply to zero: the
-    // "more members than bytes" guard passed, the walk skipped the whole map,
-    // and a crafted message parsed with a signed extent that described a
-    // different message than the one on the wire — reported to the operator
-    // as the sender forging. Counted in 64 bits it is simply refused.
-    if (count > n) return false;                      // more members than there are bytes
-    const size_t members = (size_t)count * (map ? 2u : 1u);
-    if (members > n) return false;
-    next = i + hdr;
-    if (depth == 0) return false;
-    for (size_t k = 0; k < members; k++) {
-      const uint8_t* iv = nullptr; size_t ivl = 0, inext = 0;
-      if (!msgpackNext(p, n, next, iv, ivl, inext, depth - 1)) return false;
-      next = inext;
-    }
-  }
-  else if ((t & 0xF0) == 0x80 || (t & 0xF0) == 0x90) {
-    // A container is not one element wide. Stepping over just its header left
-    // a fields map's contents outside the payload, which is the same class of
-    // fault as running past the end and just as fatal to a signature: the
-    // bytes hashed were not the bytes signed. Its members are walked, by
-    // length, without being interpreted — nothing here needs to know what a
-    // fields map means, only where it stops.
-    const bool map = (t & 0xF0) == 0x80;
-    size_t members = (size_t)(t & 0x0F) * (map ? 2u : 1u);
-    next = i + 1;
-    if (depth == 0) return false;              // nesting deeper than LXMF uses; refuse rather than recurse
+  else if (t == 0xDC || t == 0xDD || t == 0xDE || t == 0xDF ||
+           (t & 0xF0) == 0x80 || (t & 0xF0) == 0x90) {
+    // Every container, of either kind and any width. A fields dict with
+    // sixteen or more entries is no longer a fixmap, and refusing it aborted
+    // the whole parse — so a message a real client considered ordinary was
+    // counted as not-an-LXMF-message and went unproven. The header widths
+    // differ; the walk does not.
+    //
+    // A container is also not one element wide. Stepping over just its header
+    // left a fields map's contents outside the payload, which is the same
+    // class of fault as running past the end and just as fatal to a
+    // signature: the bytes hashed were not the bytes signed. Its members are
+    // walked, by length, without being interpreted — nothing here needs to
+    // know what a fields map means, only where it stops.
+    //
+    // What a header says is decoded in one place, so this and the field walk
+    // below cannot come to different conclusions about a container's shape
+    // and silently disagree about where it ends.
+    const bool map = (t == 0xDE || t == 0xDF || (t & 0xF0) == 0x80);
+    size_t count = 0, first = 0;
+    if (!msgpackContainerHeader(p, n, i, map, count, first)) return false;
+    const size_t members = count * (map ? 2u : 1u);
+    if (members > n) return false;                    // more members than there are bytes
+    next = first;
+    if (members && depth == 0) return false;          // deeper than LXMF nests; refuse rather than recurse
     for (size_t k = 0; k < members; k++) {
       const uint8_t* iv = nullptr; size_t ivl = 0, inext = 0;
       if (!msgpackNext(p, n, next, iv, ivl, inext, depth - 1)) return false;
@@ -504,6 +514,107 @@ inline void lxmfSignedSpans(const LxmfMessage& m, Sink&& sink) {
   sink(m.sourceHash, (size_t)16);
   sink(&m.signedHeader, (size_t)1);
   sink(m.signedBody, m.signedBodyLen);
+}
+
+// ---------------------------------------------------------------------------
+//  Reading inside the fields map
+//
+//  parseLxmf reports where the fields map is and how many entries it holds and
+//  deliberately reads none of them: most of what LXMF carries there is none of
+//  a transport node's business, and a parser with an opinion about every field
+//  would be a parser with far more surface than a node needs.
+//
+//  What is worth reading is the commands a client sends — a ping, an echo, a
+//  request for the signal this node heard them at. Those are what a person
+//  standing in a field with a phone actually wants to ask a node, and
+//  answering costs one short message.
+// ---------------------------------------------------------------------------
+
+// A msgpack unsigned integer, which is what a field key and a command id are.
+// False for anything else, negative fixints included: a field id is never
+// negative, and reading one as though it were is how a map walk loses its
+// place and starts reading values as keys.
+inline bool msgpackUint(const uint8_t* p, size_t n, size_t i, uint32_t& out, size_t& next) {
+  if (i >= n) return false;
+  const uint8_t t = p[i];
+  if (t <= 0x7F) { out = t; next = i + 1; return true; }                       // positive fixint
+  if (t == 0xCC) { if (i + 2 > n) return false; out = p[i + 1]; next = i + 2; return true; }
+  if (t == 0xCD) { if (i + 3 > n) return false;
+                   out = ((uint32_t)p[i + 1] << 8) | p[i + 2]; next = i + 3; return true; }
+  if (t == 0xCE) { if (i + 5 > n) return false;
+                   out = ((uint32_t)p[i + 1] << 24) | ((uint32_t)p[i + 2] << 16) |
+                         ((uint32_t)p[i + 3] << 8) | p[i + 4]; next = i + 5; return true; }
+  return false;
+}
+
+// One value out of a fields map, by its LXMF field id. What comes back is the
+// raw extent of the value — its type byte and everything it occupies — because
+// the caller may want to walk into it (a commands array) or read it as text,
+// and this file should not have to know which in advance.
+inline bool lxmfField(const uint8_t* fields, size_t n, uint32_t id,
+                      const uint8_t*& val, size_t& valLen) {
+  val = nullptr; valLen = 0;
+  size_t count = 0, i = 0;
+  if (!fields || !msgpackContainerHeader(fields, n, 0, /*wantMap*/ true, count, i)) return false;
+  for (size_t k = 0; k < count; k++) {
+    uint32_t key = 0; size_t afterKey = 0;
+    // A key this node did not write may be of any type. Skipping it by length
+    // keeps the walk in step; abandoning the map would lose every field after
+    // the first odd one.
+    const bool intKey = msgpackUint(fields, n, i, key, afterKey);
+    if (!intKey) {
+      const uint8_t* kv = nullptr; size_t kvl = 0;
+      if (!msgpackNext(fields, n, i, kv, kvl, afterKey)) return false;
+    }
+    const uint8_t* vv = nullptr; size_t vvl = 0, afterVal = 0;
+    if (!msgpackNext(fields, n, afterKey, vv, vvl, afterVal)) return false;
+    if (intKey && key == id) { val = fields + afterKey; valLen = afterVal - afterKey; return true; }
+    i = afterVal;
+  }
+  return false;
+}
+
+// The field that carries them, and the commands this node understands. The
+// numbers are Sideband's, because they are what its buttons send.
+static const uint32_t kFieldCommands    = 0x09;
+static const uint32_t kCommandTelemetry = 0x01;
+static const uint32_t kCommandPing      = 0x02;
+static const uint32_t kCommandEcho      = 0x03;
+static const uint32_t kCommandSignal    = 0x04;
+
+struct LxmfCommand {
+  uint32_t       id;                     // one of the kCommand* above
+  const uint8_t* text;                   // the argument where it is text or bytes, else null
+  size_t         textLen;
+};
+
+// The commands out of a FIELD_COMMANDS value: an array whose members are each
+// a map of one entry, {command id: argument}. Anything not of that shape is
+// skipped rather than refused — a client is free to send commands this node
+// has never heard of, and the ones it does understand should still work.
+inline size_t lxmfCommands(const uint8_t* val, size_t n, LxmfCommand* out, size_t max) {
+  if (!val || !out || max == 0) return 0;
+  size_t count = 0, i = 0, found = 0;
+  if (!msgpackContainerHeader(val, n, 0, /*wantMap*/ false, count, i)) return 0;
+  for (size_t k = 0; k < count && found < max; k++) {
+    const uint8_t* ev = nullptr; size_t evl = 0, afterElem = 0;
+    if (!msgpackNext(val, n, i, ev, evl, afterElem)) return found;   // bounds come from here
+    size_t pairs = 0, at = 0;
+    if (msgpackContainerHeader(val, n, i, /*wantMap*/ true, pairs, at) && pairs >= 1) {
+      uint32_t id = 0; size_t afterKey = 0;
+      if (msgpackUint(val, n, at, id, afterKey)) {
+        const uint8_t* av = nullptr; size_t avl = 0, afterVal = 0;
+        if (msgpackNext(val, n, afterKey, av, avl, afterVal)) {
+          out[found].id = id;
+          out[found].text = av;        // msgpackNext sets this only for a string or binary
+          out[found].textLen = avl;
+          found++;
+        }
+      }
+    }
+    i = afterElem;
+  }
+  return found;
 }
 
 // ---------------------------------------------------------------------------

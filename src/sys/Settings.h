@@ -157,6 +157,14 @@ struct MaintenanceSettings {
   // Up to four source hashes, hex, comma separated. Four thirty-two-digit
   // hashes and three commas is 131 characters.
   char rnsAdmins[140]    = "";
+  // Whether the node answers a client's ping, echo and signal-report commands
+  // (LxmfCommands.h). On, unlike the switch above, and the difference is the
+  // whole distinction between the two: these change nothing and disclose
+  // nothing, and the person who most needs a signal report is at the edge of
+  // coverage where no list would have them. What they cost is airtime, which
+  // is why there is a switch at all — an operator on a crowded channel can
+  // decline to spend it.
+  bool lxmfCommands      = true;
 };
 
 class Settings {
