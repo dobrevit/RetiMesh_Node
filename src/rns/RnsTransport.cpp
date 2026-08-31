@@ -33,6 +33,10 @@
 #include "LxmfFormat.h"
 #include "LxmfInbox.h"
 #include "LxmfCommands.h"
+#include "Telemetry.h"
+#include "Power.h"
+#include "Gps.h"
+#include <LittleFS.h>
 #include "RnsAdmin.h"
 #include <esp_random.h>
 #include "Lock.h"
@@ -665,9 +669,15 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
         // this feature is defended by true: one short reply for one short
         // request, never four.
         for (size_t k = 0; k < n; k++) {
+          // A telemetry request is answered with the node's readings and no
+          // text — the readings are the answer, and a sentence beside them
+          // would appear in the conversation as a message somebody sent.
+          const bool wantsTelemetry = cmds[k].id == Rns::kCommandTelemetry;
           char answer[Rns::Commands::kReplyMax];
-          if (!Rns::Commands::reply(cmds[k], signal, answer, sizeof(answer))) continue;
-          if (queueLxmfReply(m.sourceHash, answer)) {
+          if (!wantsTelemetry &&
+              !Rns::Commands::reply(cmds[k], signal, answer, sizeof(answer))) continue;
+          if (wantsTelemetry) answer[0] = '\0';
+          if (queueLxmfTelemetry(m.sourceHash, answer, wantsTelemetry)) {
             // Stamped only now. Stamping before knowing an answer exists spent
             // the sender's ten seconds on a command this node does not answer,
             // so a telemetry request made the ping after it look like silence.
@@ -836,18 +846,102 @@ LxmfState lxmf() {
 // enters it from the Reticulum task only — so a reply composed on the loop
 // task is handed over rather than sent there. The inbox does the same thing in
 // the other direction, for the same reason.
-struct PendingReply { uint8_t dest[16]; char text[256]; };
+// What this node can honestly say about itself right now.
+//
+// Gathered here, where the hardware is, so Telemetry.h stays a pure question
+// about shape. Each reading is offered only where the board can actually take
+// it: a node with no cell says nothing about a battery rather than reporting
+// zero percent, and a receiver with no fix reports no position rather than the
+// Atlantic. What a client cannot see it does not have to disbelieve.
+static Rns::Telemetry::Snapshot telemetrySnapshot() {
+  Rns::Telemetry::Snapshot s;
+  s.utc = (uint64_t)time(nullptr);
+
+  static char info[64];
+  snprintf(info, sizeof(info), "RetiMesh Node %s (%s)", FW_VERSION, BOARD_NAME);
+  s.information = info;
+
+  const Power::Battery b = Power::battery();
+  if (b.present) {
+    s.haveBattery = true;
+    s.batteryPercent = (float)b.percent;
+    s.charging = b.charging;
+    // Whether the board can see its charger at all, carried through rather
+    // than flattened into a false (Power.h).
+    s.chargeKnown = b.chargeKnown;
+  }
+
+  // Only with the operator's say-so. A node's position is the operator's to
+  // publish, and the setting that governs the public status API governs this
+  // for the same reason — it is the same disclosure to a wider audience.
+  const Gps::Fix fix = Gps::fix();
+  if (fix.valid && settings.radio().gpsSharePosition) {
+    s.havePosition = true;
+    s.latitude = fix.latitude;
+    s.longitude = fix.longitude;
+    s.altitudeM = fix.altitude;
+    s.speedKmh = fix.speedKmh;
+    // HDOP is a dilution figure, not a distance. Five metres per unit is the
+    // usual rule of thumb for a consumer receiver, and it is offered as the
+    // estimate it is rather than left out — a position with no accuracy at all
+    // reads as exact.
+    s.accuracyM = fix.hdop * 5.0f;
+    s.positionAt = s.utc > fix.ageMs / 1000 ? s.utc - fix.ageMs / 1000 : s.utc;
+  }
+
+  if (g_stats.loraRxPackets) {
+    s.haveSignal = true;
+    s.rssi = g_stats.lastRssi;
+    s.snr  = g_stats.lastSnr;
+    s.quality = loraQualityPercent(g_stats.lastSnr, settings.radio().sf);
+  }
+
+  s.haveProcessor = true;
+  s.cpuHz = (uint64_t)getCpuFrequencyMhz() * 1000000ULL;
+
+  // Byte-addressable internal RAM, which is the figure that decides whether a
+  // node survives (Diag.h) — not the total including PSRAM, which would look
+  // healthy on a board that is about to run out of the kind it needs.
+  const uint32_t heapFree = ESP.getFreeHeap();
+  const uint32_t heapAll  = ESP.getHeapSize();
+  if (heapAll) {
+    s.haveMemory = true;
+    s.heapCapacity = heapAll;
+    s.heapUsed = heapAll - heapFree;
+  }
+
+  const uint64_t flashAll = RnsFileSystem::backend() ? LittleFS.totalBytes() : 0;
+  if (flashAll) {
+    s.haveStorage = true;
+    s.flashCapacity = flashAll;
+    s.flashUsed = LittleFS.usedBytes();
+  }
+  return s;
+}
+
+// `telemetry` asks for the node's own readings to be attached. The document
+// is not carried here: it is built when the answer goes out, so the queue
+// stays small on a board that has little to spare, and — more to the point —
+// so the readings are the ones at the moment of sending rather than at the
+// moment of asking.
+struct PendingReply { uint8_t dest[16]; char text[256]; bool telemetry; };
 static QueueHandle_t sReplyQueue = nullptr;
 
 bool queueLxmfReply(const uint8_t destHash[16], const char* text) {
+  return queueLxmfTelemetry(destHash, text, false);
+}
+
+bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry) {
   if (!sReplyQueue) return false;
   PendingReply r{};
   memcpy(r.dest, destHash, 16);
   strlcpy(r.text, text ? text : "", sizeof(r.text));
+  r.telemetry = telemetry;
   return xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
 }
 
-static bool sendLxmf(const uint8_t destHash[16], const char* text) {
+static Rns::Telemetry::Snapshot telemetrySnapshot();
+static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry) {
   if (!sStarted || !lxmfDest) return false;
   RNS::Identity peer = senderKey(destHash);
   if (!peer) {
@@ -860,7 +954,16 @@ static bool sendLxmf(const uint8_t destHash[16], const char* text) {
   // since boot counted from 1970. That is honest — it is what this node knows
   // — and nothing depends on it: the freshness rule applies to messages
   // arriving, where the sender's clock is the one that matters.
-  const size_t plen = Rns::lxmfPayload((double)time(nullptr), "", text, payload, sizeof(payload));
+  // The node's readings, where the answer is to a request for them. Built now
+  // rather than when the request arrived, so what goes out is current.
+  uint8_t fields[288];
+  size_t flen = 0;
+  if (telemetry) {
+    flen = Rns::Telemetry::fields(telemetrySnapshot(), fields, sizeof(fields));
+    if (!flen) log_w("lxmf: the telemetry document did not fit; answering without it");
+  }
+  const size_t plen = Rns::lxmfPayload((double)time(nullptr), "", text, payload, sizeof(payload),
+                                       flen ? fields : nullptr, flen);
   if (!plen) return false;
 
   // Signed through the same spans the receiving side hashes, so the two cannot
@@ -1197,7 +1300,7 @@ void loop() {
     // that owns the library (queueLxmfReply above).
     if (sReplyQueue) {
       PendingReply r;
-      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE && !sendLxmf(r.dest, r.text))
+      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE && !sendLxmf(r.dest, r.text, r.telemetry))
         log_w("lxmf: could not send an answer to %s", RNS::Bytes(r.dest, 16).toHex().c_str());
     }
     processEvents();

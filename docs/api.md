@@ -364,9 +364,35 @@ three commands in one message get one answer rather than three. A per-sender
 cooldown of ten seconds keeps one peer off the radio, counted only when an
 answer actually went out, and the duty-cycle accounting bounds the rest. `SET
 maintenance.lxmf_commands off` (or `"lxmf_commands": false` over HTTP) declines
-to spend it on a crowded channel. A telemetry request is parsed but not
-answered — the node has no telemetry to send yet, and saying nothing leaves the
-asker's client showing it unanswered, which is true.
+to spend it on a crowded channel.
+
+### Telemetry
+
+A **telemetry request** is answered with the node's own readings, in the
+sensor format Sideband already stores, plots over time and puts on its map.
+Nothing is installed at either end, and nothing but the request is needed —
+which matters for a node on a hill whose portal nobody can reach.
+
+What it sends is what the board can actually measure:
+
+| Reading | Where it comes from |
+|---|---|
+| Time | the node's clock |
+| Information | firmware version and board |
+| Battery | percent, and charging **only where the board can see its charger** |
+| Position | the receiver, and only if `radio.gps_share_position` is on |
+| Physical link | RSSI, SNR and quality of the last frame heard |
+| Processor, RAM, storage | CPU clock, internal heap, LittleFS |
+
+A reading the board cannot take is **left out**, never sent as zero: a node
+with no cell says nothing about a battery rather than reporting empty, and a
+board that cannot see its charger sends "unknown" rather than "not charging" —
+which would send somebody looking for a fault in a working cable. A position
+is published only with the operator's say-so, under the same setting that
+governs the public status API.
+
+The document is built when the answer goes out, not when the request arrives,
+so the readings are current.
 
 ## Remote administration over RNS (off by default)
 A node can be administered by messaging it, which is the only way in when its

@@ -130,4 +130,9 @@ LxmfState lxmf();
 // loop. False when the queue is full, which means the node is already behind.
 bool queueLxmfReply(const uint8_t destHash[16], const char* text);
 
+// The same, with the node's own readings attached — what a client's telemetry
+// request is answered with. The document is built when the answer goes out
+// rather than now, so what it carries is current and the queue stays small.
+bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry);
+
 } // namespace RnsTransport
