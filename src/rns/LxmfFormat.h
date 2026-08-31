@@ -227,4 +227,74 @@ inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Writing a message, which is the same format read backwards.
+//
+// A node that can be administered over LXMF has to answer, and an answer is a
+// message. Both directions live here for the reason the file exists at all:
+// the reading side spent three bugs learning exactly which bytes LXMF signs,
+// and a writing side with its own opinion about that would have to learn them
+// again.
+// ---------------------------------------------------------------------------
+
+// The payload: [timestamp, title, content, fields]. The fields map is emitted
+// empty — this node has nothing to put in one, and a reader that wants it can
+// still walk past it.
+inline size_t lxmfPayload(double sentAt, const char* title, const char* content,
+                          uint8_t* out, size_t cap) {
+  const size_t titleLen = title ? strlen(title) : 0;
+  const size_t contentLen = content ? strlen(content) : 0;
+  if (titleLen > 255 || contentLen > 255) return 0;      // bin8 is what this writes
+  const size_t need = 1 + 9 + (2 + titleLen) + (2 + contentLen) + 1;
+  if (need > cap) return 0;
+  size_t i = 0;
+  out[i++] = 0x94;                                       // fixarray of four
+  out[i++] = 0xCB;                                       // float64, big-endian, as msgpack has it
+  uint64_t bits = 0;
+  memcpy(&bits, &sentAt, 8);
+  for (int b = 7; b >= 0; b--) out[i++] = (uint8_t)(bits >> (8 * b));
+  out[i++] = 0xC4; out[i++] = (uint8_t)titleLen;
+  memcpy(out + i, title, titleLen); i += titleLen;
+  out[i++] = 0xC4; out[i++] = (uint8_t)contentLen;
+  memcpy(out + i, content, contentLen); i += contentLen;
+  out[i++] = 0x80;                                       // an empty fixmap of fields
+  return i;
+}
+
+// The bytes a signature covers, short of the hash LXMF appends to them. The
+// caller adds SHA256 of this — the hash is the crypto library's, the layout is
+// this file's, and keeping them apart is what lets the layout be tested on a
+// host with no crypto at all.
+//
+// This is the one definition. Verifying a message that arrived builds the same
+// bytes the same way; when it did not, every message from a sender this node
+// knew was refused as a forgery, which is a worse failure than not checking.
+inline size_t lxmfHashedPart(const uint8_t dest[16], const uint8_t source[16],
+                             const uint8_t* payload, size_t payloadLen,
+                             uint8_t* out, size_t cap) {
+  const size_t need = 16 + 16 + payloadLen;
+  if (need > cap) return 0;
+  memcpy(out, dest, 16);
+  memcpy(out + 16, source, 16);
+  memcpy(out + 32, payload, payloadLen);
+  return need;
+}
+
+// The envelope as it goes on the wire for a direct delivery: the two hashes,
+// the signature, then the payload. An opportunistic send is this with the
+// destination hash left off, because the destination it arrives at says what
+// it was.
+inline size_t lxmfEnvelope(const uint8_t dest[16], const uint8_t source[16],
+                           const uint8_t sig[64], const uint8_t* payload, size_t payloadLen,
+                           uint8_t* out, size_t cap, bool includeDest = true) {
+  const size_t need = (includeDest ? 16u : 0u) + 16 + 64 + payloadLen;
+  if (need > cap) return 0;
+  size_t i = 0;
+  if (includeDest) { memcpy(out + i, dest, 16); i += 16; }
+  memcpy(out + i, source, 16); i += 16;
+  memcpy(out + i, sig, 64);    i += 64;
+  memcpy(out + i, payload, payloadLen);
+  return need;
+}
+
 } // namespace Rns

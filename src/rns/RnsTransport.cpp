@@ -32,6 +32,7 @@
 #include "RnsAnnounce.h"
 #include "LxmfFormat.h"
 #include "LxmfInbox.h"
+#include "RnsAdmin.h"
 #include <esp_random.h>
 #include "Lock.h"
 #include "Settings.h"
@@ -439,13 +440,13 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
   // a sender does when it does not see a proof, and over LoRa that is ordinary
   // — is recognised as the message it already has rather than taking a second
   // of the fifty slots.
+  const uint8_t standing = verified ? Rns::StandingVerified
+                         : !sender  ? Rns::StandingNoKey
+                                    : Rns::StandingMismatch;
   uint64_t sig = 0;
   for (int i = 0; i < 8; i++) sig = (sig << 8) | m.signature[i];
-  if (!Rns::Inbox::note(m.sourceHash,
-                        verified ? Rns::StandingVerified
-                        : !sender ? Rns::StandingNoKey
-                                  : Rns::StandingMismatch,
-                        via, m.sentAt, (const char*)m.content, m.contentLen, sig))
+  if (!Rns::Inbox::note(m.sourceHash, standing, via, m.sentAt,
+                        (const char*)m.content, m.contentLen, sig))
     log_d("lxmf: not stored (a repeat, or arriving faster than the store is written)");
   // The same three standings the counters keep, said in words. This used to
   // read off `verified` alone, so a sender whose signature did not match was
@@ -457,6 +458,12 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
                    : "UNVERIFIED (the signature does not match the key this node holds)",
         source.toHex().c_str(), how,
         (unsigned)m.contentLen, (int)(m.contentLen > 80 ? 80 : m.contentLen), (const char*)m.content);
+  // Last, and only after the message has been recorded and said out loud: a
+  // command that turns out to be one is still a message, and a node that ran
+  // it without keeping a copy would have no account of what it was told to do.
+  // The gate refuses everything by default and says which question failed
+  // (RnsAdmin.h).
+  Rns::Admin::offer(m.sourceHash, standing, m.sentAt, (const char*)m.content, m.contentLen);
   return true;
 }
 
@@ -551,6 +558,55 @@ LxmfState lxmf() {
   return s;
 }
 
+// Answering a message, which is the same three steps as reading one, backwards:
+// build the payload, sign the bytes LXMF signs, put the envelope on the wire.
+// Every part of the layout comes from LxmfFormat.h — the file that learned,
+// over three bugs, exactly which bytes those are — so the two directions
+// cannot come to different conclusions about it.
+bool sendLxmf(const uint8_t destHash[16], const char* text) {
+  if (!sStarted || !lxmfDest) return false;
+  RNS::Identity peer = RNS::Identity::recall(RNS::Bytes(destHash, 16));
+  if (!peer) {
+    log_w("lxmf: no key for %s; cannot answer", RNS::Bytes(destHash, 16).toHex().c_str());
+    return false;
+  }
+
+  uint8_t payload[320];
+  // The node's own clock, which on a board without a GNSS receiver is time
+  // since boot counted from 1970. That is honest — it is what this node knows
+  // — and nothing depends on it: the freshness rule applies to messages
+  // arriving, where the sender's clock is the one that matters.
+  const size_t plen = Rns::lxmfPayload((double)time(nullptr), "", text, payload, sizeof(payload));
+  if (!plen) return false;
+
+  const RNS::Bytes selfHash = lxmfDest.hash();
+  uint8_t hashed[16 + 16 + sizeof(payload)];
+  const size_t hlen = Rns::lxmfHashedPart(destHash, selfHash.data(), payload, plen,
+                                          hashed, sizeof(hashed));
+  if (!hlen) return false;
+  RNS::Bytes signedData(hashed, hlen);
+  signedData.append(RNS::Identity::full_hash(RNS::Bytes(hashed, hlen)));
+  const RNS::Bytes sig = nodeRnsIdentity.sign(signedData);
+  if (sig.size() != 64) return false;
+
+  // Opportunistic, so the destination hash is left off: the destination it
+  // arrives at is what says which one it was, and the sixteen bytes are worth
+  // more as message.
+  uint8_t envelope[16 + 64 + sizeof(payload)];
+  const size_t elen = Rns::lxmfEnvelope(destHash, selfHash.data(), sig.data(), payload, plen,
+                                        envelope, sizeof(envelope), /*includeDest*/ false);
+  if (!elen) return false;
+
+  RNS::Destination out(peer, RNS::Type::Destination::OUT, RNS::Type::Destination::SINGLE,
+                       "lxmf", "delivery");
+  RNS::Packet packet(out, RNS::Bytes(envelope, elen));
+  packet.send();
+  const bool sent = packet.sent();
+  if (!sent) log_w("lxmf: could not send the answer to %s",
+                   RNS::Bytes(destHash, 16).toHex().c_str());
+  return sent;
+}
+
 bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpInRing) {
   sTxRing = txRing; sRxRing = rxRing; sTcpInRing = tcpInRing;
   // Deep enough that every interface this node can hold could register at
@@ -584,6 +640,9 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
     // After the filesystem is registered and the store path is settled, so
     // the inbox lands beside the transport's own files wherever those went.
     Rns::Inbox::begin();
+    // After the inbox, which it reads to find where each administrator got to
+    // before the restart (RnsAdmin.h).
+    Rns::Admin::begin();
     reticulum.transport_enabled(true);
     // Housekeeping (announce rebroadcasts, link/receipt timeouts) every
     // second instead of the library default of 60 s (fork / upstream PR #82).

@@ -35,6 +35,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "LxmfInbox.h"
+#include "RnsAdmin.h"
 #include "Mdns.h"
 #include "Diag.h"
 #include "SettingsRules.h"
@@ -143,6 +144,7 @@ static const MaintField kMaintFields[] = {
   { "console_enabled",     &MaintenanceSettings::consoleEnabled },
   { "console_tcp",         &MaintenanceSettings::consoleTcp },
   { "web_ui",              &MaintenanceSettings::webUi },
+  { "rns_admin",           &MaintenanceSettings::rnsAdmin },
 };
 
 void WifiManager::begin() {
@@ -1237,6 +1239,10 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   {
     JsonObject m = doc["maintenance"].to<JsonObject>();
     for (const MaintField& f : kMaintFields) m[f.key] = settings.maintenance().*(f.on);
+    // The list is not a switch, so it is not in the table above. It is not a
+    // secret either — a source hash is public, and an operator needs to read
+    // back what they configured.
+    m["rns_admins"] = settings.maintenance().rnsAdmins;
   }
   bootloaderJson(doc["bootloader"].to<JsonObject>());
 
@@ -1311,6 +1317,18 @@ void WifiManager::handleMaintenancePost(AsyncWebServerRequest* request, const ch
   MaintenanceSettings m = settings.maintenance();
   for (const MaintField& f : kMaintFields)
     if (in[f.key].is<bool>()) m.*(f.on) = in[f.key];
+  // Checked here rather than at the moment a command arrives: a list that does
+  // not parse is a list nobody can get through, and finding that out when you
+  // need it is finding out too late (RnsAdmin.h).
+  if (in["rns_admins"].is<const char*>()) {
+    const char* v = in["rns_admins"];
+    Rns::Admin::List parsed;
+    if (strlen(v) >= sizeof(m.rnsAdmins) || !Rns::Admin::parseAdmins(v, parsed)) {
+      sendError(request, 400, "rns_admins: up to four source hashes of 32 hex digits, comma separated");
+      return;
+    }
+    strlcpy(m.rnsAdmins, v, sizeof(m.rnsAdmins));
+  }
   // Through the same commit the console uses, so both refuse alike and the
   // restart the portal's switch needs is asked for once rather than twice.
   char detail[160] = "";

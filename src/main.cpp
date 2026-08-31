@@ -61,6 +61,7 @@
 #include "Display.h"
 #include "RnsAnnounce.h"
 #include "LxmfInbox.h"
+#include "RnsAdmin.h"
 #include "RnsTransport.h"
 #include "SdCard.h"
 #include "StoreHome.h"
@@ -356,6 +357,10 @@ void loop() {
   // enough that doing it where they arrive delayed the delivery proof and
   // stalled the job loop that link and receipt timeouts run on (LxmfInbox.h).
   Rns::Inbox::poll();
+  // A command that arrived as a message, run here rather than in the packet
+  // callback it landed in: it means the console's parser, the settings, and
+  // sometimes a restart (RnsAdmin.h).
+  Rns::Admin::poll();
   Leds::tick(millis());
   // Every pass, not on the heartbeat: a crash 29 s after the last beat would
   // otherwise be recorded as having happened 29 s earlier, and a node stuck in

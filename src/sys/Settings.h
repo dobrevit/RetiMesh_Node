@@ -144,6 +144,15 @@ struct MaintenanceSettings {
   // Wi-Fi on, against 272 B for a console listener that does the same job for
   // an operator (ConsoleServer.h). Restart-applied, like Wi-Fi itself.
   bool webUi             = true;
+  // Whether a message from a listed identity may run a console command
+  // (RnsAdmin.h). Off, and an empty list is off however this reads: the
+  // delivery address is reachable by anyone who can route to it, so this is
+  // the one switch in here that hands the node to somebody who is not
+  // holding it.
+  bool rnsAdmin          = false;
+  // Up to four source hashes, hex, comma separated. Four thirty-two-digit
+  // hashes and three commas is 131 characters.
+  char rnsAdmins[140]    = "";
 };
 
 class Settings {

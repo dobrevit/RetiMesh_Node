@@ -330,6 +330,43 @@ public. `/messages.html` is the page that renders it, and is gated the same way.
   `STATUS` counts what was refused. The delivery address is reachable by
   anyone who can reach the node, and every stored message is a flash write.
 
+## Remote administration over RNS (off by default)
+A node can be administered by messaging it, which is the only way in when its
+cable is dead. The delivery address is reachable by anyone who can route to it
+and none of those routes authenticate, so a message becomes a command only
+after four questions, each of which can only refuse:
+
+1. **Is it on, and is anybody listed?** `maintenance.rns_admin` is off by
+   default, and an empty `maintenance.rns_admins` is off however the switch
+   reads.
+2. **Is the sender proved?** Only `verified` — this node has heard them
+   announce, holds their key, and the signature matched. `unverified` (no key
+   to check) and `mismatch` (a key that did not match) are both refused.
+3. **Are they an administrator?** Verification proves *who*, never *what they
+   may do*: anyone can announce. `maintenance.rns_admins` is the authorisation
+   — up to four source hashes, 32 hex digits each, comma separated.
+4. **Is the message new?** Each administrator's commands must carry a strictly
+   increasing timestamp. A signed message stays signed, so one captured off
+   the air could otherwise be sent again by anyone who kept the bytes.
+
+What passes goes to the same parser the serial console uses, as a session that
+is **not** host-facing — so the vocabulary, the argument checking and the
+refusals are the console's, and `BOOTLOADER CONFIRM` declines for the same
+reason it declines from the station network. The answer comes back as an LXMF
+message, truncated to what fits in one packet.
+
+```
+curl -su admin:retimesh -X POST http://10.42.0.1/api/settings/maintenance \
+  -d '{"rns_admins":"acb001b427409e8ae73daef126b39866","rns_admin":true}'
+```
+
+`GET /api/settings` returns both under `maintenance`. The console spells them
+`SET maintenance.rns_admins <hash>[,<hash>…]` (`-` clears the list) and
+`SET maintenance.rns_admin on|off`; both apply at once, without a restart.
+`STATUS` reports `rns_admin=`, how many are listed, how many commands were
+offered and run, and the verdict on the last one — which names which of the
+four questions it failed rather than leaving them all as "no".
+
 ## Bulletin board (public)
 - `GET /api/board` → `[{"id":1,"author":"…","text":"…"}]` (ordered, no timestamps — no RTC)
 - `POST /api/board` `{"author":"…","text":"…"}` → `{"ok":true}`; 50 posts kept

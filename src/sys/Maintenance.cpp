@@ -21,6 +21,7 @@
 // ============================================================================
 #include "RnsTransport.h"
 #include "LxmfInbox.h"
+#include "RnsAdmin.h"
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
@@ -187,6 +188,20 @@ static void doStatus() {
       text[i] = '\0';
       if (i) dataf("STATUS", "lxmf_last_text=%s", text);
     }
+  }
+  // Remote administration, whenever it is on or has ever been tried. A node
+  // that refused somebody is a node whose operator wants to know, and the
+  // verdict says which of the four questions the caller failed rather than
+  // leaving them all as "no" (RnsAdmin.h).
+  {
+    const Rns::Admin::State a = Rns::Admin::state();
+    if (settings.maintenance().rnsAdmin || a.offered)
+      dataf("STATUS", "rns_admin=%s admins=%u offered=%lu ran=%lu last_verdict=%s last_from=%s last_ago_ms=%lu",
+            settings.maintenance().rnsAdmin ? "on" : "off",
+            (unsigned)Rns::Admin::adminCount(),
+            (unsigned long)a.offered, (unsigned long)a.ran,
+            Rns::Admin::verdictName((Rns::Admin::Verdict)a.lastVerdict),
+            a.lastFrom[0] ? a.lastFrom : "-", (unsigned long)a.lastAgoMs);
   }
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
         ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),
@@ -593,12 +608,13 @@ void useStream(Stream& io) {
   sCable.io = &io;
 }
 
-bool openSession(Stream& io, bool hostFacing) {
+bool openSession(Stream& io, bool hostFacing, bool preAuthed) {
   for (Session& s : sNet) {
     if (s.io) continue;
     s = Session();                       // nothing of the last caller's survives: not the
     s.io = &io;                          // half-typed line, and above all not the authentication
     s.hostFacing = hostFacing;
+    s.authed = preAuthed;                // the transport proved them; see Maintenance.h
     return true;
   }
   return false;

@@ -74,7 +74,13 @@ void poll();                       // from loop(); reads what has arrived, answe
 // `hostFacing` says whether the caller is on a link the node is the host end
 // of (the access point, usb0, ppp0) rather than out on the station network.
 // The bootloader refuses on the same terms the HTTP API does, and needs it.
-bool   openSession(Stream& io, bool hostFacing);
+// `preAuthed` is for a transport that authenticated the caller itself and by
+// something better than the password: a command carried in an LXMF message is
+// signed by a key this node holds, from an identity on its administrator list,
+// and asking that caller to then quote a shared secret would be adding a
+// weaker check on top of a stronger one (RnsAdmin.h). It stays false for
+// anything that merely arrived on a socket.
+bool   openSession(Stream& io, bool hostFacing, bool preAuthed = false);
 void   closeSession(Stream& io);
 // True when the console is finished with this caller and the transport
 // should hang up: too many failed AUTHs. Checked after each poll().
