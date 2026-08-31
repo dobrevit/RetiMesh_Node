@@ -24,6 +24,7 @@
 #include <string.h>
 #include <vector>
 #include "LxmfFormat.h"
+#include "LxmfCommands.h"
 #include "vectors.h"
 
 using namespace Rns;
@@ -202,6 +203,141 @@ static void test_a_str_announce_from_an_older_client_is_still_read() {
   TEST_ASSERT_EQUAL_STRING(name, out);
 }
 
+// --- commands ----------------------------------------------------------------
+//
+// What a person in a field actually asks a node, sent by Sideband's own
+// buttons. These vectors are messages the library built, so the field walk is
+// held to what a client sends rather than to what we imagined it sends.
+
+static const LxmfCommandVector& commandVector(const char* tag) {
+  for (const auto& v : kLxmfCommandVectors) if (strcmp(v.tag, tag) == 0) return v;
+  TEST_FAIL_MESSAGE("no such command vector");
+  return kLxmfCommandVectors[0];
+}
+
+// Parse a command vector down to the commands it carries.
+static size_t commandsOf(const LxmfCommandVector& v, LxmfCommand* out, size_t max) {
+  LxmfMessage m;
+  TEST_ASSERT_TRUE_MESSAGE(parseLxmf(v.wire, v.wireLen, m), v.tag);
+  TEST_ASSERT_TRUE_MESSAGE(m.fieldsCount >= 1, v.tag);
+  const uint8_t* val = nullptr; size_t valLen = 0;
+  if (!lxmfField(m.fields, m.fieldsLen, kFieldCommands, val, valLen)) return 0;
+  return lxmfCommands(val, valLen, out, max);
+}
+
+static void test_a_ping_from_a_real_client_is_seen_as_one() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(1, commandsOf(commandVector("cmd_ping"), c, 4));
+  TEST_ASSERT_EQUAL_UINT32(kCommandPing, c[0].id);
+}
+
+static void test_an_echo_carries_the_text_to_send_back() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(1, commandsOf(commandVector("cmd_echo"), c, 4));
+  TEST_ASSERT_EQUAL_UINT32(kCommandEcho, c[0].id);
+  TEST_ASSERT_EQUAL_size_t(13, c[0].textLen);
+  TEST_ASSERT_EQUAL_MEMORY("are you there", c[0].text, 13);
+}
+
+static void test_a_signal_report_is_seen_as_one() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(1, commandsOf(commandVector("cmd_signal"), c, 4));
+  TEST_ASSERT_EQUAL_UINT32(kCommandSignal, c[0].id);
+}
+
+static void test_several_commands_arrive_in_the_order_they_were_sent() {
+  LxmfCommand c[8];
+  TEST_ASSERT_EQUAL_size_t(3, commandsOf(commandVector("cmd_all"), c, 8));
+  TEST_ASSERT_EQUAL_UINT32(kCommandEcho, c[0].id);
+  TEST_ASSERT_EQUAL_MEMORY("hello", c[0].text, 5);
+  TEST_ASSERT_EQUAL_UINT32(kCommandSignal, c[1].id);
+  TEST_ASSERT_EQUAL_UINT32(kCommandPing, c[2].id);
+}
+
+// A client may send commands this node has never heard of, and it must not
+// cost the node the ones it does understand.
+static void test_a_command_we_do_not_know_does_not_hide_the_one_we_do() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(2, commandsOf(commandVector("cmd_unknown_first"), c, 4));
+  TEST_ASSERT_EQUAL_UINT32(0x7E, c[0].id);
+  TEST_ASSERT_EQUAL_UINT32(kCommandPing, c[1].id);
+}
+
+// A telemetry request's argument is a list, not a bare true. This node does
+// not answer them yet; what matters is that one does not derail the walk.
+static void test_a_telemetry_request_is_read_without_being_answered() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(2, commandsOf(commandVector("cmd_telemetry"), c, 4));
+  TEST_ASSERT_EQUAL_UINT32(kCommandTelemetry, c[0].id);
+  TEST_ASSERT_NULL(c[0].text);                   // a list, so there is no text to read
+  TEST_ASSERT_EQUAL_UINT32(kCommandPing, c[1].id);
+}
+
+// The commands field is one of several, and the walk has to keep its place
+// past values it does not read to find it.
+static void test_commands_are_found_among_other_fields() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(1, commandsOf(commandVector("cmd_among_fields"), c, 4));
+  TEST_ASSERT_EQUAL_UINT32(kCommandPing, c[0].id);
+}
+
+// An ordinary message has no commands in it, and asking must not find any.
+static void test_a_message_with_no_commands_yields_none() {
+  for (const auto& v : kLxmfVectors) {
+    LxmfMessage m;
+    std::vector<uint8_t> b = asReceived(v);
+    TEST_ASSERT_TRUE_MESSAGE(parseLxmf(b.data(), b.size(), m), v.tag);
+    const uint8_t* val = nullptr; size_t valLen = 0;
+    TEST_ASSERT_FALSE_MESSAGE(lxmfField(m.fields, m.fieldsLen, kFieldCommands, val, valLen), v.tag);
+  }
+}
+
+// Nothing here may read past the buffer, whatever a stranger sends.
+static void test_no_truncated_command_message_reads_past_its_buffer() {
+  for (const auto& v : kLxmfCommandVectors) {
+    for (size_t cut = 0; cut < v.wireLen; cut++) {
+      LxmfMessage m;
+      if (!parseLxmf(v.wire, cut, m)) continue;
+      const uint8_t* val = nullptr; size_t valLen = 0;
+      if (!lxmfField(m.fields, m.fieldsLen, kFieldCommands, val, valLen)) continue;
+      LxmfCommand c[8];
+      const size_t k = lxmfCommands(val, valLen, c, 8);
+      for (size_t j = 0; j < k; j++)
+        if (c[j].text)
+          TEST_ASSERT_TRUE_MESSAGE(c[j].text + c[j].textLen <= v.wire + cut, v.tag);
+    }
+  }
+}
+
+// The whole way through, on bytes the library built: a real client's message
+// in, the text that goes back out. The two halves are tested apart elsewhere;
+// this is the one that fails if they stop meeting in the middle.
+static void test_a_real_ping_produces_the_answer_a_client_expects() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(1, commandsOf(commandVector("cmd_ping"), c, 4));
+  char out[Commands::kReplyMax] = "";
+  Commands::Signal s; s.rssi = -97.0f; s.snr = 6.25f;
+  TEST_ASSERT_TRUE(Commands::reply(c[0], s, out, sizeof(out)) > 0);
+  TEST_ASSERT_EQUAL_STRING("Ping reply", out);
+}
+
+static void test_a_real_echo_comes_back_with_the_senders_own_words() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(1, commandsOf(commandVector("cmd_echo"), c, 4));
+  char out[Commands::kReplyMax] = "";
+  Commands::reply(c[0], {}, out, sizeof(out));
+  TEST_ASSERT_EQUAL_STRING("Echo reply: are you there", out);
+}
+
+static void test_a_real_signal_request_reports_what_the_radio_measured() {
+  LxmfCommand c[4];
+  TEST_ASSERT_EQUAL_size_t(1, commandsOf(commandVector("cmd_signal"), c, 4));
+  char out[Commands::kReplyMax] = "";
+  Commands::Signal s; s.rssi = -104.0f; s.snr = 8.75f;
+  Commands::reply(c[0], s, out, sizeof(out));
+  TEST_ASSERT_EQUAL_STRING("RSSI: -104 dBm\nSNR: 8.8 dB", out);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -217,5 +353,17 @@ int main() {
   RUN_TEST(test_we_read_the_name_out_of_a_real_lxmf_announce);
   RUN_TEST(test_what_we_announce_is_what_lxmf_would_have_announced);
   RUN_TEST(test_a_str_announce_from_an_older_client_is_still_read);
+  RUN_TEST(test_a_ping_from_a_real_client_is_seen_as_one);
+  RUN_TEST(test_an_echo_carries_the_text_to_send_back);
+  RUN_TEST(test_a_signal_report_is_seen_as_one);
+  RUN_TEST(test_several_commands_arrive_in_the_order_they_were_sent);
+  RUN_TEST(test_a_command_we_do_not_know_does_not_hide_the_one_we_do);
+  RUN_TEST(test_a_telemetry_request_is_read_without_being_answered);
+  RUN_TEST(test_commands_are_found_among_other_fields);
+  RUN_TEST(test_a_message_with_no_commands_yields_none);
+  RUN_TEST(test_no_truncated_command_message_reads_past_its_buffer);
+  RUN_TEST(test_a_real_ping_produces_the_answer_a_client_expects);
+  RUN_TEST(test_a_real_echo_comes_back_with_the_senders_own_words);
+  RUN_TEST(test_a_real_signal_request_reports_what_the_radio_measured);
   return UNITY_END();
 }

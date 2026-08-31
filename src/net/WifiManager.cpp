@@ -145,6 +145,7 @@ static const MaintField kMaintFields[] = {
   { "console_tcp",         &MaintenanceSettings::consoleTcp },
   { "web_ui",              &MaintenanceSettings::webUi },
   { "rns_admin",           &MaintenanceSettings::rnsAdmin },
+  { "lxmf_commands",       &MaintenanceSettings::lxmfCommands },
 };
 
 void WifiManager::begin() {

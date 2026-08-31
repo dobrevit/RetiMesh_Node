@@ -231,6 +231,7 @@ them on every push.
 | `test_lxmf_vectors` | the same parser against messages and announces the reference library actually produced (see below) |
 | `test_lxmf_inbox` | the inbox record format and the ring arithmetic: whether a message read back is the message that was stored |
 | `test_rns_admin` | who may command a node — each test is a way in that must stay shut |
+| `test_lxmf_commands` | what the node says back to a ping, an echo and a signal report, and that nothing a stranger sends can overrun the reply |
 
 ### LXMF vectors
 

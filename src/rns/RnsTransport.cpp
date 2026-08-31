@@ -32,6 +32,7 @@
 #include "RnsAnnounce.h"
 #include "LxmfFormat.h"
 #include "LxmfInbox.h"
+#include "LxmfCommands.h"
 #include "RnsAdmin.h"
 #include <esp_random.h>
 #include "Lock.h"
@@ -397,7 +398,53 @@ static void rememberProvenKey(const Bytes& source, const Bytes& key) {
   slot->used = true;
 }
 
-static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
+// What the radio measured of the packet that brought a message. microReticulum
+// copies the interface's reading onto every packet it takes in
+// (Transport.cpp), and our LoRa interface sets it from the last frame the
+// radio decoded — so this is a real measurement on the RF path and NaN
+// everywhere else, which is what a signal report should say.
+static Rns::Commands::Signal signalOf(const RNS::Packet& packet) {
+  Rns::Commands::Signal s;
+  s.rssi = const_cast<RNS::Packet&>(packet).rssi();
+  s.snr  = const_cast<RNS::Packet&>(packet).snr();
+  s.q    = const_cast<RNS::Packet&>(packet).q();
+  return s;
+}
+
+// One peer cannot have the radio to itself. The reply queue is a single slot
+// drained once per pass, so throughput is already bounded; this stops one
+// sender filling every slot there is. Ten seconds is far below what a person
+// pressing a button does and far above what a flood needs to be stopped.
+//
+// Same table shape and the same reasoning as the proven keys above: eight
+// entries, oldest out, RNS task only, no lock.
+static const uint32_t kCommandCooldownMs = 10000;
+struct CommandSeen { uint8_t hash[16]; uint32_t atMs; bool used; };
+static CommandSeen sCommandSeen[8];
+
+static bool commandAllowedNow(const uint8_t* sourceHash) {
+  const uint32_t now = millis();
+  CommandSeen* slot = nullptr;
+  for (auto& e : sCommandSeen) {
+    if (e.used && memcmp(e.hash, sourceHash, 16) == 0) {
+      if ((uint32_t)(now - e.atMs) < kCommandCooldownMs) return false;
+      e.atMs = now;
+      return true;
+    }
+    if (!e.used && !slot) slot = &e;
+  }
+  if (!slot) {
+    slot = &sCommandSeen[0];
+    for (auto& e : sCommandSeen) if ((int32_t)(e.atMs - slot->atMs) < 0) slot = &e;
+  }
+  memcpy(slot->hash, sourceHash, 16);
+  slot->atMs = now;
+  slot->used = true;
+  return true;
+}
+
+static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
+                              const Rns::Commands::Signal& signal) {
   const char* how = Rns::viaName(via);
   Rns::LxmfMessage m;
   if (!Rns::parseLxmf(data.data(), data.size(), m)) {
@@ -559,6 +606,35 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
   // The gate refuses everything by default and says which of its questions
   // failed (RnsAdmin.h).
   Rns::Admin::offer(m.sourceHash, standing, m.sentAt, (const char*)text, textLen);
+
+  // And the questions that are not administration: is this node there, say
+  // this back, how well did it hear me. Answered for anyone, on purpose —
+  // requiring the admin list would defeat the point, since the person who most
+  // needs a signal report is the one at the edge of coverage whose announce
+  // may not have arrived. They disclose nothing the asker did not already
+  // know, the reply is one packet for one packet, and a cooldown keeps one
+  // peer off the radio (LxmfCommands.h).
+  if (settings.maintenance().lxmfCommands && m.fieldsCount) {
+    const uint8_t* val = nullptr; size_t valLen = 0;
+    if (Rns::lxmfField(m.fields, m.fieldsLen, Rns::kFieldCommands, val, valLen)) {
+      Rns::LxmfCommand cmds[4];
+      const size_t n = Rns::lxmfCommands(val, valLen, cmds, 4);
+      if (n && !commandAllowedNow(m.sourceHash)) {
+        log_d("lxmf: not answering %s so soon after the last time",
+              source.toHex().c_str());
+      } else {
+        for (size_t k = 0; k < n; k++) {
+          char answer[Rns::Commands::kReplyMax];
+          if (!Rns::Commands::reply(cmds[k], signal, answer, sizeof(answer))) continue;
+          if (queueLxmfReply(m.sourceHash, answer))
+            log_i("lxmf: answering command 0x%02X from %s", (unsigned)cmds[k].id,
+                  source.toHex().c_str());
+          else
+            log_w("lxmf: could not queue an answer for %s", source.toHex().c_str());
+        }
+      }
+    }
+  }
   return true;
 }
 
@@ -584,7 +660,7 @@ static void proveIfTaken(const RNS::Packet& packet, bool taken) {
 }
 
 static void onLxmfLinkPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
-  proveIfTaken(packet, handleLxmfMessage(data, Rns::ViaLink));
+  proveIfTaken(packet, handleLxmfMessage(data, Rns::ViaLink, signalOf(packet)));
 }
 
 // A message too big for one link packet is not sent as several: the client
@@ -627,7 +703,10 @@ static void onLxmfResourceConcluded(const RNS::Resource& resource) {
   }
   // No proof to send here. A resource carries its own, exchanged as the
   // transfer concludes, so the sender's client already knows it arrived.
-  handleLxmfMessage(const_cast<RNS::Resource&>(resource).data(), Rns::ViaResource);
+  // A resource carries no per-packet reading of its own, and the last
+  // packet's is not the transfer's. Nothing is claimed rather than
+  // something wrong being claimed.
+  handleLxmfMessage(const_cast<RNS::Resource&>(resource).data(), Rns::ViaResource, {});
 }
 
 // A client that has delivered a message over a link then tells the link who
@@ -686,7 +765,7 @@ static void onLxmfLink(RNS::Link& link) {
 static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
   RNS::Bytes whole(lxmfDest.hash());
   whole.append(data);
-  proveIfTaken(packet, handleLxmfMessage(whole, Rns::ViaPacket));
+  proveIfTaken(packet, handleLxmfMessage(whole, Rns::ViaPacket, signalOf(packet)));
 }
 
 LxmfState lxmf() {

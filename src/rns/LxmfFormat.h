@@ -507,6 +507,132 @@ inline void lxmfSignedSpans(const LxmfMessage& m, Sink&& sink) {
 }
 
 // ---------------------------------------------------------------------------
+//  Reading inside the fields map
+//
+//  parseLxmf reports where the fields map is and how many entries it holds and
+//  deliberately reads none of them: most of what LXMF carries there is none of
+//  a transport node's business, and a parser with an opinion about every field
+//  would be a parser with far more surface than a node needs.
+//
+//  What is worth reading is the commands a client sends — a ping, an echo, a
+//  request for the signal this node heard them at. Those are what a person
+//  standing in a field with a phone actually wants to ask a node, and
+//  answering costs one short message.
+// ---------------------------------------------------------------------------
+
+// A msgpack unsigned integer, which is what a field key and a command id are.
+// False for anything else, negative fixints included: a field id is never
+// negative, and reading one as though it were is how a map walk loses its
+// place and starts reading values as keys.
+inline bool msgpackUint(const uint8_t* p, size_t n, size_t i, uint32_t& out, size_t& next) {
+  if (i >= n) return false;
+  const uint8_t t = p[i];
+  if (t <= 0x7F) { out = t; next = i + 1; return true; }                       // positive fixint
+  if (t == 0xCC) { if (i + 2 > n) return false; out = p[i + 1]; next = i + 2; return true; }
+  if (t == 0xCD) { if (i + 3 > n) return false;
+                   out = ((uint32_t)p[i + 1] << 8) | p[i + 2]; next = i + 3; return true; }
+  if (t == 0xCE) { if (i + 5 > n) return false;
+                   out = ((uint32_t)p[i + 1] << 24) | ((uint32_t)p[i + 2] << 16) |
+                         ((uint32_t)p[i + 3] << 8) | p[i + 4]; next = i + 5; return true; }
+  return false;
+}
+
+// How many members a map or array claims, and where the first one starts.
+// Counted in 64 bits and bounded against the buffer before use, for the reason
+// msgpackNext learned: on a 32-bit target a claimed count near 2^31 wraps when
+// doubled, and a header that should have been refused is skipped as empty.
+inline bool msgpackContainerHeader(const uint8_t* p, size_t n, size_t i, bool wantMap,
+                                   size_t& count, size_t& first) {
+  if (i >= n) return false;
+  const uint8_t t = p[i];
+  const uint8_t fixMask = wantMap ? 0x80 : 0x90;
+  const uint8_t wide16  = wantMap ? 0xDE : 0xDC;
+  const uint8_t wide32  = wantMap ? 0xDF : 0xDD;
+  if ((t & 0xF0) == fixMask) { count = t & 0x0F; first = i + 1; return true; }
+  if (t == wide16) {
+    if (i + 3 > n) return false;
+    count = ((size_t)p[i + 1] << 8) | p[i + 2]; first = i + 3;
+  } else if (t == wide32) {
+    if (i + 5 > n) return false;
+    const uint64_t c = ((uint64_t)p[i + 1] << 24) | ((uint64_t)p[i + 2] << 16) |
+                       ((uint64_t)p[i + 3] << 8) | p[i + 4];
+    if (c > n) return false;
+    count = (size_t)c; first = i + 5;
+  } else return false;
+  return count <= n;
+}
+
+// One value out of a fields map, by its LXMF field id. What comes back is the
+// raw extent of the value — its type byte and everything it occupies — because
+// the caller may want to walk into it (a commands array) or read it as text,
+// and this file should not have to know which in advance.
+inline bool lxmfField(const uint8_t* fields, size_t n, uint32_t id,
+                      const uint8_t*& val, size_t& valLen) {
+  val = nullptr; valLen = 0;
+  size_t count = 0, i = 0;
+  if (!fields || !msgpackContainerHeader(fields, n, 0, /*wantMap*/ true, count, i)) return false;
+  for (size_t k = 0; k < count; k++) {
+    uint32_t key = 0; size_t afterKey = 0;
+    // A key this node did not write may be of any type. Skipping it by length
+    // keeps the walk in step; abandoning the map would lose every field after
+    // the first odd one.
+    const bool intKey = msgpackUint(fields, n, i, key, afterKey);
+    if (!intKey) {
+      const uint8_t* kv = nullptr; size_t kvl = 0;
+      if (!msgpackNext(fields, n, i, kv, kvl, afterKey)) return false;
+    }
+    const uint8_t* vv = nullptr; size_t vvl = 0, afterVal = 0;
+    if (!msgpackNext(fields, n, afterKey, vv, vvl, afterVal)) return false;
+    if (intKey && key == id) { val = fields + afterKey; valLen = afterVal - afterKey; return true; }
+    i = afterVal;
+  }
+  return false;
+}
+
+// The field that carries them, and the commands this node understands. The
+// numbers are Sideband's, because they are what its buttons send.
+static const uint32_t kFieldCommands    = 0x09;
+static const uint32_t kCommandTelemetry = 0x01;
+static const uint32_t kCommandPing      = 0x02;
+static const uint32_t kCommandEcho      = 0x03;
+static const uint32_t kCommandSignal    = 0x04;
+
+struct LxmfCommand {
+  uint32_t       id;                     // one of the kCommand* above
+  const uint8_t* text;                   // the argument where it is text or bytes, else null
+  size_t         textLen;
+};
+
+// The commands out of a FIELD_COMMANDS value: an array whose members are each
+// a map of one entry, {command id: argument}. Anything not of that shape is
+// skipped rather than refused — a client is free to send commands this node
+// has never heard of, and the ones it does understand should still work.
+inline size_t lxmfCommands(const uint8_t* val, size_t n, LxmfCommand* out, size_t max) {
+  if (!val || !out || max == 0) return 0;
+  size_t count = 0, i = 0, found = 0;
+  if (!msgpackContainerHeader(val, n, 0, /*wantMap*/ false, count, i)) return 0;
+  for (size_t k = 0; k < count && found < max; k++) {
+    const uint8_t* ev = nullptr; size_t evl = 0, afterElem = 0;
+    if (!msgpackNext(val, n, i, ev, evl, afterElem)) return found;   // bounds come from here
+    size_t pairs = 0, at = 0;
+    if (msgpackContainerHeader(val, n, i, /*wantMap*/ true, pairs, at) && pairs >= 1) {
+      uint32_t id = 0; size_t afterKey = 0;
+      if (msgpackUint(val, n, at, id, afterKey)) {
+        const uint8_t* av = nullptr; size_t avl = 0, afterVal = 0;
+        if (msgpackNext(val, n, afterKey, av, avl, afterVal)) {
+          out[found].id = id;
+          out[found].text = av;        // msgpackNext sets this only for a string or binary
+          out[found].textLen = avl;
+          found++;
+        }
+      }
+    }
+    i = afterElem;
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------------------
 // Writing a message, which is the same format read backwards.
 //
 // A node that can be administered over LXMF has to answer, and an answer is a

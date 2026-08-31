@@ -330,6 +330,33 @@ public. `/messages.html` is the page that renders it, and is gated the same way.
   `STATUS` counts what was refused. The delivery address is reachable by
   anyone who can reach the node, and every stored message is a flash write.
 
+## Answering a client's ping, echo and signal report (on by default)
+Sideband and the clients that follow it have buttons for three questions, sent
+in a message's fields rather than as text: **ping**, **echo**, and **signal
+report**. The node answers all three with an ordinary message going back, so
+they work from an unmodified client with nothing to configure on the phone.
+
+The signal report is the one worth having. It returns what *this node's* radio
+measured of the packet that carried the request — link quality, RSSI and SNR,
+in Sideband's own layout — so one person with a phone can walk a valley and
+find where the node stops hearing them. Without it that takes two people and
+two radios. A figure the node does not have is left out rather than reported as
+zero, so a request that arrived over Wi-Fi says only what it can.
+
+These are not administration and share none of its gating: they change nothing,
+and they tell a stranger only what they already knew — that the node is there,
+which they learned by reaching it, and how strong their own signal was, which
+their own radio could tell them. Requiring the administrator list would deny a
+signal report to precisely the person at the edge of coverage who needs one.
+
+What they cost is airtime: one short reply for one short request, no
+amplification. A per-sender cooldown of ten seconds keeps one peer off the
+radio, and the duty-cycle accounting bounds the rest. `SET
+maintenance.lxmf_commands off` (or `"lxmf_commands": false` over HTTP) declines
+to spend it on a crowded channel. A telemetry request is parsed but not
+answered — the node has no telemetry to send yet, and saying nothing leaves the
+asker's client showing it unanswered, which is true.
+
 ## Remote administration over RNS (off by default)
 A node can be administered by messaging it, which is the only way in when its
 cable is dead. The delivery address is reachable by anyone who can route to it
