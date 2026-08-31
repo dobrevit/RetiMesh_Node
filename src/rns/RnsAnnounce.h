@@ -73,6 +73,9 @@ const char* aspectName(const uint8_t nameHash[NAME_HASH]);
 // of an LXMF-style msgpack array). Returns bytes written (0 = none).
 size_t displayName(const Announce& a, char* out, size_t cap);
 
+// The LXMF wire format both directions live in LxmfFormat.h, which is pure
+// and tested on the host; this file needs it for displayName().
+
 void sha256(const uint8_t* data, size_t len, uint8_t out[32]);
 void toHex(const uint8_t* data, size_t len, char* out);   // out needs 2*len+1
 
