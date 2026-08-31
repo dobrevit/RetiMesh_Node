@@ -304,12 +304,15 @@ is the exception: a bootloader request may outrank a plain reboot that is
 already armed, and the earlier of the two deadlines is kept. Every reply that
 says `"restart"` says whether the restart was actually granted.
 
-### `loop` — what the loop task is doing
-`GET /api/status` carries `loop`: `{ phase, in_phase_ms, since_pass_ms, passes,
-stalled }`. `phase` is the call in the Arduino loop the task entered last. This
-is the one reading worth more over the network than over the cable: when that
-task blocks, the serial console blocks with it and this endpoint does not — a
-node that looks dead over USB will still say what it is stuck in here. See
+### `tasks` — what the watched tasks are doing (debug builds)
+`GET /api/status` carries `tasks` when the image was built with
+`-DRETIMESH_DEBUG`: an object per watched task (`loop`, `rns`) of
+`{ phase, in_phase_ms, since_pass_ms, passes, stalled }`. `phase` is the call
+that task entered last. This is the one reading worth more over the network
+than over the cable: when the loop task blocks the serial console blocks with
+it, when the Reticulum task blocks the node stops accepting packets, and this
+endpoint survives both — a node that looks dead over USB will still say what it
+is stuck in here. Absent from a release image. See
 [troubleshooting.md](troubleshooting.md).
 
 ## Messages (auth)

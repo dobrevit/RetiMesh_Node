@@ -708,17 +708,24 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["mdns"]         = settings.maintenance().mdns;
   doc["security"]     = _securityName;
   {
-    // What the loop task is doing, and when it last finished. This is the one
-    // reading that is worth more over the network than over the cable: when
-    // that task blocks the console goes with it, and this endpoint does not
-    // (LoopWatch.h).
-    JsonObject lw = doc["loop"].to<JsonObject>();
+    // What the watched tasks are doing, and when each last finished a pass.
+    // This is the one reading worth more over the network than over the cable:
+    // when the loop task blocks the console goes with it, and when the
+    // Reticulum task blocks the node stops accepting packets — and this
+    // endpoint survives both (LoopWatch.h). Absent in a release build.
+#if RETIMESH_DEBUG
     const uint32_t now = millis();
-    lw["phase"]         = LoopWatch::phaseName();
-    lw["in_phase_ms"]   = LoopWatch::inPhase(now);
-    lw["since_pass_ms"] = LoopWatch::sincePass(now);
-    lw["passes"]        = LoopWatch::state().passes;
-    lw["stalled"]       = LoopWatch::sincePass(now) >= LoopWatch::kStallWarnMs;
+    JsonObject tasks = doc["tasks"].to<JsonObject>();
+    for (uint8_t i = 0; i < LoopWatch::TaskCount; i++) {
+      const LoopWatch::Task t = (LoopWatch::Task)i;
+      JsonObject o = tasks[LoopWatch::taskName(t)].to<JsonObject>();
+      o["phase"]         = LoopWatch::phaseName(t);
+      o["in_phase_ms"]   = LoopWatch::inPhase(t, now);
+      o["since_pass_ms"] = LoopWatch::sincePass(t, now);
+      o["passes"]        = LoopWatch::state(t).passes;
+      o["stalled"]       = LoopWatch::sincePass(t, now) >= LoopWatch::kStallWarnMs;
+    }
+#endif
   }
   {
     JsonObject st = doc["station"].to<JsonObject>();

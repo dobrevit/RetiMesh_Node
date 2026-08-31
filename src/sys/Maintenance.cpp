@@ -211,14 +211,20 @@ static void doStatus() {
   // Only when it is worth saying. On a healthy node this is noise; on a stuck
   // one the console cannot answer at all, so the line is really for the
   // operator reading it back afterwards from a captured log.
+#if RETIMESH_DEBUG
   {
     const uint32_t now = millis();
-    if (LoopWatch::sincePass(now) >= LoopWatch::kStallWarnMs)
-      dataf("STATUS", "loop_phase=%s loop_in_phase_ms=%lu loop_since_pass_ms=%lu loop_passes=%lu",
-            LoopWatch::phaseName(), (unsigned long)LoopWatch::inPhase(now),
-            (unsigned long)LoopWatch::sincePass(now),
-            (unsigned long)LoopWatch::state().passes);
+    for (uint8_t i = 0; i < LoopWatch::TaskCount; i++) {
+      const LoopWatch::Task t = (LoopWatch::Task)i;
+      if (LoopWatch::sincePass(t, now) < LoopWatch::kStallWarnMs) continue;
+      dataf("STATUS", "task=%s phase=%s in_phase_ms=%lu since_pass_ms=%lu passes=%lu",
+            LoopWatch::taskName(t), LoopWatch::phaseName(t),
+            (unsigned long)LoopWatch::inPhase(t, now),
+            (unsigned long)LoopWatch::sincePass(t, now),
+            (unsigned long)LoopWatch::state(t).passes);
+    }
   }
+#endif
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
         ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),
         !ConsoleServer::connected() ? "none" : ConsoleServer::authenticated() ? "authenticated" : "unauthenticated");

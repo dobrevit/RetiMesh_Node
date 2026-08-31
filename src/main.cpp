@@ -368,8 +368,10 @@ void loop() {
   // sometimes a restart (RnsAdmin.h).
   LOOP_PHASE("rns-admin");   Rns::Admin::poll();
   LOOP_PHASE("leds");        Leds::tick(millis());
-#ifdef LOOPWATCH_SELFTEST
-  // Deliberate hang, built only for proving the watch. Never in a release.
+#if RETIMESH_DEBUG && defined(LOOPWATCH_SELFTEST)
+  // Deliberate hang, for proving the watch still works after it is changed.
+  // Needs the debug build as well as its own flag, so it cannot reach a
+  // release image by one forgotten define.
   if (millis() > 45000) { LOOP_PHASE("selftest-hang"); for (;;) vTaskDelay(pdMS_TO_TICKS(1000)); }
 #endif
   // Every pass, not on the heartbeat: a crash 29 s after the last beat would
@@ -431,7 +433,7 @@ void loop() {
   // The pass is complete. What the watcher measures is the gap between these,
   // so the delay below is inside the measurement and a healthy node reads as
   // a couple of hundred milliseconds rather than as zero (LoopWatch.h).
-  LoopWatch::pass();
+  LoopWatch::pass(LoopWatch::Loop);
   LOOP_PHASE("delay");
   vTaskDelay(pdMS_TO_TICKS(200));
 }

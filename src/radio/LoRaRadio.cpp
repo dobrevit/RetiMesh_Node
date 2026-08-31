@@ -21,6 +21,7 @@
 // ============================================================================
 #include "Diag.h"
 #include "LoRaRadio.h"
+#include "LoopWatch.h"
 #include <esp_random.h>
 #include "Neighbors.h"
 #include "WifiManager.h"
@@ -468,7 +469,17 @@ void LoRaRadio::taskLoop() {
       vTaskDelay(1);                     // one tick, every pass, until it goes quiet
     }
 
-    // (1a) Channel-use figures, and the duty-cycle verdict they feed.
+    // (1a) Watching the two tasks that have been found stopped. Kept here
+    //      because this task has outlived every stall so far — and because the
+    //      obvious place, Reticulum's own loop, went down with the loop task
+    //      in the incident that mattered (LoopWatch.h).
+    {
+      const uint32_t now = millis();
+      LoopWatch::check(LoopWatch::Loop, now);
+      LoopWatch::check(LoopWatch::Rns, now);
+    }
+
+    // (1b) Channel-use figures, and the duty-cycle verdict they feed.
     refreshAirtimeStats();
 
     // (1b) Beacons: boot hello, pending reply, periodic id when idle.

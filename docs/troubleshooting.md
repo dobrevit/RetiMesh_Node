@@ -72,41 +72,67 @@ ROM, and a power cycle boots whatever is in flash.
 Still stuck? Open an issue with: board and revision, firmware version (`/api/status`),
 the boot log, and what the peers are running (RNS/Sideband/NomadNet versions).
 
-## The console is silent but the node is not dead
+## A node that answers nothing but is not dead
 
-A node can end up with its Arduino loop task blocked while every other task
-keeps running: the radio still receives, Reticulum still routes, the web
-server still answers, an attached client still holds its socket — and the
-serial console says nothing, because the console is served from that task.
-Over the cable the node looks dead. It is not.
+A node can end up with one of its tasks stopped while the others keep running.
+Two have been seen doing it, and they look different from outside:
 
-The loop task cannot report its own hang, so the Reticulum task watches it. In
-the log, from that task rather than from the stuck one:
+- **the Arduino loop task** carries the console, so the cable goes silent;
+- **the Reticulum task** drains the ring a client's packets arrive in, so the
+  node accepts nothing — for its own address or anyone else's — while its
+  radio still logs happily and its web server still answers.
+
+Both are watched, from the radio task. That is not where the watch started: it
+was kept in the Reticulum loop until a stall took *that* task down together
+with the loop task, and the one thing that could have named the call went quiet
+with it. The radio task has outlived every stall so far.
+
+**This is a debug-build instrument.** A release image carries none of it —
+every label, pass and check compiles away. Build one when hunting:
 
 ```
-[E][LoopWatch.cpp] check(): loop: the loop task has not completed a pass for 35817 ms —
-  stuck in "inbox" (entered 35469 ms ago, 202 passes since boot). Everything else is
-  still running; the console is served from that task, so the cable will be silent
+PLATFORMIO_BUILD_FLAGS=-DRETIMESH_DEBUG pio run -e heltec-wp -t upload
 ```
 
-It repeats every 30 s while the stall lasts, and says so again when the task
-comes back. `phase` is the call in `loop()` it went into and did not come out
-of — `wifi`, `bootloader`, `console-tcp`, `console`, `links`, `inbox`,
-`rns-admin`, `leds`, `diag`, `delay`.
+It costs 40 bytes of RAM and about 1.7 KB of flash when built in.
+
+In the log, from the radio task:
+
+```
+[E][LoopWatch.cpp] check(): rns: the rns task has not completed a pass for 35817 ms —
+  stuck in "reticulum" (entered 35469 ms ago, 202 passes since boot). That task drains
+  the ring a client's packets arrive in, so the node will accept nothing while it is stopped
+```
+
+It repeats every 30 s while the stall lasts and says so again when the task
+comes back. The phases are the calls each task makes:
+
+| Task | Phases |
+|---|---|
+| `loop` | `wifi`, `bootloader`, `console-tcp`, `console`, `links`, `inbox`, `rns-admin`, `leds`, `diag`, `delay` |
+| `rns` | `log-mute`, `replies`, `events`, `drain-tcp`, `reticulum`, `announce`, `snapshots`, `idle` |
 
 **Read it over the network, not the cable.** `GET /api/status` carries the same
-thing and keeps answering while the console does not:
+thing and keeps answering when neither task does:
 
 ```
-"loop": { "phase": "inbox", "in_phase_ms": 114548, "since_pass_ms": 114896,
-          "passes": 202, "stalled": true }
+"tasks": { "loop": { "phase": "delay", "since_pass_ms": 611929, "passes": 7208, "stalled": true },
+           "rns":  { "phase": "reticulum", "since_pass_ms": 611402, "passes": 6980, "stalled": true } }
 ```
 
-`STATUS` on the console also prints a `loop_phase=` line, but only once a stall
-is under way — which on a node whose console has gone with the loop task means
-it is there for whoever reads a captured log afterwards.
+`phase: "delay"` on the loop task is worth recognising: that is the task's own
+`vTaskDelay`, so it is not blocked in a call — it is not being scheduled, which
+points at something else on its core rather than at the call it is in.
 
-To prove the watch still works after changing it, build with
-`-DLOOPWATCH_SELFTEST`: the loop task hangs itself 45 s after boot, and the
-warning, the repeats and the `/api/status` fields can all be seen. Never in a
-release build.
+`STATUS` on the console prints a `task=` line per stalled task, but only once a
+stall is under way — which on a node whose console has gone with the loop task
+means it is there for whoever reads a captured log afterwards.
+
+Read `radio.irq_yields` beside them. Nonzero means the radio task was holding
+its own core (priority 5, pinned to the core that also carries Reticulum and
+the Arduino loop) and had to be forced to yield; that guard is in every build,
+not just debug ones.
+
+To prove the watch still works after changing it, add `-DLOOPWATCH_SELFTEST` to
+a debug build: the loop task hangs itself 45 s after boot, and the warning, the
+repeats and the `/api/status` fields can all be seen.

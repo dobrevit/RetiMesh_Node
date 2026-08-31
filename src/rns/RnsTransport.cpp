@@ -1510,25 +1510,28 @@ Tables tables() {
 void loop() {
   if (!sStarted) { vTaskDelay(pdMS_TO_TICKS(500)); return; }
   try {
-    // Watched from here on purpose: the loop task cannot report its own hang,
-    // and this is the task that has kept running in every instance of one seen
-    // so far (LoopWatch.h).
-    LoopWatch::check(millis());
+    // This task is watched too, from the radio task, and for a reason learned
+    // the hard way: the watch used to be kept here, and then a stall took this
+    // task down together with the loop task, so the one thing that could have
+    // named the call went quiet with it (LoopWatch.h).
+    RNS_PHASE("log-mute");
     applyLogMute();
     // Answers other tasks composed, sent from here because this is the task
     // that owns the library (queueLxmfReply above).
+    RNS_PHASE("replies");
     if (sReplyQueue) {
       PendingReply r;
       if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE && !sendLxmf(r.dest, r.text, r.telemetry, r.signal))
         log_w("lxmf: could not send an answer to %s", RNS::Bytes(r.dest, 16).toHex().c_str());
     }
-    processEvents();
-    drainTcp();
-    reticulum.loop();                      // interface loops + housekeeping (jobs_interval = 1 s)
+    RNS_PHASE("events");     processEvents();
+    RNS_PHASE("drain-tcp");  drainTcp();
+    RNS_PHASE("reticulum");  reticulum.loop();   // interface loops + housekeeping (jobs_interval = 1 s)
 
     // sStarted is what says the schedule is valid; testing sNextAnnounceMs for
     // truth as well used to mean that the one millis() in every 49 days that
     // lands the next announce on zero switched announcing off for good.
+    RNS_PHASE("announce");
     uint16_t interval = settings.radio().announceInterval;
     if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
       char app[64];
@@ -1567,7 +1570,12 @@ void loop() {
       sNextAnnounceMs = millis() + base + (esp_random() % (base / 10 + 1));
       log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
     }
+    RNS_PHASE("snapshots");
     refreshSnapshots();
+    // The pass is complete. A throw below skips this deliberately: a task that
+    // is failing every pass has not finished one, and should read as stalled.
+    LoopWatch::pass(LoopWatch::Rns);
+    RNS_PHASE("idle");
   } catch (const std::exception& e) {
     log_e("Reticulum loop: %s", e.what());
   }
