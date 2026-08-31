@@ -73,7 +73,8 @@ struct LxmfMessage {
 // understood — a timestamp, two texts and a map — and anything else is
 // skipped by length rather than guessed at.
 inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
-                        const uint8_t*& val, size_t& valLen, size_t& next) {
+                        const uint8_t*& val, size_t& valLen, size_t& next,
+                        unsigned depth = 8) {
   val = nullptr; valLen = 0;
   if (i >= n) return false;
   const uint8_t t = p[i];
@@ -93,7 +94,23 @@ inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
   else if (t == 0xCD || t == 0xD1)     next = i + 3;
   else if (t == 0xCE || t == 0xD2 || t == 0xCA) next = i + 5;                                   // u32/i32/float32
   else if (t == 0xCF || t == 0xD3 || t == 0xCB) next = i + 9;                                   // u64/i64/float64
-  else if ((t & 0xF0) == 0x80 || (t & 0xF0) == 0x90) next = i + 1;                              // fixmap/fixarray header
+  else if ((t & 0xF0) == 0x80 || (t & 0xF0) == 0x90) {
+    // A container is not one element wide. Stepping over just its header left
+    // a fields map's contents outside the payload, which is the same class of
+    // fault as running past the end and just as fatal to a signature: the
+    // bytes hashed were not the bytes signed. Its members are walked, by
+    // length, without being interpreted — nothing here needs to know what a
+    // fields map means, only where it stops.
+    const bool map = (t & 0xF0) == 0x80;
+    size_t members = (size_t)(t & 0x0F) * (map ? 2u : 1u);
+    next = i + 1;
+    if (depth == 0) return false;              // nesting deeper than LXMF uses; refuse rather than recurse
+    for (size_t k = 0; k < members; k++) {
+      const uint8_t* iv = nullptr; size_t ivl = 0, inext = 0;
+      if (!msgpackNext(p, n, next, iv, ivl, inext, depth - 1)) return false;
+      next = inext;
+    }
+  }
   else return false;                                                                            // not a shape LXMF uses
   return next <= n;
 }
@@ -141,14 +158,32 @@ inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {
 
   const uint8_t* p = out.payload; const size_t n = out.payloadLen;
   if (n < 1 || (p[0] & 0xF0) != 0x90) return false;      // fixarray [timestamp, title, content, fields]
-  if ((p[0] & 0x0F) < 3) return false;                   // the three we read
+  const size_t elements = p[0] & 0x0F;
+  if (elements < 3) return false;                        // the three we read
   size_t i = 1, next = 0; const uint8_t* v = nullptr; size_t vl = 0;
   if (!msgpackNext(p, n, i, v, vl, next)) return false;  // timestamp, skipped
   i = next;
   if (!msgpackNext(p, n, i, v, vl, next)) return false;  // title
   out.title = v; out.titleLen = vl; i = next;
   if (!msgpackNext(p, n, i, v, vl, next)) return false;  // content
-  out.content = v; out.contentLen = vl;
+  out.content = v; out.contentLen = vl; i = next;
+
+  // The payload ends where its msgpack array ends, not where the packet does.
+  // Taking "everything after the signature" was wrong: a packet can carry
+  // trailing bytes the sender never signed, and hashing them makes a genuine
+  // message look forged. It fails only for messages long enough to be padded,
+  // which is why a short test verified and a real client's did not — the worst
+  // kind of bug, correct on the case you try first.
+  //
+  // A msgpack array is self-delimiting, so the true end is found by walking
+  // it. The remaining elements are skipped by length rather than read: this
+  // file has no business interpreting a fields map, only knowing where it
+  // stops.
+  for (size_t k = 3; k < elements; k++) {
+    if (!msgpackNext(p, n, i, v, vl, next)) return false;
+    i = next;
+  }
+  out.payloadLen = i;
   return true;
 }
 

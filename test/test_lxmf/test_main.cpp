@@ -133,6 +133,79 @@ static void test_a_message_of_nothing_but_an_envelope_is_refused() {
   TEST_ASSERT_FALSE(parseLxmf(buf, 96, m));
 }
 
+static void test_the_payload_ends_where_its_msgpack_does_not_where_the_packet_does() {
+  // The bug this is here to stop coming back: payloadLen was "everything
+  // after the signature", so a packet carrying any trailing byte the sender
+  // never signed made a genuine message hash differently and look forged.
+  // Short messages have no padding, so it passed every test until a real
+  // client sent a long one.
+  uint8_t buf[256];
+  const size_t n = buildMessage(buf, "t", "body");
+  memset(buf + n, 0xFF, 24);                   // padding the sender never signed
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, n + 24, m));
+  TEST_ASSERT_EQUAL_size_t(n - 96, m.payloadLen);          // the message, not the padding
+  TEST_ASSERT_EQUAL_STRING_LEN("body", m.content, 4);
+}
+
+static void test_a_fields_map_is_inside_the_payload_it_measures() {
+  // A fields map is what a real client adds and what made the length wrong.
+  // It is skipped rather than read — this file has no business interpreting
+  // it — but it must be counted.
+  uint8_t buf[256];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x94;                                             // [ts, title, content, fields]
+  *p++ = 0xCB; memset(p, 0, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  *p++ = 0x81; *p++ = 0x01; *p++ = 0xA3; *p++ = 'a'; *p++ = 'b'; *p++ = 'c';   // {1:"abc"}
+  const size_t n = (size_t)(p - buf);
+  memset(buf + n, 0x77, 16);                               // padding after it
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, n + 16, m));
+  TEST_ASSERT_EQUAL_size_t(n - 96, m.payloadLen);          // includes the map, excludes the padding
+  TEST_ASSERT_EQUAL_STRING_LEN("hi", m.content, 2);
+}
+
+static void test_a_nested_container_is_walked_not_stepped_over() {
+  // The bug behind the one above: a container is not one element wide, and
+  // skipping its header alone leaves its contents outside the payload — the
+  // same fatal result as running past the end, since the bytes hashed are not
+  // the bytes signed.
+  uint8_t buf[256];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x94;
+  *p++ = 0xCB; memset(p, 0, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  *p++ = 0x81; *p++ = 0x01;                                // {1: [ "ab", 7 ]}
+  *p++ = 0x92; *p++ = 0xA2; *p++ = 'a'; *p++ = 'b'; *p++ = 0x07;
+  const size_t n = (size_t)(p - buf);
+  memset(buf + n, 0x77, 12);
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, n + 12, m));
+  TEST_ASSERT_EQUAL_size_t(n - 96, m.payloadLen);
+}
+
+static void test_absurd_nesting_is_refused_rather_than_recursed_into() {
+  // Depth comes off the wire from strangers, so it is bounded. Refusing is
+  // the right answer: LXMF nests two deep and anything claiming more is not a
+  // message this node has to understand.
+  uint8_t buf[256];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x94;
+  *p++ = 0xCB; memset(p, 0, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA1; *p++ = 'c';
+  for (int k = 0; k < 40; k++) *p++ = 0x91;                // an array inside an array, forty deep
+  *p++ = 0x00;
+  LxmfMessage m;
+  TEST_ASSERT_FALSE(parseLxmf(buf, (size_t)(p - buf), m));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_the_announce_carries_the_name_a_client_will_show);
@@ -145,5 +218,9 @@ int main() {
   RUN_TEST(test_a_payload_that_is_not_an_array_is_refused);
   RUN_TEST(test_a_length_that_runs_off_the_end_is_refused);
   RUN_TEST(test_a_message_of_nothing_but_an_envelope_is_refused);
+  RUN_TEST(test_the_payload_ends_where_its_msgpack_does_not_where_the_packet_does);
+  RUN_TEST(test_a_fields_map_is_inside_the_payload_it_measures);
+  RUN_TEST(test_a_nested_container_is_walked_not_stepped_over);
+  RUN_TEST(test_absurd_nesting_is_refused_rather_than_recursed_into);
   return UNITY_END();
 }
