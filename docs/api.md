@@ -297,6 +297,33 @@ is the exception: a bootloader request may outrank a plain reboot that is
 already armed, and the earlier of the two deadlines is kept. Every reply that
 says `"restart"` says whether the restart was actually granted.
 
+## Messages (auth)
+`GET /api/messages` → the LXMF messages this node has been sent, newest first.
+Behind the admin password, like the settings page: what a node was told is not
+public. `/messages.html` is the page that renders it, and is gated the same way.
+
+```json
+{ "address": "2aa670cd82b918e2cf5457f46f5e3c44", "stored": 3, "newest": 3,
+  "boot_id": 1140900812, "uptime_ms": 106032, "more": false,
+  "messages": [ { "seq": 3, "from": "5f61718a…", "standing": "verified",
+                  "via": "link", "sent_at": 1788172420.6,
+                  "boot_id": 1140900812, "boot_ms": 85642, "text": "…" } ] }
+```
+
+- `standing` is `verified` (this node has heard the sender announce and the
+  signature matched), `unverified` (never heard them, so there was no key to
+  check against) or `mismatch` (heard them, and the signature did not match).
+  The three are kept apart because only the first will ever be allowed to
+  drive a privileged action.
+- `via` is `packet`, `link` or `resource` — how it reached the node.
+- `sent_at` is the sender's own clock, from the message. `boot_ms` is this
+  node's `millis()` when it took the message in, and is only comparable with
+  `uptime_ms` when `boot_id` matches the document's: `millis()` starts again
+  at every restart, so a message from an earlier run has no age, only a date.
+- `?n=` how many to return (1–50, default 12) and `?before=<seq>` for the next
+  page. `more` says whether another page exists. Fifty are kept on the store;
+  older ones are overwritten.
+
 ## Bulletin board (public)
 - `GET /api/board` → `[{"id":1,"author":"…","text":"…"}]` (ordered, no timestamps — no RTC)
 - `POST /api/board` `{"author":"…","text":"…"}` → `{"ok":true}`; 50 posts kept

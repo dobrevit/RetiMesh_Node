@@ -82,6 +82,7 @@ private:
   bool authed(AsyncWebServerRequest* request);
 
   void handleStatus(AsyncWebServerRequest* request);
+  void handleMessages(AsyncWebServerRequest* request);
   void handleBoardGet(AsyncWebServerRequest* request);
   void handleQrFor(AsyncWebServerRequest* request, Qr::Payload what);
   void handleBoardPost(AsyncWebServerRequest* request, const char* body, size_t len);

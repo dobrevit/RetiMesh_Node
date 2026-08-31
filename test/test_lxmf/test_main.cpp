@@ -267,6 +267,42 @@ static void test_a_str32_field_is_measured_not_refused() {
   TEST_ASSERT_EQUAL_size_t(n - 96, m.payloadLen);
 }
 
+static void test_the_senders_clock_is_read_out_of_the_payload() {
+  // The node has no clock of its own on most boards, so the only answer to
+  // "when was this written" is the one the sender put in the message. It is
+  // a big-endian float64, and reading it little-endian would have produced a
+  // date centuries out without ever failing a parse.
+  uint8_t buf[256];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x93;
+  *p++ = 0xCB;
+  const uint8_t ts[8] = {0x41, 0xDA, 0xA5, 0x38, 0x6F, 0x71, 0xF0, 0x22};   // 1767225600.53...
+  memcpy(p, ts, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, (size_t)(p - buf), m));
+  TEST_ASSERT_TRUE(m.sentAt > 1.7e9 && m.sentAt < 2.0e9);   // a plausible epoch second
+}
+
+static void test_a_payload_whose_first_element_is_not_a_timestamp_still_parses() {
+  // Nothing here depends on the clock being present, and a message that
+  // omitted it used to be a message; refusing one now would be a regression
+  // dressed up as validation.
+  uint8_t buf[256];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x93;
+  *p++ = 0x00;                                    // an integer where the float goes
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, (size_t)(p - buf), m));
+  TEST_ASSERT_EQUAL_STRING_LEN("hi", m.content, 2);
+  TEST_ASSERT_TRUE(m.sentAt == 0.0);
+}
+
 static void test_absurd_nesting_is_refused_rather_than_recursed_into() {
   // Depth comes off the wire from strangers, so it is bounded. Refusing is
   // the right answer: LXMF nests two deep and anything claiming more is not a
@@ -303,6 +339,8 @@ int main() {
   RUN_TEST(test_an_array16_is_walked_like_a_fixarray);
   RUN_TEST(test_a_container_claiming_more_members_than_there_are_bytes_is_refused);
   RUN_TEST(test_a_str32_field_is_measured_not_refused);
+  RUN_TEST(test_the_senders_clock_is_read_out_of_the_payload);
+  RUN_TEST(test_a_payload_whose_first_element_is_not_a_timestamp_still_parses);
   RUN_TEST(test_absurd_nesting_is_refused_rather_than_recursed_into);
   return UNITY_END();
 }

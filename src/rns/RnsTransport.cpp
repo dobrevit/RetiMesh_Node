@@ -31,6 +31,7 @@
 #include "SdCard.h"
 #include "RnsAnnounce.h"
 #include "LxmfFormat.h"
+#include "LxmfInbox.h"
 #include <esp_random.h>
 #include "Lock.h"
 #include "Settings.h"
@@ -357,7 +358,8 @@ static void applyLogMute() {
 // taken, which is what the callers prove on — a proof is this node saying
 // "that arrived", and saying it about bytes that were not a message at all
 // would be a lie the sender's client believes.
-static bool handleLxmfMessage(const RNS::Bytes& data, const char* how) {
+static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
+  const char* how = Rns::viaName(via);
   Rns::LxmfMessage m;
   if (!Rns::parseLxmf(data.data(), data.size(), m)) {
     sLxmfRejected++;
@@ -427,6 +429,15 @@ static bool handleLxmfMessage(const RNS::Bytes& data, const char* how) {
   }
 
   sLxmfRx++;
+  // Kept, so the page and the console can show more than the last one. The
+  // standing is stored rather than recomputed: whether this node could check
+  // a sender is a fact about the moment the message arrived, and an identity
+  // heard five minutes later does not make an old message verified.
+  Rns::Inbox::append(m.sourceHash,
+                     verified ? Rns::StandingVerified
+                     : !sender ? Rns::StandingNoKey
+                               : Rns::StandingMismatch,
+                     via, m.sentAt, (const char*)m.content, m.contentLen);
   // "Unverified" is the sender this node has never heard announce — there was
   // no key to check against. A sender it has heard whose signature does not
   // match is a different thing entirely, already counted as mismatched just
@@ -477,7 +488,7 @@ static void proveIfTaken(const RNS::Packet& packet, bool taken) {
 }
 
 static void onLxmfLinkPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
-  proveIfTaken(packet, handleLxmfMessage(data, "a link"));
+  proveIfTaken(packet, handleLxmfMessage(data, Rns::ViaLink));
 }
 
 // A message too big for one link packet is not sent as several: the client
@@ -520,7 +531,7 @@ static void onLxmfResourceConcluded(const RNS::Resource& resource) {
   }
   // No proof to send here. A resource carries its own, exchanged as the
   // transfer concludes, so the sender's client already knows it arrived.
-  handleLxmfMessage(const_cast<RNS::Resource&>(resource).data(), "a resource over a link");
+  handleLxmfMessage(const_cast<RNS::Resource&>(resource).data(), Rns::ViaResource);
 }
 
 static void onLxmfLink(RNS::Link& link) {
@@ -532,7 +543,7 @@ static void onLxmfLink(RNS::Link& link) {
 }
 
 static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
-  proveIfTaken(packet, handleLxmfMessage(data, "a single packet"));
+  proveIfTaken(packet, handleLxmfMessage(data, Rns::ViaPacket));
 }
 
 LxmfState lxmf() {
@@ -583,6 +594,9 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
     RNS::Utilities::OS::register_filesystem(rnsFs);
     reticulum = RNS::Reticulum();          // ctor resets the storage path, so set it after
     RNS::Reticulum::storagepath(RNS_FS_ROOT);
+    // After the filesystem is registered and the store path is settled, so
+    // the inbox lands beside the transport's own files wherever those went.
+    Rns::Inbox::begin();
     reticulum.transport_enabled(true);
     // Housekeeping (announce rebroadcasts, link/receipt timeouts) every
     // second instead of the library default of 60 s (fork / upstream PR #82).

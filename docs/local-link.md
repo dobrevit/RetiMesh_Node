@@ -174,6 +174,7 @@ because the console shares its port with the log.
 | `USB_STATUS` | how the host is attached, the bootloader methods this board offers |
 | `NETWORK_STATUS` | one line per local link |
 | `LINKS` | per link: hardware / firmware / enabled, and the reason when it cannot run; for ppp0 the speed and the addresses it asks for (`baud=`, `asks=`, `peer=`) |
+| `MESSAGES [n]` | the last LXMF messages, newest first — two lines each: the facts on one, the text on the next, tied by `seq=`. Default 10, up to 50 |
 | `WIFI ON` / `WIFI OFF` | saves the link setting and restarts — the way back from a Wi-Fi-off node |
 | `PPP ON` / `PPP OFF` | saves the PPP switch; applies live, no restart. Typed on the very port PPP will take, before pppd is started on it |
 | `RESET CONFIRM` | restart into the application |

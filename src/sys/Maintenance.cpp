@@ -20,6 +20,7 @@
 //  Maintenance.cpp — see Maintenance.h and MaintenanceProtocol.h.
 // ============================================================================
 #include "RnsTransport.h"
+#include "LxmfInbox.h"
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
@@ -192,6 +193,55 @@ static void doStatus() {
         wifiManager.dnsListening() ? "listening" : "down",
         p.armed() ? "true" : "false", restart);
   ok("STATUS");
+}
+
+// The stored messages, newest first. Two lines each: the facts on one, the
+// text on the next, tied together by the sequence number. The split is not
+// tidiness — a message is someone else's text, with spaces in it, and putting
+// it on the line with the fields would make every field after it unparseable
+// while also clipping the text against the line limit.
+static void doMessages(const Request& r) {
+  unsigned want = 10;
+  if (r.argc == 1) {
+    char* end = nullptr;
+    const long v = strtol(r.args[0], &end, 10);
+    if (!end || *end != '\0' || v < 1 || v > (long)Rns::kInboxSlots) {
+      err("MESSAGES", 400, "n must be a number from 1 to 50");
+      return;
+    }
+    want = (unsigned)v;
+  }
+  const uint32_t newest = Rns::Inbox::newest();
+  const uint32_t boot   = Rns::Inbox::bootId();
+  dataf("MESSAGES", "stored=%lu newest=%lu shown=%lu",
+        (unsigned long)Rns::Inbox::stored(), (unsigned long)newest,
+        (unsigned long)(want < Rns::Inbox::stored() ? want : Rns::Inbox::stored()));
+  unsigned shown = 0;
+  for (uint32_t seq = newest; seq >= 1 && shown < want; seq--) {
+    Rns::InboxRecord m;
+    if (!Rns::Inbox::read(seq, m)) break;        // fell off the end of the ring
+    char from[33];
+    for (int i = 0; i < 16; i++) snprintf(from + i * 2, 3, "%02x", m.from[i]);
+    // "ago" is only true within the run that took the message in, because
+    // millis() starts again at every restart. Said rather than implied: a
+    // node that has been up ten minutes must not report a message from last
+    // week as ten minutes old.
+    const bool thisBoot = m.bootId == boot;
+    dataf("MESSAGES", "seq=%lu from=%s standing=%s via=%s sent=%lu boot=%s ago_ms=%lu",
+          (unsigned long)m.seq, from, Rns::standingName(m.standing), Rns::viaName(m.via),
+          (unsigned long)m.sentAt, thisBoot ? "this" : "earlier",
+          (unsigned long)(thisBoot ? millis() - m.bootMs : 0));
+    char text[Rns::kInboxTextMax + 1];
+    size_t k = 0;
+    for (; k < m.textLen; k++) {
+      const unsigned char c = (unsigned char)m.text[k];
+      text[k] = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+    }
+    text[k] = '\0';
+    dataf("MESSAGES", "seq=%lu text=%s", (unsigned long)m.seq, text);
+    shown++;
+  }
+  ok("MESSAGES");
 }
 
 static void doUsbStatus() {
@@ -404,6 +454,7 @@ static void dispatch(const char* line) {
     case Cmd::UsbStatus:     doUsbStatus(); break;
     case Cmd::NetworkStatus: doNetworkStatus(); break;
     case Cmd::Links:         doLinks(); break;
+    case Cmd::Messages:      doMessages(r); break;
     case Cmd::Wifi:          doLinkSwitch(r, "wifi"); break;
     case Cmd::Ppp:           doLinkSwitch(r, "ppp"); break;
     case Cmd::Auth:          doAuth(r); break;

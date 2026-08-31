@@ -63,7 +63,19 @@ LXMF peer announces rather than on the node's own `retimesh.node`. Setting
 *Client interface mode* to `access_point` withholds announces from phones
 deliberately — see [reticulum.md](reticulum.md#interface-modes).
 
-## 5. Administer
+## 5. Read what the node has been sent
+
+<http://10.42.0.1/messages.html> — the last 50 LXMF messages, newest first,
+behind the same admin password as the settings page. Each shows whether this
+node could verify the sender, how the message reached it and what it said, so
+"did that get through" has an answer on the node rather than only in the
+sender's client. `MESSAGES` on the console answers the same question over the
+cable.
+
+The node's own delivery address is at the top of that page (and in `STATUS` as
+`lxmf_address=`); that is what to message it from Sideband or MeshChat.
+
+## 6. Administer
 
 <http://10.42.0.1/settings.html> — user `admin`, password **`retimesh`**
 (change it there). Radio channel (applied live), Wi-Fi security/SSID, transport

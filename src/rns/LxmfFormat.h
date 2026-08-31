@@ -66,6 +66,7 @@ struct LxmfMessage {
   size_t         payloadLen;
   const uint8_t* title;   size_t titleLen;      // may be empty; LXMF allows it
   const uint8_t* content; size_t contentLen;
+  double         sentAt;                        // the sender's clock, seconds since the epoch; 0 if absent
 };
 
 // One msgpack element: its value where it is a string or binary, and where it
@@ -190,7 +191,17 @@ inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {
   const size_t elements = p[0] & 0x0F;
   if (elements < 3) return false;                        // the three we read
   size_t i = 1, next = 0; const uint8_t* v = nullptr; size_t vl = 0;
-  if (!msgpackNext(p, n, i, v, vl, next)) return false;  // timestamp, skipped
+  // The timestamp. Read rather than skipped, because it is the only clock in
+  // a message: a node without an RTC knows how long ago it took something in
+  // but not when, and after a restart it does not know even that. It is the
+  // sender's word for when they wrote it, which is what a reader wants and
+  // not something to trust for anything else.
+  if (i < n && p[i] == 0xCB && i + 9 <= n) {
+    uint64_t bits = 0;
+    for (int b = 0; b < 8; b++) bits = (bits << 8) | p[i + 1 + b];   // msgpack is big-endian
+    memcpy(&out.sentAt, &bits, sizeof(out.sentAt));
+  }
+  if (!msgpackNext(p, n, i, v, vl, next)) return false;
   i = next;
   if (!msgpackNext(p, n, i, v, vl, next)) return false;  // title
   out.title = v; out.titleLen = vl; i = next;

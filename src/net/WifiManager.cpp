@@ -34,6 +34,7 @@
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
+#include "LxmfInbox.h"
 #include "Mdns.h"
 #include "Diag.h"
 #include "SettingsRules.h"
@@ -399,6 +400,17 @@ void WifiManager::setupRoutes() {
   _http.on("/api/board", HTTP_GET,
            [this](AsyncWebServerRequest* r) { handleBoardGet(r); });
 
+  // Messages are what somebody wrote to this node. Behind the admin password
+  // like the settings page, and for the same reason: the portal is open to
+  // whoever can reach the access point, and what a node was told is not
+  // theirs to read.
+  _http.on("/api/messages", HTTP_GET,
+           [this](AsyncWebServerRequest* r) { if (authed(r)) handleMessages(r); });
+  _http.on("/messages.html", HTTP_GET, [this](AsyncWebServerRequest* r) {
+    if (!authed(r)) return;
+    r->send(LittleFS, "/messages.html", "text/html");
+  });
+
   // QR codes as SVG. "wifi" embeds the AP password, so it needs the admin
   // credentials like every other place that reveals it; the portal URL and
   // the node address are public.
@@ -540,6 +552,67 @@ void WifiManager::setupRoutes() {
 // ---------------------------------------------------------------------------
 // GET /api/status
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// The stored messages, newest first.
+//
+// Bounded on purpose. Fifty records rendered as JSON is over ten kilobytes
+// built on the heap of a board that may have five to spare, so the page asks
+// for a screenful and asks again with ?before= for the rest. The default is
+// what fits comfortably; the cap is the ring.
+// ---------------------------------------------------------------------------
+void WifiManager::handleMessages(AsyncWebServerRequest* request) {
+  const uint32_t newest = Rns::Inbox::newest();
+  uint32_t from = newest;
+  if (const AsyncWebParameter* p = request->getParam("before")) {
+    const long v = atol(p->value().c_str());
+    if (v > 0 && (uint32_t)v <= newest) from = (uint32_t)v - 1;
+    else if (v <= 0) from = 0;
+  }
+  size_t want = 12;
+  if (const AsyncWebParameter* p = request->getParam("n")) {
+    const long v = atol(p->value().c_str());
+    if (v >= 1 && v <= (long)Rns::kInboxSlots) want = (size_t)v;
+  }
+
+  JsonDocument doc;
+  doc["address"]  = RnsTransport::lxmf().address;
+  doc["stored"]   = Rns::Inbox::stored();
+  doc["newest"]   = newest;
+  doc["boot_id"]  = Rns::Inbox::bootId();
+  doc["uptime_ms"] = millis();
+  JsonArray arr = doc["messages"].to<JsonArray>();
+  size_t shown = 0;
+  for (uint32_t seq = from; seq >= 1 && shown < want; seq--) {
+    Rns::InboxRecord m;
+    if (!Rns::Inbox::read(seq, m)) break;        // older than the ring still holds
+    JsonObject o = arr.add<JsonObject>();
+    char hex[33];
+    for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", m.from[i]);
+    o["seq"]      = m.seq;
+    o["from"]     = hex;
+    o["standing"] = Rns::standingName(m.standing);
+    o["via"]      = Rns::viaName(m.via);
+    o["sent_at"]  = m.sentAt;
+    // Only meaningful within the run that took the message in — millis()
+    // starts again at every restart — so the page is told which run it was
+    // rather than being handed an age that quietly lies after a reboot.
+    o["boot_id"]  = m.bootId;
+    o["boot_ms"]  = m.bootMs;
+    o["text"]     = String(m.text, m.textLen);
+    shown++;
+  }
+  // What to ask for next, so the page does not have to do the arithmetic or
+  // know that the ring can move under it.
+  bool more = false;
+  if (shown) {
+    const uint32_t oldest = arr[shown - 1]["seq"].as<uint32_t>();
+    Rns::InboxRecord probe;
+    if (oldest > 1) more = Rns::Inbox::read(oldest - 1, probe);
+  }
+  doc["more"] = more;
+  sendJson(request, 200, doc);
+}
+
 void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   const RadioSettings& rs = settings.radio();
   JsonDocument doc;
