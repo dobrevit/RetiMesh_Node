@@ -401,7 +401,12 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
     // makes this interoperable rather than merely self-consistent.
     RNS::Bytes hashed_part(m.destHash, 16);
     hashed_part.append(m.sourceHash, 16);
-    hashed_part.append(m.payload, m.payloadLen);
+    // The payload as the sender hashed it, which is not always the payload as
+    // it arrived — a stamp is appended after the hash is taken and dropped
+    // again before it is checked (LxmfFormat.h). Hashing what arrived instead
+    // is what made every message from a current client read as a forgery.
+    hashed_part.append(&m.signedHeader, 1);
+    hashed_part.append(m.signedBody, m.signedBodyLen);
     RNS::Bytes signed_data(hashed_part);
     signed_data.append(RNS::Identity::full_hash(hashed_part));
     verified = sender.validate(RNS::Bytes(m.signature, 64), signed_data);

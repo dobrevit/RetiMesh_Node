@@ -20,10 +20,43 @@ static void test_the_announce_carries_the_name_a_client_will_show() {
   uint8_t out[64];
   const size_t n = lxmfAppData("retimesh-52A7F8", 0, out, sizeof(out));
   TEST_ASSERT_TRUE(n > 0);
-  TEST_ASSERT_EQUAL_HEX8(0x92, out[0]);                 // fixarray of 2
+  TEST_ASSERT_EQUAL_HEX8(0x93, out[0]);                 // fixarray of 3
   TEST_ASSERT_EQUAL_HEX8(0xA0 | 15, out[1]);            // fixstr, 15 bytes
   TEST_ASSERT_EQUAL_STRING_LEN("retimesh-52A7F8", out + 2, 15);
-  TEST_ASSERT_EQUAL_HEX8(0x00, out[n - 1]);             // stamp cost
+}
+
+// The two elements after the name are not decoration, and getting either
+// wrong costs the node every message rather than a nicety.
+static void test_no_stamp_cost_is_announced_as_nil_and_never_as_zero() {
+  uint8_t out[64];
+  const size_t n = lxmfAppData("retimesh-52A7F8", 0, out, sizeof(out));
+  // nil. A literal zero reads to a sender as a cost it can satisfy on the
+  // first try, so it attaches a stamp — and a stamp lands in the payload
+  // after the sender hashed it, which made every message unverifiable.
+  TEST_ASSERT_EQUAL_HEX8(0xC0, out[n - 2]);
+}
+
+static void test_the_announce_claims_no_functionality_while_there_is_none() {
+  uint8_t out[64];
+  const size_t n = lxmfAppData("retimesh-52A7F8", 0, out, sizeof(out));
+  // An empty list. A shorter announce is read as claiming everything the
+  // reader knows of, and the one that matters is compression: the peer would
+  // bz2 anything large enough to travel as a resource and the transfer would
+  // be refused, which is how long messages went missing.
+  TEST_ASSERT_EQUAL_HEX8(0x90, out[n - 1]);
+}
+
+static void test_a_stamp_cost_that_is_wanted_is_still_announced() {
+  // Nothing asks for one today, but the encoding has to be right on the day
+  // something does — a fixint below 128, a uint8 above it.
+  uint8_t out[64];
+  size_t n = lxmfAppData("n", 12, out, sizeof(out));
+  TEST_ASSERT_EQUAL_HEX8(0x0C, out[n - 2]);
+  n = lxmfAppData("n", 200, out, sizeof(out));
+  TEST_ASSERT_EQUAL_HEX8(0xCC, out[n - 3]);
+  TEST_ASSERT_EQUAL_HEX8(200, out[n - 2]);
+  // LXMF reads a cost as meaningful only below 255.
+  TEST_ASSERT_EQUAL_size_t(0, lxmfAppData("n", 255, out, sizeof(out)));
 }
 
 static void test_what_it_emits_is_what_it_reads_back() {
@@ -323,6 +356,9 @@ static void test_absurd_nesting_is_refused_rather_than_recursed_into() {
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_the_announce_carries_the_name_a_client_will_show);
+  RUN_TEST(test_no_stamp_cost_is_announced_as_nil_and_never_as_zero);
+  RUN_TEST(test_the_announce_claims_no_functionality_while_there_is_none);
+  RUN_TEST(test_a_stamp_cost_that_is_wanted_is_still_announced);
   RUN_TEST(test_what_it_emits_is_what_it_reads_back);
   RUN_TEST(test_a_long_name_uses_str8_and_still_round_trips);
   RUN_TEST(test_a_name_that_will_not_fit_is_refused_not_truncated);

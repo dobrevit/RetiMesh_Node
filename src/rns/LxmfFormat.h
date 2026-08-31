@@ -33,8 +33,11 @@
 //  about, and why the length checks are written out rather than assumed.
 //
 //  Verifying a message is deliberately not here. It needs the sender's public
-//  key, which needs an announce this node has heard, which is not a question
-//  about bytes (RnsTransport::onLxmfPacket).
+//  key — from an announce this node heard, or from the sender identifying
+//  itself on its link — which is not a question about bytes
+//  (RnsTransport::handleLxmfMessage). What this file owes that decision is
+//  the exact bytes the sender signed, which are not always the bytes that
+//  arrived; see signedHeader below.
 // ============================================================================
 #pragma once
 
@@ -52,12 +55,16 @@ namespace Rns {
 // and the payload is msgpack [timestamp, title, content, fields].
 //
 // What the signature covers is not those three but those three *and their own
-// hash*: hashed_part = dest || source || payload, and the signed data is
-// hashed_part || SHA256(hashed_part). Getting that wrong does not fail
-// safely — it refuses every message a real client sent, as a forgery, which
-// accuses the honest sender. It binds the message to the pair of addresses
-// either way: replayed at another node it does not verify, and neither does
-// an altered text.
+// hash*: hashed_part = dest || source || the payload the sender hashed, and
+// the signed data is hashed_part || SHA256(hashed_part). Getting either half
+// wrong does not fail safely — it refuses every message a real client sent,
+// as a forgery, which accuses the honest sender. It binds the message to the
+// pair of addresses either way: replayed at another node it does not verify,
+// and neither does an altered text.
+//
+// "The payload the sender hashed" is doing real work in that sentence, and is
+// not the same as the payload that arrived whenever a stamp is present. See
+// signedHeader.
 struct LxmfMessage {
   const uint8_t* destHash;               // 16 bytes
   const uint8_t* sourceHash;             // 16
@@ -67,6 +74,32 @@ struct LxmfMessage {
   const uint8_t* title;   size_t titleLen;      // may be empty; LXMF allows it
   const uint8_t* content; size_t contentLen;
   double         sentAt;                        // the sender's clock, seconds since the epoch; 0 if absent
+
+  // The fields map, whole and uninterpreted. Everything LXMF carries beyond a
+  // subject and a body lives here — attachments, telemetry, commands, the
+  // ticket that lets a peer reply without doing stamp work — so a node that
+  // never looks at it shows a photo as an empty message. Handing over its
+  // extent lets a caller say "this one carried something" without this file
+  // growing an opinion about what.
+  const uint8_t* fields;  size_t fieldsLen;     // empty when the message had none
+
+  // What the sender signed, which is not the same bytes as what arrived.
+  //
+  // LXMF hashes the payload as it stood before a stamp was appended: it
+  // unpacks, drops everything past the fourth element, and re-packs the four.
+  // A receiver that hashes the array as received disagrees with the sender
+  // about the message, and the signature cannot match — which is not a
+  // failure that looks like a bug, it looks like the honest sender forging.
+  //
+  // Re-encoding those four elements would mean trusting this file's msgpack
+  // encoder to agree with the sender's byte for byte. It does not have to:
+  // the elements are already canonical, having come from that encoder, so the
+  // bytes are reused as received and only the array header is replaced.
+  // Hashing them means header first, then body.
+  uint8_t        signedHeader;                  // 0x94 when a stamp was excluded, else the array header as received
+  const uint8_t* signedBody;                    // the elements it covers, verbatim
+  size_t         signedBodyLen;
+  bool           stamped;                       // a stamp was present, and is excluded above
 };
 
 // One msgpack element: its value where it is a string or binary, and where it
@@ -145,32 +178,74 @@ inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
   return next <= n;
 }
 
-inline size_t lxmfAppData(const char* name, uint8_t stampCost, uint8_t* out, size_t cap) {
+// The app_data of an lxmf.delivery announce: three elements, and the only
+// place this node states what it can do.
+//
+//     [ display name, stamp cost, [ supported functionality ] ]
+//
+// Two of those were being got wrong, and both faults land on the sender.
+//
+// The third element is not optional in practice. A peer reading a list
+// shorter than three assumes every capability it knows of, and the one that
+// matters is compression: it will then bz2 anything it sends that is large
+// enough to travel as a resource, which microReticulum has no decompressor
+// for and refuses outright. An empty list is how a node says "none of them".
+// Put SF_COMPRESSION (0x00) in it on the day there is a decompressor, and not
+// before — claiming it without one is how long messages disappear.
+//
+// A stampCost of zero or less means no stamp is required, and it is written
+// as msgpack nil rather than as the number 0. That is not a cosmetic
+// difference: LXMF skips stamp generation only when the announced cost is
+// nil. A literal 0 is read as a cost, and one satisfied by the first value
+// tried, so the sender attaches a stamp — which arrives as a fifth payload
+// element that the sender itself excluded from what it signed. Announcing 0
+// therefore made every message from a current client arrive unverifiable, and
+// reported the honest sender as a signature mismatch.
+inline size_t lxmfAppData(const char* name, int stampCost, uint8_t* out, size_t cap) {
   const size_t n = name ? strlen(name) : 0;
   // fixstr carries up to 31 bytes and is what every LXMF client emits for a
   // node name; str8 covers the rest. Nothing here needs more than 255.
   const bool fixstr = n <= 31;
-  const size_t need = 1 + (fixstr ? 1 : 2) + n + 1;      // array, str header, name, cost
-  if (n > 255 || need > cap) return 0;
+  // LXMF reads a cost as meaningful between 1 and 254; above a fixint's 127
+  // it needs a uint8 header.
+  const bool wideCost = stampCost > 127;
+  const size_t need = 1                                  // array of 3
+                    + (fixstr ? 1 : 2) + n                // name
+                    + (wideCost ? 2u : 1u)                // cost, or nil
+                    + 1;                                  // functionality list
+  if (n > 255 || stampCost > 254 || need > cap) return 0;
   uint8_t* p = out;
-  *p++ = 0x92;                                           // fixarray of 2
+  *p++ = 0x93;                                           // fixarray of 3
   if (fixstr) *p++ = (uint8_t)(0xA0 | n);
   else      { *p++ = 0xD9; *p++ = (uint8_t)n; }
   memcpy(p, name, n); p += n;
-  // A positive fixint; stamp costs above 127 are not a thing this emits.
-  *p++ = (uint8_t)(stampCost & 0x7F);
+  if (stampCost <= 0)  *p++ = 0xC0;                      // nil — no stamp required
+  else if (!wideCost)  *p++ = (uint8_t)stampCost;        // positive fixint
+  else               { *p++ = 0xCC; *p++ = (uint8_t)stampCost; }
+  *p++ = 0x90;                                           // empty fixarray: no functionality claimed
   return (size_t)(p - out);
 }
 
-// The name out of an LXMF announce's app_data — the other direction of
-// lxmfAppData(), and here beside it for the same reason. Returns bytes
-// written; 0 when the app_data is not an LXMF array, which leaves the caller
-// to treat it as whatever else it might be.
-inline size_t lxmfName(const uint8_t* app, size_t len, char* out, size_t cap) {
-  if (!app || len < 2 || cap < 2) return 0;
-  if ((app[0] & 0xF0) != 0x90) return 0;                 // not the array LXMF sends
+// Where the name sits inside an LXMF announce's app_data — the other
+// direction of lxmfAppData(), and here beside it for the same reason. No
+// copy, because a caller that has to judge the bytes (are they text? do they
+// fit?) needs them where they are rather than in a buffer it has already
+// committed to. False when the app_data is not an LXMF array at all, which
+// leaves the caller to treat it as whatever else it might be.
+inline bool lxmfNameRef(const uint8_t* app, size_t len,
+                        const uint8_t*& name, size_t& nameLen) {
+  if (!app || len < 2) return false;
+  if ((app[0] & 0xF0) != 0x90) return false;             // not the array LXMF sends
   const uint8_t* v = nullptr; size_t vl = 0, next = 0;
-  if (!msgpackNext(app, len, 1, v, vl, next) || !v || vl == 0) return 0;
+  if (!msgpackNext(app, len, 1, v, vl, next) || !v || vl == 0) return false;
+  name = v; nameLen = vl;
+  return true;
+}
+
+// The same name, copied.
+inline size_t lxmfName(const uint8_t* app, size_t len, char* out, size_t cap) {
+  const uint8_t* v = nullptr; size_t vl = 0;
+  if (cap < 2 || !lxmfNameRef(app, len, v, vl)) return 0;
   const size_t k = vl < cap - 1 ? vl : cap - 1;
   memcpy(out, v, k); out[k] = '\0';
   return k;
@@ -208,22 +283,48 @@ inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {
   if (!msgpackNext(p, n, i, v, vl, next)) return false;  // content
   out.content = v; out.contentLen = vl; i = next;
 
+  // The fields map. Walked by length rather than interpreted — this file has
+  // no business knowing what a telemetry reading or an attachment is — but its
+  // extent is kept, so a caller can tell a message that carried something from
+  // one that did not.
+  size_t signedEnd = i;
+  if (elements >= 4) {
+    const size_t at = i;
+    if (!msgpackNext(p, n, i, v, vl, next)) return false;
+    out.fields = p + at; out.fieldsLen = next - at;
+    i = next;
+    signedEnd = i;
+  }
+
+  // Anything past the fourth element is not part of what the sender signed.
+  // LXMF appends a stamp there — proof of work against a cost the receiver
+  // announced — after computing the hash, and drops it again before checking
+  // one. A receiver that hashes it too disagrees with the sender about the
+  // message and refuses it as a forgery.
+  //
+  // Skipping the stamp is what makes this correct rather than merely lucky:
+  // announcing no cost (lxmfAppData) stops most senders attaching one, but a
+  // sender holding a ticket for this node attaches a stamp whatever the cost
+  // says, and that message has to verify too.
+  for (size_t k = 4; k < elements; k++) {
+    if (!msgpackNext(p, n, i, v, vl, next)) return false;
+    i = next;
+  }
+
   // The payload ends where its msgpack array ends, not where the packet does.
   // Taking "everything after the signature" was wrong: a packet can carry
   // trailing bytes the sender never signed, and hashing them makes a genuine
   // message look forged. It fails only for messages long enough to be padded,
   // which is why a short test verified and a real client's did not — the worst
   // kind of bug, correct on the case you try first.
-  //
-  // A msgpack array is self-delimiting, so the true end is found by walking
-  // it. The remaining elements are skipped by length rather than read: this
-  // file has no business interpreting a fields map, only knowing where it
-  // stops.
-  for (size_t k = 3; k < elements; k++) {
-    if (!msgpackNext(p, n, i, v, vl, next)) return false;
-    i = next;
-  }
   out.payloadLen = i;
+
+  // The array as the sender hashed it: the first four elements under a header
+  // that says four, whatever the header on the wire said.
+  out.stamped      = elements > 4;
+  out.signedHeader = out.stamped ? (uint8_t)0x94 : p[0];
+  out.signedBody   = p + 1;
+  out.signedBodyLen = signedEnd - 1;
   return true;
 }
 
