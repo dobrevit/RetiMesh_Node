@@ -64,11 +64,6 @@ static std::atomic<uint32_t> sLxmfRx{0}, sLxmfRejected{0}, sLxmfUnverified{0}, s
 // administrative command and every written message is far below it; a claim
 // above it is refused rather than believed (onLxmfResourceStarted).
 static constexpr size_t kLxmfResourceMax = 8 * 1024;
-static SemaphoreHandle_t     sLxmfLock = nullptr;
-static char                  sLxmfFrom[33] = "";
-static char                  sLxmfText[121] = "";
-static uint32_t              sLxmfAtMs = 0;
-static bool                  sLxmfVerified = false;
 static RnsFileSystem    rnsFs;
 static bool             sStarted = false;
 
@@ -429,30 +424,29 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
   }
 
   sLxmfRx++;
-  // Kept, so the page and the console can show more than the last one. The
-  // standing is stored rather than recomputed: whether this node could check
-  // a sender is a fact about the moment the message arrived, and an identity
-  // heard five minutes later does not make an old message verified.
-  Rns::Inbox::append(m.sourceHash,
-                     verified ? Rns::StandingVerified
-                     : !sender ? Rns::StandingNoKey
-                               : Rns::StandingMismatch,
-                     via, m.sentAt, (const char*)m.content, m.contentLen);
   // "Unverified" is the sender this node has never heard announce — there was
   // no key to check against. A sender it has heard whose signature does not
   // match is a different thing entirely, already counted as mismatched just
   // above, and counting it here as well made the two indistinguishable in the
   // one place an operator would look to tell them apart.
   if (!sender) sLxmfUnverified++;
-  if (sLxmfLock) {
-    Sys::Lock held(sLxmfLock);
-    Rns::toHex(m.sourceHash, 16, sLxmfFrom);
-    const size_t k = m.contentLen < sizeof(sLxmfText) - 1 ? m.contentLen : sizeof(sLxmfText) - 1;
-    memcpy(sLxmfText, m.content, k);
-    sLxmfText[k] = '\0';
-    sLxmfAtMs = millis();
-    sLxmfVerified = verified;
-  }
+  // Queued for the loop task, not written here. The standing is recorded
+  // rather than recomputed later: whether this node could check a sender is a
+  // fact about the moment the message arrived, and an identity heard five
+  // minutes afterwards does not make an old message verified.
+  //
+  // The signature identifies the message, which is how a retransmission — what
+  // a sender does when it does not see a proof, and over LoRa that is ordinary
+  // — is recognised as the message it already has rather than taking a second
+  // of the fifty slots.
+  uint64_t sig = 0;
+  for (int i = 0; i < 8; i++) sig = (sig << 8) | m.signature[i];
+  if (!Rns::Inbox::note(m.sourceHash,
+                        verified ? Rns::StandingVerified
+                        : !sender ? Rns::StandingNoKey
+                                  : Rns::StandingMismatch,
+                        via, m.sentAt, (const char*)m.content, m.contentLen, sig))
+    log_d("lxmf: not stored (a repeat, or arriving faster than the store is written)");
   // The same three standings the counters keep, said in words. This used to
   // read off `verified` alone, so a sender whose signature did not match was
   // reported as one this node had never heard announce — which is the one
@@ -552,14 +546,8 @@ LxmfState lxmf() {
   s.rejected = sLxmfRejected;
   s.unverified = sLxmfUnverified;
   s.mismatched = sLxmfMismatched;
+  s.notStored = Rns::Inbox::dropped();
   if (sStarted && lxmfDest) strlcpy(s.address, lxmfDest.hash().toHex().c_str(), sizeof(s.address));
-  if (sLxmfLock) {
-    Sys::Lock held(sLxmfLock);
-    strlcpy(s.lastFrom, sLxmfFrom, sizeof(s.lastFrom));
-    strlcpy(s.lastText, sLxmfText, sizeof(s.lastText));
-    s.lastAgoMs = sLxmfAtMs ? millis() - sLxmfAtMs : 0;
-    s.lastVerified = sLxmfVerified;
-  }
   return s;
 }
 
@@ -570,7 +558,6 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   // full queue lost peers silently.
   sEvents = xQueueCreate(RNS_MAX_INTERFACES + 8, sizeof(Event));
   sSnapLock = xSemaphoreCreateMutex();
-  sLxmfLock = xSemaphoreCreateMutex();
 
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
 

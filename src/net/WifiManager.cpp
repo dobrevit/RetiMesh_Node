@@ -555,61 +555,67 @@ void WifiManager::setupRoutes() {
 // ---------------------------------------------------------------------------
 // The stored messages, newest first.
 //
-// Bounded on purpose. Fifty records rendered as JSON is over ten kilobytes
-// built on the heap of a board that may have five to spare, so the page asks
-// for a screenful and asks again with ?before= for the rest. The default is
-// what fits comfortably; the cap is the ring.
+// Bounded on purpose, and bounded at what a board can render rather than at
+// the depth of the ring: fifty records is over ten kilobytes of JsonDocument
+// and about as much again once serialised, on the heap of a board that may
+// have five kilobytes free. A reader that wants all fifty pages back through
+// them with ?before=, which costs it nothing.
 // ---------------------------------------------------------------------------
+static void addMessage(const Rns::InboxRecord& m, void* ctx) {
+  JsonArray& arr = *(JsonArray*)ctx;
+  JsonObject o = arr.add<JsonObject>();
+  if (o.isNull()) return;                    // out of heap; the page is short, not wrong
+  char hex[33];
+  for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", m.from[i]);
+  o["seq"]      = m.seq;
+  o["from"]     = hex;
+  o["standing"] = Rns::standingName(m.standing);
+  o["via"]      = Rns::viaName(m.via);
+  o["sent_at"]  = m.sentAt;
+  // Only meaningful within the run that took the message in — millis() starts
+  // again at every restart — so the page is told which run it was rather than
+  // being handed an age that quietly lies after a reboot.
+  o["boot_id"]  = m.bootId;
+  o["boot_ms"]  = m.bootMs;
+  o["text"]     = String(m.text, m.textLen);
+}
+
 void WifiManager::handleMessages(AsyncWebServerRequest* request) {
-  const uint32_t newest = Rns::Inbox::newest();
-  uint32_t from = newest;
+  size_t want = 0;
+  if (!Rns::inboxPageSize(request->hasParam("n") ? request->getParam("n")->value().c_str() : nullptr,
+                          want)) {
+    // Refused rather than quietly replaced with the default. The console
+    // refuses the same input for the same reason, from the same rule.
+    char why[64];
+    snprintf(why, sizeof(why), "n must be a whole number from 1 to %u", (unsigned)Rns::kInboxPageMax);
+    sendError(request, 400, why);
+    return;
+  }
+  uint32_t from = 0;                          // 0 asks the inbox for its newest
   if (const AsyncWebParameter* p = request->getParam("before")) {
     const long v = atol(p->value().c_str());
-    if (v > 0 && (uint32_t)v <= newest) from = (uint32_t)v - 1;
-    else if (v <= 0) from = 0;
-  }
-  size_t want = 12;
-  if (const AsyncWebParameter* p = request->getParam("n")) {
-    const long v = atol(p->value().c_str());
-    if (v >= 1 && v <= (long)Rns::kInboxSlots) want = (size_t)v;
+    if (v <= 1) want = 0;                     // nothing is older than the first message
+    else        from = (uint32_t)v - 1;
   }
 
   JsonDocument doc;
-  doc["address"]  = RnsTransport::lxmf().address;
-  doc["stored"]   = Rns::Inbox::stored();
-  doc["newest"]   = newest;
-  doc["boot_id"]  = Rns::Inbox::bootId();
+  doc["address"]   = RnsTransport::lxmf().address;
+  doc["stored"]    = Rns::Inbox::stored();
+  doc["newest"]    = Rns::Inbox::newest();
+  doc["slots"]     = Rns::kInboxSlots;        // the page shows the ring's depth; it does not assume it
+  doc["boot_id"]   = Rns::Inbox::bootId();
   doc["uptime_ms"] = millis();
   JsonArray arr = doc["messages"].to<JsonArray>();
-  size_t shown = 0;
-  for (uint32_t seq = from; seq >= 1 && shown < want; seq--) {
-    Rns::InboxRecord m;
-    if (!Rns::Inbox::read(seq, m)) break;        // older than the ring still holds
-    JsonObject o = arr.add<JsonObject>();
-    char hex[33];
-    for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", m.from[i]);
-    o["seq"]      = m.seq;
-    o["from"]     = hex;
-    o["standing"] = Rns::standingName(m.standing);
-    o["via"]      = Rns::viaName(m.via);
-    o["sent_at"]  = m.sentAt;
-    // Only meaningful within the run that took the message in — millis()
-    // starts again at every restart — so the page is told which run it was
-    // rather than being handed an age that quietly lies after a reboot.
-    o["boot_id"]  = m.bootId;
-    o["boot_ms"]  = m.bootMs;
-    o["text"]     = String(m.text, m.textLen);
-    shown++;
-  }
-  // What to ask for next, so the page does not have to do the arithmetic or
-  // know that the ring can move under it.
-  bool more = false;
-  if (shown) {
-    const uint32_t oldest = arr[shown - 1]["seq"].as<uint32_t>();
-    Rns::InboxRecord probe;
-    if (oldest > 1) more = Rns::Inbox::read(oldest - 1, probe);
-  }
-  doc["more"] = more;
+  // One open of the store and one lock for the whole page. Reading a record at
+  // a time took both per record, on the task that serves every other HTTP
+  // client, each one able to wait behind a write mid-erase.
+  const Rns::Inbox::Page page = want ? Rns::Inbox::readPage(from, want, addMessage, &arr)
+                                     : Rns::Inbox::Page{};
+  // From the read itself, not recovered from the document afterwards: an add
+  // that failed for want of heap left the old arithmetic indexing past the end
+  // of a short array, reading zero, and reporting that there was nothing older
+  // when there were thirty-eight more.
+  doc["more"] = page.more;
   sendJson(request, 200, doc);
 }
 
