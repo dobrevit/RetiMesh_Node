@@ -70,15 +70,24 @@ uint32_t dropped() { return sDropped; }
 // that ran out of room leaves a short file behind, and taking that as "already
 // done" on every later boot would run the node on a ring with slots that are
 // not there — believed empty when read, and silently lost when written.
-static bool ensureFile(fs::FS& fs) {
-  if (fs.exists(kPath)) {
-    File f = fs.open(kPath, FILE_READ);
-    const size_t have = f ? f.size() : 0;
-    if (f) f.close();
-    if (have == kFileSize) return true;
-    log_w("inbox: %s is %u bytes, not %u; laying it out again",
-          kPath, (unsigned)have, (unsigned)kFileSize);
-  }
+// How big the file is, asked with it closed. A File still open for writing
+// answers 0 — the length is what the directory entry says, and that is not
+// updated until the close — so asking mid-write says the layout failed when it
+// succeeded, and the inbox then stays down for the whole of that boot with
+// messages arriving and going nowhere.
+static size_t fileSize(fs::FS& fs) {
+  File f = fs.open(kPath, FILE_READ);
+  const size_t n = f ? f.size() : 0;
+  if (f) f.close();
+  return n;
+}
+
+// Writes the fifty blank slots. Full-size on first use so that every later
+// write is an overwrite of one record: growing it a record at a time would
+// work, but it would mean the wrap is the first time the file reaches its
+// final size — and the wrap is the case least likely to be exercised before a
+// release.
+static bool layout(fs::FS& fs) {
   File f = fs.open(kPath, FILE_WRITE);
   if (!f) {
     log_e("inbox: cannot create %s; messages will not be kept", kPath);
@@ -89,14 +98,28 @@ static bool ensureFile(fs::FS& fs) {
   bool ok = true;
   for (size_t i = 0; i < kInboxSlots && ok; i++)
     ok = f.write(blank, sizeof(blank)) == sizeof(blank);
-  const size_t wrote = f.size();
   f.close();
-  if (!ok || wrote != kFileSize) {
+  const size_t wrote = ok ? fileSize(fs) : 0;
+  if (wrote != kFileSize) {
     log_e("inbox: could not lay out %s (%u of %u bytes); the store may be full",
           kPath, (unsigned)wrote, (unsigned)kFileSize);
     return false;
   }
   return true;
+}
+
+// A file that is already there is only accepted at its full length. A layout
+// that ran out of room leaves a short file behind, and taking that as "already
+// done" on every later boot would run the node on a ring with slots that are
+// not there — believed empty when read, and silently lost when written.
+static bool ensureFile(fs::FS& fs) {
+  if (fs.exists(kPath)) {
+    const size_t have = fileSize(fs);
+    if (have == kFileSize) return true;
+    log_w("inbox: %s is %u bytes, not %u; laying it out again",
+          kPath, (unsigned)have, (unsigned)kFileSize);
+  }
+  return layout(fs);
 }
 
 void begin() {
@@ -163,7 +186,11 @@ static bool seenRecently(uint64_t sig) {
 
 bool note(const uint8_t from[16], uint8_t standing, uint8_t via, double sentAt,
           const char* text, size_t textLen, uint64_t sigPrefix) {
-  if (!sReady || !sQueue) return false;
+  // Counted, not just refused. A message the node took in and did not keep is
+  // a hole in the log, and a hole that reports nothing is indistinguishable
+  // from a message that never arrived — which is exactly the shape of an hour
+  // spent looking in the wrong place.
+  if (!sReady || !sQueue) { sDropped++; return false; }
 
   // A message the sender sent again because it did not see a proof is the
   // same message. Storing it twice takes a second of the fifty slots and
@@ -217,6 +244,7 @@ static bool write(const InboxRecord& queued) {
   // sequence number picks, over whatever was there.
   File f = fs.open(kPath, "r+");
   if (!f) {
+    sDropped++;
     log_w("inbox: cannot open %s to store a message", kPath);
     return false;
   }
@@ -224,6 +252,7 @@ static bool write(const InboxRecord& queued) {
                   f.write(buf, sizeof(buf)) == sizeof(buf);
   f.close();
   if (!ok) {
+    sDropped++;
     log_w("inbox: could not store message #%lu", (unsigned long)r.seq);
     return false;
   }
