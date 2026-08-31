@@ -87,14 +87,23 @@ was kept in the Reticulum loop until a stall took *that* task down together
 with the loop task, and the one thing that could have named the call went quiet
 with it. The radio task has outlived every stall so far.
 
-**This is a debug-build instrument.** A release image carries none of it —
-every label, pass and check compiles away. Build one when hunting:
+**The node restarts itself if a task stays stopped.** Nothing can unwind a task
+spinning above the Arduino loop — it is runnable and holding its core, so
+nothing below it will ever run again — so after two minutes the node restarts
+rather than sit dead until somebody power-cycles it. That restart is recorded
+with source `stall-watch`, so it is not mistaken for one an operator asked for
+or for a crash. Detection and recovery are in **every** build; it is one store
+per pass.
+
+**The phase names are a debug-build extra.** Without the flag a stall is still
+seen, still logged and still recovered — it just says `not built` where it
+would have named a call. Build with names when hunting:
 
 ```
 PLATFORMIO_BUILD_FLAGS=-DRETIMESH_DEBUG pio run -e heltec-wp -t upload
 ```
 
-It costs 40 bytes of RAM and about 1.7 KB of flash when built in.
+The names cost 40 bytes of RAM and about 1.7 KB of flash when built in.
 
 In the log, from the radio task:
 

@@ -20,9 +20,8 @@
 //  LoopWatch.cpp — the two words the loop task writes, and the watcher
 // ============================================================================
 #include "LoopWatch.h"
-
-#if RETIMESH_DEBUG
 #include <Arduino.h>
+#include "Bootloader.h"
 
 namespace LoopWatch {
 
@@ -44,11 +43,28 @@ static uint32_t sWarnedAtMs[TaskCount] = { 0, 0 };
 
 static Slot& slot(Task t) { return sSlot[t < TaskCount ? t : Loop]; }
 
+// Saturating, because a reader can see a timestamp from a pass that has not
+// happened yet on its own clock and would otherwise report four billion
+// milliseconds of stall.
+static uint32_t since(uint32_t now, uint32_t then) {
+  const uint32_t d = now - then;
+  return (int32_t)d < 0 ? 0 : d;
+}
+
+#if RETIMESH_DEBUG
 void enter(Task task, const char* phase) {
   Slot& sl = slot(task);
   sl.phase = phase ? phase : "";
   sl.phaseMs = millis();
 }
+
+const char* phaseName(Task task) {
+  const char* p = (const char*)slot(task).phase;
+  return p ? p : "";
+}
+
+uint32_t inPhase(Task task, uint32_t now) { return since(now, slot(task).phaseMs); }
+#endif
 
 void pass(Task task) {
   Slot& sl = slot(task);
@@ -67,21 +83,7 @@ State state(Task task) {
   return s;
 }
 
-const char* phaseName(Task task) {
-  const char* p = (const char*)slot(task).phase;
-  return p ? p : "";
-}
-
-// Saturating, because a reader can see a timestamp from a pass that has not
-// happened yet on its own clock and would otherwise report four billion
-// milliseconds of stall.
-static uint32_t since(uint32_t now, uint32_t then) {
-  const uint32_t d = now - then;
-  return (int32_t)d < 0 ? 0 : d;
-}
-
 uint32_t sincePass(Task task, uint32_t now) { return since(now, slot(task).lastPass); }
-uint32_t inPhase(Task task, uint32_t now)   { return since(now, slot(task).phaseMs); }
 
 void check(Task task, uint32_t now) {
   // Nothing to say before the first pass: a task that has never run is not a
@@ -110,8 +112,20 @@ void check(Task task, uint32_t now) {
             "will accept nothing while it is stopped");
   sWarned[task] = true;
   sWarnedAtMs[task] = now;
+
+  // Past patience. Nothing can unwind a task spinning above the Arduino loop,
+  // so the node either comes back by itself or waits for hands. It says which
+  // task and which call first, so the line that explains the restart is on the
+  // wire before the restart happens.
+  if (stuck >= kStallRebootMs) {
+    log_e("%s: stopped for %lu ms — restarting the node, because nothing below a spinning "
+          "task will ever run again and there is no way to unwind one from outside",
+          taskName(task), (unsigned long)stuck);
+    // Through the same sequencer every other restart uses, so the reason is
+    // recorded and the reply-window rules are not bypassed by a special case.
+    Bootloader::reboot(Bootloader::Source::StallWatch);
+  }
 }
 
 } // namespace LoopWatch
 
-#endif  // RETIMESH_DEBUG

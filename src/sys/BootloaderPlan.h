@@ -206,7 +206,10 @@ inline bool remoteEntryAllowed(bool hostFacing, bool apiEnabled, bool fromLanAll
 }
 
 enum class Target : uint8_t { App = 0, Bootloader = 1 };
-enum class Source : uint8_t { Http = 0, Console, Settings, Touch };   // Touch: the 1200-baud touch on the USB console port
+// StallWatch: no operator asked — a task stopped and the node restarted itself
+// rather than sit dead (LoopWatch.h). Named so a restart of that kind is not
+// mistaken for one somebody requested, or for a crash.
+enum class Source : uint8_t { Http = 0, Console, Settings, Touch, StallWatch };
 
 inline const char* targetName(Target t) { return t == Target::Bootloader ? "bootloader" : "app"; }
 inline const char* sourceName(Source s) {
@@ -215,6 +218,7 @@ inline const char* sourceName(Source s) {
     case Source::Console:  return "console";
     case Source::Settings: return "settings";
     case Source::Touch:    return "touch";
+    case Source::StallWatch: return "stall-watch";
   }
   return "unknown";
 }

@@ -62,17 +62,21 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Built only into a debug image. The instrument costs a pointer store and a
-// millis() per labelled call, which is small but not nothing on a node whose
-// whole loop is a few hundred microseconds — and a release build should carry
-// no diagnostic it is not using. Off unless asked for:
+// Two halves, gated differently, because they cost differently and are worth
+// different things.
+//
+// The labels — which call a task is inside — cost a pointer store and a
+// millis() *per call*, and they only pay off while somebody is hunting. They
+// are debug-only:
 //
 //     PLATFORMIO_BUILD_FLAGS=-DRETIMESH_DEBUG pio run -e heltec-wp
 //
-// With it off every label, every pass and every check compiles to nothing, and
-// the readers answer "not built". The rule itself — stallDue(), recovered() —
-// is always compiled, because it is pure, it costs nothing to have, and its
-// tests are worth running on every build.
+// The stall detection is not. It is one store *per pass* — a few hundred a
+// second at most — and what it buys is a node that reports being stopped and
+// then recovers instead of sitting dead until somebody notices. That is worth
+// having on every node, so pass(), check() and the recovery below are in every
+// build; only the phase names go missing without the flag, and then a stall
+// reports "not built" where it would have named a call.
 #ifndef RETIMESH_DEBUG
   #define RETIMESH_DEBUG 0
 #endif
@@ -95,6 +99,20 @@ inline const char* taskName(Task t) {
 static const uint32_t kStallWarnMs = 5000;
 // While it stays stuck, say so again this often rather than once and never.
 static const uint32_t kStallRepeatMs = 30000;
+
+// And how long a task may be stopped before the node restarts itself.
+//
+// A spin at a priority above the Arduino loop cannot be interrupted from
+// outside: the task is runnable and holding its core, so nothing below it will
+// ever run again, and there is no safe way to unwind a task stuck inside a
+// library. The choice is a node that sits dead until somebody power-cycles it
+// or one that comes back by itself, and for a node on a pole the second is the
+// only one worth having. Two minutes is far past any real pass and short
+// enough that a person watching a client notices a blip rather than an outage.
+//
+// It is counted and logged as a restart of its own kind, so a node doing this
+// says so instead of looking like a node that reboots for no reason.
+static const uint32_t kStallRebootMs = 120000;
 
 // What the loop task is doing, and when it last finished a pass.
 struct State {
@@ -123,47 +141,42 @@ inline bool recovered(bool warned, uint32_t sinceMs) {
   return warned && sinceMs < kStallWarnMs;
 }
 
-// --- the instrument, in a debug build only ----------------------------------
+// --- always built -----------------------------------------------------------
+
+// Finished a pass.
+void pass(Task task);
+
+State state(Task task);
+
+// How long since that task finished a pass. Saturates rather than wraps.
+uint32_t sincePass(Task task, uint32_t now);
+
+// Called from a task that is not the one being watched, so that a stall is
+// reported by something still running. Says which call it is stuck in and for
+// how long, says when it comes back, and restarts the node if it does not.
+//
+// Both are checked from the radio task. It is the one that has kept running
+// through every stall seen so far — and in the ones that mattered the
+// Reticulum task went down with the loop task, so a watch kept there would
+// have gone quiet exactly when it was needed. If the radio task is ever the
+// one that stops, /api/status still carries the figures: they are stored by
+// the watched tasks themselves and need no watcher to be read.
+void check(Task task, uint32_t now);
+
+// --- the phase labels, in a debug build only --------------------------------
 #if RETIMESH_DEBUG
 
 // Entered a call. The string must outlive the call, which for a literal it
 // does; nothing is copied.
 void enter(Task task, const char* phase);
 
-// Finished a pass.
-void pass(Task task);
-
-// --- everybody else's side --------------------------------------------------
-
-State state(Task task);
-
-// How long since that task finished a pass, and how long it has been in the
-// call it is in. Both saturate rather than wrap.
-uint32_t sincePass(Task task, uint32_t now);
+// How long it has been in the call it is in, and what that call is called.
 uint32_t inPhase(Task task, uint32_t now);
-
-// Called from a task that is not the one being watched, so that a stall is
-// reported by something still running. Says which call it is stuck in and for
-// how long, and says when it comes back.
-//
-// Both are checked from the radio task. It is the one that has kept running
-// through every stall seen so far — and in the ones that mattered the
-// Reticulum task went down with the loop task, so a watch kept there would
-// have gone quiet exactly when it was needed. If the radio task is ever the
-// one that stops, /api/status still carries both phases: the figures are
-// stored by the watched tasks themselves and need no watcher to be read.
-void check(Task task, uint32_t now);
-
-// Names the phase in one word for a status line, never null.
 const char* phaseName(Task task);
 
-#else   // not a debug build: nothing is recorded and nothing is reported
+#else   // no labels: a stall is still seen and still recovered, just unnamed
 
 inline void enter(Task, const char*) {}
-inline void pass(Task) {}
-inline void check(Task, uint32_t) {}
-inline State state(Task) { return State{}; }
-inline uint32_t sincePass(Task, uint32_t) { return 0; }
 inline uint32_t inPhase(Task, uint32_t) { return 0; }
 inline const char* phaseName(Task) { return "not built"; }
 
