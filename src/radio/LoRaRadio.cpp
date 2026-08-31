@@ -662,7 +662,15 @@ void LoRaRadio::deliverPacket(size_t len) {
   // this ring and feeds Transport::inbound. If that task is busy — a long pass
   // through reticulum.loop(), or store I/O — the ring fills and we drop rather
   // than stall the radio.
-  if (xRingbufferSend(_rxRing, _rxBuf, len, 0) == pdTRUE) {
+  // The reading goes with the frame rather than being read from g_stats when
+  // the transport drains the ring: a backlog gave every frame in the batch the
+  // newest one's RSSI, and that number is the whole of a signal report.
+  const LoRaRxFrame hdr{ g_stats.lastRssi, g_stats.lastSnr };
+  void* slot = nullptr;
+  if (xRingbufferSendAcquire(_rxRing, &slot, sizeof(hdr) + len, 0) == pdTRUE) {
+    memcpy(slot, &hdr, sizeof(hdr));
+    memcpy((uint8_t*)slot + sizeof(hdr), _rxBuf, len);
+    xRingbufferSendComplete(_rxRing, slot);
     g_stats.loraRxPackets++;
   } else {
     g_stats.loraRxDropRing++;

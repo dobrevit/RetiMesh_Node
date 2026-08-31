@@ -394,6 +394,15 @@ const Entry kFields[] = {
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().rnsAdmin ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       MaintenanceSettings m = settings.maintenance(); m.rnsAdmin = b; return commitMaintenance(m, e, n); } },
+  // Whether the node answers ping, echo and signal-report. A different
+  // question from the two above and answered differently by default: these
+  // change nothing, and refusing them would deny a signal report to exactly
+  // the person at the edge of coverage who needs one (LxmfCommands.h). The
+  // switch exists because the answer costs airtime.
+  { "maintenance.lxmf_commands",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().lxmfCommands ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
+      MaintenanceSettings m = settings.maintenance(); m.lxmfCommands = b; return commitMaintenance(m, e, n); } },
   { "maintenance.rns_admins",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().rnsAdmins); },
     [](const char* v, char* e, size_t n) {
