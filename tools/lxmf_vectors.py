@@ -28,9 +28,21 @@ import RNS
 import RNS.vendor.umsgpack as msgpack
 from LXMF.LXMessage import LXMessage
 
-# A fixed identity would be nicer for reproducible diffs, but RNS derives the
-# delivery hash from the key, so the vectors carry whatever this run produced.
-# What matters is that the library, not this script, decided every byte.
+# Fixed keys and a fixed clock, so regenerating produces the same file unless
+# the wire format actually moved. With random identities every hash, signature
+# and stamp changed on every run, so the diff was entirely noise and a real
+# change to what clients send would have been invisible in it — which is the
+# one thing the instruction above asks the diff to show.
+# sha512("retimesh-lxmf-vector-source") and ...-destination, so the keys are
+# re-derivable rather than magic. Test material only; nothing signs with these
+# but this generator.
+SRC_KEY = bytes.fromhex(
+    "fb8d78312fe9b4516317f512ff32f4a9bf3e4a18684bdfe4ffd99a8c39f4be72"
+    "db9b83eee5822bcd2f20572ec90e6e80616a748cc7ed63d5b77cac56c1dc972d")
+DST_KEY = bytes.fromhex(
+    "5096c2467d1caa7a1b4c92dac9d9b5f8341bffb195fc67bb5474102540f99328"
+    "3f331dfaf2f9c0799cf6d4958564cde91ea0cc6fbd9d0d32e81f09d19b1dbe8d")
+TIMESTAMP = 1767225600.0        # 2026-01-01T00:00:00Z, so packing is deterministic
 
 
 def build(dst, src, content, title="", fields=None, stamp_cost=None, opportunistic=False):
@@ -38,6 +50,13 @@ def build(dst, src, content, title="", fields=None, stamp_cost=None, opportunist
                   desired_method=LXMessage.DIRECT)
     m.stamp_cost = stamp_cost
     m.defer_stamp = False           # what LXMRouter does once a stamp exists
+    m.timestamp = TIMESTAMP         # so the same input yields the same bytes
+    if stamp_cost is not None:
+        # A stamp is a search for a random value, so generating one would make
+        # these vectors differ on every run. At cost 0 every value is valid —
+        # which is the whole reason announcing 0 is a defect — so a fixed one
+        # is as real as a searched one and keeps the diff meaningful.
+        m.stamp = bytes(range(32))
     m.pack()
 
     packed = m.packed
@@ -66,18 +85,52 @@ def carray(name, data):
 
 
 def cstring(s):
+    # C hex escapes are maximal-munch: "\xc3\xa91" parses \xa91 as one escape
+    # and fails to compile. Closing and reopening the literal after every
+    # escape stops the next character being swallowed into it, which matters
+    # the moment anyone adds a vector whose text is not ASCII — the reason
+    # this branch exists.
     out = ""
+    escaped = False
     for ch in s.encode("utf-8"):
-        if ch == 0x22:   out += '\\"'
-        elif ch == 0x5C: out += "\\\\"
-        elif 0x20 <= ch < 0x7F: out += chr(ch)
-        else: out += f"\\x{ch:02x}"
+        if ch == 0x22:
+            out += '\\"'; escaped = False
+        elif ch == 0x5C:
+            out += "\\\\"; escaped = False
+        elif 0x20 <= ch < 0x7F:
+            if escaped and chr(ch) in "0123456789abcdefABCDEF":
+                out += '" "'
+            out += chr(ch); escaped = False
+        else:
+            out += f"\\x{ch:02x}"; escaped = True
     return f'"{out}"'
+
+
+# The announces LXMF itself emits, which is the half the message vectors do
+# not cover — and the gap that let this node announce its name as a msgpack
+# str for a release. LXMF packs the name with .encode("utf-8"), so it goes out
+# as bin and comes back through .decode("utf-8"); a str announce unpacks to a
+# Python str, .decode raises, and the client shows no name at all. Our own
+# reader accepts either, so a round-trip test against ourselves cannot see it.
+# These bytes come from LXMRouter, so it can.
+ANNOUNCE_CASES = [
+    ("ascii", "retimesh-52A7F8"),
+    ("utf8",  "Café Мартин"),
+    ("empty", ""),
+]
+
+
+def announce_app_data(display_name):
+    """Byte for byte what LXMRouter.get_announce_app_data() produces."""
+    from LXMF.LXMF import SF_COMPRESSION
+    name = display_name.encode("utf-8") if display_name else None
+    return msgpack.packb([name, None, [SF_COMPRESSION]])
 
 
 def main():
     RNS.Reticulum(sys.argv[1] if len(sys.argv) > 1 else None)
-    src_id, dst_id = RNS.Identity(), RNS.Identity()
+    src_id = RNS.Identity.from_bytes(SRC_KEY)
+    dst_id = RNS.Identity.from_bytes(DST_KEY)
     src = RNS.Destination(src_id, RNS.Destination.IN, RNS.Destination.SINGLE, "lxmf", "delivery")
     dst = RNS.Destination(dst_id, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
 
@@ -131,6 +184,21 @@ def main():
         out.append(f'    kHashed_{tag}, sizeof(kHashed_{tag}),')
         out.append(f'    {cstring(v["content"])}, {cstring(v["title"])}, '
                    f'{"true" if v["stamped"] else "false"} }},')
+    out.append("};")
+
+    # The announce direction.
+    out.append("")
+    for tag, name in ANNOUNCE_CASES:
+        out.append(carray(f"kAnnounce_{tag}", announce_app_data(name)))
+    out.append("struct LxmfAnnounceVector {")
+    out.append("  const char*    tag;")
+    out.append("  const uint8_t* appData; size_t appDataLen;  // as LXMRouter emits it")
+    out.append("  const char*    name;                        // what a client reads back out")
+    out.append("};")
+    out.append("")
+    out.append("static const LxmfAnnounceVector kLxmfAnnounceVectors[] = {")
+    for tag, name in ANNOUNCE_CASES:
+        out.append(f'  {{ "{tag}", kAnnounce_{tag}, sizeof(kAnnounce_{tag}), {cstring(name)} }},')
     out.append("};")
     print("\n".join(out))
 

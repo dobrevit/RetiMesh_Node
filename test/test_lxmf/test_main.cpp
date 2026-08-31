@@ -21,8 +21,12 @@ static void test_the_announce_carries_the_name_a_client_will_show() {
   const size_t n = lxmfAppData("retimesh-52A7F8", 0, out, sizeof(out));
   TEST_ASSERT_TRUE(n > 0);
   TEST_ASSERT_EQUAL_HEX8(0x93, out[0]);                 // fixarray of 3
-  TEST_ASSERT_EQUAL_HEX8(0xA0 | 15, out[1]);            // fixstr, 15 bytes
-  TEST_ASSERT_EQUAL_STRING_LEN("retimesh-52A7F8", out + 2, 15);
+  // bin, not str. LXMF encodes the name with .encode("utf-8") and reads it
+  // back with .decode("utf-8"): a str unpacks in Python as str, .decode
+  // raises, and the client shows the node with no name at all.
+  TEST_ASSERT_EQUAL_HEX8(0xC4, out[1]);
+  TEST_ASSERT_EQUAL_HEX8(15, out[2]);
+  TEST_ASSERT_EQUAL_STRING_LEN("retimesh-52A7F8", out + 3, 15);
 }
 
 // The two elements after the name are not decoration, and getting either
@@ -55,8 +59,6 @@ static void test_a_stamp_cost_that_is_wanted_is_still_announced() {
   n = lxmfAppData("n", 200, out, sizeof(out));
   TEST_ASSERT_EQUAL_HEX8(0xCC, out[n - 3]);
   TEST_ASSERT_EQUAL_HEX8(200, out[n - 2]);
-  // LXMF reads a cost as meaningful only below 255.
-  TEST_ASSERT_EQUAL_size_t(0, lxmfAppData("n", 255, out, sizeof(out)));
 }
 
 static void test_what_it_emits_is_what_it_reads_back() {
@@ -69,16 +71,36 @@ static void test_what_it_emits_is_what_it_reads_back() {
   TEST_ASSERT_EQUAL_STRING("retimesh-EAD2C8", name);
 }
 
-static void test_a_long_name_uses_str8_and_still_round_trips() {
+static void test_a_long_name_still_round_trips() {
   char longname[40];
   memset(longname, 'n', 34); longname[34] = '\0';
   uint8_t app[64];
   const size_t n = lxmfAppData(longname, 0, app, sizeof(app));
   TEST_ASSERT_TRUE(n > 0);
-  TEST_ASSERT_EQUAL_HEX8(0xD9, app[1]);                 // str8, past fixstr's 31
+  TEST_ASSERT_EQUAL_HEX8(0xC4, app[1]);                 // bin8 carries any length we emit
+  TEST_ASSERT_EQUAL_HEX8(34, app[2]);
   char name[64] = "";
   lxmfName(app, n, name, sizeof(name));
   TEST_ASSERT_EQUAL_STRING(longname, name);
+}
+
+// An out-of-range stamp cost is one bad field, not a reason to fall silent:
+// returning nothing made the caller skip the whole announce, which would take
+// the node's name and address off the network over a number.
+static void test_a_stamp_cost_out_of_range_degrades_to_nil() {
+  uint8_t out[64];
+  const size_t n = lxmfAppData("n", 255, out, sizeof(out));
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_EQUAL_HEX8(0xC0, out[n - 2]);
+  TEST_ASSERT_EQUAL_HEX8(0x90, out[n - 1]);
+}
+
+static void test_a_node_with_no_name_still_announces() {
+  uint8_t out[64];
+  const size_t n = lxmfAppData(nullptr, 0, out, sizeof(out));
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_EQUAL_HEX8(0xC4, out[1]);
+  TEST_ASSERT_EQUAL_HEX8(0, out[2]);
 }
 
 // Names are UTF-8, and most of the world's are not ASCII. Refusing every byte
@@ -122,6 +144,65 @@ static void test_a_name_that_is_not_text_is_still_refused() {
     TEST_ASSERT_EQUAL_size_t(0, displayableName(bad[k], lens[k], name, sizeof(name)));
     TEST_ASSERT_EQUAL_STRING("", name);    // and nothing half-copied is left behind
   }
+}
+
+// Unicode has control characters of its own, and widening the guard from
+// ASCII to UTF-8 let them back in. U+202E reverses the rest of the line it
+// lands on, so a name can make a console line or the neighbour list read as
+// something else entirely; the zero-width and isolate characters hide or
+// reorder text while showing nothing at all.
+static void test_a_name_that_reorders_the_line_it_sits_on_is_refused() {
+  struct { const char* bytes; size_t len; const char* what; } bad[] = {
+    { "gnp.exe\xE2\x80\xAEtxt.", 12, "U+202E right-to-left override" },
+    { "node\xE2\x80\x8Bhidden",  13, "U+200B zero-width space" },
+    { "a\xE2\x81\xA6b",           5, "U+2066 left-to-right isolate" },
+    { "a\xEF\xBB\xBFb",           5, "U+FEFF zero-width no-break space" },
+    { "a\xE2\x80\xA8b",           5, "U+2028 line separator" },
+  };
+  for (auto& c : bad) {
+    char name[40] = "sentinel";
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(0,
+      displayableName((const uint8_t*)c.bytes, c.len, name, sizeof(name)), c.what);
+    TEST_ASSERT_EQUAL_STRING("", name);
+  }
+}
+
+// Message text is held to a different standard than a name: a body carries
+// newlines and is kept, not refused. What it must not do is end mid-character.
+static void test_message_text_is_cut_between_characters_not_refused() {
+  const uint8_t body[] = { 'h','i','\n', 0xC3,0xA9, 0xC3,0xA9 };
+  TEST_ASSERT_EQUAL_size_t(7, utf8TrimLen(body, sizeof(body), 99));   // newline kept
+  TEST_ASSERT_EQUAL_size_t(5, utf8TrimLen(body, sizeof(body), 6));    // not half of the last é
+  TEST_ASSERT_EQUAL_size_t(3, utf8TrimLen(body, sizeof(body), 4));
+  TEST_ASSERT_EQUAL_size_t(0, utf8TrimLen(nullptr, 0, 8));
+}
+
+// The same text on its way to a serial console, where an escape sequence in a
+// message from a stranger would clear the operator's screen.
+static void test_message_text_shown_on_the_console_carries_no_escapes() {
+  const uint8_t body[] = { 'o','k',0x1B,'[','2','J','\n','d','o','n','e' };
+  char shown[32] = "";
+  utf8SafeCopy(body, sizeof(body), shown, sizeof(shown));
+  TEST_ASSERT_EQUAL_STRING("ok.[2J.done", shown);
+  // and it never emits half a character when the buffer runs out
+  const uint8_t accents[] = { 0xC3,0xA9, 0xC3,0xA9, 0xC3,0xA9 };
+  char small[6] = "";
+  const size_t k = utf8SafeCopy(accents, sizeof(accents), small, sizeof(small));
+  TEST_ASSERT_EQUAL_size_t(4, k);
+  TEST_ASSERT_EQUAL_STRING("\xC3\xA9\xC3\xA9", small);
+}
+
+// A map header claiming more pairs than there are bytes must be refused, not
+// silently skipped. Counted in size_t on a 32-bit target, count*2 wrapped to
+// zero for a map32 claiming 0x80000000 pairs, so the guard passed and the
+// walk stepped over the whole map — leaving a signed extent that described a
+// different message than the one on the wire.
+static void test_a_map_claiming_more_pairs_than_there_are_bytes_is_refused() {
+  const uint8_t m32[] = { 0xDF, 0x80, 0x00, 0x00, 0x00, 0xC0 };
+  const uint8_t* v = nullptr; size_t vl = 0, next = 0;
+  TEST_ASSERT_FALSE(msgpackNext(m32, sizeof(m32), 0, v, vl, next));
+  const uint8_t m16[] = { 0xDE, 0xFF, 0xFF, 0xC0 };
+  TEST_ASSERT_FALSE(msgpackNext(m16, sizeof(m16), 0, v, vl, next));
 }
 
 // Truncation has to land on a character boundary. Half of a multi-byte
@@ -415,11 +496,17 @@ int main() {
   RUN_TEST(test_the_announce_claims_no_functionality_while_there_is_none);
   RUN_TEST(test_a_stamp_cost_that_is_wanted_is_still_announced);
   RUN_TEST(test_what_it_emits_is_what_it_reads_back);
-  RUN_TEST(test_a_long_name_uses_str8_and_still_round_trips);
+  RUN_TEST(test_a_long_name_still_round_trips);
+  RUN_TEST(test_a_stamp_cost_out_of_range_degrades_to_nil);
+  RUN_TEST(test_a_node_with_no_name_still_announces);
   RUN_TEST(test_a_name_that_is_not_ascii_still_arrives);
   RUN_TEST(test_a_name_that_is_not_text_is_still_refused);
+  RUN_TEST(test_a_name_that_reorders_the_line_it_sits_on_is_refused);
   RUN_TEST(test_a_name_too_long_for_the_buffer_is_cut_between_characters);
   RUN_TEST(test_a_name_that_will_not_fit_is_refused_not_truncated);
+  RUN_TEST(test_message_text_is_cut_between_characters_not_refused);
+  RUN_TEST(test_message_text_shown_on_the_console_carries_no_escapes);
+  RUN_TEST(test_a_map_claiming_more_pairs_than_there_are_bytes_is_refused);
   RUN_TEST(test_a_well_formed_message_yields_its_text);
   RUN_TEST(test_an_empty_title_is_allowed);
   RUN_TEST(test_a_truncated_envelope_is_refused);

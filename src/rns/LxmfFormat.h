@@ -82,6 +82,7 @@ struct LxmfMessage {
   // extent lets a caller say "this one carried something" without this file
   // growing an opinion about what.
   const uint8_t* fields;  size_t fieldsLen;     // empty when the message had none
+  size_t         fieldsCount;                   // entries in it, which is the question a caller actually has
 
   // What the sender signed, which is not the same bytes as what arrived.
   //
@@ -144,11 +145,18 @@ inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
     const bool map  = (t == 0xDE || t == 0xDF);
     const size_t hdr = wide ? 5 : 3;
     if (!need(hdr)) return false;
-    size_t count = wide ? (((size_t)p[i+1] << 24) | ((size_t)p[i+2] << 16) |
-                           ((size_t)p[i+3] << 8) | p[i+4])
-                        : (((size_t)p[i+1] << 8) | p[i+2]);
-    size_t members = count * (map ? 2u : 1u);
-    if (members > n) return false;                    // more members than there are bytes
+    uint64_t count = wide ? (((uint64_t)p[i+1] << 24) | ((uint64_t)p[i+2] << 16) |
+                             ((uint64_t)p[i+3] << 8) | p[i+4])
+                          : (((uint64_t)p[i+1] << 8) | p[i+2]);
+    // Bound the count before doubling it. size_t is 32 bits on the target, so
+    // a map32 header claiming 0x80000000 pairs used to multiply to zero: the
+    // "more members than bytes" guard passed, the walk skipped the whole map,
+    // and a crafted message parsed with a signed extent that described a
+    // different message than the one on the wire — reported to the operator
+    // as the sender forging. Counted in 64 bits it is simply refused.
+    if (count > n) return false;                      // more members than there are bytes
+    const size_t members = (size_t)count * (map ? 2u : 1u);
+    if (members > n) return false;
     next = i + hdr;
     if (depth == 0) return false;
     for (size_t k = 0; k < members; k++) {
@@ -201,25 +209,35 @@ inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
 // element that the sender itself excluded from what it signed. Announcing 0
 // therefore made every message from a current client arrive unverifiable, and
 // reported the honest sender as a signature mismatch.
+// The name goes out as msgpack *bin*, not str, and that is not a matter of
+// taste. LXMF builds its own announce from `display_name.encode("utf-8")`,
+// which packs as bin, and reads one back with `peer_data[0].decode("utf-8")`.
+// A str unpacks in Python as `str`, which has no .decode — so the read throws,
+// LXMF catches it, logs "Could not decode display name in included announce
+// data" and returns None. Emitting a fixstr therefore made this node nameless
+// in every client while putting an error line in every peer's log, on every
+// announce. Our own reader takes either, which is exactly why a round-trip
+// test could not see it.
 inline size_t lxmfAppData(const char* name, int stampCost, uint8_t* out, size_t cap) {
   const size_t n = name ? strlen(name) : 0;
-  // fixstr carries up to 31 bytes and is what every LXMF client emits for a
-  // node name; str8 covers the rest. Nothing here needs more than 255.
-  const bool fixstr = n <= 31;
-  // LXMF reads a cost as meaningful between 1 and 254; above a fixint's 127
-  // it needs a uint8 header.
-  const bool wideCost = stampCost > 127;
+  // bin8 up to 255 bytes, which is far past any node name.
+  // LXMF reads a cost as meaningful between 1 and 254. A cost outside that is
+  // not a reason to fall silent: dropping the whole announce would take the
+  // node's name and address off the network over one out-of-range field, so
+  // it degrades to nil — which is what LXMF itself announces for a cost it
+  // will not state.
+  const bool wideCost = stampCost > 127 && stampCost < 255;
   const size_t need = 1                                  // array of 3
-                    + (fixstr ? 1 : 2) + n                // name
+                    + 2 + n                               // bin8 header, name
                     + (wideCost ? 2u : 1u)                // cost, or nil
                     + 1;                                  // functionality list
-  if (n > 255 || stampCost > 254 || need > cap) return 0;
+  if (n > 255 || need > cap) return 0;
   uint8_t* p = out;
   *p++ = 0x93;                                           // fixarray of 3
-  if (fixstr) *p++ = (uint8_t)(0xA0 | n);
-  else      { *p++ = 0xD9; *p++ = (uint8_t)n; }
-  memcpy(p, name, n); p += n;
-  if (stampCost <= 0)  *p++ = 0xC0;                      // nil — no stamp required
+  *p++ = 0xC4; *p++ = (uint8_t)n;                        // bin8
+  if (n) memcpy(p, name, n);
+  p += n;
+  if (stampCost <= 0 || stampCost > 254) *p++ = 0xC0;    // nil — no stamp required
   else if (!wideCost)  *p++ = (uint8_t)stampCost;        // positive fixint
   else               { *p++ = 0xCC; *p++ = (uint8_t)stampCost; }
   *p++ = 0x90;                                           // empty fixarray: no functionality claimed
@@ -254,18 +272,26 @@ inline bool lxmfNameRef(const uint8_t* app, size_t len,
 // valid UTF-8, overlong forms, surrogate halves, and control characters —
 // including the C1 range, which is where a name would hide an escape sequence
 // that means something to a terminal reading the console.
-inline size_t utf8CharWidth(const uint8_t* p, size_t n) {
+// Two questions, and they are not the same one.
+//
+// utf8SeqLen asks only whether these bytes are a character — is this
+// well-formed UTF-8, not overlong, not a surrogate half. It says nothing
+// about whether anyone should look at it, so a newline is a character here.
+// This is the question truncation asks: cutting a message body at a fixed
+// byte count lands mid-sequence for most non-Latin text, and the answer has
+// to be "where does the previous character end", not "is this printable" —
+// holding a body to the second question would truncate every message at its
+// first line break.
+//
+// utf8CharWidth asks the second question, and is what a name and a console
+// line are held to.
+inline size_t utf8SeqLen(const uint8_t* p, size_t n) {
   if (n == 0) return 0;
   const uint8_t c = p[0];
   auto cont = [&](size_t k) { return k < n && (p[k] & 0xC0) == 0x80; };
-  if (c < 0x20 || c == 0x7F) return 0;                   // C0 controls and DEL
   if (c < 0x80) return 1;
   if (c < 0xC2) return 0;                                // continuation byte, or an overlong two-byte form
-  if (c < 0xE0) {                                        // two bytes
-    if (!cont(1)) return 0;
-    if (c == 0xC2 && p[1] < 0xA0) return 0;              // C1 controls
-    return 2;
-  }
+  if (c < 0xE0) return cont(1) ? 2 : 0;
   if (c < 0xF0) {                                        // three
     if (!cont(1) || !cont(2)) return 0;
     if (c == 0xE0 && p[1] < 0xA0) return 0;              // overlong
@@ -279,6 +305,29 @@ inline size_t utf8CharWidth(const uint8_t* p, size_t n) {
     return 4;
   }
   return 0;
+}
+
+inline size_t utf8CharWidth(const uint8_t* p, size_t n) {
+  const size_t w = utf8SeqLen(p, n);
+  if (w == 0) return 0;
+  const uint8_t c = p[0];
+  if (w == 1) return (c < 0x20 || c == 0x7F) ? 0 : 1;    // C0 controls and DEL
+  if (w == 2) return (c == 0xC2 && p[1] < 0xA0) ? 0 : 2; // C1 controls
+  if (w == 4) return 4;
+  // Unicode's own control characters. Widening the guard from ASCII to UTF-8
+  // let these back in, and they are the same attack the C0/C1 checks are for
+  // rather than a different one: U+202E reverses the rest of the line it
+  // lands on, so a name can make a console line or the neighbour list read as
+  // something else entirely, and the zero-width and isolate characters hide
+  // or reorder text while showing nothing at all.
+  const uint32_t cp = ((uint32_t)(c & 0x0F) << 12) |
+                      ((uint32_t)(p[1] & 0x3F) << 6) | (uint32_t)(p[2] & 0x3F);
+  if (cp >= 0x200B && cp <= 0x200F) return 0;            // zero-width and LTR/RTL marks
+  if (cp >= 0x2028 && cp <= 0x202E) return 0;            // line/paragraph separators, bidi embedding and overrides
+  if (cp >= 0x2060 && cp <= 0x2064) return 0;            // word joiner and invisible operators
+  if (cp >= 0x2066 && cp <= 0x2069) return 0;            // bidi isolates
+  if (cp == 0xFEFF) return 0;                            // zero-width no-break space
+  return 3;
 }
 
 // Copy a name if it is one. All of it has to be displayable text — a name
@@ -306,6 +355,50 @@ inline size_t lxmfName(const uint8_t* app, size_t len, char* out, size_t cap) {
   const uint8_t* v = nullptr; size_t vl = 0;
   if (!lxmfNameRef(app, len, v, vl)) { if (cap) out[0] = '\0'; return 0; }
   return displayableName(v, vl, out, cap);
+}
+
+// Message text is not a name and cannot be held to a name's standard: a body
+// legitimately contains newlines, and refusing the whole message because one
+// character is odd would throw away what the sender wrote. What it must not
+// do is end mid-character. A body cut at a fixed byte count lands inside a
+// multi-byte sequence about three times in four for non-Latin text, and the
+// result is not UTF-8 — which reaches a JSON document and a display that each
+// do something worse with it than showing a shorter message.
+//
+// Returns the longest length not exceeding max that ends on a character
+// boundary. Bytes that are not valid UTF-8 at all stop the scan, so what
+// comes back is always a well-formed prefix.
+inline size_t utf8TrimLen(const uint8_t* p, size_t n, size_t max) {
+  if (!p) return 0;
+  size_t fits = 0;
+  for (size_t i = 0; i < n; ) {
+    const size_t w = utf8SeqLen(p + i, n - i);           // a boundary, not a judgement
+    if (w == 0) break;
+    i += w;
+    if (i <= max) fits = i; else break;
+  }
+  return fits;
+}
+
+// The same text, copied somewhere it will be read by a person rather than
+// stored — a log line on a serial console. Anything that is not a printable
+// character becomes a dot, because the console is a terminal and a message
+// body arrives from whoever is in earshot: an escape sequence in it would
+// clear the operator's screen or hide the lines around it. Newlines go too,
+// since this is one line.
+inline size_t utf8SafeCopy(const uint8_t* p, size_t n, char* out, size_t cap) {
+  if (cap == 0) return 0;
+  out[0] = '\0';
+  if (!p || n == 0 || cap < 2) return 0;
+  size_t w = 0;
+  for (size_t i = 0; i < n && w < cap - 1; ) {
+    const size_t cw = utf8CharWidth(p + i, n - i);
+    if (cw == 0) { out[w++] = '.'; i++; continue; }      // not a character; show that something was there
+    if (w + cw > cap - 1) break;                          // never half a character
+    memcpy(out + w, p + i, cw); w += cw; i += cw;
+  }
+  out[w] = '\0';
+  return w;
 }
 
 inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {
@@ -349,6 +442,17 @@ inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {
     const size_t at = i;
     if (!msgpackNext(p, n, i, v, vl, next)) return false;
     out.fields = p + at; out.fieldsLen = next - at;
+    // How many entries, not how many bytes. A caller asking "did this message
+    // bring anything with it" is asking about entries, and the two answers
+    // differ: an empty dict encoded as map16 is three bytes rather than one,
+    // so a length test calls a plain text message an attachment.
+    const uint8_t h = p[at];
+    if ((h & 0xF0) == 0x80)   out.fieldsCount = h & 0x0F;                    // fixmap
+    else if (h == 0xDE && at + 3 <= n)
+      out.fieldsCount = ((size_t)p[at + 1] << 8) | p[at + 2];                // map16
+    else if (h == 0xDF && at + 5 <= n)
+      out.fieldsCount = ((size_t)p[at + 1] << 24) | ((size_t)p[at + 2] << 16) |
+                        ((size_t)p[at + 3] << 8) | p[at + 4];                // map32
     i = next;
     signedEnd = i;
   }
@@ -383,6 +487,23 @@ inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {
   out.signedBody   = p + 1;
   out.signedBodyLen = signedEnd - 1;
   return true;
+}
+
+// The bytes the sender signed, in order, handed to a sink one span at a time.
+//
+// This is the whole of interoperability in four lines, so there is one copy of
+// it and both the node and its tests ask this rather than each remembering the
+// order. A test that rebuilt the same sequence for itself could not fail when
+// the node's copy changed — which is the one thing that test exists to catch.
+//
+// Spans rather than a buffer because the caller owns the storage: a message
+// arriving as a resource is kilobytes, which does not belong on this stack.
+template <typename Sink>
+inline void lxmfSignedSpans(const LxmfMessage& m, Sink&& sink) {
+  sink(m.destHash, (size_t)16);
+  sink(m.sourceHash, (size_t)16);
+  sink(&m.signedHeader, (size_t)1);
+  sink(m.signedBody, m.signedBodyLen);
 }
 
 } // namespace Rns

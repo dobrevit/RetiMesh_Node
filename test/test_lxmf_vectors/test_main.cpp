@@ -28,14 +28,13 @@
 
 using namespace Rns;
 
-// What RnsTransport::handleLxmfMessage hashes, kept in the same order it
-// builds it. If this and the library disagree by a byte, nothing verifies.
+// What RnsTransport::handleLxmfMessage hashes — asked of the same function it
+// asks, rather than rebuilt here. Rebuilding it would have made this test
+// unable to fail when the node's copy changed, which is the one thing it is
+// for.
 static std::vector<uint8_t> hashedPart(const LxmfMessage& m) {
   std::vector<uint8_t> hp;
-  hp.insert(hp.end(), m.destHash, m.destHash + 16);
-  hp.insert(hp.end(), m.sourceHash, m.sourceHash + 16);
-  hp.push_back(m.signedHeader);
-  hp.insert(hp.end(), m.signedBody, m.signedBody + m.signedBodyLen);
+  lxmfSignedSpans(m, [&](const uint8_t* p, size_t n) { hp.insert(hp.end(), p, p + n); });
   return hp;
 }
 
@@ -154,6 +153,55 @@ static void test_no_truncation_of_a_real_message_is_accepted_as_whole() {
   }
 }
 
+// --- the announce direction --------------------------------------------------
+//
+// The half that was missing, and the gap that let this node announce its name
+// as a msgpack str for a release: LXMF writes the name with .encode("utf-8"),
+// so it goes out as bin and comes back through .decode("utf-8"). A str
+// announce unpacks in Python as str, .decode raises, and the client shows the
+// node with no name. Our own reader takes either, so round-tripping our
+// encoder against our decoder agreed with itself and proved nothing.
+
+static void test_we_read_the_name_out_of_a_real_lxmf_announce() {
+  for (const auto& v : kLxmfAnnounceVectors) {
+    char name[80] = "";
+    const size_t k = lxmfName(v.appData, v.appDataLen, name, sizeof(name));
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(strlen(v.name), k, v.tag);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(v.name, name, v.tag);
+  }
+}
+
+// And the same bytes back out. Not a round-trip against ourselves: the
+// expected bytes are the ones LXMRouter produced, so an encoding this node
+// invents fails here.
+static void test_what_we_announce_is_what_lxmf_would_have_announced() {
+  for (const auto& v : kLxmfAnnounceVectors) {
+    if (v.name[0] == '\0') continue;           // LXMF writes nil for no name; the node always has one
+    uint8_t ours[96];
+    const size_t n = lxmfAppData(v.name, 0, ours, sizeof(ours));
+    TEST_ASSERT_TRUE_MESSAGE(n > 0, v.tag);
+    // The name element must match LXMF's byte for byte — header included.
+    // Everything after it is this node's own policy (no stamp, no
+    // compression) and deliberately differs from the vector.
+    const size_t nameBytes = 2 + strlen(v.name);           // 0xC4, len, name
+    TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(v.appData, ours, 1 + nameBytes, v.tag);
+  }
+}
+
+// The reader has to keep taking a str announce, whatever we emit: older LXMF
+// clients are out there and a name we can read is better than none.
+static void test_a_str_announce_from_an_older_client_is_still_read() {
+  const char* name = "older-client";
+  const size_t n = strlen(name);
+  uint8_t app[64];
+  app[0] = 0x93; app[1] = (uint8_t)(0xA0 | n);
+  memcpy(app + 2, name, n);
+  app[2 + n] = 0xC0; app[3 + n] = 0x90;
+  char out[40] = "";
+  TEST_ASSERT_EQUAL_size_t(n, lxmfName(app, 4 + n, out, sizeof(out)));
+  TEST_ASSERT_EQUAL_STRING(name, out);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -166,5 +214,8 @@ int main() {
   RUN_TEST(test_the_fields_map_is_located_not_read);
   RUN_TEST(test_padding_after_a_real_message_is_ignored);
   RUN_TEST(test_no_truncation_of_a_real_message_is_accepted_as_whole);
+  RUN_TEST(test_we_read_the_name_out_of_a_real_lxmf_announce);
+  RUN_TEST(test_what_we_announce_is_what_lxmf_would_have_announced);
+  RUN_TEST(test_a_str_announce_from_an_older_client_is_still_read);
   return UNITY_END();
 }
