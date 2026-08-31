@@ -633,12 +633,19 @@ inline size_t lxmfCommands(const uint8_t* val, size_t n, LxmfCommand* out, size_
 // empty and no stamp is appended, so what is signed is the whole of what is
 // sent — the case the reading side has to work to reconstruct is one this
 // side simply never creates.
+// `fields` is a msgpack map, already encoded, or null for a message that
+// carries only its text. It is taken pre-encoded rather than built here
+// because what goes in it — a telemetry document, one day something else — is
+// not this file's business, and because the caller has already had to decide
+// how much room to give it.
 inline size_t lxmfPayload(double sentAt, const char* title, const char* content,
-                          uint8_t* out, size_t cap) {
+                          uint8_t* out, size_t cap,
+                          const uint8_t* fields = nullptr, size_t fieldsLen = 0) {
   const size_t titleLen = title ? strlen(title) : 0;
   const size_t contentLen = content ? strlen(content) : 0;
   if (titleLen > 255 || contentLen > 255) return 0;      // bin8 is what this writes
-  const size_t need = 1 + 9 + (2 + titleLen) + (2 + contentLen) + 1;
+  const size_t fieldBytes = (fields && fieldsLen) ? fieldsLen : 1;
+  const size_t need = 1 + 9 + (2 + titleLen) + (2 + contentLen) + fieldBytes;
   if (need > cap) return 0;
   size_t i = 0;
   out[i++] = 0x94;                                       // fixarray of four
@@ -650,7 +657,8 @@ inline size_t lxmfPayload(double sentAt, const char* title, const char* content,
   memcpy(out + i, title, titleLen); i += titleLen;
   out[i++] = 0xC4; out[i++] = (uint8_t)contentLen;
   memcpy(out + i, content, contentLen); i += contentLen;
-  out[i++] = 0x80;                                       // an empty fixmap of fields
+  if (fields && fieldsLen) { memcpy(out + i, fields, fieldsLen); i += fieldsLen; }
+  else                       out[i++] = 0x80;            // an empty fixmap of fields
   return i;
 }
 

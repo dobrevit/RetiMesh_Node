@@ -47,6 +47,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>
 #include "Config.h"                        // INTERFACE_NAME_MAX, RNS_MAX_INTERFACES
+#include "LxmfCommands.h"                  // Rns::Commands::Signal
 
 namespace RnsTransport {
 
@@ -129,5 +130,15 @@ LxmfState lxmf();
 // other call into it in this firmware is made from the task that runs its
 // loop. False when the queue is full, which means the node is already behind.
 bool queueLxmfReply(const uint8_t destHash[16], const char* text);
+
+// The same, with the node's own readings attached — what a client's telemetry
+// request is answered with. The document is built when the answer goes out
+// rather than now, so what it carries is current and the queue stays small.
+//
+// `signal` is what the radio measured of the packet that asked, carried here
+// rather than read again at send time: by then the node may have heard a much
+// closer neighbour, and the answer would describe that link instead.
+bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry,
+                        const Rns::Commands::Signal& signal);
 
 } // namespace RnsTransport

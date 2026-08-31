@@ -360,13 +360,50 @@ served — a client that has opened a link has proved who it is, which is the
 case a signal report is most wanted in.
 
 What they cost is airtime: **one reply per message**, whatever was asked, so
-three commands in one message get one answer rather than three. A per-sender
-cooldown of ten seconds keeps one peer off the radio, counted only when an
-answer actually went out, and the duty-cycle accounting bounds the rest. `SET
+three commands in one message get one answer rather than three. A ping or an
+echo is one short packet for one short packet; a **telemetry answer is not** —
+the readings run to a couple of hundred bytes against a request of about a
+hundred, and can be two fragments at SF12. What bounds that is the per-sender
+cooldown of ten seconds, counted only when an answer actually went out, and
+the duty-cycle accounting — not the size of the request. `SET
 maintenance.lxmf_commands off` (or `"lxmf_commands": false` over HTTP) declines
-to spend it on a crowded channel. A telemetry request is parsed but not
-answered — the node has no telemetry to send yet, and saying nothing leaves the
-asker's client showing it unanswered, which is true.
+to spend it on a crowded channel.
+
+### Telemetry
+
+A **telemetry request** is answered with the node's own readings, in the
+sensor format Sideband already stores, plots over time and puts on its map.
+Nothing is installed at either end, and nothing but the request is needed —
+which matters for a node on a hill whose portal nobody can reach.
+
+What it sends is what the board can actually measure:
+
+| Reading | Where it comes from |
+|---|---|
+| Time | the node's clock |
+| Information | firmware version and board |
+| Battery | percent, and charging **only where the board can see its charger** |
+| Position | the receiver, and only if `radio.gps_share_position` is on |
+| Physical link | RSSI, SNR and quality of the last frame heard |
+| Processor, RAM, storage | CPU clock, internal heap, LittleFS — and the SD card as a second entry where the store lives there |
+
+A reading the board cannot take is **left out**, never sent as zero: a node
+with no cell says nothing about a battery rather than reporting empty, and a
+board that cannot see its charger sends "unknown" rather than "not charging" —
+which would send somebody looking for a fault in a working cable. A position
+is published only with the operator's say-so, under the same setting that
+governs the public status API.
+
+Time is sent **only if somebody set the clock**. Nothing here runs NTP, so a
+board without a GNSS receiver counts from the epoch at boot — and since a
+client files every reading by that timestamp, a wrong one would put the node's
+whole history in 1970 rather than being slightly off. The signal figures are
+what was heard of *the packet that asked*, carried with the request rather than
+re-read at send time, so a request from the edge of coverage is not answered
+with the reading of a neighbour who spoke in between.
+
+The document is built when the answer goes out, not when the request arrives,
+so the readings are current.
 
 ## Remote administration over RNS (off by default)
 A node can be administered by messaging it, which is the only way in when its

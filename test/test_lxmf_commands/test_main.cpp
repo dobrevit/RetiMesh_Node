@@ -50,10 +50,11 @@ static void test_an_echo_is_bounded_and_cut_between_characters() {
   TEST_ASSERT_EQUAL_size_t(n, strlen(out));
 
   // Two-byte characters, cut so that the limit falls inside one.
-  char accents[200];
-  // Every byte written: the old bound left the last one untouched and strlen
-  // then read it.
-  for (size_t i = 0; i + 2 < sizeof(accents); i += 2) { accents[i] = (char)0xC3; accents[i+1] = (char)0xA9; }
+  // Odd-sized on purpose: pairs fill every byte up to the terminator, so no
+  // byte is left unwritten for strlen to read. An even buffer cannot do that —
+  // which is what the previous two attempts at this line got wrong.
+  char accents[199];
+  for (size_t i = 0; i + 1 < sizeof(accents) - 1; i += 2) { accents[i] = (char)0xC3; accents[i+1] = (char)0xA9; }
   accents[sizeof(accents) - 1] = '\0';
   const size_t k = Commands::reply(cmd(kCommandEcho, accents), {}, out, sizeof(out));
   const size_t body = k - strlen("Echo reply: ");
@@ -121,10 +122,22 @@ static void test_a_message_with_no_reading_at_all_says_so() {
   TEST_ASSERT_EQUAL_STRING("No reception info available", out);
 }
 
-// A telemetry request is a real question this node cannot answer yet. Saying
-// nothing leaves the asker's client showing it unanswered, which is true; a
-// reply saying "no" would put a confusing message in their conversation.
-static void test_a_command_this_node_cannot_answer_gets_no_reply() {
+// Which commands are answered, and how. One predicate, because the transport
+// asks it too — it decides whether to attach the node's readings, and the two
+// briefly disagreed about telemetry.
+static void test_the_node_says_which_commands_it_answers() {
+  TEST_ASSERT_TRUE(Commands::answers(kCommandPing) == Commands::Answer::Text);
+  TEST_ASSERT_TRUE(Commands::answers(kCommandEcho) == Commands::Answer::Text);
+  TEST_ASSERT_TRUE(Commands::answers(kCommandSignal) == Commands::Answer::Text);
+  TEST_ASSERT_TRUE(Commands::answers(kCommandTelemetry) == Commands::Answer::Telemetry);
+  TEST_ASSERT_TRUE(Commands::answers(0x7E) == Commands::Answer::None);
+}
+
+// A telemetry request is answered with readings, not a sentence — a sentence
+// beside them would appear in somebody's conversation as a message a person
+// sent. reply() therefore writes nothing for it, and so it does for a command
+// this node has never heard of.
+static void test_no_text_is_written_for_what_is_not_a_text_answer() {
   char out[Commands::kReplyMax] = "sentinel";
   TEST_ASSERT_EQUAL_size_t(0, Commands::reply(cmd(kCommandTelemetry), {}, out, sizeof(out)));
   TEST_ASSERT_EQUAL_STRING("", out);
@@ -160,7 +173,8 @@ int main() {
   RUN_TEST(test_a_signal_report_reads_like_the_one_a_phone_sends);
   RUN_TEST(test_a_figure_the_node_does_not_have_is_left_out);
   RUN_TEST(test_a_message_with_no_reading_at_all_says_so);
-  RUN_TEST(test_a_command_this_node_cannot_answer_gets_no_reply);
+  RUN_TEST(test_the_node_says_which_commands_it_answers);
+  RUN_TEST(test_no_text_is_written_for_what_is_not_a_text_answer);
   RUN_TEST(test_no_reply_overruns_a_small_buffer);
   return UNITY_END();
 }

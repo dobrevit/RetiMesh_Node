@@ -38,10 +38,13 @@
 //  behind a list, a signature and a replay floor. The two are kept apart on
 //  purpose: this file must never grow a command that does anything.
 //
-//  What it costs is airtime, which on LoRa is the scarce thing. A reply is one
-//  short packet for one short packet — no amplification — and the caller holds
-//  a cooldown so one peer cannot monopolise the radio. The duty-cycle
-//  accounting a node already keeps (Airtime.h) is the backstop.
+//  What it costs is airtime, which on LoRa is the scarce thing. A ping or an
+//  echo is one short packet for one short packet. A telemetry answer is not:
+//  the readings run to a couple of hundred bytes against a request of about a
+//  hundred, so that one is several times what it was asked by and can be two
+//  fragments at SF12. What bounds it is the caller's per-sender cooldown and
+//  the duty-cycle accounting the node already keeps (Airtime.h) — not the
+//  size of the request.
 //
 //  Pure, so the wording and the arithmetic can be argued with on a host: what
 //  goes out over the air on a stranger's say-so is worth a test.
@@ -73,13 +76,30 @@ struct Signal {
 // Longest reply this file produces: three signal lines with room to spare.
 static const size_t kReplyMax = 96;
 
-// The answer to one command, or nothing.
+// What kind of answer a command gets, decided in one place because two
+// callers ask: this file, which writes the text ones, and the transport, which
+// has to know whether to attach the node's readings. It was briefly decided in
+// both, and they disagreed — reply() said telemetry went unanswered while the
+// transport answered it, so the comment, the docs and a test all described a
+// node that no longer existed.
+enum class Answer : uint8_t {
+  None,         // not a command this node knows
+  Text,         // reply() writes it
+  Telemetry,    // the readings are the answer; the caller attaches them
+};
+
+inline Answer answers(uint32_t id) {
+  if (id == kCommandPing || id == kCommandEcho || id == kCommandSignal) return Answer::Text;
+  if (id == kCommandTelemetry) return Answer::Telemetry;
+  return Answer::None;
+}
+
+// The text answer to one command, or nothing.
 //
-// Returns the length written, and 0 when this node does not answer that
-// command — an unknown command, or a telemetry request, which is a real
-// question this node cannot answer yet and should not pretend to. Answering
-// "no" to it would put a confusing message in somebody's conversation; saying
-// nothing leaves their client showing the request unanswered, which is true.
+// Returns the length written, and 0 for anything answers() does not call
+// Text — an unknown command, or a telemetry request, whose answer is the
+// readings rather than a sentence. A sentence beside them would appear in
+// somebody's conversation as a message a person sent.
 //
 // The wording matches what Sideband itself replies, so a node's answer reads
 // the same as another person's phone would.
@@ -146,7 +166,7 @@ inline size_t reply(const LxmfCommand& c, const Signal& s, char* out, size_t cap
     return i;
   }
 
-  return 0;                             // including a telemetry request, for now
+  return 0;                             // Answer::Telemetry and Answer::None alike
 }
 
 } // namespace Commands

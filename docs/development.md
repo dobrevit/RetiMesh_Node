@@ -233,6 +233,7 @@ them on every push.
 | `test_lxmf_inbox` | the inbox record format and the ring arithmetic: whether a message read back is the message that was stored |
 | `test_rns_admin` | who may command a node — each test is a way in that must stay shut |
 | `test_lxmf_commands` | what the node says back to a ping, an echo and a signal report, and that nothing a stranger sends can overrun the reply |
+| `test_telemetry` | what the node says about itself: sensor shapes, msgpack str against bin, and that a document too big is not sent half-written |
 
 ### LXMF vectors
 
@@ -257,6 +258,25 @@ fixed, so an unchanged format regenerates byte for byte.
 pip install rns lxmf
 python tools/lxmf_vectors.py > test/test_lxmf_vectors/vectors.h
 ```
+
+### Telemetry shapes
+
+A telemetry value in the wrong msgpack type or the wrong shape is not rendered
+wrongly by a client — it is dropped, so "it looked right in the hex" is not
+evidence. `test_telemetry` takes a document apart with this node's own decoder
+and holds the shapes; `tools/telemetry_check.py` goes further and asks the
+class that will actually read it. Run it when a sensor is added or its shape
+changes:
+
+```sh
+pip download sbapp --no-deps --no-binary :all: -d /tmp/sb
+tar -xzf /tmp/sb/sbapp-*.tar.gz -C /tmp/sb
+python tools/telemetry_check.py /tmp/sb/sbapp-1.8.0
+```
+
+It prints what each sensor reads back as, for a board with a fix and a charger
+it can see and for one with neither. A sensor missing from that output is one
+the app silently dropped.
 
 The host tooling has its own suite, run by CI too:
 ```sh
