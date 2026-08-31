@@ -760,16 +760,19 @@ static RNS::Bytes serveIndex(const RNS::Bytes& path, const RNS::Bytes& data,
   // Bounded on purpose: this runs on the RNS task because a stranger asked,
   // and the buffer is what says how much of that task's stack a request can
   // spend. A page longer than this is cut with a line saying so.
-  char page[1280];
-  const size_t n = Rns::NomadNet::index(st, page, sizeof(page));
-  if (!n) return {RNS::Bytes::NONE};
-
-  uint8_t encoded[sizeof(page) + 8];
-  Rns::MsgPack w(encoded, sizeof(encoded));
-  w.bin((const uint8_t*)page, n);
-  if (!w.ok()) return {RNS::Bytes::NONE};
+  //
+  // One buffer, not two. The msgpack header is written into three bytes
+  // reserved ahead of the text rather than the whole page being copied into a
+  // second buffer to be encoded — which halves what a request costs the stack
+  // of the task that also drives the radio and the whole Reticulum loop.
+  uint8_t out[3 + 900];
+  const size_t n = Rns::NomadNet::index(st, (char*)out + 3, sizeof(out) - 3);
+  if (!n || n > 0xFFFF) return {RNS::Bytes::NONE};
+  out[0] = 0xC5;                                  // bin16: fixed width, so the text never moves
+  out[1] = (uint8_t)(n >> 8);
+  out[2] = (uint8_t)n;
   log_i("nomadnet: served the index page (%u bytes)", (unsigned)n);
-  return RNS::Bytes(encoded, w.size());
+  return RNS::Bytes(out, 3 + n);
 }
 
 // A message can reach a delivery address two ways, and a node that handles
