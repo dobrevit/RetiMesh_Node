@@ -304,7 +304,7 @@ public. `/messages.html` is the page that renders it, and is gated the same way.
 
 ```json
 { "address": "2aa670cd82b918e2cf5457f46f5e3c44", "stored": 3, "newest": 3,
-  "boot_id": 1140900812, "uptime_ms": 106032, "more": false,
+  "slots": 50, "boot_id": 1140900812, "uptime_ms": 106032, "more": false,
   "messages": [ { "seq": 3, "from": "5f61718a…", "standing": "verified",
                   "via": "link", "sent_at": 1788172420.6,
                   "boot_id": 1140900812, "boot_ms": 85642, "text": "…" } ] }
@@ -320,9 +320,15 @@ public. `/messages.html` is the page that renders it, and is gated the same way.
   node's `millis()` when it took the message in, and is only comparable with
   `uptime_ms` when `boot_id` matches the document's: `millis()` starts again
   at every restart, so a message from an earlier run has no age, only a date.
-- `?n=` how many to return (1–50, default 12) and `?before=<seq>` for the next
-  page. `more` says whether another page exists. Fifty are kept on the store;
-  older ones are overwritten.
+- `?n=` how many to return and `?before=<seq>` for the next page; `more` says
+  whether another page exists. The cap is what a board can render, not how
+  many are kept: 1–16, default 12. Anything else is `400` — the console
+  refuses the same values, from the same rule. `slots` is how many the ring
+  holds (50), so a client does not have to assume it.
+- Arrivals are rate limited before they reach the store and a message the
+  sender retransmits is not stored twice; `lxmf_not_stored` in the console's
+  `STATUS` counts what was refused. The delivery address is reachable by
+  anyone who can reach the node, and every stored message is a flash write.
 
 ## Bulletin board (public)
 - `GET /api/board` → `[{"id":1,"author":"…","text":"…"}]` (ordered, no timestamps — no RTC)

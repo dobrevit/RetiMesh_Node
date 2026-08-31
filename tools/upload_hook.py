@@ -104,8 +104,38 @@ def after_upload(source, target, env):  # noqa: ARG001
     if info:
         _log(f"application is back: {info}")
     else:
-        _log(f"the application did not announce itself within {wait:.0f} s; if the board is still in the "
-             "downloader, press RST — and if it stays silent, see docs/local-link.md#recovery")
+        # Two very different states look the same from here, and the advice
+        # that fits one is wrong for the other.
+        #
+        # On a native-USB board the application often *is* running — serving
+        # its portal, answering Reticulum, announcing over LoRa — with only
+        # its CDC endpoint dead, because the software entry into the ROM
+        # downloader leaves the USB unit in a state the return leg does not
+        # re-arm. RST does not clear that; only a power cycle does, which the
+        # design already knew about for the non-OTG case
+        # (docs/local-link.md#recovery, BootloaderPlan.h). Telling an operator
+        # to press RST there costs them a reset that cannot work and leaves
+        # them thinking the node is dead when it is on the network.
+        #
+        # And it matters beyond this line: the console is the only hand-off
+        # this board has — the firmware does not honour the 1200-baud touch on
+        # that port — so a CDC that never came back makes the *next* upload
+        # fail at the hand-off rather than here, where the cause is visible.
+        native = False
+        try:
+            hit = device.select_port(device.list_ports(), device=port) if port else None
+            native = bool(hit and hit.kind == "retimesh_composite")
+        except Exception:                      # never fail an upload over advice
+            pass
+        if native:
+            _log(f"the console did not answer within {wait:.0f} s. On this board that usually means the "
+                 "application is running but its USB serial endpoint did not come back — try its portal "
+                 "or Reticulum port before assuming the worst. Power-cycle it (RST is not enough after a "
+                 "software entry into the downloader) before the next upload, which needs this console "
+                 "to hand off. If it is silent everywhere too, see docs/local-link.md#recovery")
+        else:
+            _log(f"the application did not announce itself within {wait:.0f} s; if the board is still in the "
+                 "downloader, press RST — and if it stays silent, see docs/local-link.md#recovery")
 
 
 # Both upload targets: the web app needs the ROM downloader exactly as the

@@ -147,6 +147,78 @@ static void test_a_record_is_the_size_the_slot_arithmetic_assumes() {
   TEST_ASSERT_TRUE(40 + kInboxTextMax <= kInboxRecordSize);
 }
 
+static void test_a_timestamp_that_is_not_a_number_is_stored_as_no_clock() {
+  // parseLxmf copies the eight bytes the sender sent, and the console turns
+  // the result into an integer. Converting a NaN or an infinity that way is
+  // undefined behaviour on a value a stranger chose, so it never gets that
+  // far: anything outside a plausible epoch second becomes zero, which every
+  // reader already shows as "no clock".
+  const double nan = 0.0 / 0.0, inf = 1.0 / 0.0;
+  TEST_ASSERT_TRUE(inboxSentAt(nan) == 0.0);
+  TEST_ASSERT_TRUE(inboxSentAt(inf) == 0.0);
+  TEST_ASSERT_TRUE(inboxSentAt(-inf) == 0.0);
+  TEST_ASSERT_TRUE(inboxSentAt(-1.0) == 0.0);
+  TEST_ASSERT_TRUE(inboxSentAt(1e300) == 0.0);
+  TEST_ASSERT_TRUE(inboxSentAt(0.0) == 0.0);
+  TEST_ASSERT_TRUE(inboxSentAt(1767225600.5) == 1767225600.5);   // an ordinary one survives
+}
+
+static void test_a_stored_timestamp_is_sanitised_both_ways() {
+  // On the way in, so the file never holds one; and on the way out, because a
+  // store is a file on a card somebody can move between nodes.
+  InboxRecord r = sample(4, "hi");
+  r.sentAt = 0.0 / 0.0;
+  uint8_t buf[kInboxRecordSize];
+  encodeInbox(r, buf);
+  InboxRecord out{};
+  TEST_ASSERT_TRUE(decodeInbox(buf, out));
+  TEST_ASSERT_TRUE(out.sentAt == 0.0);
+
+  // ...and a file that already holds a bad one, written by something else.
+  const double huge = 1e300;
+  uint64_t bits = 0;
+  memcpy(&bits, &huge, 8);
+  for (int i = 0; i < 8; i++) buf[12 + i] = (uint8_t)(bits >> (8 * i));
+  TEST_ASSERT_TRUE(decodeInbox(buf, out));
+  TEST_ASSERT_TRUE(out.sentAt == 0.0);
+}
+
+static void test_the_page_size_rule_is_one_rule() {
+  // The console and the page had a spelling each, with different defaults and
+  // opposite behaviour on a bad value, so one node gave two answers to one
+  // question. This is the only rule now, and these are the answers both give.
+  size_t n = 0;
+  TEST_ASSERT_TRUE(inboxPageSize(nullptr, n));
+  TEST_ASSERT_EQUAL_size_t(kInboxPageDefault, n);
+  TEST_ASSERT_TRUE(inboxPageSize("", n));
+  TEST_ASSERT_EQUAL_size_t(kInboxPageDefault, n);
+  TEST_ASSERT_TRUE(inboxPageSize("1", n));
+  TEST_ASSERT_EQUAL_size_t(1, n);
+  TEST_ASSERT_TRUE(inboxPageSize("16", n));
+  TEST_ASSERT_EQUAL_size_t(16, n);
+}
+
+static void test_a_page_size_out_of_range_or_not_a_number_is_refused() {
+  size_t n = 99;
+  TEST_ASSERT_FALSE(inboxPageSize("0", n));
+  TEST_ASSERT_FALSE(inboxPageSize("17", n));
+  TEST_ASSERT_FALSE(inboxPageSize("50", n));         // the ring's depth is not a page
+  TEST_ASSERT_FALSE(inboxPageSize("abc", n));
+  TEST_ASSERT_FALSE(inboxPageSize("-1", n));
+  TEST_ASSERT_FALSE(inboxPageSize("1 ", n));
+  // A digit string long enough to wrap a size_t must be refused on its way
+  // through rather than by the range check at the end.
+  TEST_ASSERT_FALSE(inboxPageSize("99999999999999999999999", n));
+}
+
+static void test_a_page_that_can_be_asked_for_fits_what_a_small_board_has() {
+  // The cap used to be the ring's fifty, which is the allocation the handler's
+  // own comment says will not fit. This is the assertion that keeps the two
+  // honest with each other.
+  TEST_ASSERT_TRUE(kInboxPageMax < kInboxSlots);
+  TEST_ASSERT_TRUE(kInboxPageDefault <= kInboxPageMax);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_a_record_reads_back_as_what_was_written);
@@ -159,5 +231,10 @@ int main() {
   RUN_TEST(test_the_slot_arithmetic_survives_a_sequence_that_wraps_at_32_bits);
   RUN_TEST(test_the_three_standings_have_three_different_words);
   RUN_TEST(test_a_record_is_the_size_the_slot_arithmetic_assumes);
+  RUN_TEST(test_a_timestamp_that_is_not_a_number_is_stored_as_no_clock);
+  RUN_TEST(test_a_stored_timestamp_is_sanitised_both_ways);
+  RUN_TEST(test_the_page_size_rule_is_one_rule);
+  RUN_TEST(test_a_page_size_out_of_range_or_not_a_number_is_refused);
+  RUN_TEST(test_a_page_that_can_be_asked_for_fits_what_a_small_board_has);
   return UNITY_END();
 }
