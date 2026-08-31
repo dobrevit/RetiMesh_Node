@@ -196,10 +196,22 @@ public:
     return true;
   }
   void loop() override {
+    // Labelled so a stall here reads as this interface rather than as the
+    // library loop that calls it — "reticulum" covers four steps and three of
+    // them are somebody else's code (LoopWatch.h).
+    RNS_PHASE("iface-lora");
     refreshBitrate();
     size_t sz = 0;
     uint8_t* item;
-    while ((item = (uint8_t*)xRingbufferReceive(sRxRing, &sz, 0)) != nullptr) {
+    // Bounded. This runs inside one pass of the Reticulum loop, which also
+    // drains the client ring, sends replies and runs housekeeping — so a drain
+    // that keeps going while the radio keeps filling holds up everything else
+    // on that task, and the task runs at a higher priority than the Arduino
+    // loop on the same core. Whatever is left stays in the ring and is taken
+    // next pass, a few milliseconds later; at LoRa rates the cap is never
+    // reached in ordinary traffic.
+    unsigned budget = kRxDrainPerPass;
+    while (budget-- && (item = (uint8_t*)xRingbufferReceive(sRxRing, &sz, 0)) != nullptr) {
       // The reading the radio took of this frame, carried with it rather than
       // sampled now: draining three at once used to stamp all three with the
       // newest one's RSSI (Config.h, LoRaRxFrame).
@@ -219,8 +231,12 @@ public:
       }
       vRingbufferReturnItem(sRxRing, item);
     }
+    RNS_PHASE("reticulum");            // back to the library's own steps
   }
 private:
+  // Frames taken from the radio's ring in one pass. Far above any rate LoRa
+  // can deliver, and low enough that one busy interface cannot own the task.
+  static const unsigned kRxDrainPerPass = 16;
   uint8_t _sf = 0, _cr = 0;
   float   _bw = 0;
 };
