@@ -231,7 +231,13 @@ public:
       }
       vRingbufferReturnItem(sRxRing, item);
     }
-    RNS_PHASE("reticulum");            // back to the library's own steps
+    // Not "reticulum" again: that is the label on the way *in*, and reusing it
+    // here made a stall before the interface loops read exactly like one after
+    // them. Reticulum::loop() runs its own jobs, then every interface, then
+    // the filesystem, then Transport::loop() — so the three labels now split
+    // that sequence in two at the only point we can reach from outside the
+    // library (LoopWatch.h).
+    RNS_PHASE("post-iface");
   }
 private:
   // Frames taken from the radio's ring in one pass. Far above any rate LoRa

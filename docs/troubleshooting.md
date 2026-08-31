@@ -110,7 +110,14 @@ comes back. The phases are the calls each task makes:
 | Task | Phases |
 |---|---|
 | `loop` | `wifi`, `bootloader`, `console-tcp`, `console`, `links`, `inbox`, `rns-admin`, `leds`, `diag`, `delay` |
-| `rns` | `log-mute`, `replies`, `events`, `drain-tcp`, `reticulum`, `announce`, `snapshots`, `idle` |
+| `rns` | `log-mute`, `replies`, `events`, `drain-tcp`, `reticulum`, `iface-lora`, `post-iface`, `announce`, `snapshots`, `idle` |
+
+`reticulum`, `iface-lora` and `post-iface` split one library call three ways.
+`Reticulum::loop()` runs its own jobs, then every interface's loop, then the
+filesystem, then `Transport::loop()`; our LoRa interface is the only part of
+that we can label from outside, so `reticulum` means it stalled before the
+interfaces ran, `iface-lora` means inside ours, and `post-iface` means after
+them — the filesystem loop or Transport's jobs.
 
 **Read it over the network, not the cable.** `GET /api/status` carries the same
 thing and keeps answering when neither task does:
