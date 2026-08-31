@@ -17,8 +17,14 @@
 // with RetiMesh Node. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================================
-//  MsgPack.h — writing msgpack, for the one place that needs more than a
+//  MsgPackWriter.h — writing msgpack, for the one place that needs more than a
 //  fixed shape
+//
+//  Named for what it does rather than for the format, because <MsgPack.h> is
+//  already taken: microReticulum includes the hideakitai library by that name
+//  and -I src/rns is on every build here, so a file called MsgPack.h in this
+//  directory is one include-order change away from being handed to a
+//  dependency that wanted the other one.
 //
 //  LxmfFormat.h writes the two payloads this node used to send by laying out
 //  their bytes directly, which is right when the shape never varies. Telemetry
@@ -107,6 +113,27 @@ public:
     if (n <= 0xFF) put(0xC4).put((uint8_t)n);
     else           put(0xC5).be(n, 2);
     return raw(p, n);
+  }
+
+  // A double narrowed to an integer field, held to that field's range rather
+  // than allowed to wrap. Converting an out-of-range double to an integer type
+  // is undefined in C++ and in practice wraps, which does not make a reading
+  // wrong by a little: an accuracy estimate of 700 m becomes a confident
+  // 44.6 m, which is worse than no reading at all.
+  static int32_t clampI32(double v) {
+    if (v <= -2147483648.0) return INT32_MIN;
+    if (v >=  2147483647.0) return INT32_MAX;
+    return (int32_t)v;
+  }
+  static uint32_t clampU32(double v) {
+    if (v <= 0.0) return 0;
+    if (v >= 4294967295.0) return UINT32_MAX;
+    return (uint32_t)v;
+  }
+  static uint16_t clampU16(double v) {
+    if (v <= 0.0) return 0;
+    if (v >= 65535.0) return UINT16_MAX;
+    return (uint16_t)v;
   }
 
   // A big-endian signed integer of a fixed width, as bytes rather than as a

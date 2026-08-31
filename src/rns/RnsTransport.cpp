@@ -669,15 +669,18 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
         // this feature is defended by true: one short reply for one short
         // request, never four.
         for (size_t k = 0; k < n; k++) {
-          // A telemetry request is answered with the node's readings and no
-          // text — the readings are the answer, and a sentence beside them
-          // would appear in the conversation as a message somebody sent.
-          const bool wantsTelemetry = cmds[k].id == Rns::kCommandTelemetry;
-          char answer[Rns::Commands::kReplyMax];
+          // Which commands are answered, and how, is LxmfCommands.h's to say —
+          // both this and reply() ask it, so they cannot come to disagree
+          // about whether telemetry is answered.
+          const Rns::Commands::Answer kind = Rns::Commands::answers(cmds[k].id);
+          if (kind == Rns::Commands::Answer::None) continue;
+          const bool wantsTelemetry = kind == Rns::Commands::Answer::Telemetry;
+          char answer[Rns::Commands::kReplyMax] = "";
+          // A telemetry answer carries readings and no text: a sentence beside
+          // them would appear in the conversation as a message somebody sent.
           if (!wantsTelemetry &&
               !Rns::Commands::reply(cmds[k], signal, answer, sizeof(answer))) continue;
-          if (wantsTelemetry) answer[0] = '\0';
-          if (queueLxmfTelemetry(m.sourceHash, answer, wantsTelemetry)) {
+          if (queueLxmfTelemetry(m.sourceHash, answer, wantsTelemetry, signal)) {
             // Stamped only now. Stamping before knowing an answer exists spent
             // the sender's ten seconds on a command this node does not answer,
             // so a telemetry request made the ping after it look like silence.
@@ -853,13 +856,26 @@ LxmfState lxmf() {
 // it: a node with no cell says nothing about a battery rather than reporting
 // zero percent, and a receiver with no fix reports no position rather than the
 // Atlantic. What a client cannot see it does not have to disbelieve.
-static Rns::Telemetry::Snapshot telemetrySnapshot() {
-  Rns::Telemetry::Snapshot s;
-  s.utc = (uint64_t)time(nullptr);
+// Any clock reading before this is uptime rather than a date: nothing here
+// sets the clock except a GNSS receiver, so a board without one counts from
+// the epoch at boot. 2025-01-01, comfortably before any node this firmware
+// runs on was built and comfortably after anything a counter reaches.
+static const uint64_t kClockIsRealAfter = 1735689600ULL;
 
-  static char info[64];
-  snprintf(info, sizeof(info), "RetiMesh Node %s (%s)", FW_VERSION, BOARD_NAME);
-  s.information = info;
+static Rns::Telemetry::Snapshot telemetrySnapshot(const Rns::Commands::Signal& signal) {
+  Rns::Telemetry::Snapshot s;
+  // Only a clock somebody set. Nothing here runs NTP, and a node without a
+  // GNSS receiver has never had its clock set at all — time() then counts from
+  // the epoch at boot, so two minutes in it says 1970-01-01 00:02. That is not
+  // a slightly wrong reading: Sideband keys every stored entry and every point
+  // it plots by this timestamp, so it would file the node's whole history in
+  // 1970 and place every other reading with it. Anything before this floor is
+  // uptime wearing a date.
+  const uint64_t now = (uint64_t)time(nullptr);
+  s.utc = now > kClockIsRealAfter ? now : 0;
+
+  snprintf(s.information, sizeof(s.information), "RetiMesh Node %s (%s)",
+           FW_VERSION, BOARD_NAME);
 
   const Power::Battery b = Power::battery();
   if (b.present) {
@@ -875,7 +891,7 @@ static Rns::Telemetry::Snapshot telemetrySnapshot() {
   // publish, and the setting that governs the public status API governs this
   // for the same reason — it is the same disclosure to a wider audience.
   const Gps::Fix fix = Gps::fix();
-  if (fix.valid && settings.radio().gpsSharePosition) {
+  if (fix.valid && settings.radio().gpsSharePosition && s.utc) {
     s.havePosition = true;
     s.latitude = fix.latitude;
     s.longitude = fix.longitude;
@@ -889,11 +905,14 @@ static Rns::Telemetry::Snapshot telemetrySnapshot() {
     s.positionAt = s.utc > fix.ageMs / 1000 ? s.utc - fix.ageMs / 1000 : s.utc;
   }
 
-  if (g_stats.loraRxPackets) {
+  // What was heard of the message that asked, carried from there rather than
+  // read from the radio now. A request that arrived over Wi-Fi or a link has
+  // no reading at all, and says so instead of borrowing the last LoRa frame's.
+  if (!isnan(signal.rssi) || !isnan(signal.snr)) {
     s.haveSignal = true;
-    s.rssi = g_stats.lastRssi;
-    s.snr  = g_stats.lastSnr;
-    s.quality = loraQualityPercent(g_stats.lastSnr, settings.radio().sf);
+    s.rssi = isnan(signal.rssi) ? 0.0f : signal.rssi;
+    s.snr  = isnan(signal.snr) ? 0.0f : signal.snr;
+    s.quality = isnan(signal.q) ? 0 : (uint8_t)signal.q;
   }
 
   s.haveProcessor = true;
@@ -910,12 +929,38 @@ static Rns::Telemetry::Snapshot telemetrySnapshot() {
     s.heapUsed = heapAll - heapFree;
   }
 
-  const uint64_t flashAll = RnsFileSystem::backend() ? LittleFS.totalBytes() : 0;
+  // Internal flash, and the card as its own entry where the store lives there.
+  // Reporting only the first showed an operator a figure that never moved
+  // while the card filled underneath it.
+  //
+  // Cached, because LittleFS::usedBytes() walks the filesystem to count used
+  // blocks and holds its lock while it does. This runs on the task that drains
+  // the LoRa receive ring, and a remote peer can ask for telemetry every ten
+  // seconds — a traversal on that path is a stranger's way of making the node
+  // drop frames. A minute-old figure is a perfectly good answer to "how full
+  // is it".
+  static uint32_t storageAtMs = 0;
+  static uint64_t flashAll = 0, flashUsed = 0;
+  if (!storageAtMs || (uint32_t)(millis() - storageAtMs) > 60000) {
+    flashAll = LittleFS.totalBytes();
+    flashUsed = flashAll ? LittleFS.usedBytes() : 0;
+    storageAtMs = millis();
+  }
   if (flashAll) {
     s.haveStorage = true;
     s.flashCapacity = flashAll;
-    s.flashUsed = LittleFS.usedBytes();
+    s.flashUsed = flashUsed;
   }
+#if HAS_SD
+  // The card's own figures are sampled by the card driver already, so asking
+  // costs nothing here.
+  const SdCard::Info card = sdCard.info();
+  if (card.volumeBytes) {
+    s.haveCard = true;
+    s.cardCapacity = card.volumeBytes;
+    s.cardUsed = card.usedBytes;
+  }
+#endif
   return s;
 }
 
@@ -924,24 +969,37 @@ static Rns::Telemetry::Snapshot telemetrySnapshot() {
 // stays small on a board that has little to spare, and — more to the point —
 // so the readings are the ones at the moment of sending rather than at the
 // moment of asking.
-struct PendingReply { uint8_t dest[16]; char text[256]; bool telemetry; };
+// The signal travels with the answer because it is a fact about the packet
+// that asked, not about the node at the moment of replying. Read from the
+// radio's latest instead, a telemetry answer reported whatever frame arrived
+// in between — so a peer at the edge of coverage was told it had a perfect
+// link, because a neighbour two metres away had spoken since. That is the
+// same fault the frame carrier fixed on the way in.
+struct PendingReply {
+  uint8_t  dest[16];
+  char     text[256];
+  bool     telemetry;
+  Rns::Commands::Signal signal;
+};
 static QueueHandle_t sReplyQueue = nullptr;
 
 bool queueLxmfReply(const uint8_t destHash[16], const char* text) {
-  return queueLxmfTelemetry(destHash, text, false);
+  return queueLxmfTelemetry(destHash, text, false, {});
 }
 
-bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry) {
+bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry,
+                        const Rns::Commands::Signal& signal) {
   if (!sReplyQueue) return false;
   PendingReply r{};
   memcpy(r.dest, destHash, 16);
   strlcpy(r.text, text ? text : "", sizeof(r.text));
   r.telemetry = telemetry;
+  r.signal = signal;
   return xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
 }
 
-static Rns::Telemetry::Snapshot telemetrySnapshot();
-static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry) {
+static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry,
+                     const Rns::Commands::Signal& signal) {
   if (!sStarted || !lxmfDest) return false;
   RNS::Identity peer = senderKey(destHash);
   if (!peer) {
@@ -959,7 +1017,7 @@ static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetr
   uint8_t fields[288];
   size_t flen = 0;
   if (telemetry) {
-    flen = Rns::Telemetry::fields(telemetrySnapshot(), fields, sizeof(fields));
+    flen = Rns::Telemetry::fields(telemetrySnapshot(signal), fields, sizeof(fields));
     if (!flen) log_w("lxmf: the telemetry document did not fit; answering without it");
   }
   const size_t plen = Rns::lxmfPayload((double)time(nullptr), "", text, payload, sizeof(payload),
@@ -1300,7 +1358,7 @@ void loop() {
     // that owns the library (queueLxmfReply above).
     if (sReplyQueue) {
       PendingReply r;
-      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE && !sendLxmf(r.dest, r.text, r.telemetry))
+      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE && !sendLxmf(r.dest, r.text, r.telemetry, r.signal))
         log_w("lxmf: could not send an answer to %s", RNS::Bytes(r.dest, 16).toHex().c_str());
     }
     processEvents();

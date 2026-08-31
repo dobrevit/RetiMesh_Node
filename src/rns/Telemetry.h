@@ -55,7 +55,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "MsgPack.h"
+#include "MsgPackWriter.h"
 
 namespace Rns {
 namespace Telemetry {
@@ -97,7 +97,10 @@ struct Snapshot {
   float    rssi = 0.0f, snr = 0.0f;
   uint8_t  quality = 0;
 
-  const char* information = nullptr;   // firmware and board, in a line
+  // Carried, not pointed at. A pointer here aliased one function-local buffer
+  // across every snapshot ever taken, so holding two at once silently gave
+  // both the second one's text.
+  char     information[64] = "";
 
   bool     haveMemory = false;
   uint64_t heapCapacity = 0, heapUsed = 0;
@@ -105,43 +108,42 @@ struct Snapshot {
   uint64_t flashCapacity = 0, flashUsed = 0;
   bool     haveProcessor = false;
   uint64_t cpuHz = 0;
+  bool     haveCard = false;           // a card the node keeps its store on
+  uint64_t cardCapacity = 0, cardUsed = 0;
 };
-
-// How many sensors a snapshot will produce. Written before the map header,
-// which has to say how many pairs follow — a header promising more than
-// arrives is a document nothing can read.
-inline size_t sensorCount(const Snapshot& s) {
-  size_t n = 0;
-  if (s.utc)           n++;
-  if (s.information)   n++;
-  if (s.haveBattery)   n++;
-  if (s.havePosition)  n++;
-  if (s.haveSignal)    n++;
-  if (s.haveProcessor) n++;
-  if (s.haveMemory)    n++;
-  if (s.haveStorage)   n++;
-  return n;
-}
 
 // The telemetry document: {sensor id: reading}. Returns bytes written, or 0 if
 // it did not fit — never a partial document, because half a msgpack map is not
 // a smaller telemetry reading, it is a parse error at the far end.
+// The map header says how many pairs follow, and a header that disagrees with
+// the body is a document nothing can read — not a shorter reading, a parse
+// failure that takes the whole message with it. So the members are written
+// first and counted as they go, and the header is written afterwards into the
+// byte reserved for it. There is no second list of conditions to keep in step.
+//
+// One byte is always enough: a fixmap holds fifteen and this node has eight
+// sensors. The count is checked anyway, because that is the assumption the
+// single reserved byte rests on.
 inline size_t build(const Snapshot& s, uint8_t* out, size_t cap) {
-  MsgPack w(out, cap);
-  w.map(sensorCount(s));
+  if (cap < 1) return 0;
+  MsgPack w(out + 1, cap - 1);
+  size_t n = 0;
+  auto sensor = [&](uint32_t sid) -> MsgPack& { n++; return w.uint(sid); };
 
-  // Time, which Sideband's own Telemeter always includes.
-  if (s.utc) w.uint(kSidTime).uint(s.utc);
+  // Time, which Sideband's own Telemeter always includes. Absent where the
+  // node's clock was never set: it places every other reading, so a wrong one
+  // is worse than none (see the caller).
+  if (s.utc) sensor(kSidTime).uint(s.utc);
 
   // A line about what this is. str, not bin: Sideband stores it with str()
   // and renders it as it stands, so bytes would show as b'...'.
-  if (s.information) w.uint(kSidInformation).str(s.information);
+  if (s.information[0]) sensor(kSidInformation).str(s.information);
 
   // [percent, charging, temperature]. Charging is nil where the board cannot
   // answer it, rather than a false that reads as "plugged in and not taking
   // charge" (Power.h). No temperature sensor on any board here yet.
   if (s.haveBattery) {
-    w.uint(kSidBattery).array(3).real(s.batteryPercent);
+    sensor(kSidBattery).array(3).real(s.batteryPercent);
     if (s.chargeKnown) w.boolean(s.charging); else w.nil();
     w.nil();
   }
@@ -150,31 +152,43 @@ inline size_t build(const Snapshot& s, uint8_t* out, size_t cap) {
   // side. Bearing is zero because nothing here measures a heading, and a node
   // on a hill has none; sending zero is the same claim as standing still.
   if (s.havePosition) {
-    w.uint(kSidLocation).array(7)
-     .binI32((int32_t)(s.latitude * 1e6))
-     .binI32((int32_t)(s.longitude * 1e6))
-     .binI32((int32_t)(s.altitudeM * 1e2))
-     .binU32((uint32_t)(s.speedKmh * 1e2))
+    sensor(kSidLocation).array(7)
+     .binI32(MsgPack::clampI32(s.latitude * 1e6))
+     .binI32(MsgPack::clampI32(s.longitude * 1e6))
+     .binI32(MsgPack::clampI32((double)s.altitudeM * 1e2))
+     .binU32(MsgPack::clampU32((double)s.speedKmh * 1e2))
      .binI32(0)
-     .binU16((uint16_t)(s.accuracyM * 1e2))
+     .binU16(MsgPack::clampU16((double)s.accuracyM * 1e2))
      .uint(s.positionAt);
   }
 
   // [rssi, snr, quality] — what this node heard of the message that asked.
   if (s.haveSignal) {
-    w.uint(kSidPhysicalLink).array(3).real(s.rssi).real(s.snr).uint(s.quality);
+    sensor(kSidPhysicalLink).array(3).real(s.rssi).real(s.snr).uint(s.quality);
   }
 
   // These three share a shape: a list of [label, [capacity, used]]. Label 0
   // is the only one this node has of each.
-  auto capacityUsed = [&](uint32_t sid, uint64_t capacity, uint64_t used) {
-    w.uint(sid).array(1).array(2).uint(0).array(2).uint(capacity).uint(used);
+  auto entry = [&](uint32_t label, uint64_t capacity, uint64_t used) {
+    w.array(2).uint(label).array(2).uint(capacity).uint(used);
   };
-  if (s.haveProcessor) capacityUsed(kSidProcessor, s.cpuHz, 0);
-  if (s.haveMemory)    capacityUsed(kSidRam, s.heapCapacity, s.heapUsed);
-  if (s.haveStorage)   capacityUsed(kSidNvm, s.flashCapacity, s.flashUsed);
+  if (s.haveProcessor) { sensor(kSidProcessor).array(1); entry(0, s.cpuHz, 0); }
+  if (s.haveMemory)    { sensor(kSidRam).array(1);       entry(0, s.heapCapacity, s.heapUsed); }
 
-  return w.ok() ? w.size() : 0;
+  // Storage is the one that can be two things. A node keeping its store on a
+  // card has an internal flash that never moves and a card that fills, and
+  // reporting only the first showed an operator a figure that could not
+  // change. The format takes a list, so both go.
+  if (s.haveStorage || s.haveCard) {
+    const size_t parts = (s.haveStorage ? 1u : 0u) + (s.haveCard ? 1u : 0u);
+    sensor(kSidNvm).array(parts);
+    if (s.haveStorage) entry(0, s.flashCapacity, s.flashUsed);
+    if (s.haveCard)    entry(1, s.cardCapacity, s.cardUsed);
+  }
+
+  if (n > 15 || !w.ok()) return 0;          // a fixmap is all the reserved byte holds
+  out[0] = (uint8_t)(0x80 | n);
+  return 1 + w.size();
 }
 
 // The whole fields map an outgoing message carries when it answers a telemetry

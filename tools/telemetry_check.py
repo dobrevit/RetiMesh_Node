@@ -31,21 +31,24 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# A snapshot with everything, and one with what a bare board can answer. The
-# second matters as much as the first: most boards have no receiver and cannot
-# see their charger, and the document they send has to be readable too.
+# Two snapshots. The second is not a lesser version of the first: it carries a
+# negative altitude and a charger the board cannot see, which are the two
+# places where a width or a type is most easily wrong and least easily seen.
 EMITTER = r"""
 #include "Telemetry.h"
 #include <cstdio>
+#include <cstring>
 int main(int argc, char** argv) {
   const bool full = argc > 1 && argv[1][0] == 'f';
   Rns::Telemetry::Snapshot s;
   s.utc = 1767225600;
-  s.information = "RetiMesh Node v0.1.0 (LilyGO T3-S3)";
+  snprintf(s.information, sizeof(s.information), "RetiMesh Node v0.1.0 (LilyGO T3-S3)");
   s.haveBattery = true; s.batteryPercent = 87.5f; s.charging = true; s.chargeKnown = full;
-  if (full) {
-    s.havePosition = true; s.latitude = 42.6977; s.longitude = 23.3219;
-    s.altitudeM = 595.0f; s.speedKmh = 0.0f; s.accuracyM = 7.5f;
+  // A position both ways, and below sea level on one of them: altitude is
+  // the signed field, and a wrong width there puts a node in orbit.
+  s.havePosition = true;
+  { s.latitude = 42.6977; s.longitude = 23.3219;
+    s.altitudeM = full ? 595.0f : -20.5f; s.speedKmh = 0.0f; s.accuracyM = 7.5f;
     s.positionAt = 1767225590;
   }
   s.haveSignal = true; s.rssi = -104.0f; s.snr = 8.75f; s.quality = 62;
@@ -61,7 +64,8 @@ int main(int argc, char** argv) {
 }
 """
 
-EXPECTED = {"time", "information", "battery", "physical_link", "processor", "ram", "nvm"}
+EXPECTED = {"time", "information", "battery", "physical_link",
+            "processor", "ram", "nvm", "location"}
 
 
 def main():
@@ -74,13 +78,14 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "emit.cpp")
         exe = os.path.join(tmp, "emit")
-        open(src, "w").write(EMITTER)
+        with open(src, "w") as fh:
+            fh.write(EMITTER)
         subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra",
                         "-I", os.path.join(ROOT, "src/rns"), "-o", exe, src], check=True)
 
         failed = False
         for mode, label in (("f", "a board with a fix and a charger it can see"),
-                            ("m", "a board with neither")):
+                            ("m", "a board below sea level that cannot see its charger")):
             hexed = subprocess.run([exe, mode], capture_output=True, text=True,
                                    check=True).stdout.strip()
             packed = bytes.fromhex(hexed)
@@ -94,10 +99,6 @@ def main():
             for name, data in readings.items():
                 print(f"  {name:16} {data!r}")
             missing = EXPECTED - set(readings)
-            if mode == "f":
-                missing -= set()
-                if "location" not in readings:
-                    missing.add("location")
             if missing:
                 print(f"  DROPPED by the app: {sorted(missing)}")
                 failed = True

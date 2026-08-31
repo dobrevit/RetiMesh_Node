@@ -26,7 +26,7 @@ using Rns::Telemetry::Snapshot;
 static Snapshot full() {
   Snapshot s;
   s.utc = 1767225600;
-  s.information = "RetiMesh Node v0.1.0 (LilyGO T3-S3)";
+  snprintf(s.information, sizeof(s.information), "RetiMesh Node v0.1.0 (LilyGO T3-S3)");
   s.haveBattery = true; s.batteryPercent = 87.5f; s.charging = true; s.chargeKnown = true;
   s.havePosition = true; s.latitude = 42.6977; s.longitude = 23.3219;
   s.altitudeM = 595.0f; s.speedKmh = 0.0f; s.accuracyM = 7.5f; s.positionAt = 1767225590;
@@ -48,7 +48,9 @@ static void test_a_document_holds_every_sensor_the_node_has() {
   const Snapshot s = full();
   const size_t n = Telemetry::build(s, buf, sizeof(buf));
   TEST_ASSERT_TRUE(n > 0);
-  TEST_ASSERT_EQUAL_size_t(8, Telemetry::sensorCount(s));
+  // The header says how many pairs follow, and it is written from the members
+  // actually emitted rather than from a second list of conditions.
+  TEST_ASSERT_EQUAL_HEX8(0x88, buf[0]);
 
   const uint32_t expect[] = { Telemetry::kSidTime, Telemetry::kSidInformation,
                               Telemetry::kSidBattery, Telemetry::kSidLocation,
@@ -69,7 +71,7 @@ static void test_a_board_says_nothing_about_what_it_cannot_measure() {
   uint8_t buf[512];
   const size_t n = Telemetry::build(s, buf, sizeof(buf));
   TEST_ASSERT_TRUE(n > 0);
-  TEST_ASSERT_EQUAL_size_t(1, Telemetry::sensorCount(s));
+  TEST_ASSERT_EQUAL_HEX8(0x81, buf[0]);            // one pair, and it is the clock
   const uint8_t* v = nullptr; size_t vl = 0;
   TEST_ASSERT_TRUE(sensor(buf, n, Telemetry::kSidTime, v, vl));
   TEST_ASSERT_FALSE(sensor(buf, n, Telemetry::kSidBattery, v, vl));
@@ -90,20 +92,57 @@ static void test_information_is_a_string_and_not_bytes() {
 }
 
 // A position is packed as bytes, big-endian fixed point — struct.pack("!i")
-// on the other side — not as msgpack numbers.
+// on the other side — not as msgpack numbers. Every member is checked, not
+// only the first: the widths and the signedness differ between them, and
+// altitude is the one that matters most because a node can sit below sea
+// level and the field is signed where speed and accuracy are not.
 static void test_a_position_is_fixed_point_bytes_and_survives_the_trip() {
   uint8_t buf[512];
-  const size_t n = Telemetry::build(full(), buf, sizeof(buf));
+  Snapshot s = full();
+  s.altitudeM = -20.5f;                              // Amsterdam, or a mine
+  const size_t n = Telemetry::build(s, buf, sizeof(buf));
   const uint8_t* v = nullptr; size_t vl = 0;
   TEST_ASSERT_TRUE(sensor(buf, n, Telemetry::kSidLocation, v, vl));
-  TEST_ASSERT_EQUAL_HEX8(0x97, v[0]);                  // fixarray of seven
+  TEST_ASSERT_EQUAL_HEX8(0x97, v[0]);                // fixarray of seven
 
-  // The first member is bin8 of four: latitude x 1e6.
-  TEST_ASSERT_EQUAL_HEX8(0xC4, v[1]);
-  TEST_ASSERT_EQUAL_HEX8(4, v[2]);
-  const int32_t lat = ((int32_t)v[3] << 24) | ((int32_t)v[4] << 16) |
-                      ((int32_t)v[5] << 8) | v[6];
-  TEST_ASSERT_EQUAL_INT32(42697700, lat);
+  // Each member is bin of a fixed width; walk them and check value and size.
+  struct { size_t width; int64_t want; bool sign; } expect[] = {
+    { 4, 42697700, true },      // latitude  x 1e6
+    { 4, 23321900, true },      // longitude x 1e6
+    { 4, -2050,    true },      // altitude  x 1e2, signed
+    { 4, 0,        false },     // speed     x 1e2, unsigned
+    { 4, 0,        true },      // bearing   x 1e2, nothing here measures one
+    { 2, 750,      false },     // accuracy  x 1e2, unsigned
+  };
+  size_t at = 1;
+  for (size_t k = 0; k < 6; k++) {
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xC4, v[at], "each member is msgpack bin");
+    TEST_ASSERT_EQUAL_size_t(expect[k].width, v[at + 1]);
+    int64_t got = 0;
+    for (size_t b = 0; b < expect[k].width; b++) got = (got << 8) | v[at + 2 + b];
+    if (expect[k].sign) {                            // sign-extend what was signed
+      const int64_t top = (int64_t)1 << (expect[k].width * 8 - 1);
+      if (got & top) got -= (int64_t)1 << (expect[k].width * 8);
+    }
+    char why[40]; snprintf(why, sizeof(why), "location member %u", (unsigned)k);
+    TEST_ASSERT_EQUAL_INT64_MESSAGE(expect[k].want, got, why);
+    at += 2 + expect[k].width;
+  }
+}
+
+// A reading too large for its field is held to that field, not wrapped. An
+// accuracy estimate of 700 m becoming a confident 44.6 m is worse than none.
+static void test_a_reading_too_large_for_its_field_is_clamped_not_wrapped() {
+  uint8_t buf[512];
+  Snapshot s = full();
+  s.accuracyM = 900.0f;                              // x100 overflows a uint16
+  const size_t n = Telemetry::build(s, buf, sizeof(buf));
+  const uint8_t* v = nullptr; size_t vl = 0;
+  TEST_ASSERT_TRUE(sensor(buf, n, Telemetry::kSidLocation, v, vl));
+  size_t at = 1;
+  for (size_t k = 0; k < 5; k++) at += 2 + v[at + 1];
+  const uint32_t accuracy = ((uint32_t)v[at + 2] << 8) | v[at + 3];
+  TEST_ASSERT_EQUAL_UINT32(65535, accuracy);
 }
 
 // Charging is nil where the board cannot see its charger, not false. "Not
@@ -121,8 +160,9 @@ static void test_a_charger_a_board_cannot_see_is_not_reported_as_absent() {
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xC0, v[10], "unknown charge state must be nil");
 
   s.chargeKnown = true; s.charging = true;
-  Telemetry::build(s, buf, sizeof(buf));
-  TEST_ASSERT_TRUE(sensor(buf, sizeof(buf), Telemetry::kSidBattery, v, vl));
+  const size_t n2 = Telemetry::build(s, buf, sizeof(buf));
+  TEST_ASSERT_TRUE(n2 > 0);
+  TEST_ASSERT_TRUE(sensor(buf, n2, Telemetry::kSidBattery, v, vl));
   TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xC3, v[10], "a known charge state is a boolean");
 }
 
@@ -199,6 +239,7 @@ int main() {
   RUN_TEST(test_a_board_says_nothing_about_what_it_cannot_measure);
   RUN_TEST(test_information_is_a_string_and_not_bytes);
   RUN_TEST(test_a_position_is_fixed_point_bytes_and_survives_the_trip);
+  RUN_TEST(test_a_reading_too_large_for_its_field_is_clamped_not_wrapped);
   RUN_TEST(test_a_charger_a_board_cannot_see_is_not_reported_as_absent);
   RUN_TEST(test_a_document_that_does_not_fit_is_not_sent_half_written);
   RUN_TEST(test_the_fields_map_carries_the_document_under_its_field);
