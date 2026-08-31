@@ -539,12 +539,44 @@ static void onLxmfResourceConcluded(const RNS::Resource& resource) {
   handleLxmfMessage(const_cast<RNS::Resource&>(resource).data(), Rns::ViaResource);
 }
 
+// A client that has delivered a message over a link then tells the link who
+// it was — LXMF calls this the backchannel, and it is how the two ends reply
+// to each other over one link instead of each opening its own.
+//
+// It is also the answer to the other half of why nothing verifies. A message
+// can only be checked against the sender's public key, and until now the only
+// way to hold one was to have heard that sender announce — which a node that
+// has just rebooted has not done for anybody, so every message it took was
+// marked unverified however honest it was.
+//
+// An identify carries the key itself, with a signature over the link id that
+// microReticulum checks before this is called (Link.cpp), so it is proof and
+// not a claim. And the address it belongs to is not the sender's to choose:
+// an lxmf.delivery hash is derived from the key, so remembering the pair
+// cannot be used to speak for somebody else's address. Remembering it is
+// therefore exactly what hearing the announce would have done, and it makes
+// this sender's next message — over this link, another link, or a single
+// packet — one this node can actually check.
+//
+// It does not rescue the message that came before it, and should not: what
+// standing a message has is a fact about the moment it arrived.
+static void onLxmfIdentified(const RNS::Link& link, const RNS::Identity& identity) {
+  (void)link;
+  if (!identity) return;
+  const Bytes source = RNS::Destination::hash_from_name_and_identity("lxmf.delivery", identity);
+  if (RNS::Identity::recall(source)) return;              // already known; nothing to learn
+  RNS::Identity::remember({Bytes::NONE}, source, identity.get_public_key());
+  log_i("lxmf: %s identified itself on its link; this node can now check what it sends",
+        source.toHex().c_str());
+}
+
 static void onLxmfLink(RNS::Link& link) {
   log_i("lxmf: a client opened a link to the delivery address");
   link.set_packet_callback(onLxmfLinkPacket);
   link.set_resource_strategy(RNS::Type::Link::ACCEPT_ALL);
   link.set_resource_started_callback(onLxmfResourceStarted);
   link.set_resource_concluded_callback(onLxmfResourceConcluded);
+  link.set_remote_identified_callback(onLxmfIdentified);
 }
 
 // A message sent as one packet straight at the delivery address — which is
