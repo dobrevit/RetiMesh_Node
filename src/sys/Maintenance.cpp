@@ -149,10 +149,33 @@ static void doStatus() {
   // Only once the node has been messaged: a line of zeroes on every node
   // that has never been written to is noise.
   const RnsTransport::LxmfState lx = RnsTransport::lxmf();
-  if (lx.received || lx.rejected)
-    dataf("STATUS", "lxmf_rx=%lu lxmf_unverified=%lu lxmf_mismatched=%lu lxmf_rejected=%lu last_from=%s last_verified=%s",
+  // Always, and not only once something has arrived: this is the address
+  // someone has to be told before they can message the node at all, and until
+  // now the only way to learn it was to be listening when an announce went
+  // out.
+  if (lx.address[0]) dataf("STATUS", "lxmf_address=%s", lx.address);
+  if (lx.received || lx.rejected) {
+    dataf("STATUS", "lxmf_rx=%lu lxmf_unverified=%lu lxmf_mismatched=%lu lxmf_rejected=%lu last_from=%s last_verified=%s last_ago_ms=%lu",
           (unsigned long)lx.received, (unsigned long)lx.unverified, (unsigned long)lx.mismatched, (unsigned long)lx.rejected,
-          lx.lastFrom[0] ? lx.lastFrom : "-", lx.lastVerified ? "yes" : "no");
+          lx.lastFrom[0] ? lx.lastFrom : "-", lx.lastVerified ? "yes" : "no",
+          (unsigned long)lx.lastAgoMs);
+    // The message itself, on a line of its own and last on it. It is someone
+    // else's text: it has spaces in it, and putting it in the key=value line
+    // above would make every field after it unparseable. Control characters
+    // are flattened for the same reason a console never prints what arrives
+    // verbatim — an escape sequence in a message is the sender deciding what
+    // the operator's terminal does.
+    if (lx.lastText[0]) {
+      char text[sizeof(lx.lastText)];
+      size_t i = 0;
+      for (; lx.lastText[i] && i < sizeof(text) - 1; i++) {
+        const unsigned char c = (unsigned char)lx.lastText[i];
+        text[i] = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+      }
+      text[i] = '\0';
+      dataf("STATUS", "lxmf_last_text=%s", text);
+    }
+  }
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
         ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),
         !ConsoleServer::connected() ? "none" : ConsoleServer::authenticated() ? "authenticated" : "unauthenticated");

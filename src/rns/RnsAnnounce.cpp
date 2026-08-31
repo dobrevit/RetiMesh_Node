@@ -132,9 +132,6 @@ size_t displayName(const Announce& a, char* out, size_t cap) {
   return k;
 }
 
-
-
-
 } // namespace Rns
 
 // ---------------------------------------------------------------------------

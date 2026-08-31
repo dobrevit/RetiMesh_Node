@@ -108,6 +108,7 @@ struct LxmfState {
   uint32_t unverified;                   // ...of which this many had no sender key to check against
   uint32_t mismatched;                   // ...and this many had a key that did not match the signature
   uint32_t rejected;                     // not an LXMF message at all
+  char     address[33];                  // this node's own delivery address, hex; empty until up
   char     lastFrom[33];                 // source hash, hex; empty if none
   char     lastText[121];
   uint32_t lastAgoMs;                    // 0 when nothing has arrived

@@ -59,6 +59,10 @@ static RNS::Destination lxmfDest({RNS::Type::NONE});
 // smallest thing that makes it visible. A real store belongs with the
 // propagation-node work.
 static std::atomic<uint32_t> sLxmfRx{0}, sLxmfRejected{0}, sLxmfUnverified{0}, sLxmfMismatched{0};
+// The largest transfer this node will assemble in RAM for a delivery. Every
+// administrative command and every written message is far below it; a claim
+// above it is refused rather than believed (onLxmfResourceStarted).
+static constexpr size_t kLxmfResourceMax = 8 * 1024;
 static SemaphoreHandle_t     sLxmfLock = nullptr;
 static char                  sLxmfFrom[33] = "";
 static char                  sLxmfText[121] = "";
@@ -341,20 +345,24 @@ static void applyLogMute() {
 // believe it.
 //
 // Believing it means checking the signature against the sender's public key,
-// and the only way to have that key is to have heard the sender announce.
-// So a message from a stranger is refused rather than shown: an unverified
-// sender hash is a claim, and a node that displayed it would be repeating
-// whatever anyone in earshot cared to put in the field.
+// and the only way to have that key is to have heard the sender announce. A
+// sender this node has not heard cannot be checked at all, which is not the
+// same as one that failed the check — the three outcomes are separated below,
+// and the standing each one earns is what a privileged action will later ask
+// about.
 //
-// A verified message is proved. That is what makes this different from
+// A message that is taken is proved, which is what makes this different from
 // announcing a delivery address and dropping what arrives: the sender's
-// client shows the message delivered, because it was.
-static void handleLxmfMessage(const RNS::Bytes& data, const RNS::Packet& packet, const char* how) {
+// client shows the message delivered, because it was. Returns whether it was
+// taken, which is what the callers prove on — a proof is this node saying
+// "that arrived", and saying it about bytes that were not a message at all
+// would be a lie the sender's client believes.
+static bool handleLxmfMessage(const RNS::Bytes& data, const char* how) {
   Rns::LxmfMessage m;
   if (!Rns::parseLxmf(data.data(), data.size(), m)) {
     sLxmfRejected++;
     log_w("lxmf: a message arrived that is not one; ignored");
-    return;
+    return false;
   }
   // Three outcomes, not two, and the difference matters.
   //
@@ -419,7 +427,12 @@ static void handleLxmfMessage(const RNS::Bytes& data, const RNS::Packet& packet,
   }
 
   sLxmfRx++;
-  if (!verified) sLxmfUnverified++;
+  // "Unverified" is the sender this node has never heard announce — there was
+  // no key to check against. A sender it has heard whose signature does not
+  // match is a different thing entirely, already counted as mismatched just
+  // above, and counting it here as well made the two indistinguishable in the
+  // one place an operator would look to tell them apart.
+  if (!sender) sLxmfUnverified++;
   if (sLxmfLock) {
     Sys::Lock held(sLxmfLock);
     Rns::toHex(m.sourceHash, 16, sLxmfFrom);
@@ -429,13 +442,17 @@ static void handleLxmfMessage(const RNS::Bytes& data, const RNS::Packet& packet,
     sLxmfAtMs = millis();
     sLxmfVerified = verified;
   }
+  // The same three standings the counters keep, said in words. This used to
+  // read off `verified` alone, so a sender whose signature did not match was
+  // reported as one this node had never heard announce — which is the one
+  // thing the log could say that points an operator away from what happened.
   log_i("lxmf: %s message from %s over %s (%u bytes): %.*s",
-        verified ? "verified" : "UNVERIFIED (this node has not heard that sender announce)",
+        verified   ? "verified"
+        : !sender  ? "UNVERIFIED (this node has not heard that sender announce)"
+                   : "UNVERIFIED (the signature does not match the key this node holds)",
         source.toHex().c_str(), how,
         (unsigned)m.contentLen, (int)(m.contentLen > 80 ? 80 : m.contentLen), (const char*)m.content);
-  // Tell the sender it arrived. Without this the message is delivered and
-  // their client says otherwise, which is the same silence as dropping it.
-  const_cast<RNS::Packet&>(packet).prove();
+  return true;
 }
 
 // A message can reach a delivery address two ways, and a node that handles
@@ -453,17 +470,69 @@ static void handleLxmfMessage(const RNS::Bytes& data, const RNS::Packet& packet,
 // up, the client sent its message into it, and the node decrypted it and
 // dropped it on the floor — every message, silently, while the announce it
 // answered looked perfectly healthy.
+// Tell the sender it arrived. Without this the message is delivered and their
+// client says otherwise, which is the same silence as dropping it.
+static void proveIfTaken(const RNS::Packet& packet, bool taken) {
+  if (taken) const_cast<RNS::Packet&>(packet).prove();
+}
+
 static void onLxmfLinkPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
-  handleLxmfMessage(data, packet, "a link");
+  proveIfTaken(packet, handleLxmfMessage(data, "a link"));
+}
+
+// A message too big for one link packet is not sent as several: the client
+// packs it as a Resource and advertises that instead. A link's resource
+// strategy defaults to ACCEPT_NONE, so those advertisements were dropped
+// where the link handles them (Link.cpp) and nothing downstream ever saw the
+// message — the same silent floor the missing link callback used to be, and
+// hit by exactly the messages people write rather than the short ones a test
+// sends.
+//
+// This does not make every long message arrive, and it would be dishonest to
+// leave it looking as though it did. microReticulum has no bz2 and refuses an
+// inbound resource that is flagged compressed (Resource.cpp), while RNS
+// compresses a resource whenever that makes it smaller — which for text is
+// always. So a long message from a real client is still refused, now by the
+// library rather than by this file. What changes here is worth having anyway:
+// an uncompressed resource is delivered instead of dropped, and a compressed
+// one is refused out loud, with a reason an operator can read, instead of
+// vanishing between a link that came up and a message that never appeared.
+static void onLxmfResourceStarted(const RNS::Resource& resource) {
+  // A resource is assembled in RAM before any of it is a message, and the
+  // size is the sender's claim. On a node with a few kilobytes of
+  // byte-addressable RAM left, believing an arbitrary claim is how a stranger
+  // reboots it. The cap is well above any administrative command or written
+  // message and far below what would hurt; past it the transfer is cancelled
+  // rather than attempted, and said out loud so an operator can see why a
+  // large message did not arrive.
+  const size_t size = const_cast<RNS::Resource&>(resource).get_data_size();
+  if (size > kLxmfResourceMax) {
+    log_w("lxmf: refusing a %u byte transfer (this node accepts up to %u); cancelled",
+          (unsigned)size, (unsigned)kLxmfResourceMax);
+    const_cast<RNS::Resource&>(resource).cancel();
+  }
+}
+
+static void onLxmfResourceConcluded(const RNS::Resource& resource) {
+  if (const_cast<RNS::Resource&>(resource).status() != RNS::Type::Resource::COMPLETE) {
+    log_w("lxmf: a transfer over a link did not complete; nothing to read");
+    return;
+  }
+  // No proof to send here. A resource carries its own, exchanged as the
+  // transfer concludes, so the sender's client already knows it arrived.
+  handleLxmfMessage(const_cast<RNS::Resource&>(resource).data(), "a resource over a link");
 }
 
 static void onLxmfLink(RNS::Link& link) {
   log_i("lxmf: a client opened a link to the delivery address");
   link.set_packet_callback(onLxmfLinkPacket);
+  link.set_resource_strategy(RNS::Type::Link::ACCEPT_ALL);
+  link.set_resource_started_callback(onLxmfResourceStarted);
+  link.set_resource_concluded_callback(onLxmfResourceConcluded);
 }
 
 static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
-  handleLxmfMessage(data, packet, "a single packet");
+  proveIfTaken(packet, handleLxmfMessage(data, "a single packet"));
 }
 
 LxmfState lxmf() {
@@ -472,6 +541,7 @@ LxmfState lxmf() {
   s.rejected = sLxmfRejected;
   s.unverified = sLxmfUnverified;
   s.mismatched = sLxmfMismatched;
+  if (sStarted && lxmfDest) strlcpy(s.address, lxmfDest.hash().toHex().c_str(), sizeof(s.address));
   if (sLxmfLock) {
     Sys::Lock held(sLxmfLock);
     strlcpy(s.lastFrom, sLxmfFrom, sizeof(s.lastFrom));
@@ -541,9 +611,7 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
                                 RNS::Type::Destination::SINGLE, "lxmf", "delivery");
     lxmfDest.set_packet_callback(onLxmfPacket);
     lxmfDest.set_link_established_callback(onLxmfLink);
-    // A delivery address has to accept the links clients open to it, or the
-    // link is refused before a message is ever sent over it.
-    lxmfDest.set_proof_strategy(RNS::Type::Destination::PROVE_ALL);
+    log_i("lxmf: this node can be messaged at %s", lxmfDest.hash().toHex().c_str());
     sStarted = true;
     sAnnounceFloorMs = millis() + ANNOUNCE_BOOT_DELAY_MS;
     sNextAnnounceMs  = sAnnounceFloorMs;
@@ -794,9 +862,9 @@ void loop() {
       // rather than the free text above — the two announces describe one node
       // to two audiences (RnsAnnounce.h).
       uint8_t lx[64];
-      const size_t lxLen = Rns::lxmfAppData(wifiManager.ssid(), 0, lx, sizeof(lx));
+      const size_t lxLen = Rns::lxmfAppData(loraRadio.callsign(), 0, lx, sizeof(lx));
       if (lxLen) lxmfDest.announce(Bytes(lx, lxLen));
-      g_stats.announcesTx++;
+      g_stats.announcesTx += lxLen ? 2 : 1;
       // Scattered, not on the dot. Two nodes flashed together boot together
       // and would then announce together for as long as they both run: the
       // interval is fixed and nothing else moves the phase, so their packets

@@ -88,12 +88,41 @@ inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
     if (!need(3)) return false;
     valLen = ((size_t)p[i + 1] << 8) | p[i + 2]; val = p + i + 3; next = i + 3 + valLen;
   }
+  else if (t == 0xDB || t == 0xC6) {                                                            // str32 / bin32
+    if (!need(5)) return false;
+    valLen = ((size_t)p[i + 1] << 24) | ((size_t)p[i + 2] << 16) |
+             ((size_t)p[i + 3] << 8) | p[i + 4];
+    val = p + i + 5; next = i + 5 + valLen;
+    if (next < i) return false;                                                                 // length that wrapped
+  }
   else if (t <= 0x7F || t >= 0xE0)     next = i + 1;                                            // fixint
   else if (t == 0xC0 || t == 0xC2 || t == 0xC3) next = i + 1;                                   // nil, false, true
   else if (t == 0xCC || t == 0xD0)     next = i + 2;
   else if (t == 0xCD || t == 0xD1)     next = i + 3;
   else if (t == 0xCE || t == 0xD2 || t == 0xCA) next = i + 5;                                   // u32/i32/float32
   else if (t == 0xCF || t == 0xD3 || t == 0xCB) next = i + 9;                                   // u64/i64/float64
+  else if (t == 0xDC || t == 0xDD || t == 0xDE || t == 0xDF) {
+    // array16/32 and map16/32. A fields dict with sixteen or more entries is
+    // no longer a fixmap, and refusing it aborted the whole parse — so a
+    // message a real client considered ordinary was counted as not-an-LXMF-
+    // message and went unproven. The header widths differ; the walk does not.
+    const bool wide = (t == 0xDD || t == 0xDF);
+    const bool map  = (t == 0xDE || t == 0xDF);
+    const size_t hdr = wide ? 5 : 3;
+    if (!need(hdr)) return false;
+    size_t count = wide ? (((size_t)p[i+1] << 24) | ((size_t)p[i+2] << 16) |
+                           ((size_t)p[i+3] << 8) | p[i+4])
+                        : (((size_t)p[i+1] << 8) | p[i+2]);
+    size_t members = count * (map ? 2u : 1u);
+    if (members > n) return false;                    // more members than there are bytes
+    next = i + hdr;
+    if (depth == 0) return false;
+    for (size_t k = 0; k < members; k++) {
+      const uint8_t* iv = nullptr; size_t ivl = 0, inext = 0;
+      if (!msgpackNext(p, n, next, iv, ivl, inext, depth - 1)) return false;
+      next = inext;
+    }
+  }
   else if ((t & 0xF0) == 0x80 || (t & 0xF0) == 0x90) {
     // A container is not one element wide. Stepping over just its header left
     // a fields map's contents outside the payload, which is the same class of

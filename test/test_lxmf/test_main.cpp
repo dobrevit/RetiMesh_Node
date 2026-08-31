@@ -189,6 +189,84 @@ static void test_a_nested_container_is_walked_not_stepped_over() {
   TEST_ASSERT_EQUAL_size_t(n - 96, m.payloadLen);
 }
 
+static void test_a_map16_fields_dict_is_walked_like_a_fixmap() {
+  // Sixteen entries is where msgpack stops using a fixmap, and the parser
+  // refused everything past that header — so a message with a large fields
+  // dict was not "a message with fields this node ignores", it was counted as
+  // not an LXMF message at all and went unproven. The client shows that as
+  // undelivered.
+  uint8_t buf[512];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x94;
+  *p++ = 0xCB; memset(p, 0, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  *p++ = 0xDE; *p++ = 0x00; *p++ = 0x11;                   // map16, 17 pairs
+  for (uint8_t k = 0; k < 17; k++) { *p++ = k; *p++ = 0xA1; *p++ = 'x'; }
+  const size_t n = (size_t)(p - buf);
+  memset(buf + n, 0x77, 16);
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, n + 16, m));
+  TEST_ASSERT_EQUAL_size_t(n - 96, m.payloadLen);
+  TEST_ASSERT_EQUAL_STRING_LEN("hi", m.content, 2);
+}
+
+static void test_an_array16_is_walked_like_a_fixarray() {
+  uint8_t buf[512];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x94;
+  *p++ = 0xCB; memset(p, 0, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  *p++ = 0x81; *p++ = 0x01;
+  *p++ = 0xDC; *p++ = 0x00; *p++ = 0x14;                   // array16, 20 members
+  for (uint8_t k = 0; k < 20; k++) *p++ = k;
+  const size_t n = (size_t)(p - buf);
+  memset(buf + n, 0x77, 8);
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, n + 8, m));
+  TEST_ASSERT_EQUAL_size_t(n - 96, m.payloadLen);
+}
+
+static void test_a_container_claiming_more_members_than_there_are_bytes_is_refused() {
+  // The count is the sender's, and a map16 claiming 65535 pairs in a packet
+  // of two hundred bytes is either broken or probing. Refusing costs nothing;
+  // walking it is 131070 recursive steps before the buffer runs out.
+  uint8_t buf[256];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x94;
+  *p++ = 0xCB; memset(p, 0, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  *p++ = 0xDE; *p++ = 0xFF; *p++ = 0xFF;                   // map16, 65535 pairs
+  const size_t n = (size_t)(p - buf);
+  LxmfMessage m;
+  TEST_ASSERT_FALSE(parseLxmf(buf, n, m));
+}
+
+static void test_a_str32_field_is_measured_not_refused() {
+  // str32 for a short string is legal msgpack and something a generic
+  // serialiser does emit. Refusing the header lost the whole message.
+  uint8_t buf[256];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x94;
+  *p++ = 0xCB; memset(p, 0, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  *p++ = 0x81; *p++ = 0x01;
+  *p++ = 0xDB; *p++ = 0; *p++ = 0; *p++ = 0; *p++ = 3;     // str32 "abc"
+  *p++ = 'a'; *p++ = 'b'; *p++ = 'c';
+  const size_t n = (size_t)(p - buf);
+  memset(buf + n, 0x77, 10);
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, n + 10, m));
+  TEST_ASSERT_EQUAL_size_t(n - 96, m.payloadLen);
+}
+
 static void test_absurd_nesting_is_refused_rather_than_recursed_into() {
   // Depth comes off the wire from strangers, so it is bounded. Refusing is
   // the right answer: LXMF nests two deep and anything claiming more is not a
@@ -221,6 +299,10 @@ int main() {
   RUN_TEST(test_the_payload_ends_where_its_msgpack_does_not_where_the_packet_does);
   RUN_TEST(test_a_fields_map_is_inside_the_payload_it_measures);
   RUN_TEST(test_a_nested_container_is_walked_not_stepped_over);
+  RUN_TEST(test_a_map16_fields_dict_is_walked_like_a_fixmap);
+  RUN_TEST(test_an_array16_is_walked_like_a_fixarray);
+  RUN_TEST(test_a_container_claiming_more_members_than_there_are_bytes_is_refused);
+  RUN_TEST(test_a_str32_field_is_measured_not_refused);
   RUN_TEST(test_absurd_nesting_is_refused_rather_than_recursed_into);
   return UNITY_END();
 }
