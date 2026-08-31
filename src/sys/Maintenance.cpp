@@ -21,6 +21,7 @@
 // ============================================================================
 #include "RnsTransport.h"
 #include "LxmfInbox.h"
+#include "LoopWatch.h"
 #include "RnsAdmin.h"
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
@@ -206,6 +207,17 @@ static void doStatus() {
             (unsigned long)a.offered, (unsigned long)a.ran,
             Rns::Admin::verdictName((Rns::Admin::Verdict)a.lastVerdict),
             a.lastFrom[0] ? a.lastFrom : "-", (unsigned long)a.lastAgoMs);
+  }
+  // Only when it is worth saying. On a healthy node this is noise; on a stuck
+  // one the console cannot answer at all, so the line is really for the
+  // operator reading it back afterwards from a captured log.
+  {
+    const uint32_t now = millis();
+    if (LoopWatch::sincePass(now) >= LoopWatch::kStallWarnMs)
+      dataf("STATUS", "loop_phase=%s loop_in_phase_ms=%lu loop_since_pass_ms=%lu loop_passes=%lu",
+            LoopWatch::phaseName(), (unsigned long)LoopWatch::inPhase(now),
+            (unsigned long)LoopWatch::sincePass(now),
+            (unsigned long)LoopWatch::state().passes);
   }
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
         ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),

@@ -304,6 +304,14 @@ is the exception: a bootloader request may outrank a plain reboot that is
 already armed, and the earlier of the two deadlines is kept. Every reply that
 says `"restart"` says whether the restart was actually granted.
 
+### `loop` — what the loop task is doing
+`GET /api/status` carries `loop`: `{ phase, in_phase_ms, since_pass_ms, passes,
+stalled }`. `phase` is the call in the Arduino loop the task entered last. This
+is the one reading worth more over the network than over the cable: when that
+task blocks, the serial console blocks with it and this endpoint does not — a
+node that looks dead over USB will still say what it is stuck in here. See
+[troubleshooting.md](troubleshooting.md).
+
 ## Messages (auth)
 `GET /api/messages` → the LXMF messages this node has been sent, newest first.
 Behind the admin password, like the settings page: what a node was told is not

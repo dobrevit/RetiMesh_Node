@@ -61,6 +61,7 @@
 #include "Display.h"
 #include "RnsAnnounce.h"
 #include "LxmfInbox.h"
+#include "LoopWatch.h"
 #include "RnsAdmin.h"
 #include "RnsTransport.h"
 #include "SdCard.h"
@@ -344,28 +345,38 @@ void setup() {
 
 // Arduino's loopTask (core 1, prio 1): scheduled restarts, the maintenance
 // console, link bookkeeping and a heartbeat.
+// Every call is labelled. A node was found with this task stopped and every
+// other one running — the console dead, the radio and the network fine — and
+// nothing anywhere said which call it had gone into. The labels cost a pointer
+// store each and are what a stuck node reports over HTTP and in the log
+// (LoopWatch.h).
 void loop() {
   static uint32_t lastBeat = 0;
-  wifiManager.tick();
-  Bootloader::tick();                      // may not return: this is where restarts happen
+  LOOP_PHASE("wifi");        wifiManager.tick();
+  LOOP_PHASE("bootloader");  Bootloader::tick();   // may not return: restarts happen here
   // Before the console reads: this is what hands it a network session when
   // one arrives, and takes it back when the caller goes (ConsoleServer.h).
-  ConsoleServer::poll();
-  Maintenance::poll();
-  LocalLink::poll(millis());
+  LOOP_PHASE("console-tcp"); ConsoleServer::poll();
+  LOOP_PHASE("console");     Maintenance::poll();
+  LOOP_PHASE("links");       LocalLink::poll(millis());
   // Messages that arrived on the Reticulum task, written here. Flash is slow
   // enough that doing it where they arrive delayed the delivery proof and
   // stalled the job loop that link and receipt timeouts run on (LxmfInbox.h).
-  Rns::Inbox::poll();
+  LOOP_PHASE("inbox");       Rns::Inbox::poll();
   // A command that arrived as a message, run here rather than in the packet
   // callback it landed in: it means the console's parser, the settings, and
   // sometimes a restart (RnsAdmin.h).
-  Rns::Admin::poll();
-  Leds::tick(millis());
+  LOOP_PHASE("rns-admin");   Rns::Admin::poll();
+  LOOP_PHASE("leds");        Leds::tick(millis());
+#ifdef LOOPWATCH_SELFTEST
+  // Deliberate hang, built only for proving the watch. Never in a release.
+  if (millis() > 45000) { LOOP_PHASE("selftest-hang"); for (;;) vTaskDelay(pdMS_TO_TICKS(1000)); }
+#endif
   // Every pass, not on the heartbeat: a crash 29 s after the last beat would
   // otherwise be recorded as having happened 29 s earlier, and a node stuck in
   // a restart loop would report every run as zero seconds — indistinguishable
   // from one that never got past setup(). One word into RTC RAM, no flash.
+  LOOP_PHASE("diag");
   Diag::tick(millis() / 1000);
   g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
   g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
@@ -417,5 +428,10 @@ void loop() {
     // from the copy that used to live here.
     Diag::report();
   }
+  // The pass is complete. What the watcher measures is the gap between these,
+  // so the delay below is inside the measurement and a healthy node reads as
+  // a couple of hundred milliseconds rather than as zero (LoopWatch.h).
+  LoopWatch::pass();
+  LOOP_PHASE("delay");
   vTaskDelay(pdMS_TO_TICKS(200));
 }

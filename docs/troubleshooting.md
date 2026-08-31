@@ -71,3 +71,42 @@ ROM, and a power cycle boots whatever is in flash.
 
 Still stuck? Open an issue with: board and revision, firmware version (`/api/status`),
 the boot log, and what the peers are running (RNS/Sideband/NomadNet versions).
+
+## The console is silent but the node is not dead
+
+A node can end up with its Arduino loop task blocked while every other task
+keeps running: the radio still receives, Reticulum still routes, the web
+server still answers, an attached client still holds its socket — and the
+serial console says nothing, because the console is served from that task.
+Over the cable the node looks dead. It is not.
+
+The loop task cannot report its own hang, so the Reticulum task watches it. In
+the log, from that task rather than from the stuck one:
+
+```
+[E][LoopWatch.cpp] check(): loop: the loop task has not completed a pass for 35817 ms —
+  stuck in "inbox" (entered 35469 ms ago, 202 passes since boot). Everything else is
+  still running; the console is served from that task, so the cable will be silent
+```
+
+It repeats every 30 s while the stall lasts, and says so again when the task
+comes back. `phase` is the call in `loop()` it went into and did not come out
+of — `wifi`, `bootloader`, `console-tcp`, `console`, `links`, `inbox`,
+`rns-admin`, `leds`, `diag`, `delay`.
+
+**Read it over the network, not the cable.** `GET /api/status` carries the same
+thing and keeps answering while the console does not:
+
+```
+"loop": { "phase": "inbox", "in_phase_ms": 114548, "since_pass_ms": 114896,
+          "passes": 202, "stalled": true }
+```
+
+`STATUS` on the console also prints a `loop_phase=` line, but only once a stall
+is under way — which on a node whose console has gone with the loop task means
+it is there for whoever reads a captured log afterwards.
+
+To prove the watch still works after changing it, build with
+`-DLOOPWATCH_SELFTEST`: the loop task hangs itself 45 s after boot, and the
+warning, the repeats and the `/api/status` fields can all be seen. Never in a
+release build.

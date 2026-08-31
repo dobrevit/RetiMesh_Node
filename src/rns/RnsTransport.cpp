@@ -40,6 +40,7 @@
 #include "Gps.h"
 #include <LittleFS.h>
 #include "RnsAdmin.h"
+#include "LoopWatch.h"
 #include <esp_random.h>
 #include "Lock.h"
 #include "Settings.h"
@@ -1509,6 +1510,10 @@ Tables tables() {
 void loop() {
   if (!sStarted) { vTaskDelay(pdMS_TO_TICKS(500)); return; }
   try {
+    // Watched from here on purpose: the loop task cannot report its own hang,
+    // and this is the task that has kept running in every instance of one seen
+    // so far (LoopWatch.h).
+    LoopWatch::check(millis());
     applyLogMute();
     // Answers other tasks composed, sent from here because this is the task
     // that owns the library (queueLxmfReply above).

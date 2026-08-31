@@ -34,6 +34,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "LxmfInbox.h"
+#include "LoopWatch.h"
 #include "RnsAdmin.h"
 #include "Mdns.h"
 #include "Diag.h"
@@ -706,6 +707,19 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["hostname"]     = _hostname;
   doc["mdns"]         = settings.maintenance().mdns;
   doc["security"]     = _securityName;
+  {
+    // What the loop task is doing, and when it last finished. This is the one
+    // reading that is worth more over the network than over the cable: when
+    // that task blocks the console goes with it, and this endpoint does not
+    // (LoopWatch.h).
+    JsonObject lw = doc["loop"].to<JsonObject>();
+    const uint32_t now = millis();
+    lw["phase"]         = LoopWatch::phaseName();
+    lw["in_phase_ms"]   = LoopWatch::inPhase(now);
+    lw["since_pass_ms"] = LoopWatch::sincePass(now);
+    lw["passes"]        = LoopWatch::state().passes;
+    lw["stalled"]       = LoopWatch::sincePass(now) >= LoopWatch::kStallWarnMs;
+  }
   {
     JsonObject st = doc["station"].to<JsonObject>();
     st["configured"] = stationConfigured();
