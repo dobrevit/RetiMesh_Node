@@ -358,6 +358,49 @@ static void applyLogMute() {
 // taken, which is what the callers prove on — a proof is this node saying
 // "that arrived", and saying it about bytes that were not a message at all
 // would be a lie the sender's client believes.
+// A key a sender proved on its own link, held in RAM for this run only.
+//
+// Deliberately not Identity::remember(). microReticulum stores a known
+// destination only when it does not already hold one — a documented
+// divergence in Identity.cpp, made to lessen flash wear — so an entry written
+// from here would be that peer's entry for good: its own announces would then
+// take the "already known" branch and be skipped, leaving its app_data (which
+// is where its name lives) permanently empty and its timestamp frozen at this
+// moment, so it is the first evicted when the table is full. Remembering a
+// key from a link would have made the node worse at the thing announces are
+// for. The store is for what announces teach; this is for what a link proves.
+//
+// Eight is more correspondents than a node in earshot of a village has at
+// once, and costs 400 bytes rather than a flash write per sender. Oldest goes
+// first, and losing one costs nothing: the sender identifies again on its
+// next link. Touched only from the RNS task — the identify callback and
+// message handling both run inside reticulum.loop() — so no lock.
+struct ProvenKey { uint8_t hash[16]; uint8_t key[32]; uint32_t atMs; bool used; };
+static ProvenKey sProven[8];
+
+static const ProvenKey* provenKeyFor(const uint8_t* sourceHash) {
+  for (const auto& e : sProven)
+    if (e.used && memcmp(e.hash, sourceHash, 16) == 0) return &e;
+  return nullptr;
+}
+
+static void rememberProvenKey(const Bytes& source, const Bytes& key) {
+  if (source.size() != 16 || key.size() != 32) return;
+  ProvenKey* slot = nullptr;
+  for (auto& e : sProven) {
+    if (e.used && memcmp(e.hash, source.data(), 16) == 0) { slot = &e; break; }
+    if (!e.used && !slot) slot = &e;
+  }
+  if (!slot) {                                   // all in use: the oldest goes
+    slot = &sProven[0];
+    for (auto& e : sProven) if ((int32_t)(e.atMs - slot->atMs) < 0) slot = &e;
+  }
+  memcpy(slot->hash, source.data(), 16);
+  memcpy(slot->key, key.data(), 32);
+  slot->atMs = millis();
+  slot->used = true;
+}
+
 static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
   const char* how = Rns::viaName(via);
   Rns::LxmfMessage m;
@@ -386,6 +429,15 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
   // unverified, and never trusted with more than being read.
   const RNS::Bytes source(m.sourceHash, 16);
   RNS::Identity sender = RNS::Identity::recall(source);
+  if (!sender) {
+    // Nothing announced — but the sender may have proved who it is on a link,
+    // which is the same proof an announce carries and arrives sooner.
+    if (const ProvenKey* proven = provenKeyFor(m.sourceHash)) {
+      RNS::Identity fromLink(false);
+      fromLink.load_public_key(RNS::Bytes(proven->key, 32));
+      sender = fromLink;
+    }
+  }
   bool verified = false;
   if (sender) {
     // What LXMF actually signs is the two hashes and the payload *and then
@@ -399,14 +451,12 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
     // same bytes replayed at another node do not verify and neither does an
     // altered text; the appended hash is LXMF's own, and matching it is what
     // makes this interoperable rather than merely self-consistent.
-    RNS::Bytes hashed_part(m.destHash, 16);
-    hashed_part.append(m.sourceHash, 16);
-    // The payload as the sender hashed it, which is not always the payload as
-    // it arrived — a stamp is appended after the hash is taken and dropped
-    // again before it is checked (LxmfFormat.h). Hashing what arrived instead
-    // is what made every message from a current client read as a forgery.
-    hashed_part.append(&m.signedHeader, 1);
-    hashed_part.append(m.signedBody, m.signedBodyLen);
+    // The order comes from LxmfFormat.h rather than being repeated here, so
+    // that this and the vector tests cannot come to disagree about it — a test
+    // that rebuilt the sequence for itself would stay green through a change
+    // to this line, which is the one thing it is there to catch.
+    RNS::Bytes hashed_part;
+    Rns::lxmfSignedSpans(m, [&](const uint8_t* p, size_t n) { hashed_part.append(p, n); });
     RNS::Bytes signed_data(hashed_part);
     signed_data.append(RNS::Identity::full_hash(hashed_part));
     verified = sender.validate(RNS::Bytes(m.signature, 64), signed_data);
@@ -434,6 +484,17 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
   }
 
   sLxmfRx++;
+  // The content element is not guaranteed to be a string: a payload of
+  // [ts, "", nil, {}] parses perfectly well and leaves content null with a
+  // length of zero, and anyone can send one, since unverified messages are
+  // taken by design. memcpy and %.*s are both undefined on a null pointer
+  // even for zero bytes, and a compiler is entitled to reason from that.
+  const uint8_t* text = m.content ? m.content : (const uint8_t*)"";
+  // Cut on a character boundary. A body truncated at a fixed byte count lands
+  // inside a multi-byte sequence for most non-Latin text, and what is stored
+  // then is not UTF-8 — which goes on to the messages page as JSON.
+  const size_t textLen = Rns::utf8TrimLen(text, m.contentLen, m.contentLen);
+
   // Kept, so the page and the console can show more than the last one. The
   // standing is stored rather than recomputed: whether this node could check
   // a sender is a fact about the moment the message arrived, and an identity
@@ -442,7 +503,8 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
                      verified ? Rns::StandingVerified
                      : !sender ? Rns::StandingNoKey
                                : Rns::StandingMismatch,
-                     via, m.sentAt, (const char*)m.content, m.contentLen);
+                     via, m.sentAt, (const char*)text,
+                     Rns::utf8TrimLen(text, textLen, Rns::kInboxTextMax));
   // "Unverified" is the sender this node has never heard announce — there was
   // no key to check against. A sender it has heard whose signature does not
   // match is a different thing entirely, already counted as mismatched just
@@ -452,8 +514,8 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
   if (sLxmfLock) {
     Sys::Lock held(sLxmfLock);
     Rns::toHex(m.sourceHash, 16, sLxmfFrom);
-    const size_t k = m.contentLen < sizeof(sLxmfText) - 1 ? m.contentLen : sizeof(sLxmfText) - 1;
-    memcpy(sLxmfText, m.content, k);
+    const size_t k = Rns::utf8TrimLen(text, textLen, sizeof(sLxmfText) - 1);
+    memcpy(sLxmfText, text, k);
     sLxmfText[k] = '\0';
     sLxmfAtMs = millis();
     sLxmfVerified = verified;
@@ -462,25 +524,36 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via) {
   // read off `verified` alone, so a sender whose signature did not match was
   // reported as one this node had never heard announce — which is the one
   // thing the log could say that points an operator away from what happened.
-  log_i("lxmf: %s message from %s over %s (%u bytes): %.*s",
+  // The body goes through the console, which is a terminal, and it arrives
+  // from whoever is in earshot. Printed raw, an escape sequence in a message
+  // clears the operator's screen or hides the lines around it — so what is
+  // shown here is the text with anything that is not a printable character
+  // replaced, cut on a character boundary.
+  char shown[81];
+  Rns::utf8SafeCopy(text, textLen, shown, sizeof(shown));
+  log_i("lxmf: %s%s message from %s over %s (%u bytes): %s",
         verified   ? "verified"
         : !sender  ? "UNVERIFIED (this node has not heard that sender announce)"
                    : "UNVERIFIED (the signature does not match the key this node holds)",
-        source.toHex().c_str(), how,
-        (unsigned)m.contentLen, (int)(m.contentLen > 80 ? 80 : m.contentLen), (const char*)m.content);
+        // A stamp only arrives when this node announced a cost, which it no
+        // longer does — so seeing one beside a mismatch says the announce is
+        // wrong rather than the sender, and that is the single most useful
+        // thing the log can say about a mismatch.
+        m.stamped ? ", carrying a stamp" : "",
+        source.toHex().c_str(), how, (unsigned)m.contentLen, shown);
   // Most of what LXMF carries is not the text: an image, a file, a telemetry
   // reading and a command all travel in the fields map, and a message that is
   // only those arrives with nothing to read. Saying so is the difference
   // between "somebody sent an empty message" and "somebody sent a photo this
-  // node does not open". An empty map is a single byte, so anything longer
-  // means the message brought something with it.
+  // node does not open".
   //
   // The stored record does not carry this yet — it is a fixed two hundred
   // bytes with no room left (LxmfInbox.h), and changing that layout is a
   // decision for whoever owns the format.
-  if (m.fieldsLen > 1)
-    log_i("lxmf: ...and %u bytes of fields this node does not read (attachment, telemetry "
-          "or a command)", (unsigned)m.fieldsLen);
+  if (m.fieldsCount)
+    log_i("lxmf: ...and %u field%s this node does not read, %u bytes (attachment, telemetry "
+          "or a command)", (unsigned)m.fieldsCount, m.fieldsCount == 1 ? "" : "s",
+          (unsigned)m.fieldsLen);
   return true;
 }
 
@@ -577,10 +650,11 @@ static void onLxmfIdentified(const RNS::Link& link, const RNS::Identity& identit
   (void)link;
   if (!identity) return;
   const Bytes source = RNS::Destination::hash_from_name_and_identity("lxmf.delivery", identity);
-  if (RNS::Identity::recall(source)) return;              // already known; nothing to learn
-  RNS::Identity::remember({Bytes::NONE}, source, identity.get_public_key());
-  log_i("lxmf: %s identified itself on its link; this node can now check what it sends",
-        source.toHex().c_str());
+  const bool isNew = !RNS::Identity::recall(source) && !provenKeyFor(source.data());
+  rememberProvenKey(source, identity.get_public_key());
+  if (isNew)
+    log_i("lxmf: %s identified itself on its link; this node can now check what it sends",
+          source.toHex().c_str());
 }
 
 static void onLxmfLink(RNS::Link& link) {
