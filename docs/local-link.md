@@ -450,6 +450,24 @@ And the settings refuse the one combination that would: switching the serial
 console off while no local link is enabled, or the last link off while the
 console is off, answers `400` rather than saving — a node in that state could
 only be recovered by erasing it.
+### The console is silent but the node is not
+
+On a native-USB board this is the common case after an upload, and it is not
+what it looks like. The application is running — its portal answers, Reticulum
+answers, it announces over LoRa — and only the USB serial endpoint is dead,
+because the software entry into the ROM downloader leaves the USB unit in a
+state the return leg does not re-arm.
+
+Check before concluding anything: `http://10.64.<n>.1/` over the cable, or the
+Wi-Fi portal, or whether other nodes are still hearing its announces. If those
+answer, the node is fine.
+
+**RST does not clear it; a power cycle does.** Do that before the next upload
+rather than after it fails: the console is the only hand-off this board has —
+the firmware does not honour the 1200-baud touch on that port — so a dead
+console makes the *next* `upload` or `uploadfs` fail at the hand-off, several
+minutes and one confusing error away from the flash that actually caused it.
+
 When the firmware is broken enough that neither the console nor the API
 answers:
 
