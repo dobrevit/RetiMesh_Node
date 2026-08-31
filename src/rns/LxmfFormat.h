@@ -242,13 +242,70 @@ inline bool lxmfNameRef(const uint8_t* app, size_t len,
   return true;
 }
 
-// The same name, copied.
+// How wide the character starting here is, or 0 if these bytes are not one.
+//
+// Names in an announce are UTF-8, and the ASCII-only guard this replaces
+// rejected every byte above 0x7E — which is every byte of every accented,
+// Cyrillic, Greek, CJK or emoji name there is, because those live entirely in
+// the range it refused. A peer called "Café" or "Мартин" announced itself and
+// appeared with no name at all.
+//
+// Rejecting is still the job, just of the right things: bytes that are not
+// valid UTF-8, overlong forms, surrogate halves, and control characters —
+// including the C1 range, which is where a name would hide an escape sequence
+// that means something to a terminal reading the console.
+inline size_t utf8CharWidth(const uint8_t* p, size_t n) {
+  if (n == 0) return 0;
+  const uint8_t c = p[0];
+  auto cont = [&](size_t k) { return k < n && (p[k] & 0xC0) == 0x80; };
+  if (c < 0x20 || c == 0x7F) return 0;                   // C0 controls and DEL
+  if (c < 0x80) return 1;
+  if (c < 0xC2) return 0;                                // continuation byte, or an overlong two-byte form
+  if (c < 0xE0) {                                        // two bytes
+    if (!cont(1)) return 0;
+    if (c == 0xC2 && p[1] < 0xA0) return 0;              // C1 controls
+    return 2;
+  }
+  if (c < 0xF0) {                                        // three
+    if (!cont(1) || !cont(2)) return 0;
+    if (c == 0xE0 && p[1] < 0xA0) return 0;              // overlong
+    if (c == 0xED && p[1] >= 0xA0) return 0;             // UTF-16 surrogate half
+    return 3;
+  }
+  if (c < 0xF5) {                                        // four
+    if (!cont(1) || !cont(2) || !cont(3)) return 0;
+    if (c == 0xF0 && p[1] < 0x90) return 0;              // overlong
+    if (c == 0xF4 && p[1] >= 0x90) return 0;             // past U+10FFFF
+    return 4;
+  }
+  return 0;
+}
+
+// Copy a name if it is one. All of it has to be displayable text — a name
+// that is half valid is not a name, it is something else being read as one —
+// but only as much as fits is copied, and never a character cut in half: a
+// truncated sequence is not UTF-8, and it goes on to a display, a JSON
+// document and a console that each have their own opinion about that.
+inline size_t displayableName(const uint8_t* p, size_t n, char* out, size_t cap) {
+  if (cap == 0) return 0;
+  out[0] = '\0';
+  if (!p || n == 0 || cap < 2) return 0;
+  size_t fits = 0;
+  for (size_t i = 0; i < n; ) {
+    const size_t w = utf8CharWidth(p + i, n - i);
+    if (w == 0) return 0;                                // not text; the caller shows nothing
+    i += w;
+    if (i <= cap - 1) fits = i;                          // last whole character that still fits
+  }
+  memcpy(out, p, fits); out[fits] = '\0';
+  return fits;
+}
+
+// The same name, copied — validated and cut on a character boundary.
 inline size_t lxmfName(const uint8_t* app, size_t len, char* out, size_t cap) {
   const uint8_t* v = nullptr; size_t vl = 0;
-  if (cap < 2 || !lxmfNameRef(app, len, v, vl)) return 0;
-  const size_t k = vl < cap - 1 ? vl : cap - 1;
-  memcpy(out, v, k); out[k] = '\0';
-  return k;
+  if (!lxmfNameRef(app, len, v, vl)) { if (cap) out[0] = '\0'; return 0; }
+  return displayableName(v, vl, out, cap);
 }
 
 inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {

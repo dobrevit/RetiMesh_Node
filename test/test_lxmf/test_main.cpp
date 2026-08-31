@@ -81,6 +81,61 @@ static void test_a_long_name_uses_str8_and_still_round_trips() {
   TEST_ASSERT_EQUAL_STRING(longname, name);
 }
 
+// Names are UTF-8, and most of the world's are not ASCII. Refusing every byte
+// above 0x7E meant a peer called "Café" announced itself and showed up with no
+// name at all — the guard was meant to keep control characters out of a
+// display and a console, and it threw out the alphabet with them.
+static void test_a_name_that_is_not_ascii_still_arrives() {
+  struct { const char* in; const char* want; } cases[] = {
+    { "Caf\xC3\xA9",                              "Caf\xC3\xA9" },              // Café
+    { "\xD0\x9C\xD0\xB0\xD1\x80\xD1\x82\xD0\xB8\xD0\xBD",
+      "\xD0\x9C\xD0\xB0\xD1\x80\xD1\x82\xD0\xB8\xD0\xBD" },                     // Мартин
+    { "node \xF0\x9F\x93\xA1",                    "node \xF0\x9F\x93\xA1" },    // with a satellite dish
+    { "\xE6\x97\xA5\xE6\x9C\xAC",                 "\xE6\x97\xA5\xE6\x9C\xAC" }, // 日本
+  };
+  for (auto& c : cases) {
+    uint8_t app[80];
+    const size_t n = lxmfAppData(c.in, 0, app, sizeof(app));
+    TEST_ASSERT_TRUE_MESSAGE(n > 0, c.in);
+    char name[80] = "";
+    TEST_ASSERT_TRUE_MESSAGE(lxmfName(app, n, name, sizeof(name)) > 0, c.in);
+    TEST_ASSERT_EQUAL_STRING(c.want, name);
+  }
+}
+
+// What the guard is actually for. A name is shown on a panel, in a JSON
+// document and on a console — none of which should be handed an escape
+// sequence or a byte that is not text.
+static void test_a_name_that_is_not_text_is_still_refused() {
+  const uint8_t bad[][6] = {
+    { 'a', 0x1B, '[', '2', 'J', 0 },       // an escape sequence
+    { 'a', 0x00, 'b', 0, 0, 0 },           // a NUL in the middle
+    { 0xC3, 0x28, 0, 0, 0, 0 },            // a lead byte with no continuation
+    { 0xED, 0xA0, 0x80, 0, 0, 0 },         // a UTF-16 surrogate half
+    { 0xC0, 0xAF, 0, 0, 0, 0 },            // an overlong slash
+    { 0xC2, 0x9B, 0, 0, 0, 0 },            // a C1 control
+    { 0xFF, 0xFE, 0, 0, 0, 0 },            // not UTF-8 at all
+  };
+  const size_t lens[] = { 5, 3, 2, 3, 2, 2, 2 };
+  for (size_t k = 0; k < sizeof(lens) / sizeof(lens[0]); k++) {
+    char name[32] = "sentinel";
+    TEST_ASSERT_EQUAL_size_t(0, displayableName(bad[k], lens[k], name, sizeof(name)));
+    TEST_ASSERT_EQUAL_STRING("", name);    // and nothing half-copied is left behind
+  }
+}
+
+// Truncation has to land on a character boundary. Half of a multi-byte
+// character is not UTF-8, and a JSON encoder or a display driver handed one
+// does something worse than showing a shorter name.
+static void test_a_name_too_long_for_the_buffer_is_cut_between_characters() {
+  // Six two-byte characters: "ééééée"
+  const uint8_t name[] = { 0xC3,0xA9, 0xC3,0xA9, 0xC3,0xA9, 0xC3,0xA9, 0xC3,0xA9, 'e' };
+  char out[8] = "";                        // room for 7 bytes of text
+  const size_t k = displayableName(name, sizeof(name), out, sizeof(out));
+  TEST_ASSERT_EQUAL_size_t(6, k);          // three whole characters, not three and a half
+  TEST_ASSERT_EQUAL_STRING("\xC3\xA9\xC3\xA9\xC3\xA9", out);
+}
+
 static void test_a_name_that_will_not_fit_is_refused_not_truncated() {
   uint8_t tiny[8];
   TEST_ASSERT_EQUAL_size_t(0, lxmfAppData("retimesh-52A7F8", 0, tiny, sizeof(tiny)));
@@ -361,6 +416,9 @@ int main() {
   RUN_TEST(test_a_stamp_cost_that_is_wanted_is_still_announced);
   RUN_TEST(test_what_it_emits_is_what_it_reads_back);
   RUN_TEST(test_a_long_name_uses_str8_and_still_round_trips);
+  RUN_TEST(test_a_name_that_is_not_ascii_still_arrives);
+  RUN_TEST(test_a_name_that_is_not_text_is_still_refused);
+  RUN_TEST(test_a_name_too_long_for_the_buffer_is_cut_between_characters);
   RUN_TEST(test_a_name_that_will_not_fit_is_refused_not_truncated);
   RUN_TEST(test_a_well_formed_message_yields_its_text);
   RUN_TEST(test_an_empty_title_is_allowed);
