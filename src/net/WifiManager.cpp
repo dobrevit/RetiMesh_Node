@@ -35,6 +35,7 @@
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "LxmfInbox.h"
+#include "RnsAdmin.h"
 #include "Mdns.h"
 #include "Diag.h"
 #include "SettingsRules.h"
@@ -143,6 +144,7 @@ static const MaintField kMaintFields[] = {
   { "console_enabled",     &MaintenanceSettings::consoleEnabled },
   { "console_tcp",         &MaintenanceSettings::consoleTcp },
   { "web_ui",              &MaintenanceSettings::webUi },
+  { "rns_admin",           &MaintenanceSettings::rnsAdmin },
 };
 
 void WifiManager::begin() {
@@ -1237,6 +1239,10 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   {
     JsonObject m = doc["maintenance"].to<JsonObject>();
     for (const MaintField& f : kMaintFields) m[f.key] = settings.maintenance().*(f.on);
+    // The list is not a switch, so it is not in the table above. It is not a
+    // secret either — a source hash is public, and an operator needs to read
+    // back what they configured.
+    m["rns_admins"] = settings.maintenance().rnsAdmins;
   }
   bootloaderJson(doc["bootloader"].to<JsonObject>());
 
@@ -1311,6 +1317,16 @@ void WifiManager::handleMaintenancePost(AsyncWebServerRequest* request, const ch
   MaintenanceSettings m = settings.maintenance();
   for (const MaintField& f : kMaintFields)
     if (in[f.key].is<bool>()) m.*(f.on) = in[f.key];
+  // Through the same rule the console's SET uses, so the two cannot disagree
+  // about what a valid list is — which they already did: "-" cleared it at the
+  // console and was a 400 here (SettingsFields.h).
+  if (in["rns_admins"].is<const char*>()) {
+    char why[128] = "";
+    if (!SettingsFields::setRnsAdmins(m, in["rns_admins"], why, sizeof(why))) {
+      sendError(request, 400, why);
+      return;
+    }
+  }
   // Through the same commit the console uses, so both refuse alike and the
   // restart the portal's switch needs is asked for once rather than twice.
   char detail[160] = "";

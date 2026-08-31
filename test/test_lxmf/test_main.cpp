@@ -489,6 +489,104 @@ static void test_absurd_nesting_is_refused_rather_than_recursed_into() {
   TEST_ASSERT_FALSE(parseLxmf(buf, (size_t)(p - buf), m));
 }
 
+// --- the writing side ---------------------------------------------------------
+
+static void test_what_this_node_writes_is_what_it_reads_back() {
+  // The round trip is the whole point of the emitters living beside the
+  // parser: a wrong bin8 marker or an off-by-one in the length compiles, sends,
+  // and is discarded by every real client as a forgery — a failure that shows
+  // up only as silence at the other end.
+  uint8_t payload[256];
+  const size_t plen = lxmfPayload(1767225600.5, "sub", "hello there", payload, sizeof(payload));
+  TEST_ASSERT_TRUE(plen > 0);
+
+  uint8_t dest[16], source[16];
+  memset(dest, 0xAA, 16); memset(source, 0xBB, 16);
+  uint8_t sig[64]; memset(sig, 0xCC, 64);
+  uint8_t wire[512];
+  const size_t wlen = lxmfEnvelope(dest, source, sig, payload, plen, wire, sizeof(wire));
+  TEST_ASSERT_EQUAL_size_t(16 + 16 + 64 + plen, wlen);
+
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(wire, wlen, m));
+  TEST_ASSERT_EQUAL_MEMORY(dest, m.destHash, 16);
+  TEST_ASSERT_EQUAL_MEMORY(source, m.sourceHash, 16);
+  TEST_ASSERT_EQUAL_STRING_LEN("hello there", m.content, 11);
+  TEST_ASSERT_EQUAL_STRING_LEN("sub", m.title, 3);
+  TEST_ASSERT_EQUAL_size_t(plen, m.payloadLen);
+  TEST_ASSERT_TRUE(m.sentAt > 1.7e9 && m.sentAt < 1.8e9);
+  TEST_ASSERT_FALSE(m.stamped);
+}
+
+static void test_an_empty_title_and_body_still_round_trip() {
+  uint8_t payload[64];
+  const size_t plen = lxmfPayload(0, "", "", payload, sizeof(payload));
+  TEST_ASSERT_TRUE(plen > 0);
+  uint8_t dest[16], source[16], sig[64];
+  memset(dest, 1, 16); memset(source, 2, 16); memset(sig, 3, 64);
+  uint8_t wire[256];
+  const size_t wlen = lxmfEnvelope(dest, source, sig, payload, plen, wire, sizeof(wire));
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(wire, wlen, m));
+  TEST_ASSERT_EQUAL_size_t(0, m.contentLen);
+  TEST_ASSERT_EQUAL_size_t(0, m.titleLen);
+}
+
+static void test_the_emitter_refuses_rather_than_overrunning_its_buffer() {
+  uint8_t small[8];
+  TEST_ASSERT_EQUAL_size_t(0, lxmfPayload(1.0, "sub", "hello", small, sizeof(small)));
+  uint8_t payload[64];
+  const size_t plen = lxmfPayload(1.0, "", "hi", payload, sizeof(payload));
+  uint8_t dest[16], source[16], sig[64];
+  memset(dest, 0, 16); memset(source, 0, 16); memset(sig, 0, 64);
+  uint8_t tight[80];
+  TEST_ASSERT_EQUAL_size_t(0, lxmfEnvelope(dest, source, sig, payload, plen, tight, sizeof(tight)));
+}
+
+static void test_an_opportunistic_envelope_leaves_the_destination_off() {
+  // The destination it arrives at is what says which one it was, so those
+  // sixteen bytes are worth more as message.
+  uint8_t payload[64];
+  const size_t plen = lxmfPayload(1.0, "", "hi", payload, sizeof(payload));
+  uint8_t dest[16], source[16], sig[64];
+  memset(dest, 0xAA, 16); memset(source, 0xBB, 16); memset(sig, 0xCC, 64);
+  uint8_t wire[256];
+  const size_t wlen = lxmfEnvelope(dest, source, sig, payload, plen, wire, sizeof(wire), false);
+  TEST_ASSERT_EQUAL_size_t(16 + 64 + plen, wlen);
+  TEST_ASSERT_EQUAL_MEMORY(source, wire, 16);          // source first, no destination
+}
+
+static void test_what_is_signed_on_the_way_out_is_what_is_checked_on_the_way_in() {
+  // The one assertion that keeps the two directions honest with each other.
+  // An outgoing message is described the way an incoming one is, so the spans
+  // come from the same call; if this ever disagrees, every reply this node
+  // sends is discarded by real clients as forged.
+  uint8_t payload[128];
+  const size_t plen = lxmfPayload(1767225600.0, "", "LINKS", payload, sizeof(payload));
+  uint8_t dest[16], source[16];
+  memset(dest, 0xAA, 16); memset(source, 0xBB, 16);
+
+  uint8_t outSpans[256]; size_t outLen = 0;
+  const LxmfMessage out = lxmfOutgoing(dest, source, payload, plen);
+  lxmfSignedSpans(out, [&](const uint8_t* p, size_t n) { memcpy(outSpans + outLen, p, n); outLen += n; });
+
+  uint8_t sig[64]; memset(sig, 0xCC, 64);
+  uint8_t wire[512];
+  const size_t wlen = lxmfEnvelope(dest, source, sig, payload, plen, wire, sizeof(wire));
+  LxmfMessage in;
+  TEST_ASSERT_TRUE(parseLxmf(wire, wlen, in));
+  uint8_t inSpans[256]; size_t inLen = 0;
+  lxmfSignedSpans(in, [&](const uint8_t* p, size_t n) { memcpy(inSpans + inLen, p, n); inLen += n; });
+
+  TEST_ASSERT_EQUAL_size_t(inLen, outLen);
+  TEST_ASSERT_EQUAL_MEMORY(inSpans, outSpans, inLen);
+  // ...and it is the layout LXMF specifies, not merely self-consistent.
+  TEST_ASSERT_EQUAL_size_t(16 + 16 + plen, outLen);
+  TEST_ASSERT_EQUAL_MEMORY(dest, outSpans, 16);
+  TEST_ASSERT_EQUAL_MEMORY(source, outSpans + 16, 16);
+  TEST_ASSERT_EQUAL_MEMORY(payload, outSpans + 32, plen);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_the_announce_carries_the_name_a_client_will_show);
@@ -523,5 +621,10 @@ int main() {
   RUN_TEST(test_the_senders_clock_is_read_out_of_the_payload);
   RUN_TEST(test_a_payload_whose_first_element_is_not_a_timestamp_still_parses);
   RUN_TEST(test_absurd_nesting_is_refused_rather_than_recursed_into);
+  RUN_TEST(test_what_this_node_writes_is_what_it_reads_back);
+  RUN_TEST(test_an_empty_title_and_body_still_round_trip);
+  RUN_TEST(test_the_emitter_refuses_rather_than_overrunning_its_buffer);
+  RUN_TEST(test_an_opportunistic_envelope_leaves_the_destination_off);
+  RUN_TEST(test_what_is_signed_on_the_way_out_is_what_is_checked_on_the_way_in);
   return UNITY_END();
 }

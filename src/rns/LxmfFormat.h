@@ -506,4 +506,76 @@ inline void lxmfSignedSpans(const LxmfMessage& m, Sink&& sink) {
   sink(m.signedBody, m.signedBodyLen);
 }
 
+// ---------------------------------------------------------------------------
+// Writing a message, which is the same format read backwards.
+//
+// A node that can be administered over LXMF has to answer, and an answer is a
+// message. Both directions live here for the reason the file exists at all:
+// the reading side spent four bugs learning exactly which bytes LXMF signs,
+// and a writing side with its own opinion about that would have to learn them
+// again. It does not have one — it builds an LxmfMessage describing what it is
+// about to send and hands that to lxmfSignedSpans, the same call the reading
+// side uses, so the two cannot come to different conclusions about the order.
+// ---------------------------------------------------------------------------
+
+// The payload: [timestamp, title, content, fields]. The fields map is emitted
+// empty and no stamp is appended, so what is signed is the whole of what is
+// sent — the case the reading side has to work to reconstruct is one this
+// side simply never creates.
+inline size_t lxmfPayload(double sentAt, const char* title, const char* content,
+                          uint8_t* out, size_t cap) {
+  const size_t titleLen = title ? strlen(title) : 0;
+  const size_t contentLen = content ? strlen(content) : 0;
+  if (titleLen > 255 || contentLen > 255) return 0;      // bin8 is what this writes
+  const size_t need = 1 + 9 + (2 + titleLen) + (2 + contentLen) + 1;
+  if (need > cap) return 0;
+  size_t i = 0;
+  out[i++] = 0x94;                                       // fixarray of four
+  out[i++] = 0xCB;                                       // float64, big-endian, as msgpack has it
+  uint64_t bits = 0;
+  memcpy(&bits, &sentAt, 8);
+  for (int b = 7; b >= 0; b--) out[i++] = (uint8_t)(bits >> (8 * b));
+  out[i++] = 0xC4; out[i++] = (uint8_t)titleLen;
+  memcpy(out + i, title, titleLen); i += titleLen;
+  out[i++] = 0xC4; out[i++] = (uint8_t)contentLen;
+  memcpy(out + i, content, contentLen); i += contentLen;
+  out[i++] = 0x80;                                       // an empty fixmap of fields
+  return i;
+}
+
+// An outgoing message described the way an incoming one is, so that the bytes
+// to sign come from lxmfSignedSpans rather than from a second opinion here.
+// Nothing this side emits is stamped, so the signed header is the array header
+// as written and the signed body is everything after it.
+inline LxmfMessage lxmfOutgoing(const uint8_t dest[16], const uint8_t source[16],
+                                const uint8_t* payload, size_t payloadLen) {
+  LxmfMessage m{};
+  m.destHash = dest;
+  m.sourceHash = source;
+  m.payload = payload;
+  m.payloadLen = payloadLen;
+  m.stamped = false;
+  m.signedHeader = payloadLen ? payload[0] : (uint8_t)0x94;
+  m.signedBody = payloadLen ? payload + 1 : payload;
+  m.signedBodyLen = payloadLen ? payloadLen - 1 : 0;
+  return m;
+}
+
+// The envelope as it goes on the wire for a direct delivery: the two hashes,
+// the signature, then the payload. An opportunistic send is this with the
+// destination hash left off, because the destination it arrives at says what
+// it was.
+inline size_t lxmfEnvelope(const uint8_t dest[16], const uint8_t source[16],
+                           const uint8_t sig[64], const uint8_t* payload, size_t payloadLen,
+                           uint8_t* out, size_t cap, bool includeDest = true) {
+  const size_t need = (includeDest ? 16u : 0u) + 16 + 64 + payloadLen;
+  if (need > cap) return 0;
+  size_t i = 0;
+  if (includeDest) { memcpy(out + i, dest, 16); i += 16; }
+  memcpy(out + i, source, 16); i += 16;
+  memcpy(out + i, sig, 64);    i += 64;
+  memcpy(out + i, payload, payloadLen);
+  return need;
+}
+
 } // namespace Rns

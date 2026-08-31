@@ -151,7 +151,14 @@
 // raised it would be a knob that turns nothing. This is a configuration
 // channel rather than a service — two operators changing settings at once is
 // a race nobody asked for.
-#define MAINT_NET_SESSIONS       1
+// One for whatever a network transport brings, and one kept back for a caller
+// the transport authenticated itself — today that is a command arriving as an
+// LXMF message. They are not interchangeable: the TCP console claims its slot
+// on connect, before any password, so a single client sitting idle on the
+// access point would otherwise deny the one recovery path a node has when its
+// cable is dead (RnsAdmin.h, Maintenance.h).
+#define MAINT_NET_SESSIONS       2
+#define MAINT_RESERVED_SESSIONS  1
 // Guessing the admin password over the air. Counted for the node, not the
 // connection (Maintenance.h).
 #ifndef MAINT_AUTH_MAX_FAILURES

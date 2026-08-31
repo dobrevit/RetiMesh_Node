@@ -451,6 +451,15 @@ And the settings refuse the one combination that would: switching the serial
 console off while no local link is enabled, or the last link off while the
 console is off, answers `400` rather than saving — a node in that state could
 only be recovered by erasing it.
+### Administering a node whose cable is dead
+
+A node in this state is still on the mesh. If `maintenance.rns_admin` is on
+and your identity is on its list, you can send it a console command as an LXMF
+message and it will answer with the reply — including `RESET CONFIRM`, which is
+the one that gets a board back without anybody walking to it. It has to be set
+up **before** it is needed, and it is off by default: see the remote
+administration section of [api.md](api.md).
+
 ### The console is silent but the node is not
 
 On a native-USB board this is the common case after an upload, and it is not

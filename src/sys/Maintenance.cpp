@@ -21,6 +21,7 @@
 // ============================================================================
 #include "RnsTransport.h"
 #include "LxmfInbox.h"
+#include "RnsAdmin.h"
 #include "Maintenance.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
@@ -187,6 +188,20 @@ static void doStatus() {
       text[i] = '\0';
       if (i) dataf("STATUS", "lxmf_last_text=%s", text);
     }
+  }
+  // Remote administration, whenever it is on or has ever been tried. A node
+  // that refused somebody is a node whose operator wants to know, and the
+  // verdict says which of the four questions the caller failed rather than
+  // leaving them all as "no" (RnsAdmin.h).
+  {
+    const Rns::Admin::State a = Rns::Admin::state();
+    if (settings.maintenance().rnsAdmin || a.offered)
+      dataf("STATUS", "rns_admin=%s admins=%u offered=%lu ran=%lu last_verdict=%s last_from=%s last_ago_ms=%lu",
+            settings.maintenance().rnsAdmin ? "on" : "off",
+            (unsigned)Rns::Admin::adminCount(),
+            (unsigned long)a.offered, (unsigned long)a.ran,
+            Rns::Admin::verdictName((Rns::Admin::Verdict)a.lastVerdict),
+            a.lastFrom[0] ? a.lastFrom : "-", (unsigned long)a.lastAgoMs);
   }
   dataf("STATUS", "console_tcp=%s port=%u session=%s",
         ConsoleServer::listening() ? "listening" : "off", (unsigned)ConsoleServer::port(),
@@ -593,12 +608,23 @@ void useStream(Stream& io) {
   sCable.io = &io;
 }
 
-bool openSession(Stream& io, bool hostFacing) {
-  for (Session& s : sNet) {
+bool openSession(Stream& io, bool hostFacing, bool preAuthed) {
+  // The last slots are kept for callers the transport proved. A socket takes
+  // its slot the moment it connects and holds it without ever authenticating,
+  // so without this one idle TCP console — or one client parked there on
+  // purpose — is enough to keep every remote command out.
+  // A proved caller takes the reserved slots first, so that using this path
+  // does not itself deny the socket the other one.
+  const size_t usable = preAuthed ? MAINT_NET_SESSIONS
+                                  : MAINT_NET_SESSIONS - MAINT_RESERVED_SESSIONS;
+  for (size_t k = 0; k < usable; k++) {
+    const size_t i = preAuthed ? usable - 1 - k : k;
+    Session& s = sNet[i];
     if (s.io) continue;
     s = Session();                       // nothing of the last caller's survives: not the
     s.io = &io;                          // half-typed line, and above all not the authentication
     s.hostFacing = hostFacing;
+    s.authed = preAuthed;                // the transport proved them; see Maintenance.h
     return true;
   }
   return false;

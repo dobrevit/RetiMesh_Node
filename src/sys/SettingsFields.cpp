@@ -24,6 +24,7 @@
 #include <Arduino.h>
 #include <stdlib.h>
 #include <string.h>
+#include "RnsAdmin.h"
 #include "Settings.h"
 #include "SettingsRules.h"
 #include "LocalLink.h"
@@ -151,6 +152,25 @@ Result commitTransport(TransportSettings& t, char* err, size_t n) {
 
 }  // namespace — commitMaintenance is the web API's too (SettingsFields.h)
 
+// Refused here rather than at the moment a command arrives: a list that does
+// not parse is a list that lets nobody in, and finding that out when you need
+// it is finding out too late (RnsAdmin.h).
+bool setRnsAdmins(MaintenanceSettings& m, const char* value, char* err, size_t n) {
+  const char* text = (value && strcmp(value, "-") == 0) ? "" : (value ? value : "");
+  if (strlen(text) >= sizeof(m.rnsAdmins)) {
+    snprintf(err, n, "too long: at most %u administrators", (unsigned)Rns::Admin::kMaxAdmins);
+    return false;
+  }
+  Rns::Admin::List parsed;
+  if (!Rns::Admin::parseAdmins(text, parsed)) {
+    snprintf(err, n, "expected up to %u source hashes of 32 hex digits, comma separated, or - to clear",
+             (unsigned)Rns::Admin::kMaxAdmins);
+    return false;
+  }
+  strlcpy(m.rnsAdmins, text, sizeof(m.rnsAdmins));
+  return true;
+}
+
 Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n) {
   if (restartPending(err, n)) return Result::Busy;
   // The console can switch itself off, but not into a node with no way in.
@@ -161,6 +181,7 @@ Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n) {
   }
   const bool needRestart = m.webUi != settings.maintenance().webUi;
   if (!settings.saveMaintenance(m)) return Result::NvsFailed;
+  Rns::Admin::reload();      // the switch and the list apply now, not next boot
   // The portal cannot be taken down under the request that asked for it, and
   // it cannot be raised without the routes it was never given: either way the
   // change lands at the next boot, as Wi-Fi's does.
@@ -365,6 +386,20 @@ const Entry kFields[] = {
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().webUi ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       MaintenanceSettings m = settings.maintenance(); m.webUi = b; return commitMaintenance(m, e, n); } },
+  // Remote administration. The switch and the list are separate settings
+  // because they answer different questions — "may anybody at all" and "who"
+  // — and because an operator taking the feature away in a hurry should be
+  // able to do it without losing the list they will want back (RnsAdmin.h).
+  { "maintenance.rns_admin",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().rnsAdmin ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
+      MaintenanceSettings m = settings.maintenance(); m.rnsAdmin = b; return commitMaintenance(m, e, n); } },
+  { "maintenance.rns_admins",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().rnsAdmins); },
+    [](const char* v, char* e, size_t n) {
+      MaintenanceSettings m = settings.maintenance();
+      if (!setRnsAdmins(m, v, e, n)) return Result::BadValue;
+      return commitMaintenance(m, e, n); } },
   { "maintenance.console_tcp",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.maintenance().consoleTcp ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
