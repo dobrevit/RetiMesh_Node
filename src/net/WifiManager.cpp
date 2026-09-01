@@ -112,6 +112,11 @@ static bool serializedWhole(const JsonDocument& doc, String& out, bool pretty) {
 static const char* const kLowMemoryMsg =
   "ran out of memory while replying — nothing was changed; try again";
 
+// The same answer for the one path that cannot afford to build it: sendJson()
+// is what a handler fails *inside*, so it cannot say whether the work was
+// done and must not claim it was not. Named once so its two uses cannot drift.
+static const char* const kLowMemoryJson = "{\"error\":\"low memory\"}";
+
 // A reply that hands its body over rather than letting it be copied.
 //
 // request->send(code, type, String) builds an AsyncBasicResponse, and that
@@ -142,12 +147,17 @@ static const char* const kLowMemoryMsg =
 // on the TCP task long after this function has returned.
 //
 // Returns nullptr when even that could not be afforded, which is a caller's
-// cue to answer with something small.
+// cue to answer with something small. An empty body is one of those cases
+// rather than a reply: no caller here can produce one honestly — sendJson()
+// and handleExport() have already checked the document serialised to its
+// measured length, handleBoardGet() starts from "[]", and a QR code always
+// carries its own header — so a body that arrives empty is a String that
+// failed to allocate and said nothing, which answered as 200 is exactly the
+// silent empty reply this function exists to stop.
 static AsyncWebServerResponse* ownedBodyResponse(AsyncWebServerRequest* r, int code,
                                                  const char* type, String&& body) {
   const size_t len = body.length();
-  // Nothing to hand over, and the library would make a chunked reply of it.
-  if (!len) return r->beginResponse(code, type, "");
+  if (!len) return nullptr;
   AsyncWebServerResponse* res = nullptr;
   try {
     std::shared_ptr<String> held = std::make_shared<String>(std::move(body));
@@ -162,19 +172,19 @@ static AsyncWebServerResponse* ownedBodyResponse(AsyncWebServerRequest* r, int c
   } catch (const std::bad_alloc&) {
     return nullptr;   // the pointer and its control block, not the body
   }
-  if (res) res->setCode(code);
+  res->setCode(code);                 // beginResponse throws rather than returning null
   return res;
 }
 
 static void sendJson(AsyncWebServerRequest* r, int code, const JsonDocument& doc) {
   String out;
   if (!serializedWhole(doc, out, false)) {
-    r->send(503, "application/json", "{\"error\":\"low memory\"}");
+    r->send(503, "application/json", kLowMemoryJson);
     return;
   }
   AsyncWebServerResponse* res = ownedBodyResponse(r, code, "application/json", std::move(out));
   if (!res) {
-    r->send(503, "application/json", "{\"error\":\"low memory\"}");
+    r->send(503, "application/json", kLowMemoryJson);
     return;
   }
   r->send(res);
@@ -555,7 +565,7 @@ void WifiManager::setupRoutes() {
       sendError(r, 400, "what must be wifi, portal or address"); return;
     }
     if (what == Qr::Payload::Wifi && settings.wifi().security != ApSecurity::Open && !authed(r)) return;
-    handleQrFor(r, what);
+    serveGuarded("/api/qr", r, kLowMemoryMsg, [&] { handleQrFor(r, what); });
   });
   _http.on("/api/board", HTTP_POST,
            [](AsyncWebServerRequest* r) {
@@ -638,8 +648,10 @@ void WifiManager::setupRoutes() {
     r->send(res);
   });
 
-  _http.on("/api/settings/export", HTTP_GET,
-           [this](AsyncWebServerRequest* r) { if (authed(r)) handleExport(r); });
+  _http.on("/api/settings/export", HTTP_GET, [this](AsyncWebServerRequest* r) {
+    if (!authed(r)) return;
+    serveGuarded("/api/settings/export", r, kLowMemoryMsg, [&] { handleExport(r); });
+  });
   // Takes no body, so it is not in the table above — but it writes NVS,
   // so it stands behind the same gate.
   _http.on("/api/settings/reset", HTTP_POST,
@@ -1185,7 +1197,15 @@ void WifiManager::handleBoardGet(AsyncWebServerRequest* request) {
   String out = "[]";
   if (littleFsHas(BOARD_FILE)) {
     File f = LittleFS.open(BOARD_FILE, "r");
-    if (f) { out = f.readString(); f.close(); }
+    if (f) {
+      // readString() grows a String and fails an allocation by simply stopping,
+      // so a short heap hands back an empty read that looks like an empty
+      // board. Keep the default rather than answer with nothing: a file that
+      // exists and reads as empty is a failure, not a wiped board.
+      String stored = f.readString();
+      f.close();
+      if (stored.length()) out = std::move(stored);
+    }
   }
   // Whatever the operator wrote on the board, which is theirs to make as long
   // as they like, so it goes the same way as the other bodies.
