@@ -343,6 +343,13 @@ static void interfaceName(uint32_t id, const char* remote, char* out, size_t cap
 // ---------------------------------------------------------------------------
 namespace RnsTransport {
 
+// Published under sSnapLock, plus a staging copy each so a refresh can be
+// built without holding the lock and then handed over with a swap. Both halves
+// are reserved to their maximum once, at begin(), and swapping exchanges two
+// already-reserved buffers -- so after startup neither ever allocates again.
+static std::vector<PathInfo>  sPaths,  sPathsStaging;
+static std::vector<IfaceInfo> sIfaces, sIfacesStaging;
+
 bool started() { return sStarted; }
 
 // The library's level while it may print, and whether it may. The mute is
@@ -1172,6 +1179,16 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   sEvents = xQueueCreate(RNS_MAX_INTERFACES + 8, sizeof(Event));
   sReplyQueue = xQueueCreate(2, sizeof(PendingReply));
   sSnapLock = xSemaphoreCreateMutex();
+  // Take the room for the snapshots now. These used to be local vectors that
+  // grew from empty on every refresh: a doubling cascade of allocate-and-free
+  // every five seconds, which is what chopped the heap into pieces too small
+  // to hold the next cascade. A Wireless Paper reached 19 KB free with a
+  // largest block of 1652 B and threw std::bad_alloc out of the Reticulum loop
+  // on every pass from then on, while still serving HTTP and looking healthy.
+  // Reserved here, at startup, the allocation happens once and cannot fail
+  // later.
+  sPaths.reserve(SNAPSHOT_MAX_PATHS);        sPathsStaging.reserve(SNAPSHOT_MAX_PATHS);
+  sIfaces.reserve(RNS_MAX_INTERFACES);       sIfacesStaging.reserve(RNS_MAX_INTERFACES);
 
   if (!settings.transport().enabled) { log_w("Reticulum transport disabled in settings"); return false; }
 
@@ -1363,8 +1380,6 @@ static void drainTcp() {
 }
 
 // Snapshots for the web layer
-static std::vector<PathInfo>  sPaths;
-static std::vector<IfaceInfo> sIfaces;
 static uint32_t sSnapAtMs = 0;
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
 static Tables   sTables = {};            // table sizes, for soak monitoring
@@ -1375,8 +1390,12 @@ static void refreshSnapshots() {
   // the count is free, the rows are not.
   if (millis() - sSnapAtMs < SNAPSHOT_INTERVAL_MS) return;
   sSnapAtMs = millis();
-  std::vector<PathInfo> p;
-  std::vector<IfaceInfo> i;
+  // clear() keeps the capacity reserved at begin(), so the push_back()s below
+  // write into memory this node already owns.
+  std::vector<PathInfo>&  p = sPathsStaging;
+  std::vector<IfaceInfo>& i = sIfacesStaging;
+  p.clear();
+  i.clear();
   double now = RNS::Utilities::OS::time();
   // Paths live in the microStore-backed table (Transport::path_table() is the
   // legacy in-memory container and stays empty in 0.5.x). begin()/end() are
@@ -1410,6 +1429,7 @@ static void refreshSnapshots() {
     strlcpy(ii.mode, modeNameOf(iface.mode()), sizeof(ii.mode));
     ii.rxb = iface.rxbytes(); ii.txb = iface.txbytes();
     i.push_back(ii);
+    if (i.size() >= RNS_MAX_INTERFACES) break;   // never grow past what was reserved
   }
   // Sizes only — every one of these is a container the RNS task owns, so they
   // are read here and published under the same lock as the rest, never touched
