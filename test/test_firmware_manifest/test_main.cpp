@@ -17,12 +17,18 @@
 // with RetiMesh Node. If not, see <https://www.gnu.org/licenses/>.
 
 
-// Whether an image may be installed. The signature check is a stub here — the
+// Whether an image may be installed.
+//
+// Two verifiers, on purpose. Most of these tests use a fake scheme, because the
 // bugs this guards against live in the ordering and the field checks, and a
-// host has no Ed25519 to test the maths with anyway.
+// fake lets a test damage one field without re-signing the manifest. The last
+// few use the firmware's own Ed25519 against a manifest the signing tool really
+// signed, because a fake cannot tell whether the bytes handed to the verifier
+// are the bytes that were signed — and that is the half a stub cannot cover.
 #include <unity.h>
 #include <string.h>
 #include "../../src/sys/FirmwareManifest.h"
+#include "../../src/sys/OtaVerify.h"
 #include "fixture.h"
 
 namespace FM = FirmwareManifest;
@@ -236,6 +242,77 @@ static void test_the_signing_tools_manifest_parses_as_the_firmware_expects() {
   for (size_t i = 0; i < FM::HASH_SIZE; i++) TEST_ASSERT_EQUAL_UINT8(i, m.imageHash[i]);
 }
 
+// ---------------------------------------------------------------------------
+// The same checks, with the crypto the device actually runs. The fixture is
+// signed by tools/fw_sign.py, so these fail if either side changes what it
+// signs over — the case the fake verifier is blind to by construction.
+// ---------------------------------------------------------------------------
+
+static FM::Policy fixturePolicy(const uint8_t (*anchors)[FM::KEY_SIZE], size_t n) {
+  FM::Policy p;
+  p.roots = anchors; p.rootCount = n;
+  p.board = "t3s3"; p.slotSize = 1966080; p.acceptedVersion = 0;
+  return p;
+}
+
+static void test_a_manifest_the_signing_tool_signed_verifies_for_real() {
+  uint8_t anchors[1][FM::KEY_SIZE];
+  memcpy(anchors[0], FIXTURE_ROOT_KEY, FM::KEY_SIZE);
+  FM::Manifest m;
+  TEST_ASSERT_EQUAL((int)FM::Result::Ok,
+                    (int)FM::check(MANIFEST_FIXTURE, sizeof(MANIFEST_FIXTURE),
+                                   fixturePolicy(anchors, 1), Ota::verifySignature, m));
+  TEST_ASSERT_EQUAL_MEMORY(FIXTURE_DELEGATE_KEY, m.delegateKey, FM::KEY_SIZE);
+}
+
+static void test_real_crypto_refuses_a_root_that_did_not_sign_the_delegation() {
+  // The delegate's own key as an anchor: a real signature by the root does not
+  // verify under it, where the fake scheme would have to be told to say no.
+  uint8_t anchors[1][FM::KEY_SIZE];
+  memcpy(anchors[0], FIXTURE_DELEGATE_KEY, FM::KEY_SIZE);
+  FM::Manifest m;
+  TEST_ASSERT_EQUAL((int)FM::Result::UnknownRoot,
+                    (int)FM::check(MANIFEST_FIXTURE, sizeof(MANIFEST_FIXTURE),
+                                   fixturePolicy(anchors, 1), Ota::verifySignature, m));
+}
+
+static void test_real_crypto_catches_a_single_flipped_bit_in_the_image_record() {
+  uint8_t anchors[1][FM::KEY_SIZE];
+  memcpy(anchors[0], FIXTURE_ROOT_KEY, FM::KEY_SIZE);
+  uint8_t b[sizeof(MANIFEST_FIXTURE)];
+  memcpy(b, MANIFEST_FIXTURE, sizeof(b));
+  b[FM::IMAGE_RECORD_OFFSET + 40] ^= 0x01;         // one bit of the image size
+  FM::Manifest m;
+  TEST_ASSERT_EQUAL((int)FM::Result::BadImageSignature,
+                    (int)FM::check(b, sizeof(b), fixturePolicy(anchors, 1),
+                                   Ota::verifySignature, m));
+}
+
+static void test_real_crypto_catches_a_flipped_bit_in_the_delegation() {
+  uint8_t anchors[1][FM::KEY_SIZE];
+  memcpy(anchors[0], FIXTURE_ROOT_KEY, FM::KEY_SIZE);
+  uint8_t b[sizeof(MANIFEST_FIXTURE)];
+  memcpy(b, MANIFEST_FIXTURE, sizeof(b));
+  b[FM::DELEGATION_RECORD_OFFSET + 36] ^= 0x01;    // the delegate's own floor
+  FM::Manifest m;
+  TEST_ASSERT_EQUAL((int)FM::Result::UnknownRoot,
+                    (int)FM::check(b, sizeof(b), fixturePolicy(anchors, 1),
+                                   Ota::verifySignature, m));
+}
+
+// The roots this build would actually trust. A regenerated OtaRoots.h that lost
+// a key, or gained a placeholder, should fail here rather than at install time.
+static void test_the_compiled_in_roots_are_usable_anchors() {
+  TEST_ASSERT_EQUAL_UINT32(2, (uint32_t)Ota::rootCount());
+  for (size_t i = 0; i < Ota::rootCount(); i++) {
+    bool allZero = true;
+    for (size_t b = 0; b < FM::KEY_SIZE; b++)
+      if (Ota::roots()[i][b] != 0) { allZero = false; break; }
+    TEST_ASSERT_FALSE_MESSAGE(allZero, "a compiled-in root is all zeroes");
+  }
+  TEST_ASSERT_NOT_EQUAL(0, memcmp(Ota::roots()[0], Ota::roots()[1], FM::KEY_SIZE));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -265,5 +342,10 @@ int main() {
   RUN_TEST(test_rubbish_is_refused_before_anything_is_read);
   RUN_TEST(test_every_refusal_can_be_explained);
   RUN_TEST(test_the_signing_tools_manifest_parses_as_the_firmware_expects);
+  RUN_TEST(test_a_manifest_the_signing_tool_signed_verifies_for_real);
+  RUN_TEST(test_real_crypto_refuses_a_root_that_did_not_sign_the_delegation);
+  RUN_TEST(test_real_crypto_catches_a_single_flipped_bit_in_the_image_record);
+  RUN_TEST(test_real_crypto_catches_a_flipped_bit_in_the_delegation);
+  RUN_TEST(test_the_compiled_in_roots_are_usable_anchors);
   return UNITY_END();
 }

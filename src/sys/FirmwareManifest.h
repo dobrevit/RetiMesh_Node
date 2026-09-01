@@ -42,9 +42,10 @@
 //  Everything here is parsing and policy — pure, no Arduino, no crypto. The
 //  signature check is a function the caller supplies, because the bugs live in
 //  the ordering and the field checks rather than in Ed25519, and because that
-//  is what lets the whole policy be tested on a host that has no Ed25519 at
-//  all. The device passes the real one; the tests pass a fake that records what
-//  it was asked.
+//  is what lets most of the policy be tested with a fake that records what it
+//  was asked, one damaged field at a time, without re-signing anything. The
+//  device passes the real one from OtaVerify.h, and so do the tests that check
+//  a manifest the signing tool actually signed.
 // ============================================================================
 #pragma once
 
