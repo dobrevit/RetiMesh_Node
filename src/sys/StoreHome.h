@@ -222,15 +222,43 @@ inline const char* ejectRefusal(bool moveQueued, Where current, bool cardLost) {
   return nullptr;
 }
 
-inline const char* adoptRefusal(bool moveQueued, Where current, Card c, bool cardLost) {
+// `cardNamesThisNode` separates the two ways a card comes back foreign. A card
+// written by a different node is the case the rule is for. A card written by
+// *this* board under an earlier identity — after a flash erase, say — reads
+// foreign too, because ownership is the identity and not the name, and the
+// operator then gets told the card belongs to the node they are standing in
+// front of. Same refusal, and it has to stay the same refusal: the store on
+// that card cannot be opened by an identity that did not write it. But saying
+// which of the two it is costs a sentence and saves an afternoon.
+inline const char* adoptRefusal(bool moveQueued, Where current, Card c, bool cardLost,
+                                bool cardNamesThisNode = false) {
   if (moveQueued)           return "a move is already queued";
   if (cardLost)             return "the card was removed; restart the node before moving the store";
   if (c == Card::NoCard)    return "no card";
   if (current == Where::Sd) return "the store is already on the card";
   // The owner's name is not something a pure rule can see; requestAdopt() adds
   // it to this sentence rather than writing a second one.
-  if (c == Card::Foreign)   return "refused: this card holds another node's store; format it first if you mean to take it";
+  if (c == Card::Foreign)
+    return cardNamesThisNode
+      ? "refused: this card was written by an earlier identity of this node, which cannot be "
+        "read from here; format it if you mean to take it"
+      : "refused: this card holds another node's store; format it first if you mean to take it";
   return nullptr;
+}
+
+// Why the store is not on the card, for the one line a node says about it at
+// boot. Null when it is on the card and there is nothing to explain.
+//
+// Pure, so the wording of each case is settled and tested here rather than at
+// the single call site, which can only be reached by booting a board with a
+// card in the slot — which is exactly how a node came to sit quietly in 128 KiB
+// of flash with eight gigabytes plugged into it.
+inline const char* flashReason(bool sdStoreSetting, bool cardMounted, Card c) {
+  if (decide(sdStoreSetting, cardMounted, c) == Where::Sd) return nullptr;
+  if (!cardMounted)       return "there is no card in the slot";
+  if (!sdStoreSetting)    return "the settings keep the store off the card";
+  if (c == Card::Foreign) return "the card holds a store this node does not own; format it to take the card";
+  return "the card is not carrying this node's store yet";
 }
 
 // --- the node --------------------------------------------------------------

@@ -351,8 +351,16 @@ static bool queue(Move m, const char* said) {
 // the page draws and the request it sends are answering the same question. A
 // second reading of them, assembled in the status handler, is how the Eject
 // button came to be lit for a card that was no longer in the slot.
+// True when the card's marker carries this node's own name. The name is derived
+// from the MAC and survives an identity change, so a card this board wrote
+// before its identity was replaced still names it.
+static bool cardNamesThisNode() {
+  const Ownership o = ownership();
+  return o.owner[0] && strcmp(o.owner, wifiManager.hostname()) == 0;
+}
+
 static const char* adoptRefusalNow() {
-  return adoptRefusal(busy(), where(), card(), sdCard.storageLost());
+  return adoptRefusal(busy(), where(), card(), sdCard.storageLost(), cardNamesThisNode());
 }
 static const char* ejectRefusalNow() {
   return ejectRefusal(busy(), where(), sdCard.storageLost());
@@ -368,12 +376,12 @@ bool requestAdopt() {
     // one: whose store this is cannot be seen by a pure rule, and is the first
     // thing the operator wants to know.
     const Ownership o = ownership();
-    if (o.card == Card::Foreign && o.owner[0])
+    if (o.card == Card::Foreign && o.owner[0] && !cardNamesThisNode())
       snprintf(sResult, sizeof(sResult),
                "refused: this card holds the store of \"%s\"; format it first if you mean to take it",
                o.owner);
     else
-      strlcpy(sResult, why, sizeof(sResult));
+      strlcpy(sResult, why, sizeof(sResult));   // already the right sentence
     return false;
   }
   return queue(Move::Adopt, "queued: the store moves onto the card as the node restarts");
@@ -535,6 +543,27 @@ Where chooseAtBoot() {
     sdCard.reserve(true);                // no formatting, and removal is an error
   } else {
     RnsFileSystem::useLittleFs();
+  }
+
+  // Said once, at boot, because a node keeping its store in flash with a card
+  // in the slot is indistinguishable from one with no card at all — until the
+  // partition fills months later and writes start failing. A card that is
+  // present and unused is a warning; not having one is not.
+  if (const char* why = flashReason(settings.transport().sdStore, sdCard.mounted(), c)) {
+    if (sdCard.mounted()) {
+      log_w("store: in flash, not on the card — %s", why);
+      // And onto the card itself, which is where someone wondering why it is
+      // not being used will look. The serial log says this too, but it says it
+      // before USB has enumerated, so nobody ever reads it there.
+      char line[160];
+      snprintf(line, sizeof(line), "store: in flash, not on this card — %s", why);
+      sdCard.log(line);
+    } else {
+      log_i("store: in flash; %s", why);
+    }
+  } else {
+    log_i("store: on the card");
+    sdCard.log("store: opened on this card");
   }
   // Keep the card's account of itself true.
   //
