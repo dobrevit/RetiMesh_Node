@@ -1548,8 +1548,9 @@ void loop() {
       nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
       // Every announce this node makes, including the page's. The counter is
       // how an operator tells a node whose mesh side has quietly stopped from
-      // one that is merely quiet (roadmap/04-backlog.md), so it must not
-      // under-report.
+      // one that is merely quiet, so it must not under-report: an announce
+      // that is sent and not counted here reads, from the other end of a
+      // status page, exactly like a node that has stopped talking.
       g_stats.announcesTx += 1 + (lxLen ? 1 : 0) + (nomadDest ? 1 : 0);
       // Scattered, not on the dot. Two nodes flashed together boot together
       // and would then announce together for as long as they both run: the
