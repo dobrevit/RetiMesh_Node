@@ -1,0 +1,33 @@
+# A/B over-the-air updates on a 4 MB part.
+#
+# Two app slots, because a node that cannot be reached by cable has to be able
+# to write a new firmware while running the old one, and to fall back when the
+# new one does not come up. Equal slots rather than Meshtastic's asymmetric
+# main-plus-updater: this needs no bespoke installer in the boot path, which is
+# the component that must never break and would be sealed in an enclosure
+# before it had ever run in anger.
+#
+# The room comes from the filesystem, not the app. data/ is 88 KiB and the
+# stock table gave it 896 KiB; at 128 KiB it still has 40 KiB spare, and the
+# two app slots take everything it gave up. If the web app ever outgrows that,
+# it fails at `uploadfs` on a desk, which is a different class of problem from
+# a firmware that will not fit its slot.
+#
+# App slots are 64 KiB aligned because the bootloader requires it, so the sizes
+# come in 64 KiB steps rather than wherever the arithmetic lands.
+#
+# 1920 KiB a slot against a firmware of 1733 KiB is 187 KiB of headroom, 11 %.
+# That is thin, and it moves: the image grew 79 KiB in the day this table was
+# designed. board_upload.maximum_size in platformio.ini is set to the slot so
+# that a build which outgrows it fails here, at a desk, rather than at install
+# time on a pole — and when it does, the answer is a trimmed deployment build
+# (no QR page, no web app) rather than a bigger slot, because on 4 MB there is
+# no bigger slot to be had.
+#
+# Name,     Type, SubType,  Offset,   Size,
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+ota_0,      app,  ota_0,    0x10000,  0x1E0000,
+ota_1,      app,  ota_1,    0x1F0000, 0x1E0000,
+littlefs,   data, spiffs,   0x3D0000, 0x20000,
+coredump,   data, coredump, 0x3F0000, 0x10000,
