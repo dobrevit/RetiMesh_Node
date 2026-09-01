@@ -238,6 +238,56 @@ static void test_an_identity_hex_fits_the_marker_field() {
   TEST_ASSERT_TRUE(StoreHome::kIdentityHexLen + 1 <= sizeof(m.node));
 }
 
+// --- what a node says about where its store ended up ------------------------
+
+static void test_a_card_in_the_slot_that_is_not_used_is_explained() {
+  // The case that cost an afternoon: a mounted card, a store in 128 KiB of
+  // flash, and nothing anywhere saying why.
+  const char* why = StoreHome::flashReason(true, true, Card::Foreign);
+  TEST_ASSERT_NOT_NULL(why);
+  TEST_ASSERT_NOT_NULL(strstr(why, "format"));
+}
+
+static void test_a_store_on_the_card_needs_no_explanation() {
+  TEST_ASSERT_NULL(StoreHome::flashReason(true, true, Card::Ours));
+  TEST_ASSERT_NULL(StoreHome::flashReason(true, true, Card::Legacy));
+}
+
+static void test_each_reason_for_flash_is_its_own_sentence() {
+  const char* noCard   = StoreHome::flashReason(true,  false, Card::NoCard);
+  const char* setting  = StoreHome::flashReason(false, true,  Card::Ours);
+  const char* foreign  = StoreHome::flashReason(true,  true,  Card::Foreign);
+  const char* notReady = StoreHome::flashReason(true,  true,  Card::Blank);
+  const char* all[] = {noCard, setting, foreign, notReady};
+  for (const char* r : all) TEST_ASSERT_NOT_NULL(r);
+  TEST_ASSERT_NOT_EQUAL(0, strcmp(noCard, setting));
+  TEST_ASSERT_NOT_EQUAL(0, strcmp(setting, foreign));
+  TEST_ASSERT_NOT_EQUAL(0, strcmp(foreign, notReady));
+}
+
+static void test_a_card_this_node_wrote_under_an_older_identity_says_so() {
+  // Same refusal either way — the store on it cannot be opened by an identity
+  // that did not write it — but the operator is standing in front of the node
+  // whose name is on the card, and "another node's store" is not what they see.
+  const char* mine   = StoreHome::adoptRefusal(false, Where::LittleFs, Card::Foreign, false, true);
+  const char* theirs = StoreHome::adoptRefusal(false, Where::LittleFs, Card::Foreign, false, false);
+  TEST_ASSERT_NOT_NULL(mine);
+  TEST_ASSERT_NOT_NULL(theirs);
+  TEST_ASSERT_NOT_EQUAL(0, strcmp(mine, theirs));
+  TEST_ASSERT_NOT_NULL(strstr(mine, "earlier identity"));
+  TEST_ASSERT_NOT_NULL(strstr(theirs, "another node"));
+  TEST_ASSERT_FALSE(StoreHome::adoptable(Card::Foreign));   // neither takes it
+}
+
+static void test_the_older_identity_wording_is_only_for_a_foreign_card() {
+  // Nothing else in the rule changes because the name happens to match.
+  TEST_ASSERT_EQUAL_STRING(StoreHome::adoptRefusal(true, Where::LittleFs, Card::Ours, false, false),
+                           StoreHome::adoptRefusal(true, Where::LittleFs, Card::Ours, false, true));
+  TEST_ASSERT_EQUAL_STRING(StoreHome::adoptRefusal(false, Where::Sd, Card::Ours, false, false),
+                           StoreHome::adoptRefusal(false, Where::Sd, Card::Ours, false, true));
+  TEST_ASSERT_NULL(StoreHome::adoptRefusal(false, Where::LittleFs, Card::Blank, false, true));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_the_setting_off_keeps_the_store_on_internal_flash);
@@ -262,5 +312,10 @@ int main(int, char**) {
   RUN_TEST(test_an_adopt_is_offered_for_a_card_this_node_may_take);
   RUN_TEST(test_a_marker_starts_invalid_and_empty);
   RUN_TEST(test_an_identity_hex_fits_the_marker_field);
+  RUN_TEST(test_a_card_in_the_slot_that_is_not_used_is_explained);
+  RUN_TEST(test_a_store_on_the_card_needs_no_explanation);
+  RUN_TEST(test_each_reason_for_flash_is_its_own_sentence);
+  RUN_TEST(test_a_card_this_node_wrote_under_an_older_identity_says_so);
+  RUN_TEST(test_the_older_identity_wording_is_only_for_a_foreign_card);
   return UNITY_END();
 }
