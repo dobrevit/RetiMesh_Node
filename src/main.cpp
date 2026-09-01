@@ -76,6 +76,7 @@
 #include "Maintenance.h"
 #include "ConsoleServer.h"
 #include "PppUart.h"
+#include "OtaDevice.h"
 
 NodeStats g_stats;
 
@@ -131,6 +132,11 @@ static LocalLink::UnavailableLink pppLink(LocalLink::Type::PppUart, "ppp0", fals
 // Whether the task that drives Reticulum was created; the transport is only
 // "online" if something is running its loop.
 static bool sRnsTaskUp = false;
+
+// The version floor an update is judged against, and where it is remembered.
+// Opened in setup() rather than here: NVS is not up this early.
+static Ota::NvsStore     otaStore;
+static Ota::Floor<Ota::NvsStore> otaFloor(otaStore);
 
 void setup() {
   // Prefer PSRAM for anything larger than a few hundred bytes — packet
@@ -333,6 +339,21 @@ void setup() {
 
   // Last, so the figure beside it is what the node has left to run on.
   Diag::cost("tasks");
+
+  // Everything is up, which is the bar an updated image has to clear: the
+  // bootloader started it on approval and puts the previous one back on the
+  // next boot unless it is told, here, that this one works. Saying so also
+  // settles the version floor — the same statement, recorded for the next
+  // update to be judged against. On a first boot after a cable flash there is
+  // nothing pending and nothing staged, and this does nothing at all.
+  otaStore.begin();
+  {
+    const Ota::Settlement s = Ota::confirmBoot(otaFloor);
+    if (s.advanced) log_i("update confirmed: the version floor is now %lu", (unsigned long)s.floor);
+    if (!Ota::canSelfUpdate())
+      log_w("this board has a single app partition: it cannot install its own updates, "
+            "and an update needs a cable");
+  }
 
   if (settings.links().wifiEnabled)
     log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",
