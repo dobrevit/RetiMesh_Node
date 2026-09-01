@@ -16,6 +16,12 @@
 # App slots are 64 KiB aligned because the bootloader requires it, so the sizes
 # come in 64 KiB steps rather than wherever the arithmetic lands.
 #
+# The filesystem partition is named spiffs even though it holds LittleFS:
+# LittleFS.begin() looks the partition up by the label "spiffs" unless it is
+# given another, and a name it cannot find fails the mount without formatting
+# anything — so the node runs with no filesystem at all, serving no portal and
+# unable to persist a single path, while the flash still holds every file.
+#
 # 1920 KiB a slot against a firmware of 1733 KiB is 187 KiB of headroom, 11 %.
 # That is thin, and it moves: the image grew 79 KiB in the day this table was
 # designed. board_upload.maximum_size in platformio.ini is set to the slot so
@@ -29,5 +35,5 @@ nvs,        data, nvs,      0x9000,   0x5000,
 otadata,    data, ota,      0xe000,   0x2000,
 ota_0,      app,  ota_0,    0x10000,  0x1E0000,
 ota_1,      app,  ota_1,    0x1F0000, 0x1E0000,
-littlefs,   data, spiffs,   0x3D0000, 0x20000,
+spiffs,     data, spiffs,   0x3D0000, 0x20000,
 coredump,   data, coredump, 0x3F0000, 0x10000,
