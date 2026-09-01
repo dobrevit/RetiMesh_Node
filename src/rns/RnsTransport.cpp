@@ -931,6 +931,22 @@ static void onLxmfPacket(const RNS::Bytes& data, const RNS::Packet& packet) {
   proveIfTaken(packet, handleLxmfMessage(whole, Rns::ViaPacket, signalOf(packet)));
 }
 
+const char* phaseNow()     { return RNS::Utilities::Phase::current(); }
+uint32_t    phaseNowMs()   { return RNS::Utilities::Phase::current_ms(); }
+
+size_t phaseSpans(RnsPhase* out, size_t max) {
+  const size_t n = RNS::Utilities::Phase::count();
+  const size_t k = n < max ? n : max;
+  for (size_t i = 0; i < k; i++) {
+    const RNS::Utilities::PhaseStat& p = RNS::Utilities::Phase::at(i);
+    out[i].name = p._name ? p._name : "?";
+    out[i].count = p._count;
+    out[i].maxMs = p._max_ms;
+    out[i].totalMs = (uint32_t)p._total_ms;
+  }
+  return k;
+}
+
 const char* nomadAddress() {
   static char hex[33] = "";
   if (sStarted && nomadDest) strlcpy(hex, nomadDest.hash().toHex().c_str(), sizeof(hex));

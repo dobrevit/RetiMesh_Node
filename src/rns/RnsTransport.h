@@ -126,6 +126,27 @@ LxmfState lxmf();
 // learn the address to give anybody.
 const char* nomadAddress();
 
+// Where the Reticulum task is inside its own loop, and how long each step of
+// it has ever taken.
+//
+// A node was found alive but not getting round that loop: the radio kept
+// receiving, the ring filled, 2603 frames were dropped against 39 taken, and
+// the most that could be said was "stuck somewhere after the interfaces".
+// Reticulum::loop() has four candidates there and two of them touch flash, so
+// the library now names each step and keeps the worst pause it ever saw
+// (microReticulum Utilities/Phase.h). The maxima are what make this useful
+// after the fact: a node that has recovered still carries the longest stall
+// it had, so "it hung last night" becomes a row in a table.
+struct RnsPhase {
+  const char* name;
+  uint32_t    count;
+  uint32_t    maxMs;
+  uint32_t    totalMs;
+};
+const char* phaseNow();          // the step running right now, "idle" between passes
+uint32_t    phaseNowMs();        // how long it has been in it
+size_t      phaseSpans(RnsPhase* out, size_t max);
+
 // Hands one LXMF message to the Reticulum task to send — the answer to a
 // command that arrived the same way (RnsAdmin.h). Opportunistic when it goes:
 // one packet, no link, which suits a short reply and still works when the only

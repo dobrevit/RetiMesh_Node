@@ -708,6 +708,24 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   // running out of. See Diag.h.
   {
     JsonObject dg = doc["diag"].to<JsonObject>();
+    // Which step of the Reticulum loop is running, and the longest each has
+    // ever taken. `phase` is what a node caught mid-stall shows; `spans` is
+    // what one that has since recovered still remembers.
+    {
+      JsonObject rp = dg["rns_loop"].to<JsonObject>();
+      rp["phase"] = RnsTransport::phaseNow();
+      rp["phase_ms"] = RnsTransport::phaseNowMs();
+      RnsTransport::RnsPhase spans[20];
+      const size_t n = RnsTransport::phaseSpans(spans, 20);
+      JsonArray arr = rp["spans"].to<JsonArray>();
+      for (size_t i = 0; i < n; i++) {
+        JsonObject o = arr.add<JsonObject>();
+        o["name"] = spans[i].name;
+        o["count"] = spans[i].count;
+        o["max_ms"] = spans[i].maxMs;
+        o["total_ms"] = spans[i].totalMs;
+      }
+    }
     const Diag::Boot& b = Diag::boot();
     JsonObject bo = dg["boot"].to<JsonObject>();
     bo["count"]        = b.count;
