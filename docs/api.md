@@ -291,6 +291,13 @@ Reticulum. Details and the recovery procedure: [local-link.md](local-link.md#the
 - `POST /api/system/bootloader` `{"confirm":"BOOTLOADER"}` → `202 { "ok":true, "restart":true, "target":"bootloader", "method":"software_api", "delay_ms":600, "expect":"…", "recovery":"…" }`; the node restarts into the ROM downloader 600 ms later. `400` without the confirm word, `403` when switched off or from a non-local link, `409` while a restart is already in progress, `500` when the request was accepted but the ROM could not be armed (the node restarts into the application instead), `501` where this board cannot (a classic ESP32, or a native-USB S3 built without the composite device, whose serial-JTAG unit survives the reset; use esptool's DTR/RTS reset — the shipped S3 images present the composite device and answer `202`). The console's `BOOTLOADER CONFIRM` answers with the same codes, and over a network session it answers to the same two switches — `bootloader_api`, and `bootloader_from_lan` unless the caller is on a host-facing link. Over the cable neither applies: physical access already allows dumping the firmware and reflashing it
 - `POST /api/system/reboot` `{"confirm":"REBOOT"}` → `202 { "ok":true, "restart":true, "target":"app" }`
 
+`503` now has two meanings, and the `error` string is what tells them apart.
+A node too short of memory to build a reply answers `503` with a reason ending
+`try again` (or, for a settings `POST`, `the change may have been applied`) —
+this can happen on any endpoint, `GET` included, and says nothing about a
+restart. Retrying later is the right response; on the smallest boards several
+browsers polling at once is enough to provoke it.
+
 While a restart is pending every settings `POST` (including `reset`) answers
 `503` and new Reticulum TCP connections are refused. `POST /api/system/bootloader`
 is the exception: a bootloader request may outrank a plain reboot that is
@@ -513,7 +520,7 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 - `POST /api/settings/sd/adopt` `{"confirm":"ADOPT"}` → moves the Reticulum store onto the card and restarts into it; the copy is made during the restart, with nothing holding the store open (409 with the reason when refused — see `sd.can_adopt`)
 - `POST /api/settings/sd/eject` `{"confirm":"EJECT"}` → moves the store back to internal flash the same way and marks the card released, after which any node may take it (409 with the reason when refused — see `sd.can_eject`)
 
-Errors: `{"error":"<reason>"}` with 400/401/403/409/413/500/501/503.
+Errors: `{"error":"<reason>"}` with 400/401/403/409/413/500/501/503 (see above for the two things `503` can mean).
 
 ## Captive portal
 `/generate_204`, `/hotspot-detect.html`, `/connecttest.txt`, … and any
