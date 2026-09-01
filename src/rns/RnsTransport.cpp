@@ -1445,7 +1445,7 @@ static void refreshSnapshots() {
   // sIfaceCount was zeroed and counted back up mid-scan — so a panel or a
   // status request landing in that window read "0 interfaces" while sIfaces
   // still held the full previous list.
-  const size_t pathCount = pathTable.size();
+  const size_t pathTotal = pathTable.size();
   size_t ifaceCount = 0;
   for (const auto& iface : RNS::Transport::get_interfaces()) {
     IfaceInfo ii = {};
@@ -1459,7 +1459,7 @@ static void refreshSnapshots() {
   // are read here and published under the same lock as the rest, never touched
   // from the web task.
   Tables t = {};
-  t.paths         = (uint32_t)pathCount;
+  t.paths         = (uint32_t)pathTotal;
   t.links         = (uint32_t)RNS::Transport::link_table().size();
   t.activeLinks   = (uint32_t)RNS::Transport::active_links().size();
   t.pendingLinks  = (uint32_t)RNS::Transport::pending_links().size();
@@ -1470,7 +1470,7 @@ static void refreshSnapshots() {
 
   xSemaphoreTake(sSnapLock, portMAX_DELAY);
   sPaths.swap(p); sIfaces.swap(i);
-  sPathCount = pathCount; sIfaceCount = ifaceCount;
+  sPathCount = pathTotal; sIfaceCount = ifaceCount;
   sTables = t;
   xSemaphoreGive(sSnapLock);
 }
@@ -1514,7 +1514,16 @@ Tables tables() {
 
 void loop() {
   if (!sStarted) { vTaskDelay(pdMS_TO_TICKS(500)); return; }
-  try {
+  // Diag::guard rather than a try/catch written out here. Containment is one
+  // rule and it lives in one place (Diag.h): what it caught is counted into
+  // faults.contained — which is how an operator learns this task is failing,
+  // a log line on a node nobody is attached to not being an answer — and,
+  // unlike the bare `catch (const std::exception&)` this replaces, it also
+  // catches what does not derive from std::exception. Spelled out here, such
+  // a throw escaped to the task loop in main.cpp, which abandoned the rest of
+  // the pass — refreshSnapshots() included, so the stale snapshot below was
+  // served as current after all.
+  Diag::guard("rns loop", [] {
     applyLogMute();
     // Answers other tasks composed, sent from here because this is the task
     // that owns the library (queueLxmfReply above).
@@ -1557,47 +1566,43 @@ void loop() {
       // signed announce.
       const int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
       const size_t appLen = n < 0 ? 0 : ((size_t)n < sizeof(app) - 1 ? (size_t)n : sizeof(app) - 1);
+      // Every announce this node makes, including the page's. The counter is
+      // how an operator tells a node whose mesh side has quietly stopped from
+      // one that is merely quiet, so it must not under-report: an announce
+      // that is sent and not counted here reads, from the other end of a
+      // status page, exactly like a node that has stopped talking. Which is
+      // why each one is counted as it goes out rather than all three summed
+      // at the end: summed, a throw from the second announce took the count
+      // of the first with it, and the node that had just talked reported that
+      // it had not.
       nodeDest.announce(Bytes((const uint8_t*)app, appLen));
+      g_stats.announcesTx++;
       // And the same node under its LXMF address, so it appears in the
       // clients people actually use. The app_data is the shape LXMF expects
       // rather than the free text above — the two announces describe one node
       // to two audiences (RnsAnnounce.h).
       uint8_t lx[64];
       const size_t lxLen = Rns::lxmfAppData(loraRadio.callsign(), 0, lx, sizeof(lx));
-      if (lxLen) lxmfDest.announce(Bytes(lx, lxLen));
+      if (lxLen) { lxmfDest.announce(Bytes(lx, lxLen)); g_stats.announcesTx++; }
       // And as something to browse. NomadNet announces its node name as plain
       // UTF-8 rather than the msgpack array LXMF uses — a third audience, and
       // the third shape, from one node.
       const char* nn = loraRadio.callsign();
       nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
-      // Every announce this node makes, including the page's. The counter is
-      // how an operator tells a node whose mesh side has quietly stopped from
-      // one that is merely quiet, so it must not under-report: an announce
-      // that is sent and not counted here reads, from the other end of a
-      // status page, exactly like a node that has stopped talking.
-      g_stats.announcesTx += 1 + (lxLen ? 1 : 0) + (nomadDest ? 1 : 0);
+      g_stats.announcesTx++;
       log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
     }
-  } catch (const std::exception& e) {
-    // Counted, not just logged: faults.contained in /api/status is how an
-    // operator learns this task is failing, and a log line on a node nobody
-    // is attached to is not an answer.
-    Diag::noteCaught("rns loop", e.what());
-  }
+  });
 
-  // Outside the try, and deliberately: the snapshots are what /api/status and
-  // the panel read, and while this lived at the end of the block above, any
-  // throw earlier in the pass skipped it and left the last complete pass being
-  // served as though it were current. A node in that state does not look
-  // broken — it looks quiet, with a plausible interface list and counters that
-  // have stopped. That is worse than an error, because it is believed: it was
-  // read as "no TCP client is attached" while a client was in fact attached
-  // and working.
-  try {
-    refreshSnapshots();
-  } catch (const std::exception& e) {
-    Diag::noteCaught("rns snapshots", e.what());
-  }
+  // Guarded separately from the pass above, and deliberately: the snapshots
+  // are what /api/status and the panel read, and while this lived at the end
+  // of the block above, any throw earlier in the pass skipped it and left the
+  // last complete pass being served as though it were current. A node in that
+  // state does not look broken — it looks quiet, with a plausible interface
+  // list and counters that have stopped. That is worse than an error, because
+  // it is believed: it was read as "no TCP client is attached" while a client
+  // was in fact attached and working.
+  Diag::guard("rns snapshots", [] { refreshSnapshots(); });
 }
 
 } // namespace RnsTransport
