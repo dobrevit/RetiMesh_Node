@@ -1440,21 +1440,26 @@ static void refreshSnapshots() {
     uint16_t dropped = RNS::Transport::remove_paths(stale);
     log_i("dropped %u stored path(s) whose interface is gone", (unsigned)dropped);
   }
-  sPathCount = pathTable.size();
-  sIfaceCount = 0;
+  // Counted into locals and published below with the lists they describe. As
+  // members they were written here, outside the lock every reader takes, and
+  // sIfaceCount was zeroed and counted back up mid-scan — so a panel or a
+  // status request landing in that window read "0 interfaces" while sIfaces
+  // still held the full previous list.
+  const size_t pathCount = pathTable.size();
+  size_t ifaceCount = 0;
   for (const auto& iface : RNS::Transport::get_interfaces()) {
     IfaceInfo ii = {};
     strlcpy(ii.name, iface.name().c_str(), sizeof(ii.name));
     strlcpy(ii.mode, modeNameOf(iface.mode()), sizeof(ii.mode));
     ii.rxb = iface.rxbytes(); ii.txb = iface.txbytes();
-    sIfaceCount++;
+    ifaceCount++;
     if (i.size() < RNS_MAX_INTERFACES) i.push_back(ii);   // never grow past what was reserved
   }
   // Sizes only — every one of these is a container the RNS task owns, so they
   // are read here and published under the same lock as the rest, never touched
   // from the web task.
   Tables t = {};
-  t.paths         = (uint32_t)sPathCount;
+  t.paths         = (uint32_t)pathCount;
   t.links         = (uint32_t)RNS::Transport::link_table().size();
   t.activeLinks   = (uint32_t)RNS::Transport::active_links().size();
   t.pendingLinks  = (uint32_t)RNS::Transport::pending_links().size();
@@ -1465,6 +1470,7 @@ static void refreshSnapshots() {
 
   xSemaphoreTake(sSnapLock, portMAX_DELAY);
   sPaths.swap(p); sIfaces.swap(i);
+  sPathCount = pathCount; sIfaceCount = ifaceCount;
   sTables = t;
   xSemaphoreGive(sSnapLock);
 }
@@ -1526,6 +1532,24 @@ void loop() {
     // lands the next announce on zero switched announcing off for good.
     uint16_t interval = settings.radio().announceInterval;
     if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
+      // Scheduled before it is attempted, not after. Advancing only on the way
+      // out meant that an announce which threw left the schedule untouched, so
+      // the next pass ten milliseconds later tried the same thing again, threw
+      // again, and logged again — for as long as whatever made it throw
+      // lasted. A failed announce now waits for the next interval like any
+      // other, which is also the only way the node stays quiet enough to
+      // recover.
+      //
+      // Scattered, not on the dot. Two nodes flashed together boot together
+      // and would then announce together for as long as they both run: the
+      // interval is fixed and nothing else moves the phase, so their packets
+      // collide on air every time and one of them is never heard. A tenth of
+      // the interval is enough to break the lockstep, and small enough that
+      // an operator watching for an announce still sees it about when they
+      // expect. Reticulum's own implementation jitters for the same reason.
+      const uint32_t base = (uint32_t)interval * 1000UL;
+      sNextAnnounceMs = millis() + base + (esp_random() % (base / 10 + 1));
+
       char app[64];
       // snprintf returns the length it *would* have written. A 32-character
       // callsign and a git-describe version exceed this buffer, and the
@@ -1552,20 +1576,27 @@ void loop() {
       // that is sent and not counted here reads, from the other end of a
       // status page, exactly like a node that has stopped talking.
       g_stats.announcesTx += 1 + (lxLen ? 1 : 0) + (nomadDest ? 1 : 0);
-      // Scattered, not on the dot. Two nodes flashed together boot together
-      // and would then announce together for as long as they both run: the
-      // interval is fixed and nothing else moves the phase, so their packets
-      // collide on air every time and one of them is never heard. A tenth of
-      // the interval is enough to break the lockstep, and small enough that
-      // an operator watching for an announce still sees it about when they
-      // expect. Reticulum's own implementation jitters for the same reason.
-      const uint32_t base = (uint32_t)interval * 1000UL;
-      sNextAnnounceMs = millis() + base + (esp_random() % (base / 10 + 1));
       log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
     }
+  } catch (const std::exception& e) {
+    // Counted, not just logged: faults.contained in /api/status is how an
+    // operator learns this task is failing, and a log line on a node nobody
+    // is attached to is not an answer.
+    Diag::noteCaught("rns loop", e.what());
+  }
+
+  // Outside the try, and deliberately: the snapshots are what /api/status and
+  // the panel read, and while this lived at the end of the block above, any
+  // throw earlier in the pass skipped it and left the last complete pass being
+  // served as though it were current. A node in that state does not look
+  // broken — it looks quiet, with a plausible interface list and counters that
+  // have stopped. That is worse than an error, because it is believed: it was
+  // read as "no TCP client is attached" while a client was in fact attached
+  // and working.
+  try {
     refreshSnapshots();
   } catch (const std::exception& e) {
-    log_e("Reticulum loop: %s", e.what());
+    Diag::noteCaught("rns snapshots", e.what());
   }
 }
 
