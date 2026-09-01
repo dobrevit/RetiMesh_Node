@@ -82,21 +82,31 @@ class Floor {
  public:
   static constexpr const char* ACCEPTED_KEY = "ota_floor";
   static constexpr const char* STAGED_KEY   = "ota_staged";
+  static constexpr const char* SLOT_KEY     = "ota_slot";
 
   explicit Floor(Store& store) : _store(store) {}
 
   // What FirmwareManifest::Policy.acceptedVersion should carry.
   uint32_t accepted() const { return _store.get(ACCEPTED_KEY, 0); }
 
-  // Called once an image has been written and otadata switched to it. Recorded
-  // before the reboot because after it there is no one left to write it down.
-  void stage(uint32_t version) { _store.put(STAGED_KEY, version); }
+  // Called once an image has been written and otadata switched to it. The slot
+  // is recorded with the version because that is how the next boot knows
+  // whether it is running the image that was staged or the one it rolled back
+  // to — both are ordinary partitions, and nothing else distinguishes them.
+  // Recorded before the reboot because after it there is no one left to write
+  // it down.
+  void stage(uint32_t version, uint32_t slot) {
+    _store.put(STAGED_KEY, version);
+    _store.put(SLOT_KEY, slot);
+  }
 
   bool haveStaged() const { return _store.has(STAGED_KEY); }
 
-  // Called on the boot after an install, with the answer to "did the image we
-  // staged actually come up?".
-  Settlement confirm(bool stagedIsRunning) {
+  // Called on the boot after an install, with wherever this firmware is running
+  // from. A node that rolled back is running somewhere else, and the version it
+  // wrote never earns the floor.
+  Settlement confirm(uint32_t runningSlot) {
+    const bool stagedIsRunning = haveStaged() && _store.get(SLOT_KEY, 0) == runningSlot;
     const Settlement s = settle(accepted(), haveStaged(),
                                 _store.get(STAGED_KEY, 0), stagedIsRunning);
     // The floor first: if power is lost between these two writes, a staged
@@ -104,7 +114,7 @@ class Floor {
     // again to the same answer — whereas a floor that never got written while
     // the record was dropped would silently lose the advance.
     if (s.advanced) _store.put(ACCEPTED_KEY, s.floor);
-    if (s.clearStaged) _store.drop(STAGED_KEY);
+    if (s.clearStaged) { _store.drop(STAGED_KEY); _store.drop(SLOT_KEY); }
     return s;
   }
 

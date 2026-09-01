@@ -45,6 +45,12 @@ struct FakeStore {
 
 using Floor = Ota::Floor<FakeStore>;
 
+// The two app slots of partitions/ota_4mb.csv, by address: which one a boot
+// came up in is the only thing that distinguishes an update that took from one
+// that was rolled back.
+static constexpr uint32_t SLOT_A = 0x010000;
+static constexpr uint32_t SLOT_B = 0x1F0000;
+
 // --- the decision on its own -----------------------------------------------
 
 static void test_a_boot_with_nothing_staged_changes_nothing() {
@@ -99,11 +105,11 @@ static void test_a_node_that_has_never_updated_accepts_any_version() {
 
 static void test_a_successful_update_is_remembered_across_the_reboot() {
   FakeStore store; Floor floor(store);
-  floor.stage(12);
+  floor.stage(12, SLOT_B);
   TEST_ASSERT_TRUE(floor.haveStaged());
 
   Floor next(store);                       // the boot after the install
-  const Ota::Settlement s = next.confirm(true);
+  const Ota::Settlement s = next.confirm(SLOT_B);
   TEST_ASSERT_TRUE(s.advanced);
   TEST_ASSERT_EQUAL_UINT32(12, next.accepted());
   TEST_ASSERT_FALSE(next.haveStaged());    // and does not settle twice
@@ -114,17 +120,19 @@ static void test_the_floor_is_written_before_the_staged_record_is_dropped() {
   // that outlives its floor settles to the same answer next boot; a floor that
   // never got written while the record was dropped loses the advance for good.
   FakeStore store; Floor floor(store);
-  floor.stage(5);
+  floor.stage(5, SLOT_B);
   store.log.clear();
-  floor.confirm(true);
-  TEST_ASSERT_EQUAL_STRING("put:ota_floor;drop:ota_staged;", store.log.c_str());
+  floor.confirm(SLOT_B);
+  TEST_ASSERT_EQUAL_STRING("put:ota_floor;drop:ota_staged;drop:ota_slot;", store.log.c_str());
 }
 
 static void test_a_rollback_forgets_the_staged_version_without_using_it() {
+  // "Rolled back" is not a flag anyone sets: it is this boot running from a
+  // slot other than the one the install wrote.
   FakeStore store; Floor floor(store);
   store.put("ota_floor", 3);
-  floor.stage(8);
-  const Ota::Settlement s = floor.confirm(false);
+  floor.stage(8, SLOT_B);
+  const Ota::Settlement s = floor.confirm(SLOT_A);
   TEST_ASSERT_FALSE(s.advanced);
   TEST_ASSERT_EQUAL_UINT32(3, floor.accepted());
   TEST_ASSERT_FALSE(floor.haveStaged());
@@ -132,9 +140,9 @@ static void test_a_rollback_forgets_the_staged_version_without_using_it() {
 
 static void test_settling_twice_is_harmless() {
   FakeStore store; Floor floor(store);
-  floor.stage(6);
-  floor.confirm(true);
-  const Ota::Settlement again = floor.confirm(true);
+  floor.stage(6, SLOT_B);
+  floor.confirm(SLOT_B);
+  const Ota::Settlement again = floor.confirm(SLOT_B);
   TEST_ASSERT_FALSE(again.advanced);
   TEST_ASSERT_EQUAL_UINT32(6, floor.accepted());
 }
@@ -152,8 +160,8 @@ static void test_a_policy_carries_the_firmwares_own_roots_and_board() {
 
 static void test_the_floor_a_node_reached_is_what_the_policy_enforces() {
   FakeStore store; Floor floor(store);
-  floor.stage(20);
-  floor.confirm(true);
+  floor.stage(20, SLOT_B);
+  floor.confirm(SLOT_B);
   TEST_ASSERT_EQUAL_UINT32(20, Ota::policyFor(1966080, floor.accepted()).acceptedVersion);
 }
 
