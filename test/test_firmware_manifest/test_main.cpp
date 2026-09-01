@@ -160,6 +160,14 @@ static void test_an_image_too_large_for_the_slot_is_refused() {
   TEST_ASSERT_EQUAL((int)FM::Result::Oversize, (int)check(b, policy()));
 }
 
+static void test_a_manifest_for_no_image_at_all_is_refused() {
+  // Nothing stops a broken build from signing a zero-byte firmware.bin, and the
+  // hash would check out; installing it costs the node its running image.
+  uint8_t b[FM::SIZE]; buildGood(b);
+  put32(b + 40, 0);
+  TEST_ASSERT_EQUAL((int)FM::Result::EmptyImage, (int)check(b, policy()));
+}
+
 static void test_an_older_image_is_refused() {
   // The only revocation that works with no clock and no network.
   uint8_t b[FM::SIZE]; buildGood(b);
@@ -190,10 +198,10 @@ static void test_every_refusal_can_be_explained() {
   // A node that refuses an update has to be able to say why, over a console
   // reached by LoRa, to somebody who cannot see it.
   const FM::Result refusals[] = { FM::Result::TooShort, FM::Result::BadMagic,
-    FM::Result::UnknownFormat, FM::Result::UnknownRoot, FM::Result::BadDelegation,
+    FM::Result::UnknownFormat, FM::Result::UnknownRoot,
     FM::Result::NotForFirmware, FM::Result::BadImageSignature, FM::Result::WrongBoard,
     FM::Result::WrongSlotSize, FM::Result::BelowDelegateFloor, FM::Result::Rollback,
-    FM::Result::Oversize };
+    FM::Result::Oversize, FM::Result::EmptyImage };
   for (FM::Result r : refusals) {
     TEST_ASSERT_NOT_NULL(FM::describe(r));
     // A sentence, not a token: this is what an operator reads over a link that
@@ -232,10 +240,11 @@ void setUp() {}
 void tearDown() {}
 
 int main() {
-  memset(ROOT_A, 0xA1, sizeof(ROOT_A));  ROOT_A[0] = 0xA1;
-  memset(ROOT_B, 0xB2, sizeof(ROOT_B));  ROOT_B[0] = 0xB2;
-  memset(DELEGATE, 0xC3, sizeof(DELEGATE)); DELEGATE[0] = 0xC3;
-  memset(STRANGER, 0xD4, sizeof(STRANGER)); STRANGER[0] = 0xD4;
+  // The fake scheme names a key by its first byte, so the four must differ there.
+  memset(ROOT_A,   0xA1, sizeof(ROOT_A));
+  memset(ROOT_B,   0xB2, sizeof(ROOT_B));
+  memset(DELEGATE, 0xC3, sizeof(DELEGATE));
+  memset(STRANGER, 0xD4, sizeof(STRANGER));
   memcpy(roots[0], ROOT_A, FM::KEY_SIZE);
   memcpy(roots[1], ROOT_B, FM::KEY_SIZE);
 
@@ -250,6 +259,7 @@ int main() {
   RUN_TEST(test_an_image_for_another_board_is_refused);
   RUN_TEST(test_an_image_for_another_partition_layout_is_refused);
   RUN_TEST(test_an_image_too_large_for_the_slot_is_refused);
+  RUN_TEST(test_a_manifest_for_no_image_at_all_is_refused);
   RUN_TEST(test_an_older_image_is_refused);
   RUN_TEST(test_a_delegate_cannot_sign_below_its_own_floor);
   RUN_TEST(test_rubbish_is_refused_before_anything_is_read);

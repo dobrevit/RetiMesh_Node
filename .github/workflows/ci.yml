@@ -73,7 +73,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - run: python -m pip install --upgrade pip && python -m pip install ./tools/retimesh-flash
+      - run: python -m pip install --upgrade pip && python -m pip install cryptography ./tools/retimesh-flash
       - run: python -m py_compile tools/*.py
       - run: retimesh-flash --help && retimesh-flash ports
       - name: host flashing-tool tests (mocked ports, console and HTTP)
@@ -82,5 +82,7 @@ jobs:
         run: python tools/check_boards.py
       - name: docs/hardware.md board matrix matches boards.json
         run: python tools/board_docs.py --check
+      - name: OTA manifest fixture matches the signing tool
+        run: python tools/fw_sign.py fixture --check --out test/test_firmware_manifest/fixture.h
       - name: bump_deps dry run
         run: python tools/bump_deps.py --dry-run

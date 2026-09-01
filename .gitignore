@@ -14,3 +14,10 @@ data/assets.json
 # package install; they carry nothing of ours (dependencies: idf >= 5.1).
 src/idf_component.yml
 src/idf_component.yml.orig
+
+# Private halves of the OTA signing keys, which tools/fw_sign.py writes into
+# the working tree by default. A committed root key is the whole trust chain,
+# and replacing one costs a visit to every deployed node. Public keys and
+# delegations are published anyway, so only the secret half is refused here.
+*.key
+keys/

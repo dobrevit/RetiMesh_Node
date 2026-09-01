@@ -62,24 +62,43 @@ namespace FirmwareManifest {
 //   [100..156)  delegation record — signed by a root
 //   [156..220)  root signature over the delegation record
 //   [220..284)  delegate signature over the image record
-static const size_t IMAGE_RECORD_OFFSET      = 0;
-static const size_t IMAGE_RECORD_SIZE        = 100;
-static const size_t DELEGATION_RECORD_OFFSET = 100;
-static const size_t DELEGATION_RECORD_SIZE   = 56;
-static const size_t ROOT_SIG_OFFSET          = 156;
-static const size_t DELEGATE_SIG_OFFSET      = 220;
-static const size_t SIGNATURE_SIZE           = 64;
-static const size_t KEY_SIZE                 = 32;
-static const size_t HASH_SIZE                = 32;
-static const size_t SIZE                     = 284;
+// Every offset is derived from the size of what precedes it rather than
+// written out again, so a record that grows cannot leave a stale offset
+// pointing into the middle of it — the one way a fixed layout can still be got
+// wrong. `constexpr` rather than `static const` because these are named inside
+// inline functions, and an internal-linkage object would give each translation
+// unit its own copy of them.
+inline constexpr size_t SIGNATURE_SIZE           = 64;
+inline constexpr size_t KEY_SIZE                 = 32;
+inline constexpr size_t HASH_SIZE                = 32;
 
-static const uint8_t  MAGIC[4]       = { 'R', 'M', 'F', 'W' };
-static const uint8_t  FORMAT_VERSION = 1;
-static const uint32_t PURPOSE_FIRMWARE = 1u << 0;   // this delegate may sign firmware
+inline constexpr size_t IMAGE_RECORD_OFFSET      = 0;
+inline constexpr size_t IMAGE_RECORD_SIZE        = 100;
+inline constexpr size_t DELEGATION_RECORD_OFFSET = IMAGE_RECORD_OFFSET + IMAGE_RECORD_SIZE;
+inline constexpr size_t DELEGATION_RECORD_SIZE   = 56;
+inline constexpr size_t ROOT_SIG_OFFSET          = DELEGATION_RECORD_OFFSET + DELEGATION_RECORD_SIZE;
+inline constexpr size_t DELEGATE_SIG_OFFSET      = ROOT_SIG_OFFSET + SIGNATURE_SIZE;
+inline constexpr size_t SIZE                     = DELEGATE_SIG_OFFSET + SIGNATURE_SIZE;
 
-static const size_t BOARD_LEN   = 16;    // "t3s3", NUL-padded
-static const size_t VERSION_LEN = 32;    // "v0.0.9-40-g87d8cec", NUL-padded
-static const size_t LABEL_LEN   = 16;    // what the delegate is called, for the log
+inline constexpr uint8_t  MAGIC[4]       = { 'R', 'M', 'F', 'W' };
+inline constexpr uint8_t  FORMAT_VERSION = 1;
+inline constexpr uint32_t PURPOSE_FIRMWARE = 1u << 0;   // this delegate may sign firmware
+
+inline constexpr size_t BOARD_LEN   = 16;    // "t3s3", NUL-padded
+inline constexpr size_t VERSION_LEN = 32;    // "v0.0.9-40-g87d8cec", NUL-padded
+inline constexpr size_t LABEL_LEN   = 16;    // what the delegate is called, for the log
+
+// The field offsets below are literals because they are the format; these say
+// that the records are still big enough to hold the fields read out of them,
+// and that the numbers published beside the image have not moved.
+static_assert(SIZE == 284, "the manifest is 284 bytes; changing that is a format change");
+static_assert(DELEGATION_RECORD_OFFSET == 100 && ROOT_SIG_OFFSET == 156 &&
+              DELEGATE_SIG_OFFSET == 220, "a record size moved a signature");
+static_assert(8 + HASH_SIZE <= 40 && 48 + BOARD_LEN <= 64 &&
+              64 + VERSION_LEN <= 96 && 96 + 4 <= IMAGE_RECORD_SIZE,
+              "an image-record field runs past the record");
+static_assert(KEY_SIZE <= 32 && 40 + LABEL_LEN <= DELEGATION_RECORD_SIZE,
+              "a delegation-record field runs past the record");
 
 struct Manifest {
   uint8_t  imageHash[HASH_SIZE];
@@ -100,7 +119,6 @@ enum class Result : uint8_t {
   BadMagic,
   UnknownFormat,      // a manifest from a newer scheme than this firmware knows
   UnknownRoot,        // no compiled-in root signed this delegation
-  BadDelegation,      // the delegation does not verify against the root that claims it
   NotForFirmware,     // the delegate is not permitted to sign firmware
   BadImageSignature,  // the delegate did not sign this image record
   WrongBoard,
@@ -108,6 +126,7 @@ enum class Result : uint8_t {
   BelowDelegateFloor, // the delegate may not sign a version this low
   Rollback,           // older than what this node has already accepted
   Oversize,           // will not fit the partition it would be written to
+  EmptyImage,         // a signed manifest for nothing at all
 };
 
 inline const char* describe(Result r) {
@@ -117,7 +136,6 @@ inline const char* describe(Result r) {
     case Result::BadMagic:           return "not a firmware manifest";
     case Result::UnknownFormat:      return "manifest format is newer than this firmware";
     case Result::UnknownRoot:        return "signed by a root this firmware does not trust";
-    case Result::BadDelegation:      return "the delegation does not verify";
     case Result::NotForFirmware:     return "that key is not permitted to sign firmware";
     case Result::BadImageSignature:  return "the image signature does not verify";
     case Result::WrongBoard:         return "built for another board";
@@ -125,6 +143,7 @@ inline const char* describe(Result r) {
     case Result::BelowDelegateFloor: return "below the floor that key may sign";
     case Result::Rollback:           return "older than the version already accepted";
     case Result::Oversize:           return "larger than the partition it would be written to";
+    case Result::EmptyImage:         return "the manifest describes an empty image";
   }
   return "unknown";
 }
@@ -192,6 +211,7 @@ inline Result check(const uint8_t* blob, size_t len, const Policy& policy,
   // Then whether this image is for this node at all.
   if (strncmp(out.board, policy.board, BOARD_LEN) != 0) return Result::WrongBoard;
   if (out.slotSize != policy.slotSize) return Result::WrongSlotSize;
+  if (out.imageSize == 0) return Result::EmptyImage;
   if (out.imageSize > policy.slotSize) return Result::Oversize;
 
   // Then freshness, which is a floor rather than a date because this hardware
