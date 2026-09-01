@@ -21,7 +21,6 @@
 // ============================================================================
 #include "WifiManager.h"
 #include <sys/stat.h>
-#include <memory>
 #include "QrCode.h"
 #include "Pmu.h"
 #include "Gps.h"
@@ -81,9 +80,42 @@ static const char* collectBody(AsyncWebServerRequest* request, const uint8_t* da
   return body;
 }
 
+// Whether the whole document actually reached `out`.
+//
+// ArduinoJson's String writer cannot be asked this directly. Its constructor
+// assigns a null const char*, which on ESP32 is String::invalidate() and frees
+// whatever the String held — so reserving room up front is undone before the
+// first byte is written. Its bulk write() returns the length it was given
+// whatever the individual writes did, and its destructor drops the result of
+// the final flush(). A short heap therefore does not fail: concat() refuses,
+// the appends are lost, and serializeJson still reports success.
+//
+// The length is the evidence that survives all of that. measureJson() says how
+// long the document is, String::length() says how much of it arrived, and
+// overflowed() covers the other half — a document the heap could not hold in
+// the first place, which serialises cleanly and is simply missing values.
+//
+// This matters because the failure is silent and looks like ours: about two in
+// five status polls on a Wireless Paper came back as half a document under a
+// 200, and the dashboard's parse error is the only symptom.
+static bool serializedWhole(const JsonDocument& doc, String& out, bool pretty) {
+  const size_t need = pretty ? measureJsonPretty(doc) : measureJson(doc);
+  if (pretty) serializeJsonPretty(doc, out);
+  else        serializeJson(doc, out);
+  return !doc.overflowed() && out.length() == need;
+}
+
+// What a node says when it could not afford to answer. One string, because a
+// caller telling the two apart by text has to match it exactly.
+static const char* const kLowMemoryMsg =
+  "ran out of memory while replying — nothing was changed; try again";
+
 static void sendJson(AsyncWebServerRequest* r, int code, const JsonDocument& doc) {
   String out;
-  serializeJson(doc, out);
+  if (!serializedWhole(doc, out, false)) {
+    r->send(503, "application/json", "{\"error\":\"low memory\"}");
+    return;
+  }
   r->send(code, "application/json", out);
 }
 
@@ -406,22 +438,48 @@ bool WifiManager::authed(AsyncWebServerRequest* request) {
   return false;
 }
 
+// Run a request handler and survive what it throws, answering 503 instead of
+// taking the node down. Diag.h explains why this has to exist at all; this is
+// the single copy of it, so the POST table and the GET routes cannot drift
+// into answering the same failure two different ways.
+//
+// The apology gets its own guard: replying is itself an allocation — a
+// JsonDocument, a String, a response object — on the same exhausted heap that
+// just threw, on the framework's task. A second failure here would reach the
+// terminate handler and abort, which is the thing being avoided. If even this
+// cannot be built the caller times out, which is a worse answer than 503 and a
+// far better one than a reboot.
+template <typename F>
+static void serveGuarded(const char* what, AsyncWebServerRequest* r,
+                         const char* apology, F&& body) {
+  if (Diag::guard(what, body)) return;
+  Diag::guard("the reply to a failed request", [&] { sendError(r, 503, apology); });
+}
+
 // ---------------------------------------------------------------------------
 void WifiManager::setupRoutes() {
   // Handlers are matched in registration order: API and the protected
   // page first, then the static handler for everything else in LittleFS.
-  _http.on("/api/status", HTTP_GET,
-           [this](AsyncWebServerRequest* r) { handleStatus(r); });
+  // Guarded like the POST table below. These build the largest documents the
+  // node produces, on the framework's task, and an allocation failure in one
+  // of them used to abort — a browser opening the dashboard rebooted a
+  // Wireless Paper three times running.
+  _http.on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* r) {
+    serveGuarded("/api/status", r, kLowMemoryMsg, [&] { handleStatus(r); });
+  });
 
-  _http.on("/api/board", HTTP_GET,
-           [this](AsyncWebServerRequest* r) { handleBoardGet(r); });
+  _http.on("/api/board", HTTP_GET, [this](AsyncWebServerRequest* r) {
+    serveGuarded("/api/board", r, kLowMemoryMsg, [&] { handleBoardGet(r); });
+  });
 
   // Messages are what somebody wrote to this node. Behind the admin password
   // like the settings page, and for the same reason: the portal is open to
   // whoever can reach the access point, and what a node was told is not
   // theirs to read.
-  _http.on("/api/messages", HTTP_GET,
-           [this](AsyncWebServerRequest* r) { if (authed(r)) handleMessages(r); });
+  _http.on("/api/messages", HTTP_GET, [this](AsyncWebServerRequest* r) {
+    if (!authed(r)) return;
+    serveGuarded("/api/messages", r, kLowMemoryMsg, [&] { handleMessages(r); });
+  });
   _http.on("/messages.html", HTTP_GET, [this](AsyncWebServerRequest* r) {
     if (!authed(r)) return;
     r->send(LittleFS, "/messages.html", "text/html");
@@ -451,8 +509,10 @@ void WifiManager::setupRoutes() {
     if (!authed(r)) return;               // browser prompts; fetches reuse the creds
     r->send(LittleFS, "/settings.html", "text/html");
   });
-  _http.on("/api/settings", HTTP_GET,
-           [this](AsyncWebServerRequest* r) { if (authed(r)) handleSettingsGet(r); });
+  _http.on("/api/settings", HTTP_GET, [this](AsyncWebServerRequest* r) {
+    if (!authed(r)) return;
+    serveGuarded("/api/settings", r, kLowMemoryMsg, [&] { handleSettingsGet(r); });
+  });
 
   struct Route { const char* path; void (WifiManager::*fn)(AsyncWebServerRequest*, const char*, size_t); bool ungated; };   // trailing member: rows that omit it are gated (value-initialised false)
   static const Route posts[] = {
@@ -492,25 +552,14 @@ void WifiManager::setupRoutes() {
                // memory (Diag.h). A request that cannot be served is answered
                // 503; before this it took the node down with it, on the
                // framework's task, under whoever sent it.
-               if (!Diag::guard(path, [&] { (this->*fn)(r, body, t); })) {
-                 // Replying is itself an allocation — a JsonDocument, a String,
-                 // a response object — on the same exhausted heap that just
-                 // threw, on the framework's task. So the apology gets its own
-                 // guard: a second failure here would reach the terminate
-                 // handler and abort, which is the thing being avoided. If
-                 // even this cannot be built the caller times out, which is a
-                 // worse answer than 503 and a far better one than a reboot.
-                 //
-                 // And it does not claim the change failed. A handler saves
-                 // its settings and arms its restart before it replies, so a
-                 // throw on the way out can follow a write that fully
-                 // happened; "that request failed" would be a lie the
-                 // operator then acts on.
-                 Diag::guard("the reply to a failed request", [&] {
-                   sendError(r, 503, "ran out of memory while replying — the change may have "
-                                     "been applied; check STATUS or /api/status");
-                 });
-               }
+               // A settings handler saves and arms its restart before it replies,
+               // so a throw on the way out can follow a write that fully
+               // happened; "that request failed" would be a lie the operator
+               // then acts on. Hence a different apology from the GETs above.
+               serveGuarded(path, r,
+                            "ran out of memory while replying — the change may have "
+                            "been applied; check STATUS or /api/status",
+                            [&] { (this->*fn)(r, body, t); });
              });
   }
   // What this board can do about its bootloader, for tooling. No secrets:
@@ -969,8 +1018,19 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // Which peers, not just how many: when a room of nodes cannot see each
     // other, the first question is whether they have peered at all, and the
     // answer used to be a bare count.
-    std::unique_ptr<AutoInterface::Peer[]> ap(new AutoInterface::Peer[AUTOIF_MAX_PEERS]);
-    size_t an = AutoInterface::peers(ap.get(), AUTOIF_MAX_PEERS);
+    // Static, not new[]. This is 1.5 KB wanted as one unbroken piece on every
+    // status poll, and a node that has been up for hours has a heap in pieces
+    // smaller than that long before it is short of memory: the crash that sent
+    // us here reported 4320 B free and a largest block of 1396. There is no
+    // recovering from it either, since a failed new[] throws and nothing on
+    // the request path catches, so the node aborted and rebooted every time a
+    // browser opened the dashboard. In BSS the same 1.5 KB is reserved once
+    // and can never fail. Safe as a static because every HTTP handler runs on
+    // the one AsyncTCP service task — platformio.ini pins it with
+    // CONFIG_ASYNC_TCP_RUNNING_CORE and the library runs a single one — so no
+    // two handlers are ever inside this at once.
+    static AutoInterface::Peer ap[AUTOIF_MAX_PEERS];
+    size_t an = AutoInterface::peers(ap, AUTOIF_MAX_PEERS);
     JsonArray pl = ai["peer_list"].to<JsonArray>();
     uint32_t nowMs = millis();
     for (size_t i = 0; i < an; i++) {
@@ -984,9 +1044,12 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // Sized for every interface Transport can hold — the radio, the clients
     // and the Auto peers. Sized for the clients alone, this listed the first
     // five and quietly left the rest out. Off the stack because that is a
-    // kilobyte and a half on a task that has other things to do with it.
-    std::unique_ptr<RnsTransport::IfaceInfo[]> ifs(new RnsTransport::IfaceInfo[RNS_MAX_INTERFACES]);
-    size_t k = RnsTransport::interfaces(ifs.get(), RNS_MAX_INTERFACES);
+    // kilobyte and a half on a task that has other things to do with it, and
+    // off the heap for the reason given at the peer list above: asked for on
+    // every poll, it is the size that a long-running node can no longer find
+    // in one piece, and failing to find it aborted the node.
+    static RnsTransport::IfaceInfo ifs[RNS_MAX_INTERFACES];
+    size_t k = RnsTransport::interfaces(ifs, RNS_MAX_INTERFACES);
     JsonArray ia = tr["interfaces"].to<JsonArray>();
     for (size_t i = 0; i < k; i++) {
       JsonObject o = ia.add<JsonObject>();
@@ -1643,7 +1706,11 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   JsonObject m = doc["maintenance"].to<JsonObject>();
   for (const MaintField& f : kMaintFields) m[f.key] = settings.maintenance().*(f.on);
   doc["admin"]["password"] = settings.admin().password;
-  String out; serializeJsonPretty(doc, out);
+  String out;
+  if (!serializedWhole(doc, out, true)) {          // the biggest document here
+    sendError(request, 503, kLowMemoryMsg);
+    return;
+  }
   AsyncWebServerResponse* res = request->beginResponse(200, "application/json", out);
   res->addHeader("Content-Disposition", "attachment; filename=\"retimesh-settings.json\"");
   request->send(res);
