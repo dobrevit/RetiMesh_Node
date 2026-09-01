@@ -117,6 +117,16 @@ static const char* const kLowMemoryMsg =
 // done and must not claim it was not. Named once so its two uses cannot drift.
 static const char* const kLowMemoryJson = "{\"error\":\"low memory\"}";
 
+// A short literal reply that a browser must not keep. The refusals below are
+// readings as much as the documents are, and the one it would hurt most to
+// reuse: a browser holding on to a 503 goes on showing a node as out of memory
+// long after it has recovered.
+static void sendNoStore(AsyncWebServerRequest* r, int code, const char* type, const char* body) {
+  AsyncWebServerResponse* res = r->beginResponse(code, type, body);
+  res->addHeader("Cache-Control", "no-store");
+  r->send(res);
+}
+
 // A reply that hands its body over rather than letting it be copied.
 //
 // request->send(code, type, String) builds an AsyncBasicResponse, and that
@@ -179,14 +189,19 @@ static AsyncWebServerResponse* ownedBodyResponse(AsyncWebServerRequest* r, int c
 static void sendJson(AsyncWebServerRequest* r, int code, const JsonDocument& doc) {
   String out;
   if (!serializedWhole(doc, out, false)) {
-    r->send(503, "application/json", kLowMemoryJson);
+    sendNoStore(r, 503, "application/json", kLowMemoryJson);
     return;
   }
   AsyncWebServerResponse* res = ownedBodyResponse(r, code, "application/json", std::move(out));
   if (!res) {
-    r->send(503, "application/json", kLowMemoryJson);
+    sendNoStore(r, 503, "application/json", kLowMemoryJson);
     return;
   }
+  // Readings, not documents. A browser that reuses one of these shows an
+  // uptime, a heap figure or a task phase from some earlier minute and gives
+  // no sign it has done so — which is worse than a stale page, because a page
+  // that looks wrong is noticed and a number that looks plausible is not.
+  res->addHeader("Cache-Control", "no-store");
   r->send(res);
 }
 
@@ -503,6 +518,32 @@ void WifiManager::tick() {
 // HTTP Basic Auth against the admin password. Sends the 401 challenge
 // itself when it fails, so callers just `return`.
 // ---------------------------------------------------------------------------
+// A page from the node's filesystem, with the one header that stops a browser
+// showing an old one for ever.
+//
+// Nothing here sent Cache-Control, an ETag or Last-Modified, so a browser had
+// no validator and no instruction and fell back to heuristic caching: it kept
+// whatever it saw first and did not ask again. A node that has just been
+// reflashed then goes on serving a page nobody sees, and the asset stamp
+// cannot tell anyone, because it compares the firmware against the *node's*
+// filesystem and knows nothing about a copy held in somebody's browser.
+//
+// This is worth fixing on its own account, and it is not what broke the
+// settings page — that was a syntax error in the page itself, and this header
+// was added while chasing the wrong explanation for it. Both are here because
+// both are real; only one of them was the bug.
+//
+// "no-cache" rather than "no-store": the browser may keep the copy, it just
+// has to ask before using it. These are tens of kilobytes over a local link,
+// and being right matters more than saving the round trip.
+static const char kNoCache[] = "no-cache";
+
+static void sendPage(AsyncWebServerRequest* request, const char* path) {
+  AsyncWebServerResponse* res = request->beginResponse(LittleFS, path, "text/html");
+  res->addHeader("Cache-Control", kNoCache);
+  request->send(res);
+}
+
 bool WifiManager::authed(AsyncWebServerRequest* request) {
   if (request->authenticate(ADMIN_USER, settings.admin().password)) return true;
   request->requestAuthentication();
@@ -553,7 +594,7 @@ void WifiManager::setupRoutes() {
   });
   _http.on("/messages.html", HTTP_GET, [this](AsyncWebServerRequest* r) {
     if (!authed(r)) return;
-    r->send(LittleFS, "/messages.html", "text/html");
+    sendPage(r, "/messages.html");
   });
 
   // QR codes as SVG. "wifi" embeds the AP password, so it needs the admin
@@ -578,7 +619,7 @@ void WifiManager::setupRoutes() {
   // ---- admin -------------------------------------------------------------
   _http.on("/settings.html", HTTP_GET, [this](AsyncWebServerRequest* r) {
     if (!authed(r)) return;               // browser prompts; fetches reuse the creds
-    r->send(LittleFS, "/settings.html", "text/html");
+    sendPage(r, "/settings.html");
   });
   _http.on("/api/settings", HTTP_GET, [this](AsyncWebServerRequest* r) {
     if (!authed(r)) return;
@@ -677,9 +718,11 @@ void WifiManager::setupRoutes() {
   // The single-page app lives in LittleFS (data/ -> `pio run -t uploadfs`).
   // Explicit routes for the two hottest paths avoid the static handler's
   // .gz / directory probes (each one logs a VFS error at debug level 3).
-  _http.on("/", HTTP_GET, [](AsyncWebServerRequest* r) { r->send(LittleFS, "/index.html", "text/html"); });
+  _http.on("/", HTTP_GET, [](AsyncWebServerRequest* r) { sendPage(r, "/index.html"); });
   _http.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* r) { r->send(204); });
-  _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+  // Everything else in the image — and it must revalidate too, for the same
+  // reason the pages do.
+  _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html").setCacheControl(kNoCache);
 
   // Everything else (arbitrary hostnames typed by the user, probe paths
   // not listed above) also lands on the portal — when there is one.
