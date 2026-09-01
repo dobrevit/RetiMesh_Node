@@ -547,7 +547,13 @@ $("maintForm").addEventListener("submit", async ev => {
     // Turning the portal off takes this page with it, and the node restarts
     // to do it — so say so before, and do not reload into nothing after.
     if (f.web_ui.value === "0" &&
-        !confirm("Turn the web portal off? This page goes away at the restart, and the node is then "
+        // The `+` is not decoration. Two adjacent string literals concatenate
+        // in C++ and are a syntax error in JavaScript, and a syntax error here
+        // stops the browser parsing the whole file — so the page renders and
+        // then does nothing at all: no fetch, no region list, no station
+        // fields. tools/check_assets.py now refuses to build a page that does
+        // not parse, because nothing else in the project could see it.
+        !confirm("Turn the web portal off? This page goes away at the restart, and the node is then " +
                  "administered over the console — on the cable, or on TCP port 4243 with the admin password.")) return;
     const r = await api("/api/settings/maintenance", { bootloader_api: f.bootloader_api.value === "1",
       bootloader_from_lan: f.bootloader_from_lan.value === "1", console_enabled: f.console_enabled.value === "1",

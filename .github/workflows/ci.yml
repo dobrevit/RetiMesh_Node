@@ -75,6 +75,13 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip && python -m pip install ./tools/retimesh-flash
       - run: python -m py_compile tools/*.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The portal pages' JavaScript must parse. A syntax error runs none of
+      # the script, so the page loads and does nothing, and no other check in
+      # this workflow can see it.
+      - run: python3 tools/check_assets.py
       - run: retimesh-flash --help && retimesh-flash ports
       - name: host flashing-tool tests (mocked ports, console and HTTP)
         run: cd tools/retimesh-flash && python -m unittest discover -s tests -t . -v
