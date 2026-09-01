@@ -455,6 +455,17 @@
 
 // Web-layer snapshots of the Reticulum path table. Each row is read back
 // through microStore (flash or SD), so this is deliberately unhurried.
+// The heap a node keeps back so that it can still answer at all. Building a
+// status reply costs roughly twice the size of the document — once for the
+// JsonDocument and again for the String it is serialised into — and several
+// browsers' worth of those at once is what drove a Wireless Paper from 40 KB
+// free to 832 B and aborted it. Below this floor the heavy endpoints answer
+// 503 instead of starting work they cannot finish: refusing one dashboard
+// poll costs a refresh, and running out costs the node.
+#ifndef HTTP_REPLY_HEAP_FLOOR
+  #define HTTP_REPLY_HEAP_FLOOR  16384
+#endif
+
 #define SNAPSHOT_INTERVAL_MS  5000
 #define SNAPSHOT_MAX_PATHS    64
 #define SD_LOG_MAX_BYTES    (1024UL * 1024UL)
