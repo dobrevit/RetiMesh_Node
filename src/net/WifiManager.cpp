@@ -26,6 +26,8 @@
 #include "Gps.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <memory>
+#include <new>
 #include <esp_wifi.h>
 #include <esp_heap_caps.h>
 #include <ESPmDNS.h>
@@ -110,13 +112,72 @@ static bool serializedWhole(const JsonDocument& doc, String& out, bool pretty) {
 static const char* const kLowMemoryMsg =
   "ran out of memory while replying — nothing was changed; try again";
 
+// A reply that hands its body over rather than letting it be copied.
+//
+// request->send(code, type, String) builds an AsyncBasicResponse, and that
+// constructor copies the body into a second String (WebResponses.cpp: the
+// content length is then read off the copy). Both are alive at the same
+// moment, so answering an eight-kilobyte /api/status wants two eight-kilobyte
+// contiguous blocks, and a node whose heap has one left cannot find the
+// second. What happens then is the worst of the outcomes available, because
+// Arduino String fails an allocation by going empty rather than by saying so:
+// the response takes its content length from the empty copy and the node
+// answers 200 OK, Content-Length: 0. A caller sees a successful request with
+// nothing in it, and no log line anywhere says why.
+//
+// Found on a node that had been up for days: /api/status and /api/qr both came
+// back empty under a 200 while a two-byte reply from the same node was intact,
+// and four other nodes answered those same requests with four to eight
+// kilobytes. Note where that leaves the check above — it had done its job, the
+// document serialised whole, and the reply was dropped one layer underneath
+// it. A guard on our own serialisation cannot see this.
+//
+// So the body is moved into a filler the library calls as the socket drains,
+// and it is never copied again. It sits behind a shared_ptr rather than being
+// captured by move because the library copies the std::function twice on the
+// way in — beginResponse takes it by value, and AsyncCallbackResponse's
+// constructor assigns it again — and a String captured by move would be copied
+// by both, which is the allocation this exists to remove. Copying a pointer
+// costs nothing, and the body outlives the handler either way: the filler runs
+// on the TCP task long after this function has returned.
+//
+// Returns nullptr when even that could not be afforded, which is a caller's
+// cue to answer with something small.
+static AsyncWebServerResponse* ownedBodyResponse(AsyncWebServerRequest* r, int code,
+                                                 const char* type, String&& body) {
+  const size_t len = body.length();
+  // Nothing to hand over, and the library would make a chunked reply of it.
+  if (!len) return r->beginResponse(code, type, "");
+  AsyncWebServerResponse* res = nullptr;
+  try {
+    std::shared_ptr<String> held = std::make_shared<String>(std::move(body));
+    res = r->beginResponse(type, len,
+                           [held](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+                             const size_t have = held->length();
+                             const size_t left = index < have ? have - index : 0;
+                             const size_t n = left < maxLen ? left : maxLen;
+                             if (n) memcpy(buf, held->c_str() + index, n);
+                             return n;
+                           });
+  } catch (const std::bad_alloc&) {
+    return nullptr;   // the pointer and its control block, not the body
+  }
+  if (res) res->setCode(code);
+  return res;
+}
+
 static void sendJson(AsyncWebServerRequest* r, int code, const JsonDocument& doc) {
   String out;
   if (!serializedWhole(doc, out, false)) {
     r->send(503, "application/json", "{\"error\":\"low memory\"}");
     return;
   }
-  r->send(code, "application/json", out);
+  AsyncWebServerResponse* res = ownedBodyResponse(r, code, "application/json", std::move(out));
+  if (!res) {
+    r->send(503, "application/json", "{\"error\":\"low memory\"}");
+    return;
+  }
+  r->send(res);
 }
 
 static void sendError(AsyncWebServerRequest* r, int code, const char* msg) {
@@ -1112,7 +1173,10 @@ void WifiManager::handleQrFor(AsyncWebServerRequest* request, Qr::Payload what) 
   QRCode qr;
   uint8_t buffer[Qr::MAX_BUFFER];
   if (!Qr::encode(text, qr, buffer)) { sendError(request, 500, "does not fit in a QR code"); return; }
-  AsyncWebServerResponse* res = request->beginResponse(200, "image/svg+xml", Qr::toSvg(qr));
+  // Several kilobytes of SVG, handed over rather than copied — this is one of
+  // the two replies a starved node was seen losing whole (ownedBodyResponse).
+  AsyncWebServerResponse* res = ownedBodyResponse(request, 200, "image/svg+xml", Qr::toSvg(qr));
+  if (!res) { sendError(request, 503, kLowMemoryMsg); return; }
   res->addHeader("Cache-Control", "no-store");
   request->send(res);
 }
@@ -1123,7 +1187,11 @@ void WifiManager::handleBoardGet(AsyncWebServerRequest* request) {
     File f = LittleFS.open(BOARD_FILE, "r");
     if (f) { out = f.readString(); f.close(); }
   }
-  request->send(200, "application/json", out);
+  // Whatever the operator wrote on the board, which is theirs to make as long
+  // as they like, so it goes the same way as the other bodies.
+  AsyncWebServerResponse* res = ownedBodyResponse(request, 200, "application/json", std::move(out));
+  if (!res) { sendError(request, 503, kLowMemoryMsg); return; }
+  request->send(res);
 }
 
 void WifiManager::handleBoardPost(AsyncWebServerRequest* request, const char* body, size_t len) {
@@ -1711,7 +1779,11 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
     sendError(request, 503, kLowMemoryMsg);
     return;
   }
-  AsyncWebServerResponse* res = request->beginResponse(200, "application/json", out);
+  AsyncWebServerResponse* res = ownedBodyResponse(request, 200, "application/json", std::move(out));
+  if (!res) {
+    sendError(request, 503, kLowMemoryMsg);
+    return;
+  }
   res->addHeader("Content-Disposition", "attachment; filename=\"retimesh-settings.json\"");
   request->send(res);
 }
