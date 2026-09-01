@@ -60,4 +60,28 @@ inline const uint8_t (*roots())[FirmwareManifest::KEY_SIZE] {
 
 inline size_t rootCount() { return OTA_ROOT_COUNT; }
 
+// Which build this is, in the manifest's terms. Set from the PlatformIO
+// environment, because that is what decides the partition layout, the radio and
+// the pins — an image for another one is unbootable, which is the whole reason
+// the manifest names a target at all.
+#ifndef OTA_BOARD_ID
+  #define OTA_BOARD_ID "unknown"
+#endif
+static_assert(sizeof(OTA_BOARD_ID) <= FirmwareManifest::BOARD_LEN,
+              "this environment's name does not fit the manifest's board field");
+
+// The only way to build a Policy. Callers choose the slot they would write to
+// and the floor they have reached; they do not get to choose who is trusted or
+// what board this is, because those are properties of the firmware rather than
+// of whatever asked the question.
+inline FirmwareManifest::Policy policyFor(uint32_t slotSize, uint32_t floor) {
+  FirmwareManifest::Policy p;
+  p.roots           = roots();
+  p.rootCount       = rootCount();
+  p.board           = OTA_BOARD_ID;
+  p.slotSize        = slotSize;
+  p.acceptedVersion = floor;
+  return p;
+}
+
 }  // namespace Ota
