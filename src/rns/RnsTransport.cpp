@@ -1440,21 +1440,26 @@ static void refreshSnapshots() {
     uint16_t dropped = RNS::Transport::remove_paths(stale);
     log_i("dropped %u stored path(s) whose interface is gone", (unsigned)dropped);
   }
-  sPathCount = pathTable.size();
-  sIfaceCount = 0;
+  // Counted into locals and published below with the lists they describe. As
+  // members they were written here, outside the lock every reader takes, and
+  // sIfaceCount was zeroed and counted back up mid-scan — so a panel or a
+  // status request landing in that window read "0 interfaces" while sIfaces
+  // still held the full previous list.
+  const size_t pathTotal = pathTable.size();
+  size_t ifaceCount = 0;
   for (const auto& iface : RNS::Transport::get_interfaces()) {
     IfaceInfo ii = {};
     strlcpy(ii.name, iface.name().c_str(), sizeof(ii.name));
     strlcpy(ii.mode, modeNameOf(iface.mode()), sizeof(ii.mode));
     ii.rxb = iface.rxbytes(); ii.txb = iface.txbytes();
-    sIfaceCount++;
+    ifaceCount++;
     if (i.size() < RNS_MAX_INTERFACES) i.push_back(ii);   // never grow past what was reserved
   }
   // Sizes only — every one of these is a container the RNS task owns, so they
   // are read here and published under the same lock as the rest, never touched
   // from the web task.
   Tables t = {};
-  t.paths         = (uint32_t)sPathCount;
+  t.paths         = (uint32_t)pathTotal;
   t.links         = (uint32_t)RNS::Transport::link_table().size();
   t.activeLinks   = (uint32_t)RNS::Transport::active_links().size();
   t.pendingLinks  = (uint32_t)RNS::Transport::pending_links().size();
@@ -1465,6 +1470,7 @@ static void refreshSnapshots() {
 
   xSemaphoreTake(sSnapLock, portMAX_DELAY);
   sPaths.swap(p); sIfaces.swap(i);
+  sPathCount = pathTotal; sIfaceCount = ifaceCount;
   sTables = t;
   xSemaphoreGive(sSnapLock);
 }
@@ -1508,7 +1514,16 @@ Tables tables() {
 
 void loop() {
   if (!sStarted) { vTaskDelay(pdMS_TO_TICKS(500)); return; }
-  try {
+  // Diag::guard rather than a try/catch written out here. Containment is one
+  // rule and it lives in one place (Diag.h): what it caught is counted into
+  // faults.contained — which is how an operator learns this task is failing,
+  // a log line on a node nobody is attached to not being an answer — and,
+  // unlike the bare `catch (const std::exception&)` this replaces, it also
+  // catches what does not derive from std::exception. Spelled out here, such
+  // a throw escaped to the task loop in main.cpp, which abandoned the rest of
+  // the pass — refreshSnapshots() included, so the stale snapshot below was
+  // served as current after all.
+  Diag::guard("rns loop", [] {
     applyLogMute();
     // Answers other tasks composed, sent from here because this is the task
     // that owns the library (queueLxmfReply above).
@@ -1526,32 +1541,14 @@ void loop() {
     // lands the next announce on zero switched announcing off for good.
     uint16_t interval = settings.radio().announceInterval;
     if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
-      char app[64];
-      // snprintf returns the length it *would* have written. A 32-character
-      // callsign and a git-describe version exceed this buffer, and the
-      // untruncated length would have put a stray byte from the stack into a
-      // signed announce.
-      const int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
-      const size_t appLen = n < 0 ? 0 : ((size_t)n < sizeof(app) - 1 ? (size_t)n : sizeof(app) - 1);
-      nodeDest.announce(Bytes((const uint8_t*)app, appLen));
-      // And the same node under its LXMF address, so it appears in the
-      // clients people actually use. The app_data is the shape LXMF expects
-      // rather than the free text above — the two announces describe one node
-      // to two audiences (RnsAnnounce.h).
-      uint8_t lx[64];
-      const size_t lxLen = Rns::lxmfAppData(loraRadio.callsign(), 0, lx, sizeof(lx));
-      if (lxLen) lxmfDest.announce(Bytes(lx, lxLen));
-      // And as something to browse. NomadNet announces its node name as plain
-      // UTF-8 rather than the msgpack array LXMF uses — a third audience, and
-      // the third shape, from one node.
-      const char* nn = loraRadio.callsign();
-      nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
-      // Every announce this node makes, including the page's. The counter is
-      // how an operator tells a node whose mesh side has quietly stopped from
-      // one that is merely quiet, so it must not under-report: an announce
-      // that is sent and not counted here reads, from the other end of a
-      // status page, exactly like a node that has stopped talking.
-      g_stats.announcesTx += 1 + (lxLen ? 1 : 0) + (nomadDest ? 1 : 0);
+      // Scheduled before it is attempted, not after. Advancing only on the way
+      // out meant that an announce which threw left the schedule untouched, so
+      // the next pass ten milliseconds later tried the same thing again, threw
+      // again, and logged again — for as long as whatever made it throw
+      // lasted. A failed announce now waits for the next interval like any
+      // other, which is also the only way the node stays quiet enough to
+      // recover.
+      //
       // Scattered, not on the dot. Two nodes flashed together boot together
       // and would then announce together for as long as they both run: the
       // interval is fixed and nothing else moves the phase, so their packets
@@ -1561,12 +1558,51 @@ void loop() {
       // expect. Reticulum's own implementation jitters for the same reason.
       const uint32_t base = (uint32_t)interval * 1000UL;
       sNextAnnounceMs = millis() + base + (esp_random() % (base / 10 + 1));
+
+      char app[64];
+      // snprintf returns the length it *would* have written. A 32-character
+      // callsign and a git-describe version exceed this buffer, and the
+      // untruncated length would have put a stray byte from the stack into a
+      // signed announce.
+      const int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
+      const size_t appLen = n < 0 ? 0 : ((size_t)n < sizeof(app) - 1 ? (size_t)n : sizeof(app) - 1);
+      // Every announce this node makes, including the page's. The counter is
+      // how an operator tells a node whose mesh side has quietly stopped from
+      // one that is merely quiet, so it must not under-report: an announce
+      // that is sent and not counted here reads, from the other end of a
+      // status page, exactly like a node that has stopped talking. Which is
+      // why each one is counted as it goes out rather than all three summed
+      // at the end: summed, a throw from the second announce took the count
+      // of the first with it, and the node that had just talked reported that
+      // it had not.
+      nodeDest.announce(Bytes((const uint8_t*)app, appLen));
+      g_stats.announcesTx++;
+      // And the same node under its LXMF address, so it appears in the
+      // clients people actually use. The app_data is the shape LXMF expects
+      // rather than the free text above — the two announces describe one node
+      // to two audiences (RnsAnnounce.h).
+      uint8_t lx[64];
+      const size_t lxLen = Rns::lxmfAppData(loraRadio.callsign(), 0, lx, sizeof(lx));
+      if (lxLen) { lxmfDest.announce(Bytes(lx, lxLen)); g_stats.announcesTx++; }
+      // And as something to browse. NomadNet announces its node name as plain
+      // UTF-8 rather than the msgpack array LXMF uses — a third audience, and
+      // the third shape, from one node.
+      const char* nn = loraRadio.callsign();
+      nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
+      g_stats.announcesTx++;
       log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
     }
-    refreshSnapshots();
-  } catch (const std::exception& e) {
-    log_e("Reticulum loop: %s", e.what());
-  }
+  });
+
+  // Guarded separately from the pass above, and deliberately: the snapshots
+  // are what /api/status and the panel read, and while this lived at the end
+  // of the block above, any throw earlier in the pass skipped it and left the
+  // last complete pass being served as though it were current. A node in that
+  // state does not look broken — it looks quiet, with a plausible interface
+  // list and counters that have stopped. That is worse than an error, because
+  // it is believed: it was read as "no TCP client is attached" while a client
+  // was in fact attached and working.
+  Diag::guard("rns snapshots", [] { refreshSnapshots(); });
 }
 
 } // namespace RnsTransport
