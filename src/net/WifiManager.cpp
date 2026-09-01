@@ -21,7 +21,6 @@
 // ============================================================================
 #include "WifiManager.h"
 #include <sys/stat.h>
-#include <memory>
 #include "QrCode.h"
 #include "Pmu.h"
 #include "Gps.h"
@@ -81,9 +80,36 @@ static const char* collectBody(AsyncWebServerRequest* request, const uint8_t* da
   return body;
 }
 
+// Serialising into a String needs one contiguous block the size of the whole
+// document, and on a fragmented heap it does not get one. ArduinoJson drops
+// the appends it cannot make and says so only in its return value, which this
+// used to discard -- so a short heap did not fail, it shipped half a document
+// under a 200 and left the caller to fail at parsing it. About two in five
+// status polls on a Wireless Paper came back that way.
+//
+// So ask for the room up front, in one piece, and check that all of it was
+// written. Reserving also spares the heap the repeated grow-and-copy that
+// helped fragment it. A node too short of memory to answer now says so.
+// Whether there is enough heap to build one of the large replies. Asked before
+// the work starts, so a node under pressure sheds load instead of failing
+// partway through it — see HTTP_REPLY_HEAP_FLOOR for what the number is.
+static bool tooLowToBuildAReply(AsyncWebServerRequest* r) {
+  if (Diag::heap().freeDram >= HTTP_REPLY_HEAP_FLOOR) return false;
+  r->send(503, "application/json", "{\"error\":\"low memory\"}");
+  return true;
+}
+
 static void sendJson(AsyncWebServerRequest* r, int code, const JsonDocument& doc) {
+  const size_t need = measureJson(doc);
   String out;
-  serializeJson(doc, out);
+  if (!out.reserve(need)) {
+    r->send(503, "application/json", "{\"error\":\"low memory\"}");
+    return;
+  }
+  if (serializeJson(doc, out) != need || doc.overflowed()) {
+    r->send(503, "application/json", "{\"error\":\"low memory\"}");
+    return;
+  }
   r->send(code, "application/json", out);
 }
 
@@ -636,6 +662,7 @@ void WifiManager::handleMessages(AsyncWebServerRequest* request) {
 }
 
 void WifiManager::handleStatus(AsyncWebServerRequest* request) {
+  if (tooLowToBuildAReply(request)) return;
   const RadioSettings& rs = settings.radio();
   JsonDocument doc;
 
@@ -969,8 +996,17 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // Which peers, not just how many: when a room of nodes cannot see each
     // other, the first question is whether they have peered at all, and the
     // answer used to be a bare count.
-    std::unique_ptr<AutoInterface::Peer[]> ap(new AutoInterface::Peer[AUTOIF_MAX_PEERS]);
-    size_t an = AutoInterface::peers(ap.get(), AUTOIF_MAX_PEERS);
+    // Static, not new[]. This is 1.5 KB wanted as one unbroken piece on every
+    // status poll, and a node that has been up for hours has a heap in pieces
+    // smaller than that long before it is short of memory: the crash that sent
+    // us here reported 4320 B free and a largest block of 1396. There is no
+    // recovering from it either, since a failed new[] throws and nothing on
+    // the request path catches, so the node aborted and rebooted every time a
+    // browser opened the dashboard. In BSS the same 1.5 KB is reserved once
+    // and can never fail. Safe as a static because every HTTP handler runs on
+    // the one AsyncTCP task, which the board handler below already relies on.
+    static AutoInterface::Peer ap[AUTOIF_MAX_PEERS];
+    size_t an = AutoInterface::peers(ap, AUTOIF_MAX_PEERS);
     JsonArray pl = ai["peer_list"].to<JsonArray>();
     uint32_t nowMs = millis();
     for (size_t i = 0; i < an; i++) {
@@ -984,9 +1020,12 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // Sized for every interface Transport can hold — the radio, the clients
     // and the Auto peers. Sized for the clients alone, this listed the first
     // five and quietly left the rest out. Off the stack because that is a
-    // kilobyte and a half on a task that has other things to do with it.
-    std::unique_ptr<RnsTransport::IfaceInfo[]> ifs(new RnsTransport::IfaceInfo[RNS_MAX_INTERFACES]);
-    size_t k = RnsTransport::interfaces(ifs.get(), RNS_MAX_INTERFACES);
+    // kilobyte and a half on a task that has other things to do with it, and
+    // off the heap for the reason given at the peer list above: asked for on
+    // every poll, it is the size that a long-running node can no longer find
+    // in one piece, and failing to find it aborted the node.
+    static RnsTransport::IfaceInfo ifs[RNS_MAX_INTERFACES];
+    size_t k = RnsTransport::interfaces(ifs, RNS_MAX_INTERFACES);
     JsonArray ia = tr["interfaces"].to<JsonArray>();
     for (size_t i = 0; i < k; i++) {
       JsonObject o = ia.add<JsonObject>();
@@ -1107,6 +1146,7 @@ void WifiManager::handleBoardPost(AsyncWebServerRequest* request, const char* bo
 // Settings API (all authenticated)
 // ---------------------------------------------------------------------------
 void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
+  if (tooLowToBuildAReply(request)) return;
   const RadioSettings& rs = settings.radio();
   const WifiSettings&  ws = settings.wifi();
   JsonDocument doc;
