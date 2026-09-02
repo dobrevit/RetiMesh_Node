@@ -63,13 +63,14 @@ inline const char* describe(Stage s) {
 // The order is what an operator can do something about. A board with one app
 // slot is never going to take an update this way and should say so before a
 // missing card is mentioned, because finding a card would not help.
-inline const char* uploadRefusal(bool cardMounted, bool haveUpdateSlot, Stage current) {
+inline const char* uploadRefusal(bool stagingReady, bool haveUpdateSlot, Stage current) {
   if (!haveUpdateSlot)
     return "this board has a single app partition and cannot install its own updates";
-  // Worded for both readers: a board with a slot and nothing in it, and one
-  // with no slot at all. "there is no card in the slot" sends the second of
-  // them looking for a slot that was never fitted.
-  if (!cardMounted)
+  // stagingReady is "somewhere to put the bytes as they arrive": the card on a
+  // board with a slot, LittleFS on one without — and LittleFS is mounted at
+  // boot and stays mounted, so on a slotless board this refusal cannot occur
+  // and the card wording below is accurate everywhere it can be read.
+  if (!stagingReady)
     return "an update has to be staged on an SD card, and this node has none mounted";
   // Staged counts: the bundle is whole on the card and the installer is on its
   // way to open it. Letting a second upload in here deletes that file out from

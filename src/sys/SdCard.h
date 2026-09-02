@@ -57,14 +57,14 @@
 
 #if HAS_SD
 #include <SD.h>
-#else
-// A board with no slot does not build the card driver at all — the library, its
-// FatFS layer and this class's real implementation stay out of the image, and
-// the accessors below become the small always-false stubs in SdCard.cpp. Only
-// one of the library's names leaks into this header: the card type that means
-// "nothing", which is zero in the driver's own enum.
-static const uint8_t CARD_NONE = 0;
 #endif
+// A board with no slot does not build the card driver at all — the library,
+// its FatFS layer and this class's real implementation stay out of the image,
+// and the accessors below become the small always-false stubs in SdCard.cpp.
+// Which is why the card-type fields below default to a literal 0 rather than
+// to the library's CARD_NONE: the name is an enumerator the header may not
+// have, and redeclaring it collides on any board where something else drags
+// the library's headers in anyway. Zero is that enumerator's value.
 
 class SdCard {
 public:
@@ -72,7 +72,7 @@ public:
 
   struct Info {
     State    state       = State::Absent;
-    uint8_t  type        = CARD_NONE;   // sdcard_type_t
+    uint8_t  type        = 0;           // sdcard_type_t; 0 is CARD_NONE
     uint64_t cardBytes   = 0;           // raw capacity
     uint64_t volumeBytes = 0;           // mounted FAT volume
     uint64_t usedBytes   = 0;
@@ -123,7 +123,7 @@ private:
   struct Probe {
     bool     present = false;
     bool     fat     = false;
-    uint8_t  type    = CARD_NONE;
+    uint8_t  type    = 0;               // sdcard_type_t; 0 is CARD_NONE
     uint64_t bytes   = 0;
   };
 
