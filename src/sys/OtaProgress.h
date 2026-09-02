@@ -2,58 +2,35 @@
 // Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
 
 // ============================================================================
-//  OtaProgress.h — what the installer is doing, for whoever is watching
+//  OtaProgress.h — the installer's narrow progress feed
 //
-//  A single-writer progress line: the HTTP task installing writes it, the
-//  display task reads it. Plain fields on purpose — a torn read costs one
-//  frame of a progress bar, and a lock here would be the only lock the
-//  host-tested installer ever needed.
+//  The installer reports bytes and phase words through these; on the device
+//  OtaUpdate sinks them into the one Ota::Progress record the portal already
+//  serves, and in host tests nothing registers and the calls vanish. The
+//  previous version kept a second record here, and the glass and the portal
+//  told two different stories about the same update — the glass a dead
+//  screen through the whole receive, the portal a progress bar.
 // ============================================================================
 #pragma once
 
 #include <stdint.h>
-#include <string.h>
-#include <atomic>
 
 namespace OtaProgress {
 
-struct State {
-  bool     active = false;
-  bool     failed = false;               // meaningful on the active->idle edge
-  uint32_t written = 0;
-  uint32_t total = 0;
-  char     stage[16] = {0};
+struct Sink {
+  void (*begin)(uint32_t total);
+  void (*step)(uint32_t done);
+  void (*phase)(const char* word);
 };
 
-inline State sState;
-// The gate: fields are published before active flips true, and failed
-// before it flips false — release stores against the reader's acquire, so
-// the display can never see active with a stale payload. A torn stage
-// string mid-install remains possible and costs one frame; the edges are
-// what must be exact.
-inline std::atomic<bool> sActive{false};
+inline Sink sSink{nullptr, nullptr, nullptr};
 
-inline void begin(uint32_t total) {
-  sState.written = 0;
-  sState.total = total;
-  strncpy(sState.stage, "writing", sizeof(sState.stage) - 1);
-  sState.failed = false;
-  sActive.store(true, std::memory_order_release);
-}
-inline void step(uint32_t written) { sState.written = written; }
-inline void phase(const char* s) {
-  strncpy(sState.stage, s, sizeof(sState.stage) - 1);
-  sState.stage[sizeof(sState.stage) - 1] = 0;
-}
-inline void end(bool ok) {
-  if (!sActive.load(std::memory_order_relaxed)) return;
-  sState.failed = !ok;
-  sActive.store(false, std::memory_order_release);
-}
-inline State get() {
-  State out = sState;
-  out.active = sActive.load(std::memory_order_acquire);
-  return out;
-}
+inline void setSink(const Sink& s)  { sSink = s; }
+inline void begin(uint32_t total)   { if (sSink.begin) sSink.begin(total); }
+inline void step(uint32_t done)     { if (sSink.step)  sSink.step(done); }
+inline void phase(const char* w)    { if (sSink.phase) sSink.phase(w); }
+// Outcomes are the caller's stage writes (OtaUpdate's say()); the installer's
+// scope guard still calls this so the call sites need not know.
+inline void end(bool) {}
 
 } // namespace OtaProgress
