@@ -61,6 +61,9 @@ bool touchActive() { return Ui::consumeTouch(); }
 void swallowTouch() { Ui::swallowTouch(); }
 
 void openPowerMenu() { Ui::openPowerMenu(); }
+void showIdle(bool on) { Ui::showIdle(on); }
+bool idleShowing() { return Ui::idleShowing(); }
+void showIncoming(const char* s, const char* t) { Ui::showIncoming(s, t); }
 uint8_t takePowerAction() { return Ui::takePowerAction(); }
 void setRotation(uint8_t q) { Ui::setRotation(q); }
 

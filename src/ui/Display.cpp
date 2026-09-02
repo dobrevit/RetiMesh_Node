@@ -46,6 +46,7 @@ Display display;
 #include "Bq25896.h"
 #include "Imu.h"
 #include <esp_sleep.h>
+#include "LxmfInbox.h"
 
 #if HAS_LVGL_UI
 // The runtime half of HAS_LVGL_UI: begin() promised a fall-back to the mono
@@ -140,11 +141,41 @@ void Display::displayTask(void* self) {
     // about fingers — the buttons alone left the panel blanking under an
     // operator mid-navigation.
     if (sShellUp && LvglUi::touchActive()) d->_lastActivityMs = now;
+    if (sShellUp) {
+      // A fresh message interrupts everything: wake the glass and put the
+      // sender on it — the spec's full-screen alert, not a corner toast,
+      // because a field device is glanced at, not watched.
+      Rns::InboxRecord nr;
+      if (Rns::Inbox::takeNotice(nr)) {
+        d->_lastActivityMs = now;
+        LvglUi::showIdle(false);
+        if (d->_blank) d->setBlank(false);
+        char sender[12];
+        snprintf(sender, sizeof(sender), "%02x%02x%02x%02x",
+                 nr.from[0], nr.from[1], nr.from[2], nr.from[3]);
+        char text[81];
+        const size_t tn = nr.textLen < sizeof(text) - 1 ? nr.textLen : sizeof(text) - 1;
+        memcpy(text, nr.text, tn); text[tn] = 0;
+        LvglUi::showIncoming(sender, text);
+      }
+      // The shell rests in two stages: first the spec's idle clock — the
+      // screen this device spends its life on, radio still listening — and
+      // the true blank only after four quiet timeouts, because the
+      // backlight is still the real money.
+      const uint32_t quiet = now - d->_lastActivityMs;
+      if (!d->_blank) {
+        if (d->_panel->blanks() && quiet > Power::displaySleepMs() * 4) {
+          LvglUi::showIdle(false);
+          d->setBlank(true);
+        } else {
+          LvglUi::showIdle(quiet > Power::displaySleepMs());
+        }
+      }
+    } else
 #endif
     // Battery saving, where there is any to save: an OLED comes off with its
-    // charge pump, an e-paper panel holds its image for nothing. Stated once,
-    // above the UI split — both families used to carry a copy each, which is
-    // how sleep policy drifts.
+    // charge pump, an e-paper panel holds its image for nothing — one
+    // statement of the rule for the mono pages and a shell that failed.
     if (d->_panel->blanks() && !d->_blank &&
         now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
 #if HAS_LVGL_UI
@@ -243,6 +274,7 @@ void Display::advancePage(bool forward) {
   if (_blank) { setBlank(false); return; }       // wake only
 #if HAS_LVGL_UI
   if (sShellUp) {
+    if (LvglUi::idleShowing()) { LvglUi::showIdle(false); return; }  // wake from the clock only
     LvglUi::stepTab(forward ? 1 : -1);           // the buttons walk the tabs
     return;
   }
@@ -261,7 +293,7 @@ void Display::advancePage(bool forward) {
 // Stated once so the two buttons cannot drift apart in what a squeeze means.
 void Display::longPressAction() {
 #if HAS_LVGL_UI
-  if (sShellUp && !_blank) { LvglUi::openPowerMenu(); return; }
+  if (sShellUp && !_blank) { LvglUi::showIdle(false); LvglUi::openPowerMenu(); return; }
 #endif
   setBlank(!_blank);
 }

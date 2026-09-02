@@ -282,6 +282,10 @@ uint32_t dropped();
 // One record, for the caller that wants only the newest.
 bool read(uint32_t seq, InboxRecord& out);
 
+// The newest arrival since last asked, exactly once — the display's
+// full-screen interrupt eats this; everything else keeps reading pages.
+bool takeNotice(InboxRecord& out);
+
 struct Page {
   size_t   count  = 0;      // how many records fn() was actually given
   uint32_t oldest = 0;      // the sequence number of the last one

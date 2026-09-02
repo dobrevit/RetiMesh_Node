@@ -77,6 +77,9 @@ void openSettings();                     // push()es the category list
 void openWifiJoin();                     // scan, pick, key if locked, save on success
 void openAbout();                        // a dialog: version, addresses
 void openPowerMenu();                    // sleep / restart / power off
+void showIdle(bool on);                  // the low-draw clock the panel rests on
+bool idleShowing();
+void showIncoming(const char* sender, const char* text);  // full-screen interrupt
 uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off
 void setRotation(uint8_t quarterTurns);  // the accelerometer's verdict
 #if HAS_GPS

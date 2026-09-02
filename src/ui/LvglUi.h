@@ -83,6 +83,13 @@ void openPowerMenu();
 uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off
 void setRotation(uint8_t quarterTurns);
 
+// The two overlays the display's rest policy drives: the idle clock the
+// panel collapses to before it truly blanks, and the full-screen incoming
+// interrupt — a field device is glanced at, not watched.
+void showIdle(bool on);
+bool idleShowing();
+void showIncoming(const char* sender, const char* text);
+
 } // namespace LvglUi
 
 #else
@@ -98,6 +105,9 @@ inline void swallowTouch() {}
 inline void openPowerMenu() {}
 inline uint8_t takePowerAction() { return 0; }
 inline void setRotation(uint8_t) {}
+inline void showIdle(bool) {}
+inline bool idleShowing() { return false; }
+inline void showIncoming(const char*, const char*) {}
 } // namespace LvglUi
 
 #endif // HAS_LVGL_UI
