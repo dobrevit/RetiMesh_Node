@@ -129,20 +129,26 @@ void Settings::load() {
 
 bool Settings::saveRadio(const RadioSettings& r) {
   _radio = r;
-  bool ok = _prefs.putFloat ("r_freq", r.freqMhz)  > 0
-         && _prefs.putFloat ("r_bw",   r.bwKhz)    > 0
-         && _prefs.putUChar ("r_sf",   r.sf)       > 0
-         && _prefs.putUChar ("r_cr",   r.cr)       > 0
-         && _prefs.putChar  ("r_pwr",  r.txDbm)    > 0
-         && _prefs.putUChar ("r_sync", r.syncWord) > 0
-         && _prefs.putString("r_rgn",  r.region) > 0
-         && _prefs.putUShort("r_pre",  r.preamble) > 0
-         && _prefs.putUShort("r_bcn",  r.beaconInterval) > 0
-         && _prefs.putUShort("r_ann",  r.announceInterval) > 0
-         && _prefs.putUChar ("r_duty", r.dutyCyclePct) > 0
-         && _prefs.putBool  ("r_gps",  r.gpsEnabled) > 0
-         && _prefs.putBool  ("r_gpspub", r.gpsSharePosition) > 0
-         && _prefs.putString("r_call", r.callsign) >= 0;
+  // Attempted and accumulated, not chained with &&. Chained, the first failure
+  // skipped every key after it, so a full or failing NVS committed half a
+  // section and left the rest holding the previous values — a node that came
+  // back running a combination nobody asked for, having reported the save as
+  // failed without saying which half of it landed.
+  bool ok = true;
+  ok &= _prefs.putFloat ("r_freq", r.freqMhz)  > 0;
+  ok &= _prefs.putFloat ("r_bw",   r.bwKhz)    > 0;
+  ok &= _prefs.putUChar ("r_sf",   r.sf)       > 0;
+  ok &= _prefs.putUChar ("r_cr",   r.cr)       > 0;
+  ok &= _prefs.putChar  ("r_pwr",  r.txDbm)    > 0;
+  ok &= _prefs.putUChar ("r_sync", r.syncWord) > 0;
+  ok &= _prefs.putString("r_rgn",  r.region) > 0;
+  ok &= _prefs.putUShort("r_pre",  r.preamble) > 0;
+  ok &= _prefs.putUShort("r_bcn",  r.beaconInterval) > 0;
+  ok &= _prefs.putUShort("r_ann",  r.announceInterval) > 0;
+  ok &= _prefs.putUChar ("r_duty", r.dutyCyclePct) > 0;
+  ok &= _prefs.putBool  ("r_gps",  r.gpsEnabled) > 0;
+  ok &= _prefs.putBool  ("r_gpspub", r.gpsSharePosition) > 0;
+  ok &= _prefs.putString("r_call", r.callsign) >= 0;
   if (!ok) log_e("NVS write failed (radio)");
   return ok;
 }
@@ -150,14 +156,15 @@ bool Settings::saveRadio(const RadioSettings& r) {
 bool Settings::saveWifi(const WifiSettings& w) {
   _wifi = w;
   // putString returns 0 for an empty string, so check those separately.
-  bool ok = _prefs.putString("w_ssid", w.ssid)     >= 0
-         && _prefs.putString("w_pass", w.password) >= 0
-         && _prefs.putUChar ("w_sec",  (uint8_t)w.security) > 0
-         && _prefs.putUChar ("w_chan", w.channel)  > 0
-         && _prefs.putUChar ("w_max",  w.maxStations) > 0
-         && _prefs.putBool  ("w_hid",  w.hidden)   > 0
-         && _prefs.putString("w_sta",  w.staSsid)  >= 0
-         && _prefs.putString("w_stap", w.staPassword) >= 0;
+  bool ok = true;
+  ok &= _prefs.putString("w_ssid", w.ssid)     >= 0;
+  ok &= _prefs.putString("w_pass", w.password) >= 0;
+  ok &= _prefs.putUChar ("w_sec",  (uint8_t)w.security) > 0;
+  ok &= _prefs.putUChar ("w_chan", w.channel)  > 0;
+  ok &= _prefs.putUChar ("w_max",  w.maxStations) > 0;
+  ok &= _prefs.putBool  ("w_hid",  w.hidden)   > 0;
+  ok &= _prefs.putString("w_sta",  w.staSsid)  >= 0;
+  ok &= _prefs.putString("w_stap", w.staPassword) >= 0;
   if (!ok) log_e("NVS write failed (wifi)");
   return ok;
 }
@@ -171,19 +178,20 @@ bool Settings::saveAdminPassword(const char* password) {
 
 bool Settings::saveTransport(const TransportSettings& t) {
   _transport = t;
-  bool ok = _prefs.putBool  ("t_en",    t.enabled)  > 0
-         && _prefs.putUChar ("t_lmode", t.loraMode) > 0
-         && _prefs.putUChar ("t_wmode", t.wifiMode) > 0
-         && _prefs.putUChar ("t_amode", t.autoMode) > 0
-         && _prefs.putUChar ("t_acap",  t.announceCap) > 0
-         && _prefs.putUShort("t_art",   t.announceRateTarget) > 0
-         && _prefs.putUChar ("t_arg",   t.announceRateGrace) > 0
-         && _prefs.putUShort("t_arp",   t.announceRatePenalty) > 0
-         && _prefs.putBool  ("t_auto",  t.autoEnabled) > 0
-         && _prefs.putUChar ("t_pwr",   t.powerProfile) > 0
-         && _prefs.putBool  ("t_sdst",  t.sdStore) > 0
-         && _prefs.putUChar ("t_smov",  (uint8_t)t.pendingMove) > 0
-         && _prefs.putString("t_agrp",  t.autoGroupId) >= 0;
+  bool ok = true;
+  ok &= _prefs.putBool  ("t_en",    t.enabled)  > 0;
+  ok &= _prefs.putUChar ("t_lmode", t.loraMode) > 0;
+  ok &= _prefs.putUChar ("t_wmode", t.wifiMode) > 0;
+  ok &= _prefs.putUChar ("t_amode", t.autoMode) > 0;
+  ok &= _prefs.putUChar ("t_acap",  t.announceCap) > 0;
+  ok &= _prefs.putUShort("t_art",   t.announceRateTarget) > 0;
+  ok &= _prefs.putUChar ("t_arg",   t.announceRateGrace) > 0;
+  ok &= _prefs.putUShort("t_arp",   t.announceRatePenalty) > 0;
+  ok &= _prefs.putBool  ("t_auto",  t.autoEnabled) > 0;
+  ok &= _prefs.putUChar ("t_pwr",   t.powerProfile) > 0;
+  ok &= _prefs.putBool  ("t_sdst",  t.sdStore) > 0;
+  ok &= _prefs.putUChar ("t_smov",  (uint8_t)t.pendingMove) > 0;
+  ok &= _prefs.putString("t_agrp",  t.autoGroupId) >= 0;
   if (!ok) log_e("NVS write failed (transport)");
   return ok;
 }
@@ -200,14 +208,23 @@ bool Settings::saveLinks(const LinkSettings& l) {
 
 bool Settings::saveMaintenance(const MaintenanceSettings& m) {
   _maintenance = m;
-  bool ok = _prefs.putBool("m_bapi", m.bootloaderApi)     > 0
-         && _prefs.putBool("m_blan", m.bootloaderFromLan) > 0
-         && _prefs.putBool("m_con",  m.consoleEnabled)    > 0
-         && _prefs.putBool("m_ctcp", m.consoleTcp)         > 0
-         && _prefs.putBool("m_web",  m.webUi)              > 0
-         && _prefs.putBool("m_mdns", m.mdns)               > 0
-         && _prefs.putBool("m_rns",  m.rnsAdmin)           > 0
-         && _prefs.putBool("m_lxc",  m.lxmfCommands)       > 0;
+  // Every key attempted, and the results collected — not chained with &&,
+  // which stops at the first failure. Chained, a full or failing NVS wrote the
+  // keys before the fault and left the ones after it holding the previous
+  // values, so the node came back running a combination nobody asked for: an
+  // operator turning lxmf_commands off on a crowded channel got `false` back
+  // and a node that still answered strangers. Writing them all leaves NVS
+  // holding what was asked for wherever it could, and the return still says
+  // something went wrong.
+  bool ok = true;
+  ok &= _prefs.putBool("m_bapi", m.bootloaderApi)    > 0;
+  ok &= _prefs.putBool("m_blan", m.bootloaderFromLan) > 0;
+  ok &= _prefs.putBool("m_con",  m.consoleEnabled)    > 0;
+  ok &= _prefs.putBool("m_ctcp", m.consoleTcp)        > 0;
+  ok &= _prefs.putBool("m_web",  m.webUi)             > 0;
+  ok &= _prefs.putBool("m_mdns", m.mdns)              > 0;
+  ok &= _prefs.putBool("m_rns",  m.rnsAdmin)          > 0;
+  ok &= _prefs.putBool("m_lxc",  m.lxmfCommands)      > 0;
   // putString returns a size_t, so the ">= 0" this used to be was true
   // whatever happened — an NVS failure writing the administrator list reported
   // a clean save, and the list was quietly gone at the next boot on a node
