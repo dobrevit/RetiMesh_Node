@@ -50,6 +50,7 @@
 #include "RetiTransportServer.h"
 #include "WifiManager.h"
 #include "AutoInterface.h"
+#include "PeerNames.h"
 
 using RNS::Bytes;
 
@@ -87,6 +88,7 @@ static RingbufHandle_t  sTxRing = nullptr, sRxRing = nullptr, sTcpInRing = nullp
 static QueueHandle_t    sEvents = nullptr;
 static SemaphoreHandle_t sSnapLock = nullptr;
 static uint32_t         sNextAnnounceMs = 0;
+static std::atomic<bool> sAnnounceForce{false};  // the glass's button; consumed on the RNS task
 static uint32_t         sAnnounceFloorMs = 0;   // nothing announces before this
 
 static RNS::Type::Interface::modes toMode(uint8_t m) {
@@ -315,6 +317,7 @@ public:
     n.rssi = n.viaWifi ? 0 : packet.rssi();
     n.snr  = n.viaWifi ? 0 : packet.snr();
     neighbors.seen(n);
+    if (n.name[0]) PeerNames::remember(n.hash, n.name);   // a name heard is a name kept
     g_stats.announcesRx++;
     log_i("announce via %s: %s <%s> \"%s\" hops %u", iface.c_str(), aspect ? aspect : "unknown-aspect", n.hash, n.name, n.hops);
     char line[160];
@@ -1183,6 +1186,13 @@ struct PendingReply {
 };
 static QueueHandle_t sReplyQueue = nullptr;
 
+// The outbound log (RnsTransport.h): written by whoever queues, stamped by
+// the RNS task, read by the display — a spinlock because every touch is a
+// short copy.
+static OutMessage    sOutLog[8];
+static uint32_t      sOutCount = 0;
+static portMUX_TYPE  sOutMux = portMUX_INITIALIZER_UNLOCKED;
+
 bool queueLxmfReply(const uint8_t destHash[16], const char* text) {
   return queueLxmfTelemetry(destHash, text, false, {});
 }
@@ -1199,7 +1209,50 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
     memcpy(r.key, verifiedKey, kPublicKeyLen);
     r.haveKey = true;
   }
-  return xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
+  // Logged before the queue, not after: the RNS task once dequeued, sent,
+  // and ran its stamp scan in the gap between the two, leaving a delivered
+  // message amber "queued" forever.
+  uint32_t slot = UINT32_MAX;
+#if HAS_LVGL_UI                          // the log's only reader is the glass
+  if (!telemetry) {
+    taskENTER_CRITICAL(&sOutMux);
+    slot = sOutCount % 8;
+    OutMessage& o = sOutLog[slot];
+    memcpy(o.dest, destHash, 16);
+    strlcpy(o.text, text ? text : "", sizeof(o.text));
+    o.queuedMs = millis() ? millis() : 1;
+    o.sentMs = 0;
+    o.ok = false;
+    sOutCount++;
+    taskEXIT_CRITICAL(&sOutMux);
+  }
+#endif
+  const bool queued = xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
+#if HAS_LVGL_UI
+  if (!queued && slot != UINT32_MAX) {
+    // The queue refused it: the entry gets its verdict now rather than
+    // sitting "queued" for a send that will never happen.
+    taskENTER_CRITICAL(&sOutMux);
+    OutMessage& o = sOutLog[slot];
+    if (!o.sentMs && memcmp(o.dest, destHash, 16) == 0) {
+      o.sentMs = millis() ? millis() : 1;
+      o.ok = false;
+    }
+    taskEXIT_CRITICAL(&sOutMux);
+  }
+#endif
+  (void)slot;
+  return queued;
+}
+
+size_t lxmfOutbound(OutMessage* out, size_t max) {
+  taskENTER_CRITICAL(&sOutMux);
+  const uint32_t n = sOutCount < 8 ? sOutCount : 8;
+  size_t w = 0;
+  for (uint32_t i = 0; i < n && w < max; i++)
+    out[w++] = sOutLog[(sOutCount - 1 - i) % 8];   // newest first
+  taskEXIT_CRITICAL(&sOutMux);
+  return w;
 }
 
 static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry,
@@ -1415,6 +1468,14 @@ static void announceSoon() {
   uint32_t at = millis() + ANNOUNCE_ON_PEER_DELAY_MS;
   if ((int32_t)(at - sAnnounceFloorMs) < 0) at = sAnnounceFloorMs;
   if ((int32_t)(at - sNextAnnounceMs) < 0) sNextAnnounceMs = at;
+}
+
+void announceNow() {
+  // A flag, not a schedule write: the schedule belongs to the RNS task, and
+  // an unlocked store from a button callback once raced it. The force also
+  // outranks interval 0 — quiet by default is not mute, and a pressed
+  // button that transmits nothing while toasting success is a lie.
+  sAnnounceForce.store(true);
 }
 
 // Drop whatever is registered under this interface's hash. Names are unique
@@ -1679,9 +1740,29 @@ void loop() {
     // that owns the library (queueLxmfReply above).
     if (sReplyQueue) {
       PendingReply r;
-      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE &&
-          !sendLxmf(r.dest, r.text, r.telemetry, r.signal, r.haveKey ? r.key : nullptr))
-        log_w("lxmf: could not send an answer to %s", RNS::Bytes(r.dest, 16).toHex().c_str());
+      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE) {
+        const bool ok = sendLxmf(r.dest, r.text, r.telemetry, r.signal,
+                                 r.haveKey ? r.key : nullptr);
+        if (!ok) log_w("lxmf: could not send an answer to %s",
+                       RNS::Bytes(r.dest, 16).toHex().c_str());
+#if HAS_LVGL_UI
+        if (!r.telemetry) {
+          // The queue is FIFO, so this send belongs to the oldest unsent
+          // log entry for the same destination.
+          taskENTER_CRITICAL(&sOutMux);
+          const uint32_t from = sOutCount > 8 ? sOutCount - 8 : 0;
+          for (uint32_t i = from; i < sOutCount; i++) {
+            OutMessage& o = sOutLog[i % 8];
+            if (!o.sentMs && memcmp(o.dest, r.dest, 16) == 0) {
+              o.sentMs = millis() ? millis() : 1;
+              o.ok = ok;
+              break;
+            }
+          }
+          taskEXIT_CRITICAL(&sOutMux);
+        }
+#endif
+      }
     }
     processEvents();
     drainTcp();
@@ -1701,7 +1782,11 @@ void loop() {
       sNextAnnounceMs = Rns::clampAnnounceTo(sNextAnnounceMs, interval, millis());
       sBookedFor = interval;
     }
-    if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
+    bool forced = false;
+    if (sAnnounceForce.load(std::memory_order_relaxed) &&
+        (int32_t)(millis() - sAnnounceFloorMs) >= 0)
+      forced = sAnnounceForce.exchange(false);   // survives until the floor passes
+    if ((interval || forced) && (forced || (int32_t)(millis() - sNextAnnounceMs) >= 0)) {
       // Scheduled before it is attempted, not after. Advancing only on the way
       // out meant that an announce which threw left the schedule untouched, so
       // the next pass ten milliseconds later tried the same thing again, threw

@@ -424,6 +424,10 @@ void loop() {
   g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   if (millis() - lastBeat >= 30000) {
     lastBeat = millis();
+    // The battery sampler rides whoever calls battery(); with the glass
+    // asleep nobody did, and the discharge history's clock silently stopped
+    // on exactly the battery-first nodes it exists for. The heartbeat asks.
+    Power::battery();
     const uint32_t uptimeS = millis() / 1000;
     log_i("up %lus | peers tcp %u auto %u | lora rx/tx %u/%u (drop %u) | announces rx/tx %u/%u",
           (unsigned long)uptimeS, (unsigned)g_stats.tcpClients, (unsigned)AutoInterface::peerCount(),

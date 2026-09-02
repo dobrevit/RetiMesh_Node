@@ -307,15 +307,18 @@ static Driver sDriver = { { postAttach, nullptr } };
 // this port, which the core's reboot also honoured, is not offered: the
 // host tool never uses it here, since the downloader appears on another
 // port.
+// Noted here, completed in poll(): the USB event task that hears the
+// line-coding change carries a stack too small for the sequencer's own
+// logging — a request made from this context died inside vsnprintf, and the
+// coredump of boot 906 named this exact handler. The loop task has the
+// stack; the touch can afford its one poll pass of latency.
+static std::atomic<uint32_t> sTouchAtMs{0};    // 0 = none; else millis of the touch
+
 static void onLineCoding(void*, esp_event_base_t, int32_t, void* data) {
   const auto* d = static_cast<arduino_usb_cdc_event_data_t*>(data);
   if (!d || d->line_coding.bit_rate != 1200) return;
-  const char* why = nullptr;
-  const Bootloader::Refusal r = Bootloader::request(Bootloader::Target::Bootloader, Bootloader::Source::Touch, 0, &why);
-  // A refusal has nowhere to go but the log: the core posts this event only
-  // when the coding changes, so the host tool opens at another speed before
-  // touching again (device.py, touch_1200).
-  if (r != Bootloader::Refusal::None) log_w("touch: refused (%s)", why ? why : "");
+  const uint32_t now = millis();
+  sTouchAtMs.store(now ? now : 1);
 }
 
 // What the device needs whether or not the network link is switched on: the
@@ -557,6 +560,22 @@ static void stepStop(uint32_t nowMs) {
 
 void poll(bool enabled) {
   const uint32_t now = millis();
+  // The 1200-baud touch, before anything else and regardless of the link
+  // switch — begin() promises the touch works either way. Requested from
+  // here rather than the event handler that heard it (see onLineCoding).
+  // A touch is honored only while the tool is plausibly still waiting: a
+  // flag latched during a wedged loop must not reboot the node into the
+  // downloader minutes later with nobody flashing.
+  const uint32_t touchAt = sTouchAtMs.exchange(0);
+  if (touchAt && now - touchAt < 3000) {
+    const char* why = nullptr;
+    const Bootloader::Refusal r = Bootloader::request(Bootloader::Target::Bootloader,
+                                                      Bootloader::Source::Touch, 0, &why);
+    // A refusal has nowhere to go but the log: the core posts the event only
+    // when the coding changes, so the host tool opens at another speed
+    // before touching again (device.py, touch_1200).
+    if (r != Bootloader::Refusal::None) log_w("touch: refused (%s)", why ? why : "");
+  }
   // The switch decides whether the interface exists at all, not merely
   // whether it answers (UsbNcm.h). A teardown once begun runs to its end
   // before anything is built again, and a build that failed is not retried

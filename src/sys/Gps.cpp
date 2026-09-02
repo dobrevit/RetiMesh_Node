@@ -136,6 +136,45 @@ void parseGga(const char* s) {
   if (field(s, 9, f, sizeof(f))) sFix.altitude   = atof(f);
 }
 
+// The per-satellite story, up to four SVs per sentence. An aging map rather
+// than message-cycle bookkeeping: entries update in place and the reader
+// ignores anything not refreshed lately — constellations may interleave
+// their blocks however they like.
+#if HAS_LVGL_UI                          // only the sky view reads this
+constexpr size_t kMaxSvs = 20;
+Gps::Sv sSvs[kMaxSvs];
+portMUX_TYPE sSvMux = portMUX_INITIALIZER_UNLOCKED;
+
+void parseGsv(const char* s) {
+  char f[16];
+  for (int k = 0; k < 4; k++) {
+    if (!field(s, 4 + 4 * k, f, sizeof(f)) || !f[0]) continue;
+    const uint8_t id = (uint8_t)atoi(f);
+    if (!id) continue;
+    uint8_t cn0 = 0;
+    if (field(s, 7 + 4 * k, f, sizeof(f)) && f[0]) cn0 = (uint8_t)atoi(f);
+    const uint32_t nowMs = millis();
+    taskENTER_CRITICAL(&sSvMux);
+    size_t slot = 0;
+    uint32_t oldestAge = 0;
+    for (size_t i = 0; i < kMaxSvs; i++) {
+      if (sSvs[i].seenMs && sSvs[i].id == id &&
+          sSvs[i].talker[0] == s[1] && sSvs[i].talker[1] == s[2]) { slot = i; break; }
+      // Age, never the raw stamp: absolute comparison inverts after the
+      // 49.7-day wrap and evicts the freshest SVs while ghosts hold slots.
+      const uint32_t age = sSvs[i].seenMs ? nowMs - sSvs[i].seenMs : UINT32_MAX;
+      if (age >= oldestAge) { oldestAge = age; slot = i; }
+    }
+    Gps::Sv& v = sSvs[slot];
+    v.talker[0] = s[1]; v.talker[1] = s[2]; v.talker[2] = 0;
+    v.id = id;
+    v.cn0 = cn0;
+    v.seenMs = millis() ? millis() : 1;
+    taskEXIT_CRITICAL(&sSvMux);
+  }
+}
+#endif // HAS_LVGL_UI
+
 void parse(const char* s, uint16_t len) {
   if (!checksumOk(s, len)) return;
   sFix.sentences++;
@@ -144,6 +183,9 @@ void parse(const char* s, uint16_t len) {
   // the sentence type instead of the whole prefix.
   if      (strncmp(s + 3, "RMC", 3) == 0) parseRmc(s);
   else if (strncmp(s + 3, "GGA", 3) == 0) parseGga(s);
+#if HAS_LVGL_UI
+  else if (strncmp(s + 3, "GSV", 3) == 0) parseGsv(s);
+#endif
 }
 
 void resetState() {
@@ -260,6 +302,24 @@ Fix fix() {
   if (!sLock) return Fix{};
   Sys::Lock held(sLock);
   return sFix;
+}
+
+size_t skyView(Sv* out, size_t max) {
+#if !HAS_LVGL_UI
+  // No sky view on this build: a GPS board without a glass must not pay
+  // interrupt-masked table scans forty times a second for a chart it
+  // cannot draw.
+  (void)out; (void)max;
+  return 0;
+#else
+  const uint32_t now = millis();
+  size_t w = 0;
+  taskENTER_CRITICAL(&sSvMux);
+  for (size_t i = 0; i < kMaxSvs && w < max; i++)
+    if (sSvs[i].seenMs && now - sSvs[i].seenMs < 10000) out[w++] = sSvs[i];
+  taskEXIT_CRITICAL(&sSvMux);
+  return w;
+#endif
 }
 
 } // namespace Gps

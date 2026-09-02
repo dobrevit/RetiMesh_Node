@@ -62,6 +62,13 @@ struct Fix {
   char     utc[20]   = "";         // "YYYY-MM-DD HH:MM:SS"
 };
 
+// One tracked space vehicle, as the GSV sentences tell it. talker is the
+// constellation's two letters (GP, GL, GA, GB...).
+struct Sv { char talker[3]; uint8_t id; uint8_t cn0; uint32_t seenMs; };
+// The SVs heard in the last ten seconds — the sky view's data. Returns how
+// many were written.
+size_t skyView(Sv* out, size_t max);
+
 // Powers the receiver (via the PMU) and opens its UART, or shuts both down.
 // Safe to call from any task: it holds the same lock as the reader.
 void setEnabled(bool on);

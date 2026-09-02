@@ -55,6 +55,9 @@ public:
   void   seen(const Neighbor& info);
   // Copies up to `max` entries into `out`, newest first. Returns the count.
   size_t snapshot(Neighbor* out, size_t max);
+  // One neighbor by its hex destination hash — how the mesh screens put a
+  // name and a signal to a path-table entry. False when never heard.
+  bool   byHash(const char* hashHex, Neighbor& out);
   size_t count(uint32_t maxAgeMs);       // heard within maxAgeMs
 
 private:

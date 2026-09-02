@@ -42,6 +42,7 @@ static const size_t kFileSize = kInboxSlots * kInboxRecordSize;
 
 static SemaphoreHandle_t sLock = nullptr;
 static QueueHandle_t     sQueue = nullptr;    // arrivals waiting to be written
+static QueueHandle_t     sNotice = nullptr;   // newest unseen arrival, for the glass
 static uint32_t sNewest = 0;         // highest sequence number stored; 0 when empty
 static uint32_t sStored = 0;         // how many slots hold a message
 static uint32_t sDropped = 0;        // arrivals refused: repeats and floods
@@ -125,6 +126,8 @@ static bool ensureFile(fs::FS& fs) {
 void begin() {
   if (!sLock) sLock = xSemaphoreCreateMutex();
   if (!sQueue) sQueue = xQueueCreate(3, sizeof(InboxRecord));
+  // Depth one, overwritten: the display shows the newest arrival or nothing.
+  if (!sNotice) sNotice = xQueueCreate(1, sizeof(InboxRecord));
   // Distinguishes this run from the last one. A message's "four minutes ago"
   // is only true within the run that took it in, because millis() starts
   // again at every restart; anything older than the current run is shown by
@@ -267,7 +270,28 @@ void poll() {
   // One per pass. The loop task has a display, a console and a restart
   // sequence to get to, and a burst of messages does not need to be written
   // faster than it comes round again.
-  if (xQueueReceive(sQueue, &r, 0) == pdTRUE) write(r);
+  if (xQueueReceive(sQueue, &r, 0) == pdTRUE) {
+    write(r);
+    // The glass hears about messages for people. Empty bodies and the
+    // remote console's command traffic (the RM prefix is its convention)
+    // are machine chatter — waking a pocketed panel for them burned
+    // backlight and buried the real alerts.
+    const bool machine = r.textLen == 0 ||
+                         (r.textLen >= 3 && memcmp(r.text, "RM ", 3) == 0);
+    if (sNotice && !machine) xQueueOverwrite(sNotice, &r);
+  }
+}
+
+void wipe() {
+  Sys::Lock held(sLock);
+  fs::FS& backend = *RnsFileSystem::backend();
+  backend.remove(kPath);
+  sNewest = 0;
+  sStored = 0;
+}
+
+bool takeNotice(InboxRecord& out) {
+  return sNotice && xQueueReceive(sNotice, &out, 0) == pdTRUE;
 }
 
 // Reads one record out of an open file. The caller holds the lock.

@@ -499,6 +499,40 @@ void WifiManager::startAccessPoint() {
 }
 
 void WifiManager::tick() {
+  // The join the glass asked for completes here, on the task that owns the
+  // driver — connect, timeout, persist and fallback all in one place, so an
+  // abandoned screen can no longer strand any of them.
+  if (_joining) {
+    if (WiFi.status() == WL_CONNECTED) {
+      WifiSettings w = settings.wifi();
+      strlcpy(w.staSsid, _joinSsid, sizeof(w.staSsid));
+      strlcpy(w.staPassword, _joinPass, sizeof(w.staPassword));
+      char why[96];
+      // Proven on air, then written down — through the same rules the
+      // funnel holds, so no side door into the store.
+      if (SettingsRules::validateWifi(w, why, sizeof(why))) {
+        settings.saveWifi(w);
+        log_i("station: joined \"%s\", IP %s — saved", w.staSsid,
+              WiFi.localIP().toString().c_str());
+      } else {
+        log_w("station: joined \"%s\" but not saved: %s", _joinSsid, why);
+      }
+      _staRetryAt = millis() + 30000;
+      _joining = false;
+      _joinVerdict = 1;
+    } else if ((int32_t)(millis() - _joinDeadline) >= 0) {
+      log_w("station: could not join \"%s\"", _joinSsid);
+      const WifiSettings& w = settings.wifi();
+      WiFi.disconnect();
+      if (w.staSsid[0]) {
+        WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
+        _staRetryAt = millis() + 30000;
+      }
+      _joining = false;
+      _joinVerdict = 2;
+    }
+    return;                              // the watchdog waits its turn
+  }
   // Station watchdog: log transitions, kick a reconnect if auto-reconnect
   // gave up (e.g. the LAN was down at boot).
   if (wifiEnabled() && stationConfigured()) {
@@ -514,6 +548,84 @@ void WifiManager::tick() {
       WiFi.reconnect();
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Joining a network from the glass (WifiManager.h explains the live-first
+// order). All of it is polled from the display task; the driver does the
+// actual work on its own task either way.
+// ---------------------------------------------------------------------------
+void WifiManager::staScanStart() {
+  // Scanning wants the station interface; a node running AP-only gains it
+  // here and keeps it — the mode is where a configured station would put it.
+  if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
+  WiFi.scanNetworks(true /* async */);
+}
+
+int WifiManager::staScanCount() {
+  const int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) return -1;
+  if (n == WIFI_SCAN_FAILED)  return 0;
+  return n;
+}
+
+bool WifiManager::staScanResult(int i, StaScanEntry& out) {
+  if (i < 0 || i >= WiFi.scanComplete()) return false;
+  strlcpy(out.ssid, WiFi.SSID(i).c_str(), sizeof(out.ssid));
+  out.rssi    = (int8_t)WiFi.RSSI(i);
+  out.secured = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+  return out.ssid[0] != '\0';           // hidden networks scan as empty names
+}
+
+void WifiManager::staScanDone() { WiFi.scanDelete(); }
+
+bool WifiManager::staJoin(const char* ssid, const char* password) {
+  // What cannot be stored is not attempted: a 64-character raw PSK joins
+  // fine and then wedges every wifi.* change against the funnel's length
+  // rule — the funnel's truth holds at this door too.
+  if (!ssid || !ssid[0] || strlen(ssid) > 32) return false;
+  if (password && strlen(password) > 63) return false;
+  strlcpy(_joinSsid, ssid, sizeof(_joinSsid));
+  strlcpy(_joinPass, password ? password : "", sizeof(_joinPass));
+  _joinDeadline = millis() + 20000;      // WPA against a present AP settles well inside this
+  _joining = true;
+  WiFi.disconnect();                     // whatever the station was doing before
+  WiFi.begin(_joinSsid, _joinPass[0] ? _joinPass : nullptr);
+  log_i("station: joining \"%s\" (asked from the glass)", _joinSsid);
+  return true;
+}
+
+WifiManager::StaJoin WifiManager::staJoinState() {
+  // Pure, and one-shot on the verdicts: the work happens in tick() on the
+  // loop task. The screen's own poll once carried it, and a screen closed
+  // mid-join stranded the station, the watchdog, and the typed password.
+  if (_joining) return StaJoin::Trying;
+  const uint8_t v = _joinVerdict;
+  if (v) {
+    _joinVerdict = 0;
+    return v == 1 ? StaJoin::Joined : StaJoin::Failed;
+  }
+  return StaJoin::Idle;
+}
+
+void WifiManager::staForget() {
+  _joining = false;                      // a forget mid-attempt wins
+  WifiSettings w = settings.wifi();
+  if (!w.staSsid[0]) return;
+  log_i("station: forgetting \"%s\"", w.staSsid);
+  w.staSsid[0] = '\0';
+  w.staPassword[0] = '\0';
+  settings.saveWifi(w);
+  WiFi.disconnect();                     // stationConfigured() is now false; the watchdog rests
+}
+
+int WifiManager::staRssi() const { return stationConnected() ? WiFi.RSSI() : 0; }
+
+void WifiManager::staIpText(char* out, size_t n) const {
+  // Octets, not String: this runs at 1 Hz on the display task while the
+  // wifi page is open, and the UI path is otherwise allocation-free.
+  const IPAddress ip = WiFi.localIP();
+  snprintf(out, n, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
 }
 
 // ---------------------------------------------------------------------------

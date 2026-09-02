@@ -31,6 +31,7 @@
 //  without this file changing.
 // ============================================================================
 #include "Ui.h"
+#include "UiTheme.h"
 
 #if HAS_LVGL_UI
 
@@ -39,14 +40,19 @@
 #include "Settings.h"
 #include "Power.h"
 #include "Airtime.h"
+#include "Bootloader.h"
+#include "PeerNames.h"
+#include "LxmfInbox.h"
+#include "WifiManager.h"
 
 namespace {
 
 // --- what kind of control a key wants ---------------------------------------
 
-enum class Kind : uint8_t { Text, Secret, Number, Switch, Region, Words };
+enum class Kind : uint8_t { Text, Secret, Number, Switch, Region, Words, Slider };
 
 Kind kindFor(const char* key, const char* value, bool quoted) {
+  if (strcmp(key, "display.brightness") == 0)       return Kind::Slider;
   if (strcmp(key, "radio.region") == 0)             return Kind::Region;
   if (strcmp(key, "wifi.security") == 0)            return Kind::Words;
   if (strcmp(key, "transport.power_profile") == 0)  return Kind::Words;
@@ -104,6 +110,9 @@ Row sRows[kMaxRows];
 // The value a control holds now, in the words SettingsFields::set eats.
 void rowValue(const Row& r, char* out, size_t len) {
   switch (r.kind) {
+    case Kind::Slider:
+      snprintf(out, len, "%d", (int)lv_slider_get_value(r.control));
+      break;
     case Kind::Switch:
       snprintf(out, len, "%s", lv_obj_has_state(r.control, LV_STATE_CHECKED) ? "on" : "off");
       break;
@@ -132,6 +141,17 @@ bool rowChanged(const Row& r) {
   rowValue(r, now, sizeof(now));
   if (r.kind == Kind::Secret) return now[0] != 0;      // typed at all = change
   return strcmp(now, r.initial) != 0;
+}
+
+// A slider's value into the funnel, and the row's baseline moved with it so
+// Save has nothing left to do.
+void applySliderRow(Row* row) {
+  char v[8], err[96] = "";
+  snprintf(v, sizeof(v), "%d", (int)lv_slider_get_value(row->control));
+  const SettingsFields::Result res = SettingsFields::set(row->key, v, err, sizeof(err));
+  if (res == SettingsFields::Result::Ok)
+    strlcpy(row->initial, v, sizeof(row->initial));
+  else Ui::toast(err[0] ? err : SettingsFields::resultText(res));
 }
 
 void buildControl(lv_obj_t* parent, Row& r) {
@@ -173,6 +193,60 @@ void buildControl(lv_obj_t* parent, Row& r) {
       }
       lv_dropdown_set_selected(r.control, sel);
       lv_obj_set_width(r.control, lv_pct(100));
+      break;
+    }
+    case Kind::Slider: {
+      // Typing a percentage is tedious on glass: a slider with step keys on
+      // either side, applied through the funnel the moment the finger lifts,
+      // so the backlight answers while the hand is still on the panel.
+      lv_obj_t* rowH = lv_obj_create(parent);
+      lv_obj_remove_style_all(rowH);
+      lv_obj_set_size(rowH, lv_pct(100), 36);
+      lv_obj_set_flex_flow(rowH, LV_FLEX_FLOW_ROW);
+      lv_obj_set_style_pad_column(rowH, 8, 0);
+      lv_obj_set_flex_align(rowH, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+      auto stepBtn = [&](const char* sym) {
+        lv_obj_t* b = lv_button_create(rowH);
+        UiTheme::actionButton(b);
+        lv_obj_set_size(b, 40, lv_pct(100));
+        lv_obj_t* l = lv_label_create(b);
+        lv_label_set_text(l, sym);
+        lv_obj_center(l);
+        return b;
+      };
+      lv_obj_t* minus = stepBtn(LV_SYMBOL_MINUS);
+      lv_obj_t* slider = lv_slider_create(rowH);
+      // The floor is BRIGHTNESS_FLOOR_PCT everywhere — funnel, load, and
+      // this slider ask the same constant.
+      lv_slider_set_range(slider, BRIGHTNESS_FLOOR_PCT, 100);
+      const int init = atoi(r.initial);
+      lv_slider_set_value(slider, init < BRIGHTNESS_FLOOR_PCT ? BRIGHTNESS_FLOOR_PCT : init, LV_ANIM_OFF);
+      lv_obj_set_flex_grow(slider, 1);
+      lv_obj_t* plus = stepBtn(LV_SYMBOL_PLUS);
+      r.control = slider;
+      // Applied by direct call, never by a synthetic event: sending the
+      // slider a fake RELEASED made its class handler re-derive the value
+      // from the touch point's last position — the step key itself, at the
+      // screen's edge — and one tap on minus blacked the glass.
+      lv_obj_add_event_cb(slider, [](lv_event_t* e) {
+        applySliderRow((Row*)lv_event_get_user_data(e));
+      }, LV_EVENT_RELEASED, &r);
+      struct Step { Row* row; int delta; };
+      static Step steps[kMaxRows * 2];
+      static size_t stepN = 0;
+      if (stepN + 2 > kMaxRows * 2) stepN = 0;
+      steps[stepN] = { &r, -5 };
+      steps[stepN + 1] = { &r, +5 };
+      auto stepCb = [](lv_event_t* e) {
+        Step* st = (Step*)lv_event_get_user_data(e);
+        int v = (int)lv_slider_get_value(st->row->control) + st->delta;
+        v = v < BRIGHTNESS_FLOOR_PCT ? BRIGHTNESS_FLOOR_PCT : (v > 100 ? 100 : v);
+        lv_slider_set_value(st->row->control, v, LV_ANIM_OFF);
+        applySliderRow(st->row);
+      };
+      lv_obj_add_event_cb(minus, stepCb, LV_EVENT_CLICKED, &steps[stepN]);
+      lv_obj_add_event_cb(plus, stepCb, LV_EVENT_CLICKED, &steps[stepN + 1]);
+      stepN += 2;
       break;
     }
     case Kind::Secret:
@@ -226,6 +300,66 @@ void saveForm(lv_event_t*) {
   if (!failed) Ui::back();               // a refusal keeps the form for fixing
 }
 
+// The radio form's consequence line: every parameter change costs range or
+// airtime, so the cost is printed under the controls and follows the staged
+// values — what the operator is about to APPLY, not what the node runs.
+lv_obj_t* sRadioFoot = nullptr;
+
+const Row* rowFor(const char* key) {
+  for (const Row& r : sRows)
+    if (r.used && strcmp(r.key, key) == 0) return &r;
+  return nullptr;
+}
+
+void radioFootTick(lv_timer_t*) {
+  if (!sRadioFoot || !lv_obj_is_valid(sRadioFoot)) return;
+  char v[24];
+  Airtime::Params p;
+  int8_t dbm = settings.radio().txDbm;
+  if (const Row* r = rowFor("radio.sf"))     { rowValue(*r, v, sizeof(v)); p.sf = (uint8_t)atoi(v); }
+  if (const Row* r = rowFor("radio.bw_khz")) { rowValue(*r, v, sizeof(v)); p.bwKhz = (float)atof(v); }
+  if (const Row* r = rowFor("radio.cr"))     { rowValue(*r, v, sizeof(v)); p.cr = (uint8_t)atoi(v); }
+  if (const Row* r = rowFor("radio.tx_dbm")) { rowValue(*r, v, sizeof(v)); dbm = (int8_t)atoi(v); }
+  if (p.sf < 5 || p.sf > 12 || p.bwKhz < 7.0f || p.cr < 5 || p.cr > 8) return;  // mid-edit
+  Airtime a;
+  a.configure(p);
+  const float ms = a.timeOnAirMs(200);
+  // A deliberately rough line-of-sight guess, and labelled as one: SF9/125
+  // as 4 km, a third more per SF step, narrower bandwidth buying a little,
+  // a dB of power a few percent. It ranks choices; it does not promise.
+  const float km = 4.0f * powf(1.35f, (float)p.sf - 9.0f) *
+                   sqrtf(125.0f / p.bwKhz) * powf(1.04f, (float)dbm - 17.0f);
+  char line[96];
+  snprintf(line, sizeof(line), "est. range ~%.1f km · %.2f s per 200 B\nduty used %.1f%% of %.1f%%",
+           (double)km, (double)(ms / 1000.0f),
+           (double)(g_stats.airtimeLong * 100.0f), (double)(g_stats.dutyLimitBp / 100.0f));
+  if (strcmp(lv_label_get_text(sRadioFoot), line)) lv_label_set_text(sRadioFoot, line);
+}
+
+// The station's line on the wifi page, kept live while the page is open.
+lv_obj_t* sStaStatus = nullptr;
+
+void staStatusTick(lv_timer_t*) {
+  if (!sStaStatus || !lv_obj_is_valid(sStaStatus)) return;
+  const char* ssid = settings.wifi().staSsid;
+  char line[96];
+  if (!settings.links().wifiEnabled) {
+    // The truth outranks the saved network: with the adapter off nothing is
+    // looking for anything — a "searching" line here once claimed a hunt the
+    // driver was never even started for.
+    snprintf(line, sizeof(line), "WiFi is off — the switch above turns it on.");
+  } else if (!ssid[0]) {
+    snprintf(line, sizeof(line), "No network saved — scan to join one.");
+  } else if (wifiManager.stationConnected()) {
+    char ip[20];
+    wifiManager.staIpText(ip, sizeof(ip));
+    snprintf(line, sizeof(line), "Connected to %s\n%s, %d dBm", ssid, ip, wifiManager.staRssi());
+  } else {
+    snprintf(line, sizeof(line), "Looking for %s...", ssid);
+  }
+  if (strcmp(lv_label_get_text(sStaStatus), line)) lv_label_set_text(sStaStatus, line);
+}
+
 void openCategory(lv_event_t* e) {
   const char* section = (const char*)lv_event_get_user_data(e);
   // A breadcrumb before the heavy build: if this screen ever takes the node
@@ -237,10 +371,86 @@ void openCategory(lv_event_t* e) {
   if (title[0] >= 'a' && title[0] <= 'z') title[0] -= 32;
   lv_obj_t* body = Ui::newScreen(title);
 
+  // The wifi page leads with the station: what it is doing right now, the
+  // scanner to change it, and — while a network is saved — the way out. The
+  // raw sta_ssid/sta_password rows are gone from the glass (the scanner and
+  // its hidden-network dialog own joining; the console and portal still
+  // carry the keys).
+  if (strcmp(section, "wifi") == 0) {
+    // The adapter's master switch rides the status row, as the design draws
+    // it — through the funnel, whose link rules refuse a combination that
+    // would leave no way into the node.
+    lv_obj_t* head = lv_obj_create(body);
+    lv_obj_remove_style_all(head);
+    lv_obj_set_size(head, lv_pct(100), LV_SIZE_CONTENT);
+    sStaStatus = lv_label_create(head);
+    lv_obj_set_width(sStaStatus, lv_pct(74));
+    lv_label_set_long_mode(sStaStatus, LV_LABEL_LONG_WRAP);
+    lv_obj_align(sStaStatus, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t* master = lv_switch_create(head);
+    lv_obj_align(master, LV_ALIGN_RIGHT_MID, 0, 0);
+    if (settings.links().wifiEnabled) lv_obj_add_state(master, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(master, [](lv_event_t* e) {
+      lv_obj_t* sw = (lv_obj_t*)lv_event_get_target(e);
+      const bool want = lv_obj_has_state(sw, LV_STATE_CHECKED);
+      char err[128] = "";
+      const SettingsFields::Result res =
+          SettingsFields::set("links.wifi", want ? "on" : "off", err, sizeof(err));
+      const bool ok = res == SettingsFields::Result::Ok ||
+                      res == SettingsFields::Result::OkRestart ||
+                      res == SettingsFields::Result::OkNextBoot;
+      if (!ok) {
+        // The funnel said no (usually the no-way-in rule); the switch tells
+        // the truth again and the reason gets the toast.
+        if (want) lv_obj_remove_state(sw, LV_STATE_CHECKED);
+        else      lv_obj_add_state(sw, LV_STATE_CHECKED);
+        Ui::toast(err[0] ? err : SettingsFields::resultText(res));
+      } else if (res != SettingsFields::Result::Ok) {
+        Ui::toast(SettingsFields::resultText(res));
+      }
+    }, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_timer_t* t = lv_timer_create(staStatusTick, 1000, nullptr);
+    lv_obj_add_event_cb(lv_obj_get_parent(lv_obj_get_parent(body)),
+                        [](lv_event_t* ev) {
+                          lv_timer_delete((lv_timer_t*)lv_event_get_user_data(ev));
+                          sStaStatus = nullptr;
+                        }, LV_EVENT_DELETE, t);
+    staStatusTick(nullptr);
+
+    lv_obj_t* scan = lv_button_create(body);
+    lv_obj_set_width(scan, lv_pct(100));
+    lv_obj_t* sl = lv_label_create(scan);
+    lv_label_set_text(sl, LV_SYMBOL_WIFI "  Join a network...");
+    lv_obj_center(sl);
+    lv_obj_add_event_cb(scan, [](lv_event_t*) { Ui::openWifiJoin(); }, LV_EVENT_CLICKED, nullptr);
+    // Locked, not hidden, while the adapter is off — the master switch's
+    // restart rebuilds this page, so build-time state is the truth.
+    if (!settings.links().wifiEnabled) lv_obj_add_state(scan, LV_STATE_DISABLED);
+
+    if (wifiManager.stationConfigured()) {
+      lv_obj_t* forget = lv_button_create(body);
+      lv_obj_set_width(forget, lv_pct(100));
+      lv_obj_t* fl = lv_label_create(forget);
+      lv_label_set_text(fl, LV_SYMBOL_CLOSE "  Disconnect & forget");
+      lv_obj_center(fl);
+      if (!settings.links().wifiEnabled) lv_obj_add_state(forget, LV_STATE_DISABLED);
+      lv_obj_add_event_cb(forget, [](lv_event_t* ev) {
+        wifiManager.staForget();
+        Ui::toast("Network forgotten");
+        lv_obj_add_state((lv_obj_t*)lv_event_get_target(ev), LV_STATE_DISABLED);
+      }, LV_EVENT_CLICKED, nullptr);
+    }
+  }
+
   memset(sRows, 0, sizeof(sRows));
   size_t used = 0;
   for (size_t i = 0; i < SettingsFields::count() && used < kMaxRows; i++) {
     if (!SettingsFields::keyInSection(i, section)) continue;
+    // Joining lives on the scanner now — a picked network proves itself on
+    // air before it is saved, and the hidden-SSID dialog covers the rest. A
+    // raw row here would be a second, unverified way to say the same thing.
+    const char* k = SettingsFields::keyAt(i);
+    if (k && (strcmp(k, "wifi.sta_ssid") == 0 || strcmp(k, "wifi.sta_password") == 0)) continue;
     char line[224];
     if (!SettingsFields::render(i, line, sizeof(line))) continue;
     char* eq = strchr(line, '=');
@@ -267,6 +477,93 @@ void openCategory(lv_event_t* e) {
     lv_obj_t* lbl = lv_label_create(rowBox);
     lv_label_set_text(lbl, strchr(r.key, '.') ? strchr(r.key, '.') + 1 : r.key);
     buildControl(rowBox, r);
+
+    // The transport's WiFi usage depends on the adapter: with the adapter
+    // off the control locks rather than pretending, and says where the key
+    // to it lives.
+    if (strcmp(r.key, "transport.wifi_mode") == 0 && !settings.links().wifiEnabled) {
+      lv_obj_add_state(r.control, LV_STATE_DISABLED);
+      lv_obj_t* why = lv_label_create(rowBox);
+      lv_label_set_text(why, "locked — the WiFi adapter is off (Settings > wifi)");
+      UiTheme::labelCaps(why);
+    }
+  }
+
+  if (strcmp(section, "radio") == 0) {
+    lv_obj_t* card = lv_obj_create(body);
+    UiTheme::card(card);
+    lv_obj_set_width(card, lv_pct(100));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(card, 8, 0);
+    lv_obj_t* cl = lv_label_create(card);
+    lv_label_set_text(cl, "CONSEQUENCE");
+    UiTheme::labelCaps(cl);
+    sRadioFoot = lv_label_create(card);
+    lv_obj_set_width(sRadioFoot, lv_pct(100));
+    lv_label_set_long_mode(sRadioFoot, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(sRadioFoot, lv_color_hex(UiTheme::kInkDim), 0);
+    lv_label_set_text(sRadioFoot, "");
+    lv_obj_align_to(sRadioFoot, cl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 3);
+    lv_timer_t* t = lv_timer_create(radioFootTick, 500, nullptr);
+    lv_obj_add_event_cb(lv_obj_get_parent(lv_obj_get_parent(body)),
+                        [](lv_event_t* ev) {
+                          lv_timer_delete((lv_timer_t*)lv_event_get_user_data(ev));
+                          sRadioFoot = nullptr;
+                        }, LV_EVENT_DELETE, t);
+    radioFootTick(nullptr);
+  }
+
+  if (strcmp(section, "display") == 0) {
+    // The discharge sparkline: the evidence that a power profile is doing
+    // something, one point per five minutes over eight hours.
+    uint8_t h[96];
+    const size_t hn = Power::batteryHistory(h, 96);
+    if (hn >= 2) {
+      lv_obj_t* card = lv_obj_create(body);
+      UiTheme::card(card);
+      lv_obj_set_width(card, lv_pct(100));
+      lv_obj_set_height(card, 84);
+      lv_obj_set_style_pad_all(card, 6, 0);
+      lv_obj_t* cl = lv_label_create(card);
+      lv_label_set_text(cl, "BATTERY · LAST 8 H");
+      UiTheme::labelCaps(cl);
+      lv_obj_t* chart = lv_chart_create(card);
+      lv_obj_set_size(chart, lv_pct(100), 52);
+      lv_obj_align(chart, LV_ALIGN_BOTTOM_MID, 0, 0);
+      lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+      lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+      lv_chart_set_point_count(chart, (uint32_t)hn);
+      lv_chart_set_div_line_count(chart, 3, 0);
+      lv_chart_series_t* ser =
+          lv_chart_add_series(chart, lv_color_hex(UiTheme::kGood), LV_CHART_AXIS_PRIMARY_Y);
+      for (size_t i = 0; i < hn; i++) lv_chart_set_next_value(chart, ser, h[i]);
+    }
+  }
+
+  if (strcmp(section, "maintenance") == 0) {
+    // The one irreversible control, in the one irreversible colour, behind
+    // the one gesture gloves and rain cannot fake: a real two-second hold.
+    lv_obj_t* erase = lv_button_create(body);
+    UiTheme::actionButton(erase);
+    lv_obj_set_width(erase, lv_pct(100));
+    lv_obj_set_height(erase, 40);
+    lv_obj_t* el = lv_label_create(erase);
+    lv_label_set_text(el, "ERASE NODE — HOLD 2 s");
+    lv_obj_set_style_text_color(el, lv_color_hex(UiTheme::kBad), 0);
+    lv_obj_center(el);
+    Ui::onHeld2s(erase, [](void*) {
+      {
+        settings.factoryReset();
+        // The control says erase, so the personal data goes with the
+        // settings: the stored conversations and the remembered peer names.
+        // The RNS identity survives — destroying the key is the design's own
+        // dedicated screen, with its own words, another day.
+        Rns::Inbox::wipe();
+        PeerNames::wipe();
+        Ui::toast("erased — restarting");
+        Bootloader::reboot(Bootloader::Source::Ui);
+      }
+    }, nullptr);
   }
 
   // Cancel and Save, side by side, the row every form ends with.
@@ -324,6 +621,14 @@ void openSettings() {
     lv_obj_add_event_cb(btn, openCategory, LV_EVENT_CLICKED, sSections[nSections]);
     nSections++;
   }
+
+  lv_obj_t* ident = lv_list_add_button(list, LV_SYMBOL_HOME, "Identity");
+  lv_obj_add_event_cb(ident, [](lv_event_t*) { Ui::openIdentity(); }, LV_EVENT_CLICKED, nullptr);
+
+  // About lives here now — the action bar's slots belong to the spec's
+  // three destinations plus the receiver.
+  lv_obj_t* about = lv_list_add_button(list, LV_SYMBOL_LIST, "About");
+  lv_obj_add_event_cb(about, [](lv_event_t*) { Ui::openAbout(); }, LV_EVENT_CLICKED, nullptr);
 
   push(lv_obj_get_parent(lv_obj_get_parent(body)));
 }

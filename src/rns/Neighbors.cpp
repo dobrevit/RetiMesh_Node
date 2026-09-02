@@ -61,6 +61,15 @@ size_t Neighbors::snapshot(Neighbor* out, size_t max) {
   return k;
 }
 
+bool Neighbors::byHash(const char* hashHex, Neighbor& out) {
+  bool found = false;
+  portENTER_CRITICAL(&_mux);
+  for (const Neighbor& n : _n)
+    if (n.used && strcmp(n.hash, hashHex) == 0) { out = n; found = true; break; }
+  portEXIT_CRITICAL(&_mux);
+  return found;
+}
+
 size_t Neighbors::count(uint32_t maxAgeMs) {
   size_t c = 0; uint32_t now = millis();
   portENTER_CRITICAL(&_mux);

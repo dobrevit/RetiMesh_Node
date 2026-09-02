@@ -118,7 +118,7 @@ struct AdminSettings {
 // every board: the node then answers only on USB or PPP where it has them,
 // and on the maintenance console everywhere (WIFI ON turns it back on).
 struct LinkSettings {
-  bool wifiEnabled = true;
+  bool wifiEnabled = WIFI_ENABLED_DEFAULT != 0;   // headless boards ship it off
   bool usbEnabled  = true;              // USB networking, where the board and build carry it
   bool pppEnabled  = false;             // PPP over the bridge UART, likewise
   // The serial port's speed while PPP is on — console and log included,
@@ -140,6 +140,10 @@ struct DisplaySettings {
   // Whether a tap wakes a blanked panel. On by the phone convention; off for
   // a pocketed device whose every accidental touch would light the glass.
   bool touchWake = true;
+  // Backlight, percent, floored at 5 by the funnel: a panel dimmed to
+  // nothing still believes it is on, and going dark is the sleep timer's
+  // job. The panel maps it through PWM.
+  uint8_t brightness = 80;
 };
 
 struct MaintenanceSettings {

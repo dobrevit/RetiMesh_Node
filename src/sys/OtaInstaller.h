@@ -59,6 +59,7 @@
 #include "FirmwareManifest.h"
 #include "OtaFloor.h"
 #include "OtaVerify.h"
+#include "OtaProgress.h"
 
 namespace Ota {
 
@@ -130,6 +131,12 @@ class Installer {
 
   Outcome install(const uint8_t* manifestBlob, size_t manifestLen, Source& source) {
     Outcome out;
+    // Ends the progress line on every one of the returns below; a no-op if
+    // begin() was never reached.
+    struct ProgressScope {
+      Outcome* o;
+      ~ProgressScope() { OtaProgress::end(o->result == Install::Ok); }
+    } progressScope{&out};
     if (!_target.haveSlot()) { out.result = Install::NoSlot; return out; }
 
     // 1. Judged before anything is written. policyFor decides who is trusted
@@ -146,6 +153,7 @@ class Installer {
     // 2. Into the slot we are not running from.
     const size_t declared = out.manifest.imageSize;
     if (!_target.begin(declared)) { out.result = Install::WriteFailed; return out; }
+    OtaProgress::begin((uint32_t)declared);
 
     uint8_t buf[CHUNK];
     size_t written = 0;
@@ -155,6 +163,7 @@ class Installer {
       if (written + got > declared) { out.result = Install::LongImage; return out; }
       if (!_target.write(buf, got)) { out.result = Install::WriteFailed; return out; }
       written += got;
+      OtaProgress::step((uint32_t)written);
     }
     out.bytesWritten = written;
     if (written != declared) { out.result = Install::ShortImage; return out; }
@@ -163,12 +172,14 @@ class Installer {
     // 3. Hashed out of flash. Hashing the bytes that arrived would prove only
     //    that the sender and the manifest agree, which is the one thing already
     //    guaranteed by the signature.
+    OtaProgress::phase("verifying");
     SHA256 sha;
     for (size_t off = 0; off < declared; ) {
       const size_t n = declared - off < CHUNK ? declared - off : CHUNK;
       if (!_target.readBack(off, buf, n)) { out.result = Install::ReadBackFailed; return out; }
       sha.update(buf, n);
       off += n;
+      OtaProgress::step((uint32_t)off);
     }
     uint8_t digest[FirmwareManifest::HASH_SIZE];
     sha.finalize(digest, sizeof(digest));

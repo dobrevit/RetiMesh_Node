@@ -63,6 +63,24 @@ lv_obj_t* newScreen(const char* title);
 // A transient result line, top centre, above everything.
 void toast(const char* text);
 
+// Set a label only when the text changed — LVGL reallocates and repaints on
+// every set — and only while the label still exists. Stated once; three
+// screens had grown three variants with three different guards.
+void setLabel(lv_obj_t* label, const char* text);
+
+// Seconds into the s/m/h wording every age on the glass uses. One unit on
+// purpose: two same-named helpers taking seconds and milliseconds were one
+// copy-paste away from ages wrong by a thousand.
+void ageTextS(uint32_t seconds, char* out, size_t n);
+
+// The two-second hold the system's irreversible actions demand — stated
+// once, because a timing tweak that reaches one red control and not the
+// other is the worst drift this firmware could grow.
+void onHeld2s(lv_obj_t* btn, void (*fire)(void*), void* userData);
+
+// A hash grouped in fours across two lines, to be verified out loud.
+void groupedHash(const char* hex, char* out, size_t n);
+
 // A textarea wired to the shared keyboard: focus summons it (numeric mode for
 // number fields), defocus dismisses it. The parent form scrolls the field
 // clear of the keys.
@@ -73,9 +91,24 @@ lv_obj_t* textarea(lv_obj_t* parent, const char* placeholder,
 
 void openHome();                         // builds and loads the root screen
 void openMessages();                     // push()es the messages screen
+void openThread(const uint8_t from[16]);  // one conversation, directly
+// The rule for naming a peer, stated once: the live announce table first,
+// the persistent name memory second, the shortened hash last.
+void peerLabelHex(const char* hashHex, char* out, size_t n);
+void peerLabel(const uint8_t hash[16], char* out, size_t n);
+void openDestinations();                 // the mesh: peers by hops and freshness
 void openSettings();                     // push()es the category list
+void openWifiJoin();                     // scan, pick, key if locked, save on success
 void openAbout();                        // a dialog: version, addresses
+void openIdentity();                     // who this node is, and its QR
 void openPowerMenu();                    // sleep / restart / power off
+void showIdle(bool on);                  // the low-draw clock the panel rests on
+bool idleShowing();
+void showIncoming(const uint8_t from[16], const char* text);  // full-screen interrupt
+void showFirmware(const char* stage, uint32_t written, uint32_t total);
+void hideFirmware();
+void openBearing(const char* peer);      // the dial, honest about what it lacks
+void openPlot();                         // rings and a crosshair, no cartography
 uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off
 void setRotation(uint8_t quarterTurns);  // the accelerometer's verdict
 #if HAS_GPS

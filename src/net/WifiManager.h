@@ -76,6 +76,27 @@ public:
   void tick();
   bool wifiEnabled() const;
 
+  // --- joining a network from the glass -----------------------------------
+  // The GUI's scanner drives these. A live join, deliberately: the AP's
+  // settings apply at a restart because the AP cannot be rebuilt under the
+  // request that changed it, but a station join applies itself — so success
+  // is proven on air first and only then written down, with no restart.
+  struct StaScanEntry {
+    char   ssid[33];
+    int8_t rssi;
+    bool   secured;
+  };
+  enum class StaJoin : uint8_t { Idle, Trying, Joined, Failed };
+  void staScanStart();                   // async; needs the STA interface, enables it
+  int  staScanCount();                   // -1 still scanning, else how many
+  bool staScanResult(int i, StaScanEntry& out);
+  void staScanDone();                    // frees the driver's result table
+  bool staJoin(const char* ssid, const char* password);  // false: unusable credentials
+  StaJoin staJoinState();                // pure one-shot verdict; tick() does the work
+  void staForget();                      // disconnect and clear the stored network
+  int  staRssi() const;                  // dBm while connected, 0 otherwise
+  void staIpText(char* out, size_t n) const;
+
 private:
   void startAccessPoint();
   void setupRoutes();
@@ -113,6 +134,13 @@ private:
   // means a filesystem written before stamping existed.
   String          _assetStamp;
   uint32_t        _staRetryAt = 0;
+  // The join in progress, if any. Volatile: the GUI polls from the display
+  // task while tick() runs on the loop task.
+  volatile bool   _joining = false;
+  volatile uint8_t _joinVerdict = 0;     // 0 none, 1 joined, 2 failed — one-shot
+  char            _joinSsid[33] = "";
+  char            _joinPass[65] = "";
+  uint32_t        _joinDeadline = 0;
 };
 
 extern WifiManager wifiManager;

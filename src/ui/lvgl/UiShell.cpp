@@ -25,6 +25,7 @@
 //  It sits on the top layer, so every screen inherits it without carrying it.
 // ============================================================================
 #include "Ui.h"
+#include "UiTheme.h"
 
 #if HAS_LVGL_UI
 
@@ -164,16 +165,15 @@ void barCreate() {
   lv_obj_remove_style_all(sBar);
   lv_obj_set_size(sBar, lv_pct(100), kBarH);   // pct, so rotation re-fits it
   lv_obj_align(sBar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(sBar, lv_color_black(), 0);
-  lv_obj_set_style_bg_opa(sBar, LV_OPA_COVER, 0);
+  UiTheme::bar(sBar);
   lv_obj_set_style_pad_hor(sBar, 6, 0);
 
   sBarName = lv_label_create(sBar);
-  lv_obj_set_style_text_color(sBarName, lv_color_white(), 0);
+  lv_obj_set_style_text_color(sBarName, lv_color_hex(UiTheme::kInkDim), 0);
   lv_obj_align(sBarName, LV_ALIGN_LEFT_MID, 0, 0);
 
   sBarIcons = lv_label_create(sBar);
-  lv_obj_set_style_text_color(sBarIcons, lv_color_white(), 0);
+  lv_obj_set_style_text_color(sBarIcons, lv_color_hex(UiTheme::kInkDim), 0);
   lv_obj_align(sBarIcons, LV_ALIGN_RIGHT_MID, 0, 0);
 
   lv_timer_create(barTick, 1000, nullptr);
@@ -182,11 +182,21 @@ void barCreate() {
 
 // --- the keyboard -----------------------------------------------------------
 
+// The active screen's form (newScreen tags it on the screen's user data):
+// padded while the keyboard is up so the last field can scroll clear of the
+// keys, and only then — the padding used to be permanent, and every screen
+// paid it whether or not a keyboard was showing.
+void formKeyboardPad(int32_t px) {
+  lv_obj_t* body = (lv_obj_t*)lv_obj_get_user_data(lv_screen_active());
+  if (body && lv_obj_is_valid(body)) lv_obj_set_style_pad_bottom(body, px, 0);
+}
+
 void kbEvent(lv_event_t* e) {
   const lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
     lv_keyboard_set_textarea(sKeyboard, nullptr);
     lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+    formKeyboardPad(0);
   }
 }
 
@@ -215,11 +225,16 @@ void taFocusEvent(lv_event_t* e) {
       const int32_t kbTop = LV_VER_RES - lv_obj_get_height(sKeyboard);
       lv_obj_set_style_max_height(box, kbTop - kBarH - 8, 0);
       lv_obj_align(box, LV_ALIGN_TOP_MID, 0, kBarH + 2);
+    } else {
+      // An ordinary screen scrolls its field clear of the keys instead of
+      // being lifted, which needs headroom below the last field.
+      formKeyboardPad(140);
     }
     lv_obj_scroll_to_view(ta, LV_ANIM_ON);
   } else if (code == LV_EVENT_DEFOCUSED) {
     lv_keyboard_set_textarea(sKeyboard, nullptr);
     lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+    formKeyboardPad(0);
   }
 }
 
@@ -239,6 +254,13 @@ bool shellInit(TftPanel& panel) {
   lv_display_set_flush_cb(disp, flushCb);
   lv_display_set_buffers(disp, sBuf1, nullptr, sizeof(sBuf1),
                          LV_DISPLAY_RENDER_MODE_PARTIAL);
+  UiTheme::init(disp);                   // before any widget exists
+  // text_font is an inherited style, and overlays live on the top layer —
+  // outside any themed screen's inheritance. Without this, their labels
+  // fall back to LV_FONT_DEFAULT, which lacks the design's delimiters: the
+  // idle clock drew its middle dots as hollow rectangles.
+  lv_obj_set_style_text_font(lv_layer_top(), &font_barlow_16, 0);
+  lv_obj_set_style_text_color(lv_layer_top(), lv_color_hex(UiTheme::kInk), 0);
 
   lv_indev_t* touch = lv_indev_create();
   lv_indev_set_type(touch, LV_INDEV_TYPE_POINTER);
@@ -247,10 +269,40 @@ bool shellInit(TftPanel& panel) {
   barCreate();
 
   sKeyboard = lv_keyboard_create(lv_layer_top());
+  lv_obj_set_style_bg_color(sKeyboard, lv_color_hex(UiTheme::kGround2), 0);
   lv_obj_set_height(sKeyboard, 132);     // four ~33 px rows: tappable, compact
   lv_keyboard_set_mode(sKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_obj_add_event_cb(sKeyboard, kbEvent, LV_EVENT_ALL, nullptr);
   lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+
+  // One real frame before setup() continues: the boot splash. The display
+  // task is not running yet, so this paints synchronously and holds the
+  // glass until openHome replaces (and deletes) it.
+  {
+    lv_obj_t* splash = lv_obj_create(nullptr);
+    UiTheme::screen(splash);
+    lv_obj_t* name = lv_label_create(splash);
+    lv_label_set_text(name, "RETIMESH");
+    lv_obj_set_style_text_font(name, &font_barlow_28, 0);
+    lv_obj_set_style_text_letter_space(name, 3, 0);
+    lv_obj_align(name, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_t* fw = lv_label_create(splash);
+    lv_label_set_text_fmt(fw, "%s · lvgl %d.%d", FW_VERSION,
+                          lv_version_major(), lv_version_minor());
+    lv_obj_set_style_text_color(fw, lv_color_hex(UiTheme::kInkDim), 0);
+    lv_obj_align(fw, LV_ALIGN_CENTER, 0, 4);
+    lv_obj_t* bd = lv_label_create(splash);
+    lv_label_set_text(bd, BOARD_NAME);
+    lv_obj_set_style_text_color(bd, lv_color_hex(UiTheme::kInkLabel), 0);
+    lv_obj_align(bd, LV_ALIGN_CENTER, 0, 26);
+    lv_obj_t* st = lv_label_create(splash);
+    lv_label_set_text_fmt(st, "LXMF · %s", settings.radio().region[0]
+                          ? settings.radio().region : "region unset");
+    lv_obj_set_style_text_color(st, lv_color_hex(UiTheme::kInkLabel), 0);
+    lv_obj_align(st, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_screen_load(splash);
+    lv_refr_now(disp);
+  }
 
   log_i("gui: LVGL %d.%d.%d shell up — status bar, %u B render buffer",
         lv_version_major(), lv_version_minor(), lv_version_patch(),
@@ -292,8 +344,51 @@ bool consumeTouch() {
 
 void swallowTouch() { sSwallow = true; }
 
+void setLabel(lv_obj_t* label, const char* text) {
+  if (!label || !lv_obj_is_valid(label)) return;
+  if (strcmp(lv_label_get_text(label), text)) lv_label_set_text(label, text);
+}
+
+void ageTextS(uint32_t s, char* out, size_t n) {
+  if (s < 60)        snprintf(out, n, "%lus", (unsigned long)s);
+  else if (s < 3600) snprintf(out, n, "%lum", (unsigned long)(s / 60));
+  else               snprintf(out, n, "%luh", (unsigned long)(s / 3600));
+}
+
+void onHeld2s(lv_obj_t* btn, void (*fire)(void*), void* userData) {
+  // LONG_PRESSED at the indev's 400 ms, then repeats every ~100 ms: sixteen
+  // repeats is the two-second bar. A resistive panel in rain produces stray
+  // taps, never a stray hold — which is why the irreversible actions live
+  // behind exactly this and nothing shorter.
+  struct Held { void (*fire)(void*); void* ud; uint8_t count; };
+  Held* h = (Held*)lv_malloc(sizeof(Held));
+  h->fire = fire; h->ud = userData; h->count = 0;
+  lv_obj_add_event_cb(btn, [](lv_event_t* e) {
+    Held* hh = (Held*)lv_event_get_user_data(e);
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) hh->count = 0;
+    else if (code == LV_EVENT_LONG_PRESSED_REPEAT && ++hh->count == 16) hh->fire(hh->ud);
+    else if (code == LV_EVENT_DELETE) lv_free(hh);
+  }, LV_EVENT_ALL, h);
+}
+
+void groupedHash(const char* hex, char* out, size_t n) {
+  size_t w = 0;
+  for (size_t i = 0; hex[i] && w < n - 3; i++) {
+    out[w++] = hex[i];
+    if ((i % 4) == 3 && hex[i + 1]) out[w++] = (i == 15) ? '\n' : ' ';
+  }
+  out[w] = 0;
+}
+
 void push(lv_obj_t* screen) {
-  if (sDepth >= sizeof(sStack) / sizeof(sStack[0])) return;
+  if (sDepth >= sizeof(sStack) / sizeof(sStack[0])) {
+    // A refusal owns the screen it refuses: silently dropping the pointer
+    // leaked a fully built tree per refused push.
+    lv_obj_delete(screen);
+    toast("too deep — go back first");
+    return;
+  }
   sStack[sDepth++] = lv_screen_active();
   lv_screen_load_anim(screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 150, 0, false);
 }
@@ -314,6 +409,7 @@ bool atRoot() { return sDepth == 0; }
 
 lv_obj_t* newScreen(const char* title) {
   lv_obj_t* scr = lv_obj_create(nullptr);
+  UiTheme::screen(scr);
   lv_obj_set_style_pad_top(scr, kBarH, 0);   // the status bar's lane
 
   lv_obj_t* col = lv_obj_create(scr);
@@ -336,7 +432,7 @@ lv_obj_t* newScreen(const char* title) {
     lv_obj_add_event_cb(backBtn, backEvent, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* tl = lv_label_create(head);
     lv_label_set_text(tl, title);
-    lv_obj_set_style_text_font(tl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(tl, &font_barlow_16, 0);
     lv_obj_align(tl, LV_ALIGN_CENTER, 0, 0);
   }
 
@@ -346,9 +442,12 @@ lv_obj_t* newScreen(const char* title) {
   lv_obj_set_flex_grow(body, 1);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(body, 4, 0);
-  // Room to scroll any field clear of the keyboard.
-  lv_obj_set_style_pad_bottom(body, 140, 0);
   lv_obj_set_scroll_dir(body, LV_DIR_VER);
+  // The keyboard's clearance is paid only while the keyboard is up (the
+  // focus handler pads this body, found again through the screen's user
+  // data). A standing reservation here cost every screen 140 px of height —
+  // a list ended mid-screen with dead glass below it.
+  lv_obj_set_user_data(scr, body);
   return body;
 }
 
