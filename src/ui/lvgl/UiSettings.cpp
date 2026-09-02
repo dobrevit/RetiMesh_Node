@@ -227,6 +227,42 @@ void saveForm(lv_event_t*) {
   if (!failed) Ui::back();               // a refusal keeps the form for fixing
 }
 
+// The radio form's consequence line: every parameter change costs range or
+// airtime, so the cost is printed under the controls and follows the staged
+// values — what the operator is about to APPLY, not what the node runs.
+lv_obj_t* sRadioFoot = nullptr;
+
+const Row* rowFor(const char* key) {
+  for (const Row& r : sRows)
+    if (r.used && strcmp(r.key, key) == 0) return &r;
+  return nullptr;
+}
+
+void radioFootTick(lv_timer_t*) {
+  if (!sRadioFoot || !lv_obj_is_valid(sRadioFoot)) return;
+  char v[24];
+  Airtime::Params p;
+  int8_t dbm = settings.radio().txDbm;
+  if (const Row* r = rowFor("radio.sf"))     { rowValue(*r, v, sizeof(v)); p.sf = (uint8_t)atoi(v); }
+  if (const Row* r = rowFor("radio.bw_khz")) { rowValue(*r, v, sizeof(v)); p.bwKhz = (float)atof(v); }
+  if (const Row* r = rowFor("radio.cr"))     { rowValue(*r, v, sizeof(v)); p.cr = (uint8_t)atoi(v); }
+  if (const Row* r = rowFor("radio.tx_dbm")) { rowValue(*r, v, sizeof(v)); dbm = (int8_t)atoi(v); }
+  if (p.sf < 5 || p.sf > 12 || p.bwKhz < 7.0f || p.cr < 5 || p.cr > 8) return;  // mid-edit
+  Airtime a;
+  a.configure(p);
+  const float ms = a.timeOnAirMs(200);
+  // A deliberately rough line-of-sight guess, and labelled as one: SF9/125
+  // as 4 km, a third more per SF step, narrower bandwidth buying a little,
+  // a dB of power a few percent. It ranks choices; it does not promise.
+  const float km = 4.0f * powf(1.35f, (float)p.sf - 9.0f) *
+                   sqrtf(125.0f / p.bwKhz) * powf(1.04f, (float)dbm - 17.0f);
+  char line[96];
+  snprintf(line, sizeof(line), "est. range ~%.1f km · %.2f s per 200 B\nduty used %.1f%% of %.1f%%",
+           (double)km, (double)(ms / 1000.0f),
+           (double)(g_stats.airtimeLong * 100.0f), (double)(g_stats.dutyLimitBp / 100.0f));
+  if (strcmp(lv_label_get_text(sRadioFoot), line)) lv_label_set_text(sRadioFoot, line);
+}
+
 // The station's line on the wifi page, kept live while the page is open.
 lv_obj_t* sStaStatus = nullptr;
 
@@ -330,6 +366,30 @@ void openCategory(lv_event_t* e) {
     lv_obj_t* lbl = lv_label_create(rowBox);
     lv_label_set_text(lbl, strchr(r.key, '.') ? strchr(r.key, '.') + 1 : r.key);
     buildControl(rowBox, r);
+  }
+
+  if (strcmp(section, "radio") == 0) {
+    lv_obj_t* card = lv_obj_create(body);
+    UiTheme::card(card);
+    lv_obj_set_width(card, lv_pct(100));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(card, 8, 0);
+    lv_obj_t* cl = lv_label_create(card);
+    lv_label_set_text(cl, "CONSEQUENCE");
+    UiTheme::labelCaps(cl);
+    sRadioFoot = lv_label_create(card);
+    lv_obj_set_width(sRadioFoot, lv_pct(100));
+    lv_label_set_long_mode(sRadioFoot, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(sRadioFoot, lv_color_hex(UiTheme::kInkDim), 0);
+    lv_label_set_text(sRadioFoot, "");
+    lv_obj_align_to(sRadioFoot, cl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 3);
+    lv_timer_t* t = lv_timer_create(radioFootTick, 500, nullptr);
+    lv_obj_add_event_cb(lv_obj_get_parent(lv_obj_get_parent(body)),
+                        [](lv_event_t* ev) {
+                          lv_timer_delete((lv_timer_t*)lv_event_get_user_data(ev));
+                          sRadioFoot = nullptr;
+                        }, LV_EVENT_DELETE, t);
+    radioFootTick(nullptr);
   }
 
   // Cancel and Save, side by side, the row every form ends with.
