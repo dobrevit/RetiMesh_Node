@@ -74,6 +74,7 @@ lv_obj_t* textarea(lv_obj_t* parent, const char* placeholder,
 void openHome();                         // builds and loads the root screen
 void openMessages();                     // push()es the messages screen
 void openSettings();                     // push()es the category list
+void openWifiJoin();                     // scan, pick, key if locked, save on success
 void openAbout();                        // a dialog: version, addresses
 void openPowerMenu();                    // sleep / restart / power off
 uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off

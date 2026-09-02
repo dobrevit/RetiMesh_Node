@@ -237,6 +237,18 @@ void openCategory(lv_event_t* e) {
   if (title[0] >= 'a' && title[0] <= 'z') title[0] -= 32;
   lv_obj_t* body = Ui::newScreen(title);
 
+  // The wifi form leads with the scanner: picking a network from the air is
+  // the way a person joins one; the sta_ssid/sta_password rows below remain
+  // the by-hand fallback (a hidden SSID, a network not up right now).
+  if (strcmp(section, "wifi") == 0) {
+    lv_obj_t* scan = lv_button_create(body);
+    lv_obj_set_width(scan, lv_pct(100));
+    lv_obj_t* sl = lv_label_create(scan);
+    lv_label_set_text(sl, LV_SYMBOL_WIFI "  Join a network...");
+    lv_obj_center(sl);
+    lv_obj_add_event_cb(scan, [](lv_event_t*) { Ui::openWifiJoin(); }, LV_EVENT_CLICKED, nullptr);
+  }
+
   memset(sRows, 0, sizeof(sRows));
   size_t used = 0;
   for (size_t i = 0; i < SettingsFields::count() && used < kMaxRows; i++) {

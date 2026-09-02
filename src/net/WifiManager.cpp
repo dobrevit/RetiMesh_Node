@@ -499,6 +499,9 @@ void WifiManager::startAccessPoint() {
 }
 
 void WifiManager::tick() {
+  // A join the glass asked for owns the station while it runs: the watchdog
+  // below would otherwise reconnect to the old network mid-attempt.
+  if (_joining) return;
   // Station watchdog: log transitions, kick a reconnect if auto-reconnect
   // gave up (e.g. the LAN was down at boot).
   if (wifiEnabled() && stationConfigured()) {
@@ -514,6 +517,77 @@ void WifiManager::tick() {
       WiFi.reconnect();
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Joining a network from the glass (WifiManager.h explains the live-first
+// order). All of it is polled from the display task; the driver does the
+// actual work on its own task either way.
+// ---------------------------------------------------------------------------
+void WifiManager::staScanStart() {
+  // Scanning wants the station interface; a node running AP-only gains it
+  // here and keeps it — the mode is where a configured station would put it.
+  if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
+  WiFi.scanNetworks(true /* async */);
+}
+
+int WifiManager::staScanCount() {
+  const int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) return -1;
+  if (n == WIFI_SCAN_FAILED)  return 0;
+  return n;
+}
+
+bool WifiManager::staScanResult(int i, StaScanEntry& out) {
+  if (i < 0 || i >= WiFi.scanComplete()) return false;
+  strlcpy(out.ssid, WiFi.SSID(i).c_str(), sizeof(out.ssid));
+  out.rssi    = (int8_t)WiFi.RSSI(i);
+  out.secured = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+  return out.ssid[0] != '\0';           // hidden networks scan as empty names
+}
+
+void WifiManager::staScanDone() { WiFi.scanDelete(); }
+
+void WifiManager::staJoin(const char* ssid, const char* password) {
+  strlcpy(_joinSsid, ssid ? ssid : "", sizeof(_joinSsid));
+  strlcpy(_joinPass, password ? password : "", sizeof(_joinPass));
+  if (!_joinSsid[0]) return;
+  _joinDeadline = millis() + 20000;      // WPA against a present AP settles well inside this
+  _joining = true;
+  WiFi.disconnect();                     // whatever the station was doing before
+  WiFi.begin(_joinSsid, _joinPass[0] ? _joinPass : nullptr);
+  log_i("station: joining \"%s\" (asked from the glass)", _joinSsid);
+}
+
+WifiManager::StaJoin WifiManager::staJoinState() {
+  if (!_joining) return StaJoin::Idle;
+  if (WiFi.status() == WL_CONNECTED) {
+    // Proven on air; only now is it written down. Straight to the store, not
+    // through commitWifi: that path asks for a restart because the AP cannot
+    // be rebuilt in place, and nothing about the AP changed here.
+    WifiSettings w = settings.wifi();
+    strlcpy(w.staSsid, _joinSsid, sizeof(w.staSsid));
+    strlcpy(w.staPassword, _joinPass, sizeof(w.staPassword));
+    settings.saveWifi(w);
+    _joining = false;
+    _staRetryAt = millis() + 30000;      // the watchdog takes over from here
+    log_i("station: joined \"%s\", IP %s — saved", w.staSsid, WiFi.localIP().toString().c_str());
+    return StaJoin::Joined;
+  }
+  if ((int32_t)(millis() - _joinDeadline) >= 0) {
+    _joining = false;
+    log_w("station: could not join \"%s\"", _joinSsid);
+    // Back to the network the settings name, if there is one; the watchdog
+    // owns the retries from here.
+    const WifiSettings& w = settings.wifi();
+    WiFi.disconnect();
+    if (w.staSsid[0]) {
+      WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
+      _staRetryAt = millis() + 30000;
+    }
+    return StaJoin::Failed;
+  }
+  return StaJoin::Trying;
 }
 
 // ---------------------------------------------------------------------------
