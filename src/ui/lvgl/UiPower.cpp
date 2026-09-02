@@ -21,7 +21,7 @@ lv_obj_t* sMenu = nullptr;
 
 void act(lv_event_t* e) {
   sAction = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
-  if (sMenu) { lv_msgbox_close(sMenu); sMenu = nullptr; }
+  if (sMenu) lv_msgbox_close(sMenu);     // the DELETE hook below forgets it
 }
 } // namespace
 
@@ -32,10 +32,14 @@ void openPowerMenu() {
   sMenu = lv_msgbox_create(nullptr);
   lv_msgbox_add_title(sMenu, "Power");
   lv_msgbox_add_close_button(sMenu);
+  // Forgotten when it dies, not when a button says so: the close button the
+  // line above added deletes the box without asking act(), and a pointer
+  // that outlived its box kept this menu from ever opening again.
+  lv_obj_add_event_cb(sMenu, [](lv_event_t*) { sMenu = nullptr; }, LV_EVENT_DELETE, nullptr);
   struct { const char* label; uint8_t action; } rows[] = {
     { LV_SYMBOL_EYE_CLOSE "  Sleep",   1 },
     { LV_SYMBOL_REFRESH   "  Restart", 2 },
-    { LV_SYMBOL_POWER     "  Power off", 3 },
+    { LV_SYMBOL_POWER     "  Power off (hold)", 3 },
   };
   lv_obj_t* body = lv_msgbox_get_content(sMenu);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
@@ -45,7 +49,12 @@ void openPowerMenu() {
     lv_obj_t* l = lv_label_create(btn);
     lv_label_set_text(l, r.label);
     lv_obj_center(l);
-    lv_obj_add_event_cb(btn, act, LV_EVENT_CLICKED, (void*)(uintptr_t)r.action);
+    // The one that cannot be taken back is not given to a tap: a pocketed
+    // case can squeeze its way to this menu, and a stray contact must not be
+    // able to end the node. Holding the row is deliberate in a way a touch
+    // is not.
+    lv_obj_add_event_cb(btn, act, r.action == 3 ? LV_EVENT_LONG_PRESSED : LV_EVENT_CLICKED,
+                        (void*)(uintptr_t)r.action);
   }
 }
 

@@ -63,11 +63,13 @@ TftPanel* sPanel = nullptr;
 
 constexpr int32_t kBarH = 22;
 
-// Two partial render buffers, ~1/10 of the panel each, in internal DRAM:
-// DMA-friendly, and the PSRAM-over-SPI chunking trap never applies.
+// One partial render buffer, ~1/10 of the panel, in internal DRAM:
+// DMA-friendly, and the PSRAM-over-SPI chunking trap never applies. One,
+// deliberately: the flush below blits synchronously and reports ready before
+// returning, so a second buffer never overlapped anything — it only held
+// 15 KiB of the internal RAM this file's own allocator notes call scarce.
 constexpr size_t kBufPx = DISPLAY_WIDTH * 32;
 static uint8_t sBuf1[kBufPx * 2];
-static uint8_t sBuf2[kBufPx * 2];
 
 lv_obj_t* sKeyboard = nullptr;
 lv_obj_t* sBar = nullptr;
@@ -128,7 +130,10 @@ const char* batterySymbol(const Power::Battery& b) {
 void barTick(lv_timer_t*) {
   char text[96];
   size_t n = 0;
-  auto add = [&](const char* s) { n += snprintf(text + n, sizeof(text) - n, "%s", s); };
+  auto add = [&](const char* s) {
+    n += snprintf(text + n, sizeof(text) - n, "%s", s);
+    if (n >= sizeof(text)) n = sizeof(text) - 1;   // snprintf reports, not writes
+  };
 
   // The clock, once the receiver has set it: hours and minutes are the part a
   // person wants; the date belongs to the About dialog.
@@ -147,8 +152,11 @@ void barTick(lv_timer_t*) {
   add(batterySymbol(b));
   if (b.present) { char p[8]; snprintf(p, sizeof(p), " %u%%", b.percent); add(p); }
 
-  lv_label_set_text(sBarIcons, text);
-  lv_label_set_text(sBarName, wifiManager.ssid());
+  // Unchanged text is not re-set: LVGL reallocates and repaints on every
+  // set, and this bar changes at most once a minute.
+  if (strcmp(lv_label_get_text(sBarIcons), text)) lv_label_set_text(sBarIcons, text);
+  if (strcmp(lv_label_get_text(sBarName), wifiManager.ssid()))
+    lv_label_set_text(sBarName, wifiManager.ssid());
 }
 
 void barCreate() {
@@ -229,7 +237,7 @@ bool shellInit(TftPanel& panel) {
   lv_display_t* disp = lv_display_create(DISPLAY_WIDTH, DISPLAY_HEIGHT);
   if (!disp) return false;
   lv_display_set_flush_cb(disp, flushCb);
-  lv_display_set_buffers(disp, sBuf1, sBuf2, sizeof(sBuf1),
+  lv_display_set_buffers(disp, sBuf1, nullptr, sizeof(sBuf1),
                          LV_DISPLAY_RENDER_MODE_PARTIAL);
 
   lv_indev_t* touch = lv_indev_create();
@@ -244,7 +252,7 @@ bool shellInit(TftPanel& panel) {
   lv_obj_add_event_cb(sKeyboard, kbEvent, LV_EVENT_ALL, nullptr);
   lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
 
-  log_i("gui: LVGL %d.%d.%d shell up — status bar, %u B x2 render buffers",
+  log_i("gui: LVGL %d.%d.%d shell up — status bar, %u B render buffer",
         lv_version_major(), lv_version_minor(), lv_version_patch(),
         (unsigned)sizeof(sBuf1));
   return true;
@@ -292,6 +300,12 @@ void push(lv_obj_t* screen) {
 
 void back() {
   if (!sDepth) return;
+  // The keyboard outlives every screen, so it must not keep pointing into
+  // one about to be freed: a hardware back while a field was focused left it
+  // bound to a deleted textarea, and the next key wrote into freed memory.
+  // Deleting an object sends no DEFOCUSED, so the unbinding happens here.
+  lv_keyboard_set_textarea(sKeyboard, nullptr);
+  lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
   // auto_del deletes the screen being left once the slide is over.
   lv_screen_load_anim(sStack[--sDepth], LV_SCR_LOAD_ANIM_MOVE_RIGHT, 150, 0, true);
 }

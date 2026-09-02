@@ -34,7 +34,7 @@
 /* The default theme sized for a 240x320 at this dot pitch. */
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 1
-#define LV_FONT_MONTSERRAT_20 1
+#define LV_FONT_MONTSERRAT_20 0  // nothing sets it; flash is metered here
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
 /* Diagnostics off in release builds; the node's own logging carries what

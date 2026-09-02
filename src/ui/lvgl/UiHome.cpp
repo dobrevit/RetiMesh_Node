@@ -29,6 +29,7 @@
 #if HAS_LVGL_UI
 
 #include <Arduino.h>
+#include <esp_timer.h>
 #include "Settings.h"
 #include "Power.h"
 #include "Gps.h"
@@ -71,26 +72,31 @@ void refreshHome(lv_timer_t*) {
              (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
   else
     snprintf(v, sizeof(v), "offline");
-  lv_label_set_text(sRadioVal, v);
+  // Unchanged text is not re-set: LVGL reallocates and repaints on every
+  // set, and these cards are mostly static between ticks.
+  if (strcmp(lv_label_get_text(sRadioVal), v)) lv_label_set_text(sRadioVal, v);
 
   const RnsTransport::LxmfState lx = RnsTransport::lxmf();
   snprintf(v, sizeof(v), "LXMF  %s\n%lu message%s stored",
            lx.address[0] ? lx.address : "—",
            (unsigned long)Rns::Inbox::stored(),
            Rns::Inbox::stored() == 1 ? "" : "s");
-  lv_label_set_text(sNetVal, v);
+  if (strcmp(lv_label_get_text(sNetVal), v)) lv_label_set_text(sNetVal, v);
 
-  const uint32_t up = millis() / 1000;
-  size_t n = snprintf(v, sizeof(v), "%s\nup %lud %luh %lum",
-                      FW_VERSION, (unsigned long)(up / 86400),
-                      (unsigned long)(up % 86400 / 3600), (unsigned long)(up % 3600 / 60));
+  // 64-bit on purpose: millis() wraps at 49.7 days, and "up 1m" on a node
+  // that has run two months is exactly the wrong signal on this card.
+  const uint64_t up = (uint64_t)(esp_timer_get_time() / 1000000LL);
+  size_t n = snprintf(v, sizeof(v), "%s\nup %llud %lluh %llum",
+                      FW_VERSION, (unsigned long long)(up / 86400),
+                      (unsigned long long)(up % 86400 / 3600), (unsigned long long)(up % 3600 / 60));
+  if (n >= sizeof(v)) n = sizeof(v) - 1;   // snprintf reports, not writes
 #if HAS_GPS
   const Gps::Fix f = Gps::fix();
   if (f.valid)
     snprintf(v + n, sizeof(v) - n, "\n%.5f, %.5f (%u sats)",
              f.latitude, f.longitude, f.satellites);
 #endif
-  lv_label_set_text(sNodeVal, v);
+  if (strcmp(lv_label_get_text(sNodeVal), v)) lv_label_set_text(sNodeVal, v);
 }
 
 void shortcut(lv_obj_t* bar, const char* symbol, const char* name,

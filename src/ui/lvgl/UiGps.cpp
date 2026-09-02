@@ -41,9 +41,15 @@ void refresh(lv_timer_t*) {
   const Gps::Fix f = Gps::fix();
   char v[48];
   size_t row = 0;
+  // Only what changed is rewritten — a set always reallocates the cell and
+  // repaints, and most of these rows never change while the screen is open.
+  auto set = [&](uint32_t col, const char* txt) {
+    const char* cur = lv_table_get_cell_value(sTable, row, col);
+    if (!cur || strcmp(cur, txt)) lv_table_set_cell_value(sTable, row, col, txt);
+  };
   auto put = [&](const char* k, const char* val) {
-    lv_table_set_cell_value(sTable, row, 0, k);
-    lv_table_set_cell_value(sTable, row, 1, val);
+    set(0, k);
+    set(1, val);
     row++;
   };
   put("Receiver", f.enabled ? "on" : "off (settings: radio)");
@@ -60,6 +66,9 @@ void refresh(lv_timer_t*) {
   put("Node clock", f.clockSet ? "set from GNSS" : "not set");
   snprintf(v, sizeof(v), "%lu", (unsigned long)f.sentences); put("Sentences", v);
   put("Shares position", settings.radio().gpsSharePosition ? "yes" : "no");
+  // A lost fix writes fewer rows than a valid one: without the trim the tail
+  // kept the old readings under duplicated labels, frozen but looking live.
+  lv_table_set_row_count(sTable, row);
 }
 
 } // namespace
