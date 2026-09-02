@@ -87,9 +87,18 @@ void flushCb(lv_display_t* disp, const lv_area_t* area, uint8_t* px) {
 }
 
 volatile bool sTouchSeen = false;
+volatile bool sSwallow = false;          // the wake tap must not press anything
 
 void touchCb(lv_indev_t*, lv_indev_data_t* data) {
   const TouchInput::Point p = TouchInput::poll();
+  if (sSwallow) {
+    // The contact that woke the panel is still on the glass: report it as
+    // released until it truly lifts, so waking cannot also press whatever
+    // happened to be under the finger.
+    if (!p.down) sSwallow = false;
+    data->state = LV_INDEV_STATE_RELEASED;
+    return;
+  }
   data->state = p.down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
   if (p.down) { data->point.x = p.x; data->point.y = p.y; sTouchSeen = true; }
 }
@@ -242,6 +251,8 @@ bool consumeTouch() {
   sTouchSeen = false;
   return t;
 }
+
+void swallowTouch() { sSwallow = true; }
 
 void push(lv_obj_t* screen) {
   if (sDepth >= sizeof(sStack) / sizeof(sStack[0])) return;

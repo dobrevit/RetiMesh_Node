@@ -134,9 +134,18 @@ void Display::displayTask(void* self) {
         now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
     if (d->_blank) {
       static uint32_t lastWakePoll = 0;
-      if (now - lastWakePoll >= 100) {
+      if (settings.display().touchWake && now - lastWakePoll >= 100) {
         lastWakePoll = now;
-        if (TouchInput::poll().down) d->setBlank(false);
+        if (TouchInput::poll().down) {
+          // Activity first — the bench found the wake flickering and dying:
+          // without this the timer was still expired on the very next pass
+          // and re-blanked the panel under the waking finger. And the tap
+          // that wakes must only wake: the shell ignores this contact until
+          // it lifts.
+          d->_lastActivityMs = now;
+          LvglUi::swallowTouch();
+          d->setBlank(false);
+        }
       }
     } else {
       LvglUi::loop();
@@ -271,13 +280,18 @@ void Display::setBlank(bool blank) {
     _panel->blank(true);                 // panel + charge pump off
   } else {
     _panel->blank(false);
+#if !HAS_LVGL_UI
     // Nothing is known about the glass after it has been off, so the next
-    // frame goes out whether or not it matches the last one drawn.
+    // frame goes out whether or not it matches the last one drawn. Mono
+    // boards only: on the shell this painter would smear a half-res page
+    // over the LVGL frame — the bench saw it as a flicker at wake — and
+    // onBlank() already invalidates the screen for a full repaint.
     _refresh.forget();
     _pageChangedMs = millis();
     _lastPaintMs = _pageChangedMs;
     _paintDue = false;
     paint();
+#endif
   }
 }
 

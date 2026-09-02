@@ -74,6 +74,10 @@ void onBlank(bool on);
 // activity timer eats this, since the shell owns the touch layer.
 bool touchActive();
 
+// Ignore the contact currently on the glass until it lifts — called when a
+// tap wakes the panel, so waking is all that tap does.
+void swallowTouch();
+
 } // namespace LvglUi
 
 #else
@@ -85,6 +89,7 @@ inline uint32_t loop() { return 1000; }
 inline void stepTab(int8_t) {}
 inline void onBlank(bool) {}
 inline bool touchActive() { return false; }
+inline void swallowTouch() {}
 } // namespace LvglUi
 
 #endif // HAS_LVGL_UI

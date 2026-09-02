@@ -131,6 +131,12 @@ Result commitWifi(WifiSettings& w, char* err, size_t n) {
 
 // The interface modes are registered with Transport at boot, so they need a
 // restart too; the power profile and the store's home are read at boot as well.
+Result commitDisplay(DisplaySettings& d, char* err, size_t n) {
+  if (restartPending(err, n)) return Result::Busy;
+  if (!settings.saveDisplay(d)) return Result::NvsFailed;
+  return Result::Ok;                     // read live at the next wake poll
+}
+
 Result commitTransport(TransportSettings& t, char* err, size_t n) {
   if (restartPending(err, n)) return Result::Busy;
   if (!SettingsRules::validateTransport(t, err, n)) return Result::BadValue;
@@ -323,6 +329,12 @@ const Entry kFields[] = {
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.radio().gpsSharePosition ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       RadioSettings r = settings.radio(); r.gpsSharePosition = b; return commitRadio(r, e, n); } },
+
+  // --- display -----------------------------------------------------------
+  { "display.touch_wake",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.display().touchWake ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
+      DisplaySettings d = settings.display(); d.touchWake = b; return commitDisplay(d, e, n); } },
 
   // --- wifi --------------------------------------------------------------
   { "wifi.ssid",

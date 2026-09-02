@@ -58,6 +58,8 @@ void onBlank(bool on) {
 
 bool touchActive() { return Ui::consumeTouch(); }
 
+void swallowTouch() { Ui::swallowTouch(); }
+
 } // namespace LvglUi
 
 #endif // HAS_LVGL_UI

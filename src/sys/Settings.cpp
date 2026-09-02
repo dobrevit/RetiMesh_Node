@@ -93,6 +93,7 @@ void Settings::load() {
   if (_prefs.isKey("w_stap")) _prefs.getString("w_stap", _wifi.staPassword, sizeof(_wifi.staPassword));
 
   if (_prefs.isKey("a_pass")) _prefs.getString("a_pass", _admin.password, sizeof(_admin.password));
+  LOAD(_display.touchWake,  "d_twake", getBool ("d_twake"));
   LOAD(_transport.enabled,  "t_en",    getBool ("t_en"));
   LOAD(_transport.loraMode, "t_lmode", getUChar("t_lmode"));
   LOAD(_transport.wifiMode, "t_wmode", getUChar("t_wmode"));
@@ -174,6 +175,11 @@ bool Settings::saveAdminPassword(const char* password) {
   bool ok = _prefs.putString("a_pass", _admin.password) > 0;
   if (!ok) log_e("NVS write failed (admin)");
   return ok;
+}
+
+bool Settings::saveDisplay(const DisplaySettings& d) {
+  _display = d;
+  return _prefs.putBool("d_twake", d.touchWake) > 0;
 }
 
 bool Settings::saveTransport(const TransportSettings& t) {
