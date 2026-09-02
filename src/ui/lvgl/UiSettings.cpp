@@ -141,6 +141,17 @@ bool rowChanged(const Row& r) {
   return strcmp(now, r.initial) != 0;
 }
 
+// A slider's value into the funnel, and the row's baseline moved with it so
+// Save has nothing left to do.
+void applySliderRow(Row* row) {
+  char v[8], err[96] = "";
+  snprintf(v, sizeof(v), "%d", (int)lv_slider_get_value(row->control));
+  const SettingsFields::Result res = SettingsFields::set(row->key, v, err, sizeof(err));
+  if (res == SettingsFields::Result::Ok)
+    strlcpy(row->initial, v, sizeof(row->initial));
+  else Ui::toast(err[0] ? err : SettingsFields::resultText(res));
+}
+
 void buildControl(lv_obj_t* parent, Row& r) {
   switch (r.kind) {
     case Kind::Switch: {
@@ -203,21 +214,21 @@ void buildControl(lv_obj_t* parent, Row& r) {
       };
       lv_obj_t* minus = stepBtn(LV_SYMBOL_MINUS);
       lv_obj_t* slider = lv_slider_create(rowH);
-      lv_slider_set_range(slider, 0, 100);
-      lv_slider_set_value(slider, atoi(r.initial), LV_ANIM_OFF);
+      // Floored at 5 on the glass: the funnel accepts 0, but a tap sequence
+      // that can black the panel you are holding is a trap, not a setting.
+      lv_slider_set_range(slider, 5, 100);
+      const int init = atoi(r.initial);
+      lv_slider_set_value(slider, init < 5 ? 5 : init, LV_ANIM_OFF);
       lv_obj_set_flex_grow(slider, 1);
       lv_obj_t* plus = stepBtn(LV_SYMBOL_PLUS);
       r.control = slider;
-      auto apply = [](lv_event_t* e) {
-        Row* row = (Row*)lv_event_get_user_data(e);
-        char v[8], err[96] = "";
-        snprintf(v, sizeof(v), "%d", (int)lv_slider_get_value(row->control));
-        const SettingsFields::Result res = SettingsFields::set(row->key, v, err, sizeof(err));
-        if (res == SettingsFields::Result::Ok)
-          strlcpy(row->initial, v, sizeof(row->initial));   // Save has nothing left to do
-        else Ui::toast(err[0] ? err : SettingsFields::resultText(res));
-      };
-      lv_obj_add_event_cb(slider, apply, LV_EVENT_RELEASED, &r);
+      // Applied by direct call, never by a synthetic event: sending the
+      // slider a fake RELEASED made its class handler re-derive the value
+      // from the touch point's last position — the step key itself, at the
+      // screen's edge — and one tap on minus blacked the glass.
+      lv_obj_add_event_cb(slider, [](lv_event_t* e) {
+        applySliderRow((Row*)lv_event_get_user_data(e));
+      }, LV_EVENT_RELEASED, &r);
       struct Step { Row* row; int delta; };
       static Step steps[kMaxRows * 2];
       static size_t stepN = 0;
@@ -227,9 +238,9 @@ void buildControl(lv_obj_t* parent, Row& r) {
       auto stepCb = [](lv_event_t* e) {
         Step* st = (Step*)lv_event_get_user_data(e);
         int v = (int)lv_slider_get_value(st->row->control) + st->delta;
-        v = v < 0 ? 0 : (v > 100 ? 100 : v);
+        v = v < 5 ? 5 : (v > 100 ? 100 : v);
         lv_slider_set_value(st->row->control, v, LV_ANIM_OFF);
-        lv_obj_send_event(st->row->control, LV_EVENT_RELEASED, nullptr);
+        applySliderRow(st->row);
       };
       lv_obj_add_event_cb(minus, stepCb, LV_EVENT_CLICKED, &steps[stepN]);
       lv_obj_add_event_cb(plus, stepCb, LV_EVENT_CLICKED, &steps[stepN + 1]);
