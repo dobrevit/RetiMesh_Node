@@ -210,6 +210,10 @@ void saveForm(lv_event_t*) {
 
 void openCategory(lv_event_t* e) {
   const char* section = (const char*)lv_event_get_user_data(e);
+  // A breadcrumb before the heavy build: if this screen ever takes the node
+  // down again, the log names the section instead of leaving a silent panic
+  // on a UART nobody wired.
+  log_i("gui: opening settings/%s", section);
   char title[24];
   snprintf(title, sizeof(title), "%s", section);
   if (title[0] >= 'a' && title[0] <= 'z') title[0] -= 32;

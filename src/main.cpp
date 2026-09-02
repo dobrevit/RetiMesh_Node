@@ -321,7 +321,10 @@ void setup() {
   #if HAS_DISPLAY
     // The LVGL shell renders whole widget trees on this stack; the page
     // stack's 6 KB starved it in the first bench build.
-    Diag::startTask(Display::displayTask, "display", HAS_LVGL_UI ? 12288 : 6144, &display, 1, 0);
+    // 16 KB with the GUI: a settings form builds forty widgets inside one
+    // click callback inside lv_timer_handler, and 12 KB was the first
+    // suspect when that tap took the node down.
+    Diag::startTask(Display::displayTask, "display", HAS_LVGL_UI ? 16384 : 6144, &display, 1, 0);
   #endif
 
   // The RNS task owns every call into microReticulum (Transport is

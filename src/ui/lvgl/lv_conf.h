@@ -13,11 +13,17 @@
  * callback (lv_draw_sw_rgb565_swap) because the ST7789 wants big-endian. */
 #define LV_COLOR_DEPTH 16
 
-/* The C library's malloc, deliberately: this firmware routes allocations
- * above a small threshold to PSRAM (PSRAM_MALLOC_THRESHOLD in Config.h), so
- * LVGL's widgets land in the 2 MB that would otherwise sit idle, and the
- * library's own pool allocator would only hide that from the heap report. */
-#define LV_USE_STDLIB_MALLOC   LV_STDLIB_CLIB
+/* A custom allocator (UiShell.cpp), PSRAM-first at every size. The C
+ * library's malloc only prefers PSRAM above the firmware's 128-byte
+ * threshold, and LVGL allocates mostly *below* it — styles, event nodes,
+ * small structs — so a form build filled internal DRAM and starved the
+ * allocations that may only live there: the flash driver's bounce buffer
+ * and newlib's lazily-created locks. That combination took the node down
+ * from the RNS task while the GUI was merely opening a settings form
+ * (coredump, 2026-09-02). The GUI now takes its memory from the 2 MB that
+ * sit idle, at every size, and touches internal RAM only when PSRAM is
+ * genuinely full. */
+#define LV_USE_STDLIB_MALLOC   LV_STDLIB_CUSTOM
 #define LV_USE_STDLIB_STRING   LV_STDLIB_CLIB
 #define LV_USE_STDLIB_SPRINTF  LV_STDLIB_CLIB
 

@@ -29,12 +29,33 @@
 #if HAS_LVGL_UI
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include "TftPanel.h"
 #include "TouchInput.h"
 #include "Settings.h"
 #include "Power.h"
 #include "Gps.h"
 #include "WifiManager.h"
+
+// ---------------------------------------------------------------------------
+// LVGL's allocator: PSRAM first at every size, internal RAM only as the
+// fallback. lv_conf.h says why this exists; these are the five functions the
+// LV_STDLIB_CUSTOM contract asks for. Widget memory has no DMA or ISR needs,
+// so external RAM is simply correct for all of it.
+// ---------------------------------------------------------------------------
+extern "C" {
+void lv_mem_init(void) {}
+void lv_mem_deinit(void) {}
+void* lv_malloc_core(size_t size) {
+  void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return p ? p : heap_caps_malloc(size, MALLOC_CAP_8BIT);
+}
+void lv_free_core(void* p) { heap_caps_free(p); }
+void* lv_realloc_core(void* p, size_t new_size) {
+  void* q = heap_caps_realloc(p, new_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return q ? q : heap_caps_realloc(p, new_size, MALLOC_CAP_8BIT);
+}
+}
 
 namespace {
 
@@ -65,10 +86,12 @@ void flushCb(lv_display_t* disp, const lv_area_t* area, uint8_t* px) {
   lv_display_flush_ready(disp);
 }
 
+volatile bool sTouchSeen = false;
+
 void touchCb(lv_indev_t*, lv_indev_data_t* data) {
   const TouchInput::Point p = TouchInput::poll();
   data->state = p.down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-  if (p.down) { data->point.x = p.x; data->point.y = p.y; }
+  if (p.down) { data->point.x = p.x; data->point.y = p.y; sTouchSeen = true; }
 }
 
 // --- the status bar ---------------------------------------------------------
@@ -208,6 +231,17 @@ bool shellInit(TftPanel& panel) {
 }
 
 uint32_t shellLoop() { return lv_timer_handler(); }
+
+// Whether a finger has touched the glass since this was last asked. The
+// display's blanking timer consumes it: the shell reads the touch layer, so
+// without this the timer only ever heard the physical buttons and blanked
+// the panel under an operator mid-navigation — the bench found it inside a
+// minute.
+bool consumeTouch() {
+  const bool t = sTouchSeen;
+  sTouchSeen = false;
+  return t;
+}
 
 void push(lv_obj_t* screen) {
   if (sDepth >= sizeof(sStack) / sizeof(sStack[0])) return;
