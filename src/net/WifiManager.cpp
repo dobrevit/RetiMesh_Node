@@ -32,6 +32,7 @@
 #include <esp_heap_caps.h>
 #include <ESPmDNS.h>
 #include "LoRaRadio.h"
+#include "LoRaFem.h"
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
@@ -1453,6 +1454,13 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
     // An amplifier does not change what the chip may be driven at, but it does
     // change what leaves the antenna, and the operator has to account for it.
     cp["pa_fitted"]    = LoRaRadio::hasPa();
+#if HAS_LORA_FEM
+    // Which front end the boot detection found, and roughly what it adds at
+    // the configured drive — the two numbers an operator needs to work out
+    // what is actually leaving the antenna.
+    cp["fem"]          = LoRaFem::partName();
+    cp["fem_gain_db"]  = LoRaFem::gainDb(settings.radio().txDbm);
+#endif
     JsonArray bws = cp["bandwidths_khz"].to<JsonArray>();
     for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++) bws.add(*b);
     // Which rulebook the configured channel falls under, and what it caps
