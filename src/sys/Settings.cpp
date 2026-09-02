@@ -253,5 +253,6 @@ void Settings::factoryReset() {
   _transport = TransportSettings();
   _links = LinkSettings();
   _maintenance = MaintenanceSettings();
+  _display = DisplaySettings();
   log_w("settings: factory reset");
 }

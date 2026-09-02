@@ -46,16 +46,14 @@ namespace {
 
 enum class Kind : uint8_t { Text, Secret, Number, Switch, Region, Words };
 
-struct WordList { const char* options; };  // '\n'-separated, LVGL dropdown form
-
-// The canonical word sets, from the same helpers the funnel validates with.
-constexpr const char* kSecurityWords = "open\nwpa2\nwpa2wpa3\nwpa3";
-constexpr const char* kProfileWords  = "performance\nbalanced\nbattery";
-
-Kind kindFor(const char* key, const char* value) {
+Kind kindFor(const char* key, const char* value, bool quoted) {
   if (strcmp(key, "radio.region") == 0)             return Kind::Region;
   if (strcmp(key, "wifi.security") == 0)            return Kind::Words;
   if (strcmp(key, "transport.power_profile") == 0)  return Kind::Words;
+  // Quoted is the funnel's own convention for free text (renderStr quotes,
+  // bools and numbers render bare) — so an SSID that happens to read "off"
+  // or "12345678" is text, and the sniffing below never sees it.
+  if (quoted) return Kind::Text;
   if (strcmp(value, "on") == 0 || strcmp(value, "off") == 0) return Kind::Switch;
   if (strcmp(value, "(set)") == 0 || strcmp(value, "(unset)") == 0) return Kind::Secret;
   // A number, possibly signed, possibly with a decimal point.
@@ -71,8 +69,19 @@ Kind kindFor(const char* key, const char* value) {
   return Kind::Text;
 }
 
-const char* wordsFor(const char* key) {
-  return strcmp(key, "wifi.security") == 0 ? kSecurityWords : kProfileWords;
+// The dropdown's words, from the enums' own name helpers — retyped lists
+// went silently stale the day the enum grew.
+void wordsFor(const char* key, char* out, size_t len) {
+  size_t n = 0;
+  if (strcmp(key, "wifi.security") == 0) {
+    for (uint8_t i = 0; i <= (uint8_t)ApSecurity::WPA3; i++)
+      n += snprintf(out + n, len - n, "%s%s", i ? "\n" : "",
+                    Settings::securityName((ApSecurity)i));
+  } else {
+    for (uint8_t i = 0; i <= (uint8_t)Power::Profile::Battery; i++)
+      n += snprintf(out + n, len - n, "%s%s", i ? "\n" : "",
+                    Power::profileName((Power::Profile)i));
+  }
 }
 
 // --- one form row ------------------------------------------------------------
@@ -81,7 +90,10 @@ const char* wordsFor(const char* key) {
 // and Cancel can simply leave.
 struct Row {
   char      key[40];
-  char      initial[96];
+  // Sized for the longest rendered value — the admins list runs to 139
+  // characters, and a 96-byte draft showed it cut mid-hash and saved the
+  // fragment back.
+  char      initial[160];
   Kind      kind;
   lv_obj_t* control;
   bool      used;
@@ -116,7 +128,7 @@ void rowValue(const Row& r, char* out, size_t len) {
 }
 
 bool rowChanged(const Row& r) {
-  char now[96];
+  char now[160];
   rowValue(r, now, sizeof(now));
   if (r.kind == Kind::Secret) return now[0] != 0;      // typed at all = change
   return strcmp(now, r.initial) != 0;
@@ -147,7 +159,8 @@ void buildControl(lv_obj_t* parent, Row& r) {
     }
     case Kind::Words: {
       r.control = lv_dropdown_create(parent);
-      const char* words = wordsFor(r.key);
+      char words[64];
+      wordsFor(r.key, words, sizeof(words));
       lv_dropdown_set_options(r.control, words);
       // Select the current value by walking the option lines.
       uint32_t idx = 0, sel = 0;
@@ -182,9 +195,13 @@ void buildControl(lv_obj_t* parent, Row& r) {
 void saveForm(lv_event_t*) {
   size_t changed = 0, failed = 0;
   char firstErr[128] = "";
+  // One gesture, one restart: without the batch the first changed Wi-Fi key
+  // armed it and every later key was refused Busy — half a form applied,
+  // then a reboot with the rest unsaved.
+  SettingsFields::beginBatch();
   for (Row& r : sRows) {
     if (!r.used || !rowChanged(r)) continue;
-    char value[96], err[128] = "";
+    char value[160], err[128] = "";
     rowValue(r, value, sizeof(value));
     const SettingsFields::Result res = SettingsFields::set(r.key, value, err, sizeof(err));
     const bool ok = res == SettingsFields::Result::Ok ||
@@ -198,6 +215,7 @@ void saveForm(lv_event_t*) {
                  err[0] ? err : SettingsFields::resultText(res));
     }
   }
+  SettingsFields::endBatch();          // arms the one restart, if any key asked
   char line[160];
   if (failed) snprintf(line, sizeof(line), "%u saved, %u refused — %s",
                        (unsigned)changed, (unsigned)failed, firstErr);
@@ -231,13 +249,14 @@ void openCategory(lv_event_t* e) {
     char* value = eq + 1;
     // Strings render quoted; the editor wants the bare value.
     size_t vn = strlen(value);
-    if (vn >= 2 && value[0] == '"' && value[vn - 1] == '"') { value[vn - 1] = 0; value++; }
+    const bool quoted = vn >= 2 && value[0] == '"' && value[vn - 1] == '"';
+    if (quoted) { value[vn - 1] = 0; value++; }
 
     Row& r = sRows[used++];
     r.used = true;
     strlcpy(r.key, line, sizeof(r.key));
     strlcpy(r.initial, value, sizeof(r.initial));
-    r.kind = kindFor(r.key, value);
+    r.kind = kindFor(r.key, value, quoted);
 
     lv_obj_t* rowBox = lv_obj_create(body);
     lv_obj_remove_style_all(rowBox);

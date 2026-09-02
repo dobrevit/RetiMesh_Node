@@ -107,6 +107,16 @@ bool restartPending(char* err, size_t n) {
   return true;
 }
 
+// Inside a batch the restart is a wish, recorded here and armed once at
+// endBatch — arming per key made key N+1 Busy on key N's restart.
+bool sBatch = false;
+bool sWantRestart = false;
+
+Result askRestart() {
+  if (sBatch) { sWantRestart = true; return Result::OkRestart; }
+  return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
+}
+
 Result commitRadio(RadioSettings& r, char* err, size_t n) {
   if (restartPending(err, n)) return Result::Busy;
   const int8_t maxDbm = loraRadio.online() ? loraRadio.maxTxDbm() : 22;
@@ -126,7 +136,7 @@ Result commitWifi(WifiSettings& w, char* err, size_t n) {
   if (restartPending(err, n)) return Result::Busy;
   if (!SettingsRules::validateWifi(w, err, n)) return Result::BadValue;
   if (!settings.saveWifi(w)) return Result::NvsFailed;
-  return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
+  return askRestart();
 }
 
 // The interface modes are registered with Transport at boot, so they need a
@@ -153,10 +163,19 @@ Result commitTransport(TransportSettings& t, char* err, size_t n) {
                            strcmp(before.autoGroupId, t.autoGroupId) != 0 ||
                            before.announceCap != t.announceCap;
   if (!needRestart) return Result::Ok;
-  return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
+  return askRestart();
 }
 
 }  // namespace — commitMaintenance is the web API's too (SettingsFields.h)
+
+void beginBatch() { sBatch = true; sWantRestart = false; }
+
+Result endBatch() {
+  sBatch = false;
+  if (!sWantRestart) return Result::Ok;
+  sWantRestart = false;
+  return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
+}
 
 // Refused here rather than at the moment a command arrives: a list that does
 // not parse is a list that lets nobody in, and finding that out when you need
@@ -197,7 +216,7 @@ Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n) {
   // it cannot be raised without the routes it was never given: either way the
   // change lands at the next boot, as Wi-Fi's does.
   if (!needRestart) return Result::Ok;
-  return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
+  return askRestart();
 }
 
 namespace {
