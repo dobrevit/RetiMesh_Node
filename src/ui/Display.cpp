@@ -41,6 +41,19 @@ Display display;
 #include "DisplayIcons.h"
 #include "QrCode.h"
 #include "TouchInput.h"
+#include "LvglUi.h"
+#include "Bootloader.h"
+#include "Bq25896.h"
+#include "Imu.h"
+#include <esp_sleep.h>
+
+#if HAS_LVGL_UI
+// The runtime half of HAS_LVGL_UI: begin() promised a fall-back to the mono
+// pages when the shell cannot start, and the compile-time branch alone made
+// that promise a lie — the task ran shell calls against a shell that never
+// existed. Everything GUI asks this first.
+static bool sShellUp = false;
+#endif
 
 
 bool Display::begin() {
@@ -57,6 +70,14 @@ bool Display::begin() {
   // survives a power cut.
   TouchInput::begin();                   // input for a panel someone can now see
 
+#if HAS_LVGL_UI
+  // The shell owns the glass from the first frame: pages, splash and the
+  // refresh policy stay out of its way. The mono page stack below remains
+  // exactly what every other board runs.
+  sShellUp = LvglUi::begin(_panelImpl);
+  if (sShellUp) return _ok;
+  log_w("display: the GUI shell could not start; falling back to the pages");
+#endif
   _panel->clear();
   _gfx->setCursor(0, 0);
   _gfx->print(FW_NAME);
@@ -107,13 +128,85 @@ void Display::displayTask(void* self) {
     // pressure and must be the first to give way (Diag.h).
     Diag::guard("the display task", [d] {
     d->pollButton();
-#if HAS_TOUCH
-    d->pollTouch();
+#if !HAS_LVGL_UI && HAS_TOUCH
+    d->pollTouch();                      // the shell reads the glass itself
 #endif
 #if HAS_BUTTON2
     d->pollButton2();
 #endif
     uint32_t now = millis();
+#if HAS_LVGL_UI
+    // The shell owns the touch layer, so the activity timer has to ask it
+    // about fingers — the buttons alone left the panel blanking under an
+    // operator mid-navigation.
+    if (sShellUp && LvglUi::touchActive()) d->_lastActivityMs = now;
+#endif
+    // Battery saving, where there is any to save: an OLED comes off with its
+    // charge pump, an e-paper panel holds its image for nothing. Stated once,
+    // above the UI split — both families used to carry a copy each, which is
+    // how sleep policy drifts.
+    if (d->_panel->blanks() && !d->_blank &&
+        now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
+#if HAS_LVGL_UI
+    if (sShellUp) {
+    // The shell's pass: LVGL timers, then done — the page machinery below
+    // belongs to the mono boards and to a shell that failed to start. And a
+    // blanked glass wakes to a tap the way a phone does: while dark, the
+    // touch controller is polled gently here, since the shell's loop is
+    // stopped.
+    switch (LvglUi::takePowerAction()) {
+      case 1: d->setBlank(true); break;
+      case 2: Bootloader::reboot(Bootloader::Source::Ui); break;
+      case 3:
+        // The glass first: deep sleep holds the pins as they stand, and
+        // "off" must not leave a lit backlight showing a frozen frame. Then
+        // ship mode if the charger answers; the deepest sleep the chip has
+        // otherwise, with the user button as the way back.
+        d->setBlank(true);
+        Bq25896::shipMode();
+        esp_sleep_enable_ext1_wakeup(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
+        esp_deep_sleep_start();
+        break;
+      default: break;
+    }
+#if HAS_DA217
+    // The panel follows the hand: two agreeing readings a second apart turn
+    // the display, so a wobble costs nothing and a real turn costs a second.
+    {
+      static uint32_t lastImuMs = 0;
+      static Imu::Facing lastF = Imu::Facing::Unknown;
+      if (!d->_blank && now - lastImuMs >= 1000) {   // a dark panel needs no orienting
+        lastImuMs = now;
+        const Imu::Facing f = Imu::facing();
+        if (f == lastF && f != Imu::Facing::Flat && f != Imu::Facing::Unknown)
+          LvglUi::setRotation((uint8_t)f);
+        lastF = f;
+      }
+    }
+#endif
+    if (d->_blank) {
+      static uint32_t lastWakePoll = 0;
+      // 250 ms: a real tap lasts longer than that, and at 100 ms a node that
+      // sleeps all day burned ten doomed bus reads a second to notice one.
+      if (settings.display().touchWake && now - lastWakePoll >= 250) {
+        lastWakePoll = now;
+        if (TouchInput::poll().down) {
+          // Activity first — the bench found the wake flickering and dying:
+          // without this the timer was still expired on the very next pass
+          // and re-blanked the panel under the waking finger. And the tap
+          // that wakes must only wake: the shell ignores this contact until
+          // it lifts.
+          d->_lastActivityMs = now;
+          LvglUi::swallowTouch();
+          d->setBlank(false);
+        }
+      }
+    } else {
+      LvglUi::loop();
+    }
+    return;
+    }                                    // !sShellUp falls through to the pages
+#endif
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
       d->_page = STATUS; d->_pageChangedMs = now;
       d->_refresh.interval(d->cadence());    // back to what the node rests at
@@ -124,11 +217,6 @@ void Display::displayTask(void* self) {
       d->_refresh.urgent();
       d->_paintDue = true;
     }
-    // Battery saving, where there is any to save: an OLED comes off with its
-    // charge pump, an e-paper panel holds its image for nothing and blanking
-    // it would only stop the redraws that keep it true.
-    if (d->_panel->blanks() && !d->_blank &&
-        now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
     // Drawn when something asked for it, and otherwise at the cadence the page
     // asks for; whether the result reaches the glass is still the policy's
     // answer, and on a panel that costs something to update it usually is not.
@@ -153,6 +241,12 @@ void Display::displayTask(void* self) {
 // function so they cannot drift apart in what a tap means.
 void Display::advancePage(bool forward) {
   if (_blank) { setBlank(false); return; }       // wake only
+#if HAS_LVGL_UI
+  if (sShellUp) {
+    LvglUi::stepTab(forward ? 1 : -1);           // the buttons walk the tabs
+    return;
+  }
+#endif
   _page = stepPage(_page, forward ? 1 : -1);
   _pageChangedMs = millis();
   _refresh.interval(cadence());          // the page decides how live it is
@@ -162,13 +256,23 @@ void Display::advancePage(bool forward) {
   paint();
 }
 
+// One long press, whoever's button delivered it: the power question on a lit
+// shell, a wake on a dark panel, the blank toggle where there is no shell.
+// Stated once so the two buttons cannot drift apart in what a squeeze means.
+void Display::longPressAction() {
+#if HAS_LVGL_UI
+  if (sShellUp && !_blank) { LvglUi::openPowerMenu(); return; }
+#endif
+  setBlank(!_blank);
+}
+
 // Debounced by the poll interval; the grammar lives in PressTracker so the
 // three inputs cannot drift apart in what a press means.
 void Display::pollButton() {
   const uint32_t now = millis();
   switch (_btn.update(digitalRead(PIN_BUTTON) == LOW, now)) {
     case PressTracker::Event::Press: _lastActivityMs = now; break;
-    case PressTracker::Event::Long:  setBlank(!_blank); break;
+    case PressTracker::Event::Long: longPressAction(); break;
     case PressTracker::Event::Short: advancePage(true); break;
     default: break;
   }
@@ -226,24 +330,42 @@ void Display::pollButton2() {
   switch (_btn2.update(digitalRead(PIN_BUTTON2) == LOW, now)) {
     case PressTracker::Event::Press: _lastActivityMs = now; break;
     case PressTracker::Event::Short: advancePage(false); break;
-    default: break;                     // Long: latched silence, by design
+    case PressTracker::Event::Long:
+#if HAS_LVGL_UI
+      // GPIO35 is the case's power button; the factory firmware put its power
+      // menu on this button's long press, so ours does too. A short press
+      // still steps back a screen. On mono builds this button's long press
+      // stays deliberately silent — the tracker latches, so a case that
+      // squeezes it for an hour does nothing.
+      longPressAction();
+#endif
+      break;
+    default: break;
   }
 }
 #endif
 
 void Display::setBlank(bool blank) {
   _blank = blank;
+#if HAS_LVGL_UI
+  if (sShellUp) LvglUi::onBlank(blank);
+#endif
   if (blank) {
     _panel->blank(true);                 // panel + charge pump off
   } else {
     _panel->blank(false);
+#if !HAS_LVGL_UI
     // Nothing is known about the glass after it has been off, so the next
-    // frame goes out whether or not it matches the last one drawn.
+    // frame goes out whether or not it matches the last one drawn. Mono
+    // boards only: on the shell this painter would smear a half-res page
+    // over the LVGL frame — the bench saw it as a flicker at wake — and
+    // onBlank() already invalidates the screen for a full repaint.
     _refresh.forget();
     _pageChangedMs = millis();
     _lastPaintMs = _pageChangedMs;
     _paintDue = false;
     paint();
+#endif
   }
 }
 

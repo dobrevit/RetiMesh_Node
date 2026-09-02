@@ -133,6 +133,15 @@ struct LinkSettings {
 // flashing workflow depends on it, and it is guarded by the admin password
 // and by the link the request arrives over; a deployed relay can switch it
 // off here and be flashed by hand only.
+// What the glass does, on boards that have one worth configuring. Its own
+// section because it will grow — brightness, sleep timing — and because a
+// UI behaviour is neither radio nor maintenance.
+struct DisplaySettings {
+  // Whether a tap wakes a blanked panel. On by the phone convention; off for
+  // a pocketed device whose every accidental touch would light the glass.
+  bool touchWake = true;
+};
+
 struct MaintenanceSettings {
   bool bootloaderApi     = true;        // POST /api/system/bootloader answers at all
   bool bootloaderFromLan = false;       // ...also from the station (upstream LAN) link
@@ -177,6 +186,7 @@ public:
   const TransportSettings& transport() const { return _transport; }
   const LinkSettings& links() const { return _links; }
   const MaintenanceSettings& maintenance() const { return _maintenance; }
+  const DisplaySettings& display() const { return _display; }
 
   bool saveRadio(const RadioSettings& r);
   bool saveLinks(const LinkSettings& l);
@@ -184,6 +194,7 @@ public:
   bool saveWifi(const WifiSettings& w);
   bool saveAdminPassword(const char* password);
   bool saveTransport(const TransportSettings& t);
+  bool saveDisplay(const DisplaySettings& d);
   void factoryReset();                    // wipes the namespace, restores defaults
 
   // Valid LoRa bandwidths shared by SX126x and SX127x, in kHz.
@@ -199,6 +210,7 @@ private:
   TransportSettings _transport;
   LinkSettings      _links;
   MaintenanceSettings _maintenance;
+  DisplaySettings     _display;
 };
 
 extern Settings settings;

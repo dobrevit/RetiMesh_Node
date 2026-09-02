@@ -80,6 +80,14 @@ bool keyInSection(size_t i, const char* prefix);
 // Parse, validate and apply one setting. `err` carries the refusal.
 Result set(const char* key, const char* value, char* err, size_t errLen);
 
+// A form saves several keys in one gesture. Between these two calls, a
+// commit that would arm a restart records the wish instead — otherwise the
+// first changed Wi-Fi key armed it and every later key in the same save was
+// refused as Busy, applying half a form and then rebooting. endBatch arms
+// the one restart, if any commit asked for it.
+void beginBatch();
+Result endBatch();   // Ok, or OkRestart/OkNextBoot once armed
+
 // The maintenance section's commit, exported because the web API writes the
 // same section and must refuse on the same terms and ask for the same
 // restart. The rule for whether a change leaves a way into the node, and for

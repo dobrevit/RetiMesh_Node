@@ -24,6 +24,8 @@
 #include "RnsAdmin.h"
 #include "Maintenance.h"
 #include "Power.h"
+#include "Bq25896.h"
+#include "Imu.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
 
@@ -138,6 +140,10 @@ static void doStatus() {
         (unsigned long)h.largestDramBlock);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
+#if HAS_BQ25896 || HAS_DA217
+  dataf("STATUS", "parts charger=%s imu=%s",
+        Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");
+#endif
 #if HAS_PMU || HAS_BATTERY_ADC
   // The cell as this board sees it — the same reading the panel's icon acts
   // on, which is the point: an icon that has gone missing is diagnosed from

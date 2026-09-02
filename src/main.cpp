@@ -73,6 +73,9 @@
 #include "LocalLink.h"
 #include "Bootloader.h"
 #include "Buzzer.h"
+#include "Bq25896.h"
+#include "Imu.h"
+#include <Wire.h>
 #include "Leds.h"
 #include "Maintenance.h"
 #include "ConsoleServer.h"
@@ -229,6 +232,17 @@ void setup() {
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   Diag::cost("display");
+#if HAS_BQ25896 || HAS_DA217
+  // After the display, deliberately: the case's I2C parts sit behind the
+  // switched peripheral rail, and the panel is what brings that rail up and
+  // settles it (Panel.h). Powering it a second time from here left the panel
+  // dark — one owner for the rail, and the probe simply comes later.
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);  // both residents are 400 kHz parts
+  Bq25896::begin();
+  Imu::begin();
+  Diag::cost("i2c case parts");
+#endif
+
   #if HAS_SD
     // Before the card task exists: it is the task that reads the card's
     // ownership marker for everyone else, and it needs somewhere to put it.
@@ -319,7 +333,12 @@ void setup() {
   // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
   // transaction to every network page.
   #if HAS_DISPLAY
-    Diag::startTask(Display::displayTask, "display", 6144, &display, 1, 0);
+    // The LVGL shell renders whole widget trees on this stack; the page
+    // stack's 6 KB starved it in the first bench build.
+    // 16 KB with the GUI: a settings form builds forty widgets inside one
+    // click callback inside lv_timer_handler, and 12 KB was the first
+    // suspect when that tap took the node down.
+    Diag::startTask(Display::displayTask, "display", HAS_LVGL_UI ? 16384 : 6144, &display, 1, 0);
   #endif
 
   // The RNS task owns every call into microReticulum (Transport is
