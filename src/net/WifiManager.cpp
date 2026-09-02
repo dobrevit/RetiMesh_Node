@@ -590,6 +590,23 @@ WifiManager::StaJoin WifiManager::staJoinState() {
   return StaJoin::Trying;
 }
 
+void WifiManager::staForget() {
+  _joining = false;                      // a forget mid-attempt wins
+  WifiSettings w = settings.wifi();
+  if (!w.staSsid[0]) return;
+  log_i("station: forgetting \"%s\"", w.staSsid);
+  w.staSsid[0] = '\0';
+  w.staPassword[0] = '\0';
+  settings.saveWifi(w);
+  WiFi.disconnect();                     // stationConfigured() is now false; the watchdog rests
+}
+
+int WifiManager::staRssi() const { return stationConnected() ? WiFi.RSSI() : 0; }
+
+void WifiManager::staIpText(char* out, size_t n) const {
+  snprintf(out, n, "%s", WiFi.localIP().toString().c_str());
+}
+
 // ---------------------------------------------------------------------------
 // HTTP Basic Auth against the admin password. Sends the 401 challenge
 // itself when it fails, so callers just `return`.

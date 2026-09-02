@@ -39,6 +39,7 @@
 #include "Settings.h"
 #include "Power.h"
 #include "Airtime.h"
+#include "WifiManager.h"
 
 namespace {
 
@@ -226,6 +227,25 @@ void saveForm(lv_event_t*) {
   if (!failed) Ui::back();               // a refusal keeps the form for fixing
 }
 
+// The station's line on the wifi page, kept live while the page is open.
+lv_obj_t* sStaStatus = nullptr;
+
+void staStatusTick(lv_timer_t*) {
+  if (!sStaStatus || !lv_obj_is_valid(sStaStatus)) return;
+  const char* ssid = settings.wifi().staSsid;
+  char line[96];
+  if (!ssid[0]) {
+    snprintf(line, sizeof(line), "No network saved — scan to join one.");
+  } else if (wifiManager.stationConnected()) {
+    char ip[20];
+    wifiManager.staIpText(ip, sizeof(ip));
+    snprintf(line, sizeof(line), "Connected to %s\n%s, %d dBm", ssid, ip, wifiManager.staRssi());
+  } else {
+    snprintf(line, sizeof(line), "Looking for %s...", ssid);
+  }
+  if (strcmp(lv_label_get_text(sStaStatus), line)) lv_label_set_text(sStaStatus, line);
+}
+
 void openCategory(lv_event_t* e) {
   const char* section = (const char*)lv_event_get_user_data(e);
   // A breadcrumb before the heavy build: if this screen ever takes the node
@@ -237,22 +257,53 @@ void openCategory(lv_event_t* e) {
   if (title[0] >= 'a' && title[0] <= 'z') title[0] -= 32;
   lv_obj_t* body = Ui::newScreen(title);
 
-  // The wifi form leads with the scanner: picking a network from the air is
-  // the way a person joins one; the sta_ssid/sta_password rows below remain
-  // the by-hand fallback (a hidden SSID, a network not up right now).
+  // The wifi page leads with the station: what it is doing right now, the
+  // scanner to change it, and — while a network is saved — the way out. The
+  // raw sta_ssid/sta_password rows are gone from the glass (the scanner and
+  // its hidden-network dialog own joining; the console and portal still
+  // carry the keys).
   if (strcmp(section, "wifi") == 0) {
+    sStaStatus = lv_label_create(body);
+    lv_obj_set_width(sStaStatus, lv_pct(100));
+    lv_label_set_long_mode(sStaStatus, LV_LABEL_LONG_WRAP);
+    lv_timer_t* t = lv_timer_create(staStatusTick, 1000, nullptr);
+    lv_obj_add_event_cb(lv_obj_get_parent(lv_obj_get_parent(body)),
+                        [](lv_event_t* ev) {
+                          lv_timer_delete((lv_timer_t*)lv_event_get_user_data(ev));
+                          sStaStatus = nullptr;
+                        }, LV_EVENT_DELETE, t);
+    staStatusTick(nullptr);
+
     lv_obj_t* scan = lv_button_create(body);
     lv_obj_set_width(scan, lv_pct(100));
     lv_obj_t* sl = lv_label_create(scan);
     lv_label_set_text(sl, LV_SYMBOL_WIFI "  Join a network...");
     lv_obj_center(sl);
     lv_obj_add_event_cb(scan, [](lv_event_t*) { Ui::openWifiJoin(); }, LV_EVENT_CLICKED, nullptr);
+
+    if (wifiManager.stationConfigured()) {
+      lv_obj_t* forget = lv_button_create(body);
+      lv_obj_set_width(forget, lv_pct(100));
+      lv_obj_t* fl = lv_label_create(forget);
+      lv_label_set_text(fl, LV_SYMBOL_CLOSE "  Disconnect & forget");
+      lv_obj_center(fl);
+      lv_obj_add_event_cb(forget, [](lv_event_t* ev) {
+        wifiManager.staForget();
+        Ui::toast("Network forgotten");
+        lv_obj_add_state((lv_obj_t*)lv_event_get_target(ev), LV_STATE_DISABLED);
+      }, LV_EVENT_CLICKED, nullptr);
+    }
   }
 
   memset(sRows, 0, sizeof(sRows));
   size_t used = 0;
   for (size_t i = 0; i < SettingsFields::count() && used < kMaxRows; i++) {
     if (!SettingsFields::keyInSection(i, section)) continue;
+    // Joining lives on the scanner now — a picked network proves itself on
+    // air before it is saved, and the hidden-SSID dialog covers the rest. A
+    // raw row here would be a second, unverified way to say the same thing.
+    const char* k = SettingsFields::keyAt(i);
+    if (k && (strcmp(k, "wifi.sta_ssid") == 0 || strcmp(k, "wifi.sta_password") == 0)) continue;
     char line[224];
     if (!SettingsFields::render(i, line, sizeof(line))) continue;
     char* eq = strchr(line, '=');

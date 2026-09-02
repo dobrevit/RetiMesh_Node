@@ -60,6 +60,35 @@ void askKey(lv_event_t*) {
   }, LV_EVENT_CLICKED, &ctx);
 }
 
+// A hidden network never appears in the scan, so it is asked for by name —
+// the one case the old free-text settings rows existed for.
+void askHidden(lv_event_t*) {
+  lv_obj_t* box = lv_msgbox_create(nullptr);
+  lv_msgbox_add_title(box, "Hidden network");
+  lv_msgbox_add_close_button(box);
+  lv_obj_t* body = lv_msgbox_get_content(box);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+  lv_obj_t* taSsid = Ui::textarea(body, "SSID", true, false);
+  lv_obj_t* taPass = Ui::textarea(body, "password (empty if open)", true, false);
+  lv_textarea_set_password_mode(taPass, true);
+  lv_obj_t* btn = lv_button_create(body);
+  lv_obj_set_width(btn, lv_pct(100));
+  lv_obj_t* bl = lv_label_create(btn);
+  lv_label_set_text(bl, "Join");
+  lv_obj_center(bl);
+  struct Ctx { lv_obj_t* box; lv_obj_t* ssid; lv_obj_t* pass; };
+  static Ctx ctx;                        // one dialog at a time, like the rest
+  ctx = { box, taSsid, taPass };
+  lv_obj_add_event_cb(btn, [](lv_event_t* e) {
+    Ctx* c = (Ctx*)lv_event_get_user_data(e);
+    snprintf(sPickedSsid, sizeof(sPickedSsid), "%s", lv_textarea_get_text(c->ssid));
+    char pass[65];
+    snprintf(pass, sizeof(pass), "%s", lv_textarea_get_text(c->pass));
+    lv_msgbox_close(c->box);
+    if (sPickedSsid[0]) join(pass);
+  }, LV_EVENT_CLICKED, &ctx);
+}
+
 void picked(lv_event_t* e) {
   const bool secured = (bool)(uintptr_t)lv_event_get_user_data(e);
   lv_obj_t* btn = (lv_obj_t*)lv_event_get_target(e);
@@ -140,6 +169,13 @@ void openWifiJoin() {
   lv_label_set_text(al, LV_SYMBOL_REFRESH "  Scan again");
   lv_obj_center(al);
   lv_obj_add_event_cb(again, rescan, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* hidden = lv_button_create(body);
+  lv_obj_set_width(hidden, lv_pct(100));
+  lv_obj_t* hl = lv_label_create(hidden);
+  lv_label_set_text(hl, LV_SYMBOL_EYE_CLOSE "  Join hidden network...");
+  lv_obj_center(hl);
+  lv_obj_add_event_cb(hidden, askHidden, LV_EVENT_CLICKED, nullptr);
 
   lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
   lv_timer_t* t = lv_timer_create(heartbeat, 250, nullptr);

@@ -93,6 +93,9 @@ public:
   void staScanDone();                    // frees the driver's result table
   void staJoin(const char* ssid, const char* password);
   StaJoin staJoinState();                // Joined reports once, after persisting
+  void staForget();                      // disconnect and clear the stored network
+  int  staRssi() const;                  // dBm while connected, 0 otherwise
+  void staIpText(char* out, size_t n) const;
 
 private:
   void startAccessPoint();
