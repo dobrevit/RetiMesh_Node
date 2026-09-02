@@ -370,9 +370,38 @@ void openCategory(lv_event_t* e) {
   // its hidden-network dialog own joining; the console and portal still
   // carry the keys).
   if (strcmp(section, "wifi") == 0) {
-    sStaStatus = lv_label_create(body);
-    lv_obj_set_width(sStaStatus, lv_pct(100));
+    // The adapter's master switch rides the status row, as the design draws
+    // it — through the funnel, whose link rules refuse a combination that
+    // would leave no way into the node.
+    lv_obj_t* head = lv_obj_create(body);
+    lv_obj_remove_style_all(head);
+    lv_obj_set_size(head, lv_pct(100), LV_SIZE_CONTENT);
+    sStaStatus = lv_label_create(head);
+    lv_obj_set_width(sStaStatus, lv_pct(74));
     lv_label_set_long_mode(sStaStatus, LV_LABEL_LONG_WRAP);
+    lv_obj_align(sStaStatus, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t* master = lv_switch_create(head);
+    lv_obj_align(master, LV_ALIGN_RIGHT_MID, 0, 0);
+    if (settings.links().wifiEnabled) lv_obj_add_state(master, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(master, [](lv_event_t* e) {
+      lv_obj_t* sw = (lv_obj_t*)lv_event_get_target(e);
+      const bool want = lv_obj_has_state(sw, LV_STATE_CHECKED);
+      char err[128] = "";
+      const SettingsFields::Result res =
+          SettingsFields::set("links.wifi", want ? "on" : "off", err, sizeof(err));
+      const bool ok = res == SettingsFields::Result::Ok ||
+                      res == SettingsFields::Result::OkRestart ||
+                      res == SettingsFields::Result::OkNextBoot;
+      if (!ok) {
+        // The funnel said no (usually the no-way-in rule); the switch tells
+        // the truth again and the reason gets the toast.
+        if (want) lv_obj_remove_state(sw, LV_STATE_CHECKED);
+        else      lv_obj_add_state(sw, LV_STATE_CHECKED);
+        Ui::toast(err[0] ? err : SettingsFields::resultText(res));
+      } else if (res != SettingsFields::Result::Ok) {
+        Ui::toast(SettingsFields::resultText(res));
+      }
+    }, LV_EVENT_VALUE_CHANGED, nullptr);
     lv_timer_t* t = lv_timer_create(staStatusTick, 1000, nullptr);
     lv_obj_add_event_cb(lv_obj_get_parent(lv_obj_get_parent(body)),
                         [](lv_event_t* ev) {
@@ -437,6 +466,16 @@ void openCategory(lv_event_t* e) {
     lv_obj_t* lbl = lv_label_create(rowBox);
     lv_label_set_text(lbl, strchr(r.key, '.') ? strchr(r.key, '.') + 1 : r.key);
     buildControl(rowBox, r);
+
+    // The transport's WiFi usage depends on the adapter: with the adapter
+    // off the control locks rather than pretending, and says where the key
+    // to it lives.
+    if (strcmp(r.key, "transport.wifi_mode") == 0 && !settings.links().wifiEnabled) {
+      lv_obj_add_state(r.control, LV_STATE_DISABLED);
+      lv_obj_t* why = lv_label_create(rowBox);
+      lv_label_set_text(why, "locked — the WiFi adapter is off (Settings > wifi)");
+      UiTheme::labelCaps(why);
+    }
   }
 
   if (strcmp(section, "radio") == 0) {
