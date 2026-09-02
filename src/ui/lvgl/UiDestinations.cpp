@@ -19,6 +19,9 @@
 #include "UiTheme.h"
 #include "RnsTransport.h"
 #include "Neighbors.h"
+#include "PeerPositions.h"
+#include "GeoMath.h"
+#include "Gps.h"
 
 namespace {
 
@@ -68,6 +71,27 @@ void openDetail(lv_event_t* e) {
     snprintf(v, sizeof(v), "%.1f dB", (double)nb.snr);
     UiTheme::reading(body, "SNR", v);
   }
+#if HAS_GPS
+  {
+    // Geometry, only when both ends are real: our fix and a position the
+    // peer actually announced, aged honestly.
+    PeerPositions::Position pp;
+    const Gps::Fix own = Gps::fix();
+    if (own.valid && PeerPositions::getByHex(pi->hash, pp)) {
+      const double km = GeoMath::distanceKm(own.latitude, own.longitude,
+                                            pp.latitude, pp.longitude);
+      snprintf(v, sizeof(v), km < 10.0 ? "%.2f km" : "%.1f km", km);
+      UiTheme::reading(body, "DISTANCE", v);
+      snprintf(v, sizeof(v), "%.0f°", GeoMath::bearingDeg(own.latitude, own.longitude,
+                                                          pp.latitude, pp.longitude));
+      UiTheme::reading(body, "BEARING", v);
+      char age[8];
+      Ui::ageTextS((millis() - pp.heardMs) / 1000, age, sizeof(age));
+      snprintf(v, sizeof(v), "%s ago · ±%.0f m", age, (double)pp.accuracyM);
+      UiTheme::reading(body, "POS HEARD", v);
+    }
+  }
+#endif
   snprintf(v, sizeof(v), "self -> %s -> %.8s", pi->via, pi->hash);
   lv_obj_t* path = UiTheme::reading(body, "PATH", v);
   lv_obj_set_style_text_color(path, lv_color_hex(UiTheme::kInkDim), 0);
@@ -102,7 +126,7 @@ void openDetail(lv_event_t* e) {
         (const RnsTransport::PathInfo*)lv_event_get_user_data(ev);
     char t[34];
     Ui::peerLabelHex(p2->hash, t, sizeof(t));
-    Ui::openBearing(t);
+    Ui::openBearing(t, p2->hash);
   }, LV_EVENT_CLICKED, (void*)pi);
   lv_obj_t* ann = lv_button_create(row);
   UiTheme::actionButton(ann);

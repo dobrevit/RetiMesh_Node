@@ -107,7 +107,7 @@ bool idleShowing();
 void showIncoming(const uint8_t from[16], const char* text);  // full-screen interrupt
 void showFirmware(const char* stage, uint32_t written, uint32_t total);
 void hideFirmware();
-void openBearing(const char* peer);      // the dial, honest about what it lacks
+void openBearing(const char* peer, const char* hashHex);  // the live dial
 void openPlot();                         // rings and a crosshair, no cartography
 uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off
 void setRotation(uint8_t quarterTurns);  // the accelerometer's verdict
