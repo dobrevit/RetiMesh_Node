@@ -1090,12 +1090,17 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     const Ota::Progress p = Ota::progress();
     JsonObject up = doc["update"].to<JsonObject>();
     up["stage"] = Ota::describe(p.stage);
-    // JsonString copies; p is a local that dies before this document is
-    // serialised, and the stage names beside it are literals that do not.
-    if (p.message[0]) up["message"] = JsonString(p.message);
     if (p.expected)   { up["received"] = p.received; up["expected"] = p.expected; }
-    up["floor"] = Ota::acceptedFloor();
-    up["slot"]  = Ota::runningSlot();
+    // The floor says which old signed images this node would still accept, and
+    // the slot and the message say how an update went. /api/status is public —
+    // on an open access point that is anyone within radio range — and none of
+    // the three is any of their business. Withheld unless the caller holds the
+    // admin credentials, the same way the coordinates below are.
+    if (request->authenticate(ADMIN_USER, settings.admin().password)) {
+      up["floor"] = Ota::acceptedFloor();
+      up["slot"]  = Ota::runningSlot();
+      if (p.message[0]) up["message"] = JsonString(p.message);
+    }
     const char* why = Ota::uploadRefusal(sdCard.mounted(), Ota::canSelfUpdate(), p.stage);
     up["can_upload"] = (why == nullptr);
     if (why) up["refusal"] = why;
