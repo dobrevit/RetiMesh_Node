@@ -182,11 +182,21 @@ void barCreate() {
 
 // --- the keyboard -----------------------------------------------------------
 
+// The active screen's form (newScreen tags it on the screen's user data):
+// padded while the keyboard is up so the last field can scroll clear of the
+// keys, and only then — the padding used to be permanent, and every screen
+// paid it whether or not a keyboard was showing.
+void formKeyboardPad(int32_t px) {
+  lv_obj_t* body = (lv_obj_t*)lv_obj_get_user_data(lv_screen_active());
+  if (body && lv_obj_is_valid(body)) lv_obj_set_style_pad_bottom(body, px, 0);
+}
+
 void kbEvent(lv_event_t* e) {
   const lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
     lv_keyboard_set_textarea(sKeyboard, nullptr);
     lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+    formKeyboardPad(0);
   }
 }
 
@@ -215,11 +225,16 @@ void taFocusEvent(lv_event_t* e) {
       const int32_t kbTop = LV_VER_RES - lv_obj_get_height(sKeyboard);
       lv_obj_set_style_max_height(box, kbTop - kBarH - 8, 0);
       lv_obj_align(box, LV_ALIGN_TOP_MID, 0, kBarH + 2);
+    } else {
+      // An ordinary screen scrolls its field clear of the keys instead of
+      // being lifted, which needs headroom below the last field.
+      formKeyboardPad(140);
     }
     lv_obj_scroll_to_view(ta, LV_ANIM_ON);
   } else if (code == LV_EVENT_DEFOCUSED) {
     lv_keyboard_set_textarea(sKeyboard, nullptr);
     lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+    formKeyboardPad(0);
   }
 }
 
@@ -346,9 +361,12 @@ lv_obj_t* newScreen(const char* title) {
   lv_obj_set_flex_grow(body, 1);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(body, 4, 0);
-  // Room to scroll any field clear of the keyboard.
-  lv_obj_set_style_pad_bottom(body, 140, 0);
   lv_obj_set_scroll_dir(body, LV_DIR_VER);
+  // The keyboard's clearance is paid only while the keyboard is up (the
+  // focus handler pads this body, found again through the screen's user
+  // data). A standing reservation here cost every screen 140 px of height —
+  // a list ended mid-screen with dead glass below it.
+  lv_obj_set_user_data(scr, body);
   return body;
 }
 
