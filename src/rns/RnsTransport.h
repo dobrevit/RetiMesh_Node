@@ -94,6 +94,27 @@ struct Tables {
 };
 Tables tables();
 
+// One reading, taken under one lock.
+//
+// The calls above each take the lock separately, so a caller that wants a
+// count and the list it counts gets them from two different refreshes — and
+// prints a total that does not match the rows under it. Anything assembling a
+// picture of the node's tables should ask for it in one go.
+//
+// `ageMs` is how long ago the reading was last successfully rebuilt, which is
+// not the same as how long ago one was attempted: a refresh that throws leaves
+// the previous values in place, and this is what says so.
+struct Snapshot {
+  Tables   tables;
+  size_t   pathTotal;      // the whole table, however many rows came back
+  size_t   ifaceTotal;
+  size_t   pathRows;       // rows actually written to the caller's arrays
+  size_t   ifaceRows;
+  uint32_t ageMs;
+};
+Snapshot snapshot(PathInfo* pathOut, size_t maxPaths,
+                  IfaceInfo* ifaceOut, size_t maxIfaces);
+
 const char* modeName(uint8_t mode);        // settings value -> "full", ...
 
 // Where the microStore files live: "sd" or "littlefs" (chosen at boot).
@@ -144,7 +165,14 @@ bool queueLxmfReply(const uint8_t destHash[16], const char* text);
 // `signal` is what the radio measured of the packet that asked, carried here
 // rather than read again at send time: by then the node may have heard a much
 // closer neighbour, and the answer would describe that link instead.
+//
+// `verifiedKey`, where given, is the 64-byte public key the request was checked
+// against — both halves, as get_public_key() returns them. Carrying it saves
+// looking the sender up a second time on the task that also drives the library,
+// and makes the answer go to the identity that was verified rather than to
+// whatever the hash resolves to a pass later.
 bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry,
-                        const Rns::Commands::Signal& signal);
+                        const Rns::Commands::Signal& signal,
+                        const uint8_t* verifiedKey = nullptr);
 
 } // namespace RnsTransport

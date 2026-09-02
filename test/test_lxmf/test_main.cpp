@@ -587,6 +587,113 @@ static void test_what_is_signed_on_the_way_out_is_what_is_checked_on_the_way_in(
   TEST_ASSERT_EQUAL_MEMORY(payload, outSpans + 32, plen);
 }
 
+
+// A str32 length of 0xFFFFFFFB or more wraps i + 5 + valLen back to somewhere
+// at or just after i when size_t is 32 bits, so a check that the sum had gone
+// backwards did not fire and the parser handed out a 4 GiB length for a
+// five-byte header. Nothing has to be authenticated to send this.
+//
+// This test runs on a 64-bit host, where nothing wraps and the old check
+// passed too — so on its own it only guards the target against regression, it
+// does not demonstrate the bug. The one below does that part.
+static void test_a_length_that_wraps_the_address_space_is_refused() {
+  for (uint64_t len = 0xFFFFFFFBull; len <= 0xFFFFFFFFull; len++) {
+    uint8_t buf[32];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0xC6;                                              // bin32
+    buf[1] = (uint8_t)(len >> 24); buf[2] = (uint8_t)(len >> 16);
+    buf[3] = (uint8_t)(len >> 8);  buf[4] = (uint8_t)len;
+    const uint8_t* v = nullptr; size_t vl = 0, next = 0;
+    TEST_ASSERT_FALSE(msgpackNext(buf, sizeof(buf), 0, v, vl, next));
+  }
+}
+
+// The two formulations, in the width the firmware actually runs in. The old
+// one asked whether the sum had gone backwards, which a wrap of exactly the
+// header size does not; the new one bounds the length against the bytes that
+// remain, which has no sum to wrap. Modelled rather than executed, because the
+// host cannot be made to wrap at 32 bits — but the arithmetic is the whole
+// argument, so it is worth holding onto in a form that fails if someone
+// restores the old check.
+static void test_the_old_and_new_bounds_disagree_at_32_bits() {
+  const uint32_t i = 12, n = 32;                                // a plausible offset in a real packet
+  bool anyAcceptedByOld = false;
+  for (uint64_t l = 0xFFFFFFFBull; l <= 0xFFFFFFFFull; l++) {
+    const uint32_t valLen = (uint32_t)l;
+    const uint32_t next = i + 5u + valLen;                      // wraps, by construction
+    const bool oldTakesIt = !(next < i) && next <= n;
+    const bool newTakesIt = !(valLen > n - (i + 5u));
+    if (oldTakesIt) anyAcceptedByOld = true;
+    TEST_ASSERT_FALSE(newTakesIt);                              // the fix refuses all five
+  }
+  TEST_ASSERT_TRUE(anyAcceptedByOld);                           // and the old check did not
+}
+
+// An ordinary over-long length is refused too, which is what makes the case
+// above a wrap rather than just a big number.
+static void test_a_length_past_the_end_is_still_refused() {
+  uint8_t buf[32];
+  memset(buf, 0, sizeof(buf));
+  buf[0] = 0xC6; buf[3] = 0x01;                                 // bin32, 256 bytes
+  const uint8_t* v = nullptr; size_t vl = 0, next = 0;
+  TEST_ASSERT_FALSE(msgpackNext(buf, sizeof(buf), 0, v, vl, next));
+}
+
+// msgpack's own timestamp is an extension, so a client is free to put one in a
+// message. Refusing the shape rejected the whole message and left it unproven,
+// which is the fault the container walk was written to fix.
+static void test_an_extension_is_stepped_over_not_refused() {
+  struct Case { uint8_t head[6]; size_t headLen; size_t total; };
+  static const Case cases[] = {
+    { { 0xD4, 0xFF },                         2, 3  },          // fixext1
+    { { 0xD5, 0xFF },                         2, 4  },          // fixext2
+    { { 0xD6, 0xFF },                         2, 6  },          // fixext4
+    { { 0xD7, 0xFF },                         2, 10 },          // fixext8
+    { { 0xD8, 0xFF },                         2, 18 },          // fixext16
+    { { 0xC7, 0x03, 0xFF },                   3, 6  },          // ext8,  3 bytes
+    { { 0xC8, 0x00, 0x03, 0xFF },             4, 7  },          // ext16, 3 bytes
+    { { 0xC9, 0x00, 0x00, 0x00, 0x03, 0xFF }, 6, 9  },          // ext32, 3 bytes
+  };
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    uint8_t buf[32];
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, cases[c].head, cases[c].headLen);
+    const uint8_t* v = nullptr; size_t vl = 0, next = 0;
+    TEST_ASSERT_TRUE(msgpackNext(buf, sizeof(buf), 0, v, vl, next));
+    TEST_ASSERT_EQUAL_size_t(cases[c].total, next);
+  }
+}
+
+// An extension whose declared length runs past the buffer is refused like any
+// other over-long element, including the 32-bit width that could wrap.
+static void test_an_extension_running_past_the_end_is_refused() {
+  const uint8_t* v = nullptr; size_t vl = 0, next = 0;
+  uint8_t big[16] = { 0xC9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };     // ext32 claiming 4 GiB
+  TEST_ASSERT_FALSE(msgpackNext(big, sizeof(big), 0, v, vl, next));
+  uint8_t past[8] = { 0xC7, 0x40, 0xFF };                       // ext8 claiming 64 bytes
+  TEST_ASSERT_FALSE(msgpackNext(past, sizeof(past), 0, v, vl, next));
+}
+
+// A message carrying an extension beside its fields is an ordinary message and
+// has to reach the inbox, not the not-an-LXMF-message counter.
+static void test_a_message_with_an_extension_field_is_taken() {
+  uint8_t buf[512];
+  memset(buf, 0xAA, 16); memset(buf + 16, 0xBB, 16); memset(buf + 32, 0xCC, 64);
+  uint8_t* p = buf + 96;
+  *p++ = 0x94;
+  *p++ = 0xCB; memset(p, 0, 8); p += 8;
+  *p++ = 0xA1; *p++ = 't';
+  *p++ = 0xA2; *p++ = 'h'; *p++ = 'i';
+  *p++ = 0x81;                                                  // fixmap, 1 pair
+  *p++ = 0x0A;                                                  // key
+  *p++ = 0xD4; *p++ = 0xFF; *p++ = 0x07;                        // fixext1 value
+  const size_t n = (size_t)(p - buf);
+  LxmfMessage m;
+  TEST_ASSERT_TRUE(parseLxmf(buf, n, m));
+  TEST_ASSERT_EQUAL_size_t(1, m.fieldsCount);
+  TEST_ASSERT_EQUAL_STRING_LEN("hi", m.content, 2);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_the_announce_carries_the_name_a_client_will_show);
@@ -626,5 +733,12 @@ int main() {
   RUN_TEST(test_the_emitter_refuses_rather_than_overrunning_its_buffer);
   RUN_TEST(test_an_opportunistic_envelope_leaves_the_destination_off);
   RUN_TEST(test_what_is_signed_on_the_way_out_is_what_is_checked_on_the_way_in);
+  RUN_TEST(test_a_length_that_wraps_the_address_space_is_refused);
+  RUN_TEST(test_the_old_and_new_bounds_disagree_at_32_bits);
+  RUN_TEST(test_a_length_past_the_end_is_still_refused);
+  RUN_TEST(test_an_extension_is_stepped_over_not_refused);
+  RUN_TEST(test_an_extension_running_past_the_end_is_refused);
+  RUN_TEST(test_a_message_with_an_extension_field_is_taken);
+
   return UNITY_END();
 }

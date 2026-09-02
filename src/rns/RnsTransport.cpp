@@ -36,6 +36,8 @@
 #include "Telemetry.h"
 #include "NomadNet.h"
 #include "Diag.h"
+#include "RingItem.h"
+#include "Lock.h"
 #include "Power.h"
 #include "Gps.h"
 #include <LittleFS.h>
@@ -199,10 +201,23 @@ public:
     size_t sz = 0;
     uint8_t* item;
     while ((item = (uint8_t*)xRingbufferReceive(sRxRing, &sz, 0)) != nullptr) {
+      // Given back however this body is left, including by a throw out of
+      // handle_incoming below (Sys::RingItem). Returned by hand, a bad_alloc
+      // there leaked a frame's worth of ring on every failure and the node
+      // eventually went deaf with every counter still rising.
+      Sys::RingItem held(sRxRing, item);
       // The reading the radio took of this frame, carried with it rather than
       // sampled now: draining three at once used to stamp all three with the
       // newest one's RSSI (Config.h, LoRaRxFrame).
-      if (sz > sizeof(LoRaRxFrame)) {
+      if (sz <= sizeof(LoRaRxFrame)) {
+        // A header with no frame behind it. Cannot happen from the radio task,
+        // which only posts what it decoded — but the producer has already
+        // counted it, so dropping it silently would leave the two ends of the
+        // ring disagreeing with nothing to say so.
+        g_stats.loraRxBadLength++;
+        continue;
+      }
+      {
         LoRaRxFrame hdr;
         memcpy(&hdr, item, sizeof(hdr));
         // Signal stats are private to InterfaceImpl; the wrapper exposes setters.
@@ -216,7 +231,6 @@ public:
         self.r_stat_q((float)loraQualityPercent(hdr.snr, settings.radio().sf));
         handle_incoming(Bytes(item + sizeof(hdr), sz - sizeof(hdr)));
       }
-      vRingbufferReturnItem(sRxRing, item);
     }
   }
 private:
@@ -401,7 +415,13 @@ static void applyLogMute() {
 // first, and losing one costs nothing: the sender identifies again on its
 // next link. Touched only from the RNS task — the identify callback and
 // message handling both run inside reticulum.loop() — so no lock.
-struct ProvenKey { uint8_t hash[16]; uint8_t key[32]; uint32_t atMs; bool used; };
+// A whole public key, which for Reticulum is two: the X25519 half used to
+// encrypt to a peer and the Ed25519 half used to check what it signed.
+// get_public_key() hands back both halves concatenated, so 32 bytes is exactly
+// half a key. Taken from the library rather than written out, so that a node
+// and the stack it runs on cannot disagree about how long a key is.
+static const size_t kPublicKeyLen = RNS::Type::Identity::KEYSIZE / 8;
+struct ProvenKey { uint8_t hash[16]; uint8_t key[kPublicKeyLen]; uint32_t atMs; bool used; };
 static ProvenKey sProven[8];
 
 static const ProvenKey* provenKeyFor(const uint8_t* sourceHash) {
@@ -411,7 +431,12 @@ static const ProvenKey* provenKeyFor(const uint8_t* sourceHash) {
 }
 
 static void rememberProvenKey(const Bytes& source, const Bytes& key) {
-  if (source.size() != 16 || key.size() != 32) return;
+  // 32 here rejected every key there is. get_public_key() returns both halves,
+  // so nothing was ever remembered: the table stayed empty, provenKeyFor()
+  // always said no, and a sender who identified on a link but had never
+  // announced was counted unverified and answered with silence — the one case
+  // this table exists for.
+  if (source.size() != 16 || key.size() != kPublicKeyLen) return;
   ProvenKey* slot = nullptr;
   for (auto& e : sProven) {
     if (e.used && memcmp(e.hash, source.data(), 16) == 0) { slot = &e; break; }
@@ -422,7 +447,7 @@ static void rememberProvenKey(const Bytes& source, const Bytes& key) {
     for (auto& e : sProven) if ((int32_t)(e.atMs - slot->atMs) < 0) slot = &e;
   }
   memcpy(slot->hash, source.data(), 16);
-  memcpy(slot->key, key.data(), 32);
+  memcpy(slot->key, key.data(), kPublicKeyLen);
   slot->atMs = millis();
   slot->used = true;
 }
@@ -462,7 +487,45 @@ static bool commandCooldownActive(const uint8_t* sourceHash) {
   return false;
 }
 
+// What every sender gets between them.
+//
+// The table above holds eight hashes and evicts the oldest, so it gates a
+// sender who keeps one identity and nothing else: announce nine throwaway
+// identities and each request evicts the entry that would have stopped the
+// next one, so the gate never fires. Announcing is free and being `verified`
+// asks for nothing more, so the cost of defeating a per-sender rule is the
+// cost of generating keys.
+//
+// What that bought an attacker was the node's transmit budget. Every answer is
+// a signed LXMF packet; enough of them and refreshAirtimeStats() sets
+// dutyLocked, LoRaRadio stops draining the TX ring, and the node's own
+// transport traffic and admin answers stop with it — for the rest of the hour.
+//
+// So there is a second rule that no identity can be rotated out of: a bucket
+// of four answers, refilling one every fifteen seconds. A person pressing a
+// button gets an immediate answer and three more; a flood gets four per
+// minute however many names it wears.
+static const uint32_t kCommandBurst    = 4;
+static const uint32_t kCommandRefillMs = 15000;
+static uint32_t sCommandTokens   = kCommandBurst;
+static uint32_t sCommandFilledMs = 0;
+
+static void refillCommandBudget() {
+  const uint32_t now = millis();
+  const uint32_t due = (uint32_t)(now - sCommandFilledMs) / kCommandRefillMs;
+  if (!due) return;
+  sCommandTokens = (sCommandTokens + due > kCommandBurst) ? kCommandBurst : sCommandTokens + due;
+  sCommandFilledMs += due * kCommandRefillMs;         // keep the remainder, so it does not drift
+}
+
+// The one question both rules live behind, so a caller cannot ask half of it.
+static bool mayAnswerCommand(const uint8_t* sourceHash) {
+  refillCommandBudget();
+  return sCommandTokens > 0 && !commandCooldownActive(sourceHash);
+}
+
 static void noteCommandAnswered(const uint8_t* sourceHash) {
+  if (sCommandTokens) sCommandTokens--;
   CommandSeen* slot = nullptr;
   for (auto& e : sCommandSeen) {
     if (e.used && memcmp(e.hash, sourceHash, 16) == 0) { slot = &e; break; }
@@ -489,7 +552,11 @@ static RNS::Identity senderKey(const uint8_t sourceHash[16]) {
   if (known) return known;
   if (const ProvenKey* proven = provenKeyFor(sourceHash)) {
     RNS::Identity fromLink(false);
-    fromLink.load_public_key(RNS::Bytes(proven->key, 32));
+    // Both halves. Given 32, load_public_key() left _sig_pub_bytes empty, so
+    // validate() had nothing to check a signature with and the identity hash
+    // was derived from half the key — addressing a reply to a destination that
+    // is not the sender's.
+    fromLink.load_public_key(RNS::Bytes(proven->key, kPublicKeyLen));
     return fromLink;
   }
   return {RNS::Type::NONE};
@@ -673,8 +740,9 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
     if (Rns::lxmfField(m.fields, m.fieldsLen, Rns::kFieldCommands, val, valLen)) {
       Rns::LxmfCommand cmds[4];
       const size_t n = Rns::lxmfCommands(val, valLen, cmds, 4);
-      if (n && commandCooldownActive(m.sourceHash)) {
-        log_d("lxmf: not answering %s so soon after the last time", source.toHex().c_str());
+      if (n && !mayAnswerCommand(m.sourceHash)) {
+        log_d("lxmf: not answering %s (%u answer(s) left in the budget)",
+              source.toHex().c_str(), (unsigned)sCommandTokens);
       } else {
         // One answer per message, whatever was asked. The reply queue is two
         // deep and shared with remote administration, so a message carrying
@@ -694,7 +762,13 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
           // them would appear in the conversation as a message somebody sent.
           if (!wantsTelemetry &&
               !Rns::Commands::reply(cmds[k], signal, answer, sizeof(answer))) continue;
-          if (queueLxmfTelemetry(m.sourceHash, answer, wantsTelemetry, signal)) {
+          // The key this message was checked against, so the answer does not
+          // ask who the sender is a second time and cannot get a different
+          // answer than the check did.
+          const RNS::Bytes senderPub = sender.get_public_key();
+          const uint8_t* verifiedKey =
+              senderPub.size() == kPublicKeyLen ? senderPub.data() : nullptr;
+          if (queueLxmfTelemetry(m.sourceHash, answer, wantsTelemetry, signal, verifiedKey)) {
             // Stamped only now. Stamping before knowing an answer exists spent
             // the sender's ten seconds on a command this node does not answer,
             // so a telemetry request made the ping after it look like silence.
@@ -1096,6 +1170,13 @@ struct PendingReply {
   char     text[256];
   bool     telemetry;
   Rns::Commands::Signal signal;
+  // The key the request was verified against, where there was one. Carrying it
+  // saves the second Identity::recall — which can reach the SD card, on the
+  // task that also drives reticulum.loop() — and settles a question the second
+  // lookup could get a different answer to: the reply goes to the identity
+  // that was checked, not to whatever that hash resolves to a pass later.
+  uint8_t  key[kPublicKeyLen];
+  bool     haveKey;
 };
 static QueueHandle_t sReplyQueue = nullptr;
 
@@ -1104,20 +1185,27 @@ bool queueLxmfReply(const uint8_t destHash[16], const char* text) {
 }
 
 bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry,
-                        const Rns::Commands::Signal& signal) {
+                        const Rns::Commands::Signal& signal, const uint8_t* verifiedKey) {
   if (!sReplyQueue) return false;
   PendingReply r{};
   memcpy(r.dest, destHash, 16);
   strlcpy(r.text, text ? text : "", sizeof(r.text));
   r.telemetry = telemetry;
   r.signal = signal;
+  if (verifiedKey) {
+    memcpy(r.key, verifiedKey, kPublicKeyLen);
+    r.haveKey = true;
+  }
   return xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
 }
 
 static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry,
-                     const Rns::Commands::Signal& signal) {
+                     const Rns::Commands::Signal& signal,
+                     const uint8_t* verifiedKey = nullptr) {
   if (!sStarted || !lxmfDest) return false;
-  RNS::Identity peer = senderKey(destHash);
+  RNS::Identity peer(false);
+  if (verifiedKey) peer.load_public_key(RNS::Bytes(verifiedKey, kPublicKeyLen));
+  else             peer = senderKey(destHash);
   if (!peer) {
     log_w("lxmf: no key for %s; cannot answer", RNS::Bytes(destHash, 16).toHex().c_str());
     return false;
@@ -1354,9 +1442,22 @@ static void processEvents() {
       const RNS::Type::Interface::modes mode = modeFor(e.id);
       iface.mode(mode);
       evictCollision(iface);
+      // All three steps or none. start() opens sockets and emplace() allocates
+      // a map node, so either can throw — and the pass that calls this is
+      // guarded, so a throw between them did not restart the node: it left an
+      // interface registered with Transport and absent from tcpIfaces, which
+      // drainTcp cannot route to and clientDisconnected cannot ever remove.
+      // The snapshot then listed it as live, with counters, for the rest of
+      // the node's uptime.
       RNS::Transport::register_interface(iface);
-      iface.start();
-      tcpIfaces.emplace(e.id, TcpIface{ iface, impl });
+      try {
+        iface.start();
+        tcpIfaces.emplace(e.id, TcpIface{ iface, impl });
+      } catch (...) {
+        RNS::Transport::deregister_interface(iface);
+        log_w("could not bring up %s; left nothing half-registered", name);
+        throw;                        // counted and contained by the guard above
+      }
       // A neighbour that has just appeared has heard nothing from this node,
       // and the periodic announce can be ten minutes away. Announce shortly,
       // once, however many peers arrive together — which is what makes a
@@ -1378,26 +1479,38 @@ static void drainTcp() {
   size_t sz = 0;
   uint8_t* item;
   while ((item = (uint8_t*)xRingbufferReceive(sTcpInRing, &sz, 0)) != nullptr) {
+    // As in the radio drain above: incoming() runs a whole packet through the
+    // library and can throw, and a hand-written return is skipped when it
+    // does — bleeding this ring until no client's traffic gets through.
+    Sys::RingItem held(sTcpInRing, item);
     if (sz > sizeof(TcpItemHeader)) {
       TcpItemHeader h; memcpy(&h, item, sizeof(h));
       auto it = tcpIfaces.find(h.clientId);
       if (it != tcpIfaces.end()) it->second.impl->incoming(item + sizeof(h), sz - sizeof(h));
     }
-    vRingbufferReturnItem(sTcpInRing, item);
   }
 }
 
 // Snapshots for the web layer
 static uint32_t sSnapAtMs = 0;
+static uint32_t sSnapOkMs = 0;          // last pass that actually published; the age readers see
+// Dead paths are cleaned up on a slower clock than the reading is refreshed:
+// the reading is capped and cheap, the sweep walks the whole table.
+static const uint32_t kStaleSweepMs = 60000;
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
 static size_t   sIfaceCount = 0;         // likewise, so a capped list still counts true
 static Tables   sTables = {};            // table sizes, for soak monitoring
 
-static void refreshSnapshots() {
+static void refreshSnapshots(bool allowSweep) {
   // Walking the path table reads every record back through microStore
   // (LittleFS or the SD card), so refresh it slowly and keep the list short —
   // the count is free, the rows are not.
   if (millis() - sSnapAtMs < SNAPSHOT_INTERVAL_MS) return;
+  // Stamped on the way in, so a pass that throws does not come straight back
+  // on the next 10 ms tick and spend the node's remaining memory logging about
+  // it. What it must not do is imply the reading is current: sSnapOkMs, set
+  // only after the publish below, is what /api/status reports the age from, so
+  // a snapshot that stopped updating says so instead of looking fresh.
   sSnapAtMs = millis();
   // clear() keeps the capacity reserved at begin(), so the push_back()s below
   // write into memory this node already owns.
@@ -1420,22 +1533,36 @@ static void refreshSnapshots() {
   // behind per destination it carried, so on a busy node this is the same
   // doubling cascade the other two just stopped doing. Bounded to one pass's
   // worth: what is not dropped this time is dropped in five seconds.
+  //
+  // On its own, slower clock. Collecting rows stops at SNAPSHOT_MAX_PATHS, and
+  // the scan used to stop with it — so on a node with more live paths than
+  // that, every entry past the sixty-fourth was never examined and a dead one
+  // sitting there was dropped never rather than in five seconds. Iteration
+  // order is stable, so it stopped in the same place every pass, for ever.
+  //
+  // The whole table is walked when a sweep is due and the rows are capped as
+  // before when it is not, which keeps the reading cheap at five seconds and
+  // the cleanup complete at a minute.
   static std::vector<RNS::Bytes> stale;
+  static uint32_t sSweptMs = 0;
+  const bool sweeping = allowSweep && (uint32_t)(millis() - sSweptMs) >= kStaleSweepMs;
   stale.clear();
   for (auto it = pathTable.begin(); it != pathTable.end(); ++it) {
     RNS::Persistence::NewPathTable::Entry& e = *it;
     if (!e.value.receiving_interface()) {
-      if (stale.size() < SNAPSHOT_MAX_PATHS) stale.push_back(e.key);
+      if (sweeping && stale.size() < SNAPSHOT_MAX_PATHS) stale.push_back(e.key);
       continue;
     }
+    if (p.size() >= SNAPSHOT_MAX_PATHS) continue;    // counted by the table, swept above, not rendered
     PathInfo pi = {};
     strlcpy(pi.hash, e.key.toHex().c_str(), sizeof(pi.hash));
     pi.hops = e.value._hops;
     strlcpy(pi.via, e.value.receiving_interface() ? e.value.receiving_interface().name().c_str() : "?", sizeof(pi.via));
     pi.ageS = (uint32_t)max(0.0, now - e.value._timestamp);
-    p.push_back(pi);
-    if (p.size() >= SNAPSHOT_MAX_PATHS) break;
+    if (p.size() < SNAPSHOT_MAX_PATHS) p.push_back(pi);
+    else if (!sweeping) break;              // rows are full and nothing else needs the rest
   }
+  if (sweeping) sSweptMs = millis();
   if (!stale.empty()) {
     uint16_t dropped = RNS::Transport::remove_paths(stale);
     log_i("dropped %u stored path(s) whose interface is gone", (unsigned)dropped);
@@ -1468,48 +1595,68 @@ static void refreshSnapshots() {
   t.heldAnnounces = (uint32_t)RNS::Transport::held_announces().size();
   t.rates         = (uint32_t)RNS::Transport::announce_rate_table().size();
 
-  xSemaphoreTake(sSnapLock, portMAX_DELAY);
+  // Sys::Lock, not a hand-written pair. Lock.h states the rule: this whole
+  // function now runs under Diag::guard, so there is a way out of the scope
+  // that a give at the bottom does not cover, and a mutex leaked that way
+  // deadlocks the web task, the display task and this one on the next pass.
+  // Nothing in here throws today; the point is that it no longer has to be
+  // checked before anything is added.
+  Sys::Lock held(sSnapLock);
   sPaths.swap(p); sIfaces.swap(i);
   sPathCount = pathTotal; sIfaceCount = ifaceCount;
   sTables = t;
-  xSemaphoreGive(sSnapLock);
+  sSnapOkMs = millis();                 // only here: a pass that threw never reaches this
 }
 
 size_t paths(PathInfo* out, size_t max) {
-  xSemaphoreTake(sSnapLock, portMAX_DELAY);
+  Sys::Lock held(sSnapLock);
   size_t n = min(max, sPaths.size());
   for (size_t k = 0; k < n; k++) out[k] = sPaths[k];
-  xSemaphoreGive(sSnapLock);
   return n;
 }
 
 size_t interfaces(IfaceInfo* out, size_t max) {
-  xSemaphoreTake(sSnapLock, portMAX_DELAY);
+  Sys::Lock held(sSnapLock);
   size_t n = min(max, sIfaces.size());
   for (size_t k = 0; k < n; k++) out[k] = sIfaces[k];
-  xSemaphoreGive(sSnapLock);
   return n;
 }
 
 size_t pathCount() {
-  xSemaphoreTake(sSnapLock, portMAX_DELAY);
-  size_t n = sPathCount;                 // whole table, even when the list is capped
-  xSemaphoreGive(sSnapLock);
-  return n;
+  Sys::Lock held(sSnapLock);
+  return sPathCount;                     // whole table, even when the list is capped
 }
 
 size_t interfaceCount() {
-  xSemaphoreTake(sSnapLock, portMAX_DELAY);
-  size_t n = sIfaceCount;                // the whole list, even when sIfaces is capped
-  xSemaphoreGive(sSnapLock);
-  return n;
+  Sys::Lock held(sSnapLock);
+  return sIfaceCount;                    // the whole list, even when sIfaces is capped
 }
 
 Tables tables() {
-  xSemaphoreTake(sSnapLock, portMAX_DELAY);
-  Tables t = sTables;
-  xSemaphoreGive(sSnapLock);
-  return t;
+  Sys::Lock held(sSnapLock);
+  return sTables;
+}
+
+// Everything a caller needs to describe the node's tables, out of one pass.
+//
+// Taken separately, a count and the list it counts came from different
+// refreshes: a panel read interfaceCount() as five, a refresh landed, and
+// interfaces() then returned three rows — so it printed "+2 more" for
+// interfaces that no longer existed. Moving the counts inside the lock fixed
+// who could see a half-written pass, not who could see two.
+Snapshot snapshot(PathInfo* pathOut, size_t maxPaths,
+                  IfaceInfo* ifaceOut, size_t maxIfaces) {
+  Sys::Lock held(sSnapLock);
+  Snapshot s = {};
+  s.tables      = sTables;
+  s.pathTotal   = sPathCount;
+  s.ifaceTotal  = sIfaceCount;
+  s.pathRows    = pathOut  ? min(maxPaths,  sPaths.size())  : 0;
+  s.ifaceRows   = ifaceOut ? min(maxIfaces, sIfaces.size()) : 0;
+  for (size_t k = 0; k < s.pathRows;  k++) pathOut[k]  = sPaths[k];
+  for (size_t k = 0; k < s.ifaceRows; k++) ifaceOut[k] = sIfaces[k];
+  s.ageMs = (uint32_t)(millis() - sSnapOkMs);
+  return s;
 }
 
 void loop() {
@@ -1523,13 +1670,14 @@ void loop() {
   // a throw escaped to the task loop in main.cpp, which abandoned the rest of
   // the pass — refreshSnapshots() included, so the stale snapshot below was
   // served as current after all.
-  Diag::guard("rns loop", [] {
+  const bool passOk = Diag::guard("rns loop", [] {
     applyLogMute();
     // Answers other tasks composed, sent from here because this is the task
     // that owns the library (queueLxmfReply above).
     if (sReplyQueue) {
       PendingReply r;
-      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE && !sendLxmf(r.dest, r.text, r.telemetry, r.signal))
+      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE &&
+          !sendLxmf(r.dest, r.text, r.telemetry, r.signal, r.haveKey ? r.key : nullptr))
         log_w("lxmf: could not send an answer to %s", RNS::Bytes(r.dest, 16).toHex().c_str());
     }
     processEvents();
@@ -1540,6 +1688,16 @@ void loop() {
     // truth as well used to mean that the one millis() in every 49 days that
     // lands the next announce on zero switched announcing off for good.
     uint16_t interval = settings.radio().announceInterval;
+    // A booked announce does not survive the interval being lowered. Nothing
+    // on the settings path touches the schedule, so a node at the 12-hour
+    // maximum dropped to a minute — which is what an operator does when
+    // neighbours cannot see it — went on saying nothing for up to 13 hours
+    // while /api/status reported the new value.
+    static uint16_t sBookedFor = 0;
+    if (interval && interval != sBookedFor) {
+      sNextAnnounceMs = Rns::clampAnnounceTo(sNextAnnounceMs, interval, millis());
+      sBookedFor = interval;
+    }
     if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
       // Scheduled before it is attempted, not after. Advancing only on the way
       // out meant that an announce which threw left the schedule untouched, so
@@ -1556,8 +1714,7 @@ void loop() {
       // the interval is enough to break the lockstep, and small enough that
       // an operator watching for an announce still sees it about when they
       // expect. Reticulum's own implementation jitters for the same reason.
-      const uint32_t base = (uint32_t)interval * 1000UL;
-      sNextAnnounceMs = millis() + base + (esp_random() % (base / 10 + 1));
+      sNextAnnounceMs = Rns::nextAnnounceAt(interval, millis(), esp_random());
 
       char app[64];
       // snprintf returns the length it *would* have written. A 32-character
@@ -1577,6 +1734,12 @@ void loop() {
       // it had not.
       nodeDest.announce(Bytes((const uint8_t*)app, appLen));
       g_stats.announcesTx++;
+      // Logged here, with the first announce that actually went out, for the
+      // same reason the counter is incremented here. At the end of the block a
+      // throw from the second or third announce took the line with it, so a
+      // node that had just announced twice left no record of having announced
+      // at all — and an operator reading the log concluded it had gone quiet.
+      log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
       // And the same node under its LXMF address, so it appears in the
       // clients people actually use. The app_data is the shape LXMF expects
       // rather than the free text above — the two announces describe one node
@@ -1590,7 +1753,6 @@ void loop() {
       const char* nn = loraRadio.callsign();
       nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
       g_stats.announcesTx++;
-      log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
     }
   });
 
@@ -1602,7 +1764,24 @@ void loop() {
   // list and counters that have stopped. That is worse than an error, because
   // it is believed: it was read as "no TCP client is attached" while a client
   // was in fact attached and working.
-  Diag::guard("rns snapshots", [] { refreshSnapshots(); });
+  //
+  // The reading is still taken when the pass above failed — that is the whole
+  // point of the separate guard — but the dead-path sweep is not. Sweeping
+  // deletes from the path table, and doing that straight after an allocation
+  // failure means mutating a store whose last operation was abandoned
+  // part-way, on a node that has just run out of memory. The reading is what
+  // an operator needs; the cleanup can wait a minute.
+  Diag::guard("rns snapshots", [passOk] { refreshSnapshots(passOk); });
+
+  // Backing off after a caught failure. This task runs every 10 ms, and
+  // Diag::noteCaught walks the heap free list twice to report the figures
+  // behind a failure — so a condition that throws every pass produced a
+  // hundred catches and two hundred free-list traversals a second, under the
+  // allocator's lock, on a node whose problem is almost certainly memory. The
+  // log that would tell an operator what happened is also the thing burying
+  // it. A quarter second between attempts keeps the report and drops the
+  // flood.
+  if (!passOk) vTaskDelay(pdMS_TO_TICKS(250));
 }
 
 } // namespace RnsTransport

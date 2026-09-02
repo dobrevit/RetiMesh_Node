@@ -40,6 +40,49 @@
 
 namespace Rns {
 
+// ---------------------------------------------------------------------------
+// When to announce next
+// ---------------------------------------------------------------------------
+// Pure arithmetic, out here where the native tests can reach it. Inside the
+// task loop none of this was exercised: not the wrap, not the jitter bound,
+// not the promotion of a uint16 interval into milliseconds.
+//
+// Scattered, not on the dot. Two nodes flashed together boot together and
+// would then announce together for as long as they both run — the interval is
+// fixed and nothing else moves the phase, so their packets collide every time
+// and one of them is never heard.
+//
+// Scattered *around* the interval, not after it. Adding jitter and never
+// subtracting it made the configured value a floor the node never met: every
+// announce came late by somewhere between nothing and a tenth of the interval,
+// so a node set to announce every minute managed about 1371 a day against the
+// 1440 asked for — and at the 12-hour maximum the settings allow, an announce
+// booked for noon could arrive as late as 13:12 and never before noon. The
+// spread is the same width; it is centred now, so the configured interval is
+// what the node averages.
+//
+// `rnd` is any random value; the caller passes esp_random(). Returns an
+// absolute millis() deadline.
+inline uint32_t nextAnnounceAt(uint16_t intervalS, uint32_t nowMs, uint32_t rnd) {
+  if (!intervalS) return nowMs;                     // caller checks this; defined anyway
+  const uint32_t base   = (uint32_t)intervalS * 1000UL;
+  const uint32_t spread = base / 10;                // a tenth, as before
+  return nowMs + base - spread / 2 + (spread ? rnd % (spread + 1) : 0);
+}
+
+// Bring a booked announce forward when the interval is lowered.
+//
+// Nothing on the settings path touches the schedule, so a node running at the
+// 12-hour maximum that is dropped to a minute — because neighbours cannot see
+// it, which is when an operator does this — went on saying nothing for up to
+// 13 hours while the status page reported the new interval. A deadline further
+// out than the new interval allows is pulled in to it.
+inline uint32_t clampAnnounceTo(uint32_t bookedMs, uint16_t intervalS, uint32_t nowMs) {
+  const uint32_t latest = nowMs + (uint32_t)intervalS * 1000UL;
+  return (int32_t)(bookedMs - latest) > 0 ? latest : bookedMs;
+}
+
+
 constexpr size_t HASH_LEN   = 16;
 constexpr size_t NAME_HASH  = 10;
 constexpr size_t KEY_LEN    = 64;

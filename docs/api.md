@@ -387,9 +387,16 @@ What they cost is airtime: **one reply per message**, whatever was asked, so
 three commands in one message get one answer rather than three. A ping or an
 echo is one short packet for one short packet; a **telemetry answer is not** —
 the readings run to a couple of hundred bytes against a request of about a
-hundred, and can be two fragments at SF12. What bounds that is the per-sender
-cooldown of ten seconds, counted only when an answer actually went out, and
-the duty-cycle accounting — not the size of the request. `SET
+hundred, and can be two fragments at SF12. Two things bound that, not the size
+of the request. A **per-sender cooldown** of ten seconds, counted when an answer
+is composed and queued rather than when it reaches the air — a reply that then
+fails to send is logged and still spends the ten seconds, which costs the sender
+one retry and keeps the limit a bound on work rather than on luck. And a
+**budget shared by every sender**: four answers, refilling one every fifteen
+seconds. The cooldown alone gates a peer that keeps one identity; announcing
+costs nothing, so anyone willing to rotate through nine of them evicts their own
+entry from the table before it can stop them. The budget is the rule that does
+not care what a sender calls itself. `SET
 maintenance.lxmf_commands off` (or `"lxmf_commands": false` over HTTP) declines
 to spend it on a crowded channel.
 

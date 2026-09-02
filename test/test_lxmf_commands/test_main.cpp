@@ -163,6 +163,40 @@ static void test_no_reply_overruns_a_small_buffer() {
 void setUp() {}
 void tearDown() {}
 
+
+// An echo carries whatever the sender put beside it, and msgpackNext only sets
+// the value for a string or binary — so {echo: true} arrives with nothing to
+// echo. Answering it put "Echo reply: " on the air over this node's signature,
+// spent the sender's cooldown, and stopped the loop before any real command
+// later in the same message.
+static void test_an_echo_with_nothing_to_echo_is_not_answered() {
+  char out[Commands::kReplyMax];
+  TEST_ASSERT_EQUAL_size_t(0, Commands::reply(cmd(kCommandEcho), {}, out, sizeof(out)));
+  TEST_ASSERT_EQUAL_size_t(0, strlen(out));
+
+  // And an argument that is present but holds nothing printable is the same
+  // answer: there is no text to send back.
+  TEST_ASSERT_EQUAL_size_t(0, Commands::reply(cmd(kCommandEcho, ""), {}, out, sizeof(out)));
+}
+
+// "No reception info available" is a claim about the radio, not about the
+// formatter. Saying it because a figure would not render tells the asker the
+// node heard nothing when it had a measurement.
+static void test_a_reading_that_will_not_render_is_not_reported_as_no_reading() {
+  char out[Commands::kReplyMax];
+  Signal huge{};
+  huge.q = 1e30f; huge.rssi = NAN; huge.snr = NAN;     // formats longer than the scratch line
+  const size_t n = Commands::reply(cmd(kCommandSignal), huge, out, sizeof(out));
+  TEST_ASSERT_EQUAL_size_t(0, n);
+  TEST_ASSERT_NULL(strstr(out, "No reception"));
+
+  // With nothing measured at all, the sentence is still the right answer.
+  Signal none{};
+  none.q = NAN; none.rssi = NAN; none.snr = NAN;
+  TEST_ASSERT_TRUE(Commands::reply(cmd(kCommandSignal), none, out, sizeof(out)) > 0);
+  TEST_ASSERT_EQUAL_STRING("No reception info available", out);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_a_ping_is_answered_the_way_sideband_answers_one);
@@ -176,5 +210,8 @@ int main() {
   RUN_TEST(test_the_node_says_which_commands_it_answers);
   RUN_TEST(test_no_text_is_written_for_what_is_not_a_text_answer);
   RUN_TEST(test_no_reply_overruns_a_small_buffer);
+  RUN_TEST(test_an_echo_with_nothing_to_echo_is_not_answered);
+  RUN_TEST(test_a_reading_that_will_not_render_is_not_reported_as_no_reading);
+
   return UNITY_END();
 }

@@ -1265,15 +1265,26 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // every poll, it is the size that a long-running node can no longer find
     // in one piece, and failing to find it aborted the node.
     static RnsTransport::IfaceInfo ifs[RNS_MAX_INTERFACES];
-    size_t k = RnsTransport::interfaces(ifs, RNS_MAX_INTERFACES);
+    static RnsTransport::PathInfo  ps[32];
+    // Interfaces, paths and the totals that describe them, out of one pass —
+    // otherwise this document can report a path_count from one refresh beside
+    // rows from another, which is a status page contradicting itself.
+    const RnsTransport::Snapshot snap =
+        RnsTransport::snapshot(ps, 32, ifs, RNS_MAX_INTERFACES);
+    const size_t k = snap.ifaceRows;
     JsonArray ia = tr["interfaces"].to<JsonArray>();
     for (size_t i = 0; i < k; i++) {
       JsonObject o = ia.add<JsonObject>();
       o["name"] = ifs[i].name; o["mode"] = ifs[i].mode; o["rx_bytes"] = ifs[i].rxb; o["tx_bytes"] = ifs[i].txb;
     }
-    RnsTransport::PathInfo ps[32];
-    size_t pk = RnsTransport::paths(ps, 32);
-    tr["path_count"] = RnsTransport::pathCount();
+    const size_t pk = snap.pathRows;
+    tr["path_count"]     = snap.pathTotal;
+    tr["interface_count"] = snap.ifaceTotal;
+    // How old the reading is. A refresh that fails leaves the previous values
+    // in place, and without this they are indistinguishable from current ones
+    // — on exactly the node an operator is looking at to find out what is
+    // wrong with it.
+    tr["snapshot_age_s"] = snap.ageMs / 1000;
     JsonArray pa = tr["paths"].to<JsonArray>();
     for (size_t i = 0; i < pk; i++) {
       JsonObject o = pa.add<JsonObject>();

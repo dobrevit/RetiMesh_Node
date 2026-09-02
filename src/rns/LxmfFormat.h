@@ -152,8 +152,14 @@ inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
     if (!need(5)) return false;
     valLen = ((size_t)p[i + 1] << 24) | ((size_t)p[i + 2] << 16) |
              ((size_t)p[i + 3] << 8) | p[i + 4];
+    // Bound the length against what is left, rather than checking the sum for
+    // having gone backwards. On a 32-bit size_t the five lengths from
+    // 0xFFFFFFFB up wrap i + 5 + valLen to between i and i + 4, so the sum is
+    // not less than i and the check passed — handing the caller a 4 GiB valLen
+    // for a five-byte header. utf8TrimLen then walked the heap until it hit
+    // something unmapped, on a message no one had to authenticate to send.
+    if (valLen > n - (i + 5)) return false;
     val = p + i + 5; next = i + 5 + valLen;
-    if (next < i) return false;                                                                 // length that wrapped
   }
   else if (t <= 0x7F || t >= 0xE0)     next = i + 1;                                            // fixint
   else if (t == 0xC0 || t == 0xC2 || t == 0xC3) next = i + 1;                                   // nil, false, true
@@ -161,6 +167,21 @@ inline bool msgpackNext(const uint8_t* p, size_t n, size_t i,
   else if (t == 0xCD || t == 0xD1)     next = i + 3;
   else if (t == 0xCE || t == 0xD2 || t == 0xCA) next = i + 5;                                   // u32/i32/float32
   else if (t == 0xCF || t == 0xD3 || t == 0xCB) next = i + 9;                                   // u64/i64/float64
+  else if (t >= 0xD4 && t <= 0xD8) {                                                             // fixext 1/2/4/8/16
+    // An extension carries a type byte and a fixed payload. LXMF does not ask
+    // for one, but msgpack's own timestamp is ext -1 and a client is free to
+    // send it, so refusing the shape would reject the whole message and leave
+    // it unproven — the same fault the container walk below was written to fix.
+    next = i + 2 + ((size_t)1 << (t - 0xD4));
+  }
+  else if (t == 0xC7 || t == 0xC8 || t == 0xC9) {                                               // ext8 / ext16 / ext32
+    const size_t w = (t == 0xC7) ? 1u : (t == 0xC8) ? 2u : 4u;
+    if (!need(1 + w + 1)) return false;
+    uint64_t len = 0;
+    for (size_t k = 0; k < w; k++) len = (len << 8) | p[i + 1 + k];
+    if (len > n - (i + 1 + w + 1)) return false;                                                // as for str32 above
+    next = i + 1 + w + 1 + (size_t)len;
+  }
   else if (t == 0xDC || t == 0xDD || t == 0xDE || t == 0xDF ||
            (t & 0xF0) == 0x80 || (t & 0xF0) == 0x90) {
     // Every container, of either kind and any width. A fields dict with
@@ -456,13 +477,14 @@ inline bool parseLxmf(const uint8_t* data, size_t len, LxmfMessage& out) {
     // bring anything with it" is asking about entries, and the two answers
     // differ: an empty dict encoded as map16 is three bytes rather than one,
     // so a length test calls a plain text message an attachment.
-    const uint8_t h = p[at];
-    if ((h & 0xF0) == 0x80)   out.fieldsCount = h & 0x0F;                    // fixmap
-    else if (h == 0xDE && at + 3 <= n)
-      out.fieldsCount = ((size_t)p[at + 1] << 8) | p[at + 2];                // map16
-    else if (h == 0xDF && at + 5 <= n)
-      out.fieldsCount = ((size_t)p[at + 1] << 24) | ((size_t)p[at + 2] << 16) |
-                        ((size_t)p[at + 3] << 8) | p[at + 4];                // map32
+    //
+    // Asked of the same helper the walk above uses, so the two cannot come to
+    // different conclusions about a map's shape. This was a second, slacker
+    // copy of that decode — it read a map32 count without the helper's bound
+    // on it — and two readings of one header in one file is how they drift.
+    size_t entries = 0, firstEntry = 0;
+    if (msgpackContainerHeader(p, n, at, /*wantMap=*/true, entries, firstEntry))
+      out.fieldsCount = entries;
     i = next;
     signedEnd = i;
   }
@@ -597,8 +619,14 @@ inline size_t lxmfCommands(const uint8_t* val, size_t n, LxmfCommand* out, size_
   size_t count = 0, i = 0, found = 0;
   if (!msgpackContainerHeader(val, n, 0, /*wantMap*/ false, count, i)) return 0;
   for (size_t k = 0; k < count && found < max; k++) {
-    const uint8_t* ev = nullptr; size_t evl = 0, afterElem = 0;
-    if (!msgpackNext(val, n, i, ev, evl, afterElem)) return found;   // bounds come from here
+    // Where this element ends. A one-pair map is the shape every real client
+    // sends, and reading its key and value already establishes that — so in
+    // that case the walk below yields the end for free and the element is
+    // parsed once rather than twice. Anything else (no pairs, more than one,
+    // or a member this cannot read) falls back to walking the element whole,
+    // which is what bounds it.
+    size_t afterElem = 0;
+    bool   haveEnd   = false;
     size_t pairs = 0, at = 0;
     if (msgpackContainerHeader(val, n, i, /*wantMap*/ true, pairs, at) && pairs >= 1) {
       uint32_t id = 0; size_t afterKey = 0;
@@ -609,8 +637,13 @@ inline size_t lxmfCommands(const uint8_t* val, size_t n, LxmfCommand* out, size_
           out[found].text = av;        // msgpackNext sets this only for a string or binary
           out[found].textLen = avl;
           found++;
+          if (pairs == 1) { afterElem = afterVal; haveEnd = true; }
         }
       }
+    }
+    if (!haveEnd) {
+      const uint8_t* ev = nullptr; size_t evl = 0;
+      if (!msgpackNext(val, n, i, ev, evl, afterElem)) return found;  // bounds come from here
     }
     i = afterElem;
   }
