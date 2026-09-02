@@ -50,6 +50,12 @@ void sample() {
   // is readable (Config.h): most halve the cell and read at 11 dB, one divides
   // by five and reads at 2.5 dB. Average a few readings; the pin floats
   // without a cell.
+  // Both the pin's attenuation and the driver-wide one: measured on the V4,
+  // setting only the pin left analogReadMilliVolts calibrating against the
+  // 11 dB default while the hardware sat at 2.5 dB, and a 0.76 V divider tap
+  // came back as 2.2 V — an 11.4 V battery on the status line. The two calls
+  // must agree for the calibration to.
+  analogSetAttenuation(BATTERY_ADC_ATTEN);
   analogSetPinAttenuation(PIN_BATTERY_ADC, BATTERY_ADC_ATTEN);
 #if PIN_BATTERY_ADC_EN >= 0
   // The divider is only connected while its enable line is held, so hold it

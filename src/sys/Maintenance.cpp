@@ -23,6 +23,7 @@
 #include "LxmfInbox.h"
 #include "RnsAdmin.h"
 #include "Maintenance.h"
+#include "Power.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
 
@@ -137,6 +138,17 @@ static void doStatus() {
         (unsigned long)h.largestDramBlock);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
+#if HAS_PMU || HAS_BATTERY_ADC
+  // The cell as this board sees it — the same reading the panel's icon acts
+  // on, which is the point: an icon that has gone missing is diagnosed from
+  // the cable by the number that made it go.
+  {
+    const Power::Battery bat = Power::battery();
+    dataf("STATUS", "battery=%s volts=%.3f percent=%u%s",
+          bat.present ? "present" : "not-seen", (double)bat.volts, (unsigned)bat.percent,
+          bat.chargeKnown ? (bat.charging ? " charging=yes" : " charging=no") : "");
+  }
+#endif
   // Whether the console can be reached over the network, and whether somebody
   // already holds the one session — which is the answer to "why will it not
   // let me in" when two people administer the same node.
