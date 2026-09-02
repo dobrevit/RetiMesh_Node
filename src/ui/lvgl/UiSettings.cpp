@@ -31,6 +31,7 @@
 //  without this file changing.
 // ============================================================================
 #include "Ui.h"
+#include "UiTheme.h"
 
 #if HAS_LVGL_UI
 
