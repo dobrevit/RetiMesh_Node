@@ -353,6 +353,9 @@ const Entry kFields[] = {
   { "display.brightness",
     [](char* o, size_t n) { snprintf(o, n, "%u", settings.display().brightness); },
     [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 100, u, e, n)) return Result::BadValue;
+      // Floored everywhere, not just on the glass: zero is a dark panel that
+      // still believes it is on, and going dark is the sleep timer's job.
+      if (u < 5) { snprintf(e, n, "at least 5: darkness belongs to the sleep timer, not a setting"); return Result::BadValue; }
       DisplaySettings d = settings.display(); d.brightness = (uint8_t)u; return commitDisplay(d, e, n); } },
   { "display.touch_wake",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.display().touchWake ? "on" : "off"); },

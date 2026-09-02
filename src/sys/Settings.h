@@ -140,8 +140,9 @@ struct DisplaySettings {
   // Whether a tap wakes a blanked panel. On by the phone convention; off for
   // a pocketed device whose every accidental touch would light the glass.
   bool touchWake = true;
-  // Backlight, percent. The panel maps it through PWM; zero is legal and
-  // means "as dark as the glass can show".
+  // Backlight, percent, floored at 5 by the funnel: a panel dimmed to
+  // nothing still believes it is on, and going dark is the sleep timer's
+  // job. The panel maps it through PWM.
   uint8_t brightness = 80;
 };
 
