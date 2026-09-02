@@ -158,6 +158,18 @@ const char* nomadAddress();
 // loop. False when the queue is full, which means the node is already behind.
 bool queueLxmfReply(const uint8_t destHash[16], const char* text);
 
+// What this node has said, for the glass: the last few outbound text
+// messages with their honest fate — queued, then sent or refused when the
+// RNS task got to them. Telemetry answers are machine traffic and stay out.
+struct OutMessage {
+  uint8_t  dest[16];
+  char     text[80];
+  uint32_t queuedMs;
+  uint32_t sentMs;                       // 0 while still queued
+  bool     ok;                           // meaningful once sentMs != 0
+};
+size_t lxmfOutbound(OutMessage* out, size_t max);   // newest first
+
 // The same, with the node's own readings attached — what a client's telemetry
 // request is answered with. The document is built when the answer goes out
 // rather than now, so what it carries is current and the queue stays small.

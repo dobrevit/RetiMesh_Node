@@ -1183,6 +1183,13 @@ struct PendingReply {
 };
 static QueueHandle_t sReplyQueue = nullptr;
 
+// The outbound log (RnsTransport.h): written by whoever queues, stamped by
+// the RNS task, read by the display — a spinlock because every touch is a
+// short copy.
+static OutMessage    sOutLog[8];
+static uint32_t      sOutCount = 0;
+static portMUX_TYPE  sOutMux = portMUX_INITIALIZER_UNLOCKED;
+
 bool queueLxmfReply(const uint8_t destHash[16], const char* text) {
   return queueLxmfTelemetry(destHash, text, false, {});
 }
@@ -1199,7 +1206,29 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
     memcpy(r.key, verifiedKey, kPublicKeyLen);
     r.haveKey = true;
   }
-  return xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
+  const bool queued = xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
+  if (queued && !telemetry) {
+    taskENTER_CRITICAL(&sOutMux);
+    OutMessage& o = sOutLog[sOutCount % 8];
+    memcpy(o.dest, destHash, 16);
+    strlcpy(o.text, text ? text : "", sizeof(o.text));
+    o.queuedMs = millis() ? millis() : 1;
+    o.sentMs = 0;
+    o.ok = false;
+    sOutCount++;
+    taskEXIT_CRITICAL(&sOutMux);
+  }
+  return queued;
+}
+
+size_t lxmfOutbound(OutMessage* out, size_t max) {
+  taskENTER_CRITICAL(&sOutMux);
+  const uint32_t n = sOutCount < 8 ? sOutCount : 8;
+  size_t w = 0;
+  for (uint32_t i = 0; i < n && w < max; i++)
+    out[w++] = sOutLog[(sOutCount - 1 - i) % 8];   // newest first
+  taskEXIT_CRITICAL(&sOutMux);
+  return w;
 }
 
 static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry,
@@ -1679,9 +1708,27 @@ void loop() {
     // that owns the library (queueLxmfReply above).
     if (sReplyQueue) {
       PendingReply r;
-      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE &&
-          !sendLxmf(r.dest, r.text, r.telemetry, r.signal, r.haveKey ? r.key : nullptr))
-        log_w("lxmf: could not send an answer to %s", RNS::Bytes(r.dest, 16).toHex().c_str());
+      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE) {
+        const bool ok = sendLxmf(r.dest, r.text, r.telemetry, r.signal,
+                                 r.haveKey ? r.key : nullptr);
+        if (!ok) log_w("lxmf: could not send an answer to %s",
+                       RNS::Bytes(r.dest, 16).toHex().c_str());
+        if (!r.telemetry) {
+          // The queue is FIFO, so this send belongs to the oldest unsent
+          // log entry for the same destination.
+          taskENTER_CRITICAL(&sOutMux);
+          const uint32_t from = sOutCount > 8 ? sOutCount - 8 : 0;
+          for (uint32_t i = from; i < sOutCount; i++) {
+            OutMessage& o = sOutLog[i % 8];
+            if (!o.sentMs && memcmp(o.dest, r.dest, 16) == 0) {
+              o.sentMs = millis() ? millis() : 1;
+              o.ok = ok;
+              break;
+            }
+          }
+          taskEXIT_CRITICAL(&sOutMux);
+        }
+      }
     }
     processEvents();
     drainTcp();
