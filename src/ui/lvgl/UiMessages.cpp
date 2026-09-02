@@ -26,6 +26,7 @@
 #include "LxmfInbox.h"
 #include "RnsTransport.h"
 #include "Gps.h"
+#include "Neighbors.h"
 
 namespace {
 
@@ -37,6 +38,16 @@ uint32_t  sThreadStamp = 0;              // outbound-state hash, to redraw only 
 
 void hex8(const uint8_t* h, char* out) {
   snprintf(out, 10, "%02x%02x%02x%02x", h[0], h[1], h[2], h[3]);
+}
+
+// The sender's announced name when one was heard, the shortened hash
+// otherwise — same rule as the mesh list.
+void senderName(const uint8_t* h, char* out, size_t n) {
+  char hex[33];
+  for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", h[i]);
+  Neighbor nb = {};
+  if (neighbors.byHash(hex, nb) && nb.name[0]) snprintf(out, n, "%s", nb.name);
+  else snprintf(out, n, "%.8s", hex);
 }
 
 void ageText(uint32_t ms, char* out, size_t n) {
@@ -231,8 +242,8 @@ void openQuick(lv_event_t*) {
 
 void openThreadScreen(const uint8_t from[16]) {
   memcpy(sThreadDest, from, 16);
-  char title[12];
-  hex8(from, title);
+  char title[34];
+  senderName(from, title, sizeof(title));
   lv_obj_t* body = Ui::newScreen(title);
 
   sThreadCol = lv_obj_create(body);
@@ -304,9 +315,9 @@ void listRebuild() {
 
   if (!n) { lv_list_add_text(sList, "no messages yet"); return; }
   for (size_t i = 0; i < n; i++) {
-    char line[64], h[12];
-    hex8(th[i].from, h);
-    snprintf(line, sizeof(line), "%s · %u\n%s", h, th[i].count, th[i].preview);
+    char line[96], who[34];
+    senderName(th[i].from, who, sizeof(who));
+    snprintf(line, sizeof(line), "%s · %u\n%s", who, th[i].count, th[i].preview);
     lv_obj_t* btn = lv_list_add_button(sList, LV_SYMBOL_ENVELOPE, line);
     static uint8_t dests[16][16];        // stable storage the callback points at
     memcpy(dests[i], th[i].from, 16);

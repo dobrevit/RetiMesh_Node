@@ -18,6 +18,7 @@
 #include <Arduino.h>
 #include "UiTheme.h"
 #include "RnsTransport.h"
+#include "Neighbors.h"
 
 namespace {
 
@@ -62,8 +63,11 @@ lv_obj_t* reading(lv_obj_t* parent, const char* label, const char* value) {
 void openDetail(lv_event_t* e) {
   const RnsTransport::PathInfo* pi =
       (const RnsTransport::PathInfo*)lv_event_get_user_data(e);
-  char title[12];
-  snprintf(title, sizeof(title), "%.8s", pi->hash);
+  Neighbor nb = {};
+  const bool heard = neighbors.byHash(pi->hash, nb) && nb.name[0];
+  char title[34];
+  snprintf(title, sizeof(title), "%s", heard ? nb.name : "");
+  if (!title[0]) snprintf(title, sizeof(title), "%.8s", pi->hash);
   lv_obj_t* body = Ui::newScreen(title);
 
   // The full hash, grouped in fours across two lines — the spec's rule: it
@@ -86,6 +90,14 @@ void openDetail(lv_event_t* e) {
   char av[44]; snprintf(av, sizeof(av), "%s ago", v);
   reading(body, "LAST HEARD", av);
   reading(body, "VIA", pi->via);
+  // The signal rows the spec drew, filled only when this node truly heard
+  // the peer itself — a announce that came over RF carries its own figures.
+  if (neighbors.byHash(pi->hash, nb) && !nb.viaWifi && nb.rssi != 0) {
+    snprintf(v, sizeof(v), "%.0f dBm", (double)nb.rssi);
+    reading(body, "LAST RSSI", v);
+    snprintf(v, sizeof(v), "%.1f dB", (double)nb.snr);
+    reading(body, "SNR", v);
+  }
   snprintf(v, sizeof(v), "self -> %s -> %.8s", pi->via, pi->hash);
   lv_obj_t* path = reading(body, "PATH", v);
   lv_obj_set_style_text_color(path, lv_color_hex(UiTheme::kInkDim), 0);
@@ -145,10 +157,16 @@ void openDestinations() {
   lv_obj_set_flex_grow(list, 1);
   if (!sCount) lv_list_add_text(list, "nothing announced yet");
   for (size_t i = 0; i < sCount; i++) {
-    char age[8], line[64];
+    char age[8], line[80];
     ageText(sPaths[i].ageS, age, sizeof(age));
-    snprintf(line, sizeof(line), "%.8s · %u hop%s · %s\nvia %s", sPaths[i].hash,
-             sPaths[i].hops, sPaths[i].hops == 1 ? "" : "s", age, sPaths[i].via);
+    // The peer's name leads when an announce carried one; the shortened key
+    // id sits beneath it either way — the name is for people, the hash is
+    // what the mesh actually routes on.
+    Neighbor nb = {};
+    const bool named = neighbors.byHash(sPaths[i].hash, nb) && nb.name[0];
+    snprintf(line, sizeof(line), "%s%s%.8s · %u hop%s · %s",
+             named ? nb.name : "", named ? "\n" : "", sPaths[i].hash,
+             sPaths[i].hops, sPaths[i].hops == 1 ? "" : "s", age);
     lv_obj_t* btn = lv_list_add_button(list, LV_SYMBOL_SHUFFLE, line);
     // Stale peers stay listed but recede — quiet an hour is still a fact.
     if (sPaths[i].ageS > 3600)
