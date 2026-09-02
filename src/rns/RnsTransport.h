@@ -170,6 +170,10 @@ struct OutMessage {
 };
 size_t lxmfOutbound(OutMessage* out, size_t max);   // newest first
 
+// Ask for an announce at the next opportunity the schedule allows — the
+// destinations screen's button. The boot floor and rate manners hold.
+void announceNow();
+
 // The same, with the node's own readings attached — what a client's telemetry
 // request is answered with. The document is built when the answer goes out
 // rather than now, so what it carries is current and the queue stays small.

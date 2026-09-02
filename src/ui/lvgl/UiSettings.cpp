@@ -388,6 +388,11 @@ void openSettings() {
     nSections++;
   }
 
+  // About lives here now — the action bar's slots belong to the spec's
+  // three destinations plus the receiver.
+  lv_obj_t* about = lv_list_add_button(list, LV_SYMBOL_LIST, "About");
+  lv_obj_add_event_cb(about, [](lv_event_t*) { Ui::openAbout(); }, LV_EVENT_CLICKED, nullptr);
+
   push(lv_obj_get_parent(lv_obj_get_parent(body)));
 }
 

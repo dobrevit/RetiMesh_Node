@@ -229,7 +229,7 @@ void openQuick(lv_event_t*) {
 
 // --- the thread screen ------------------------------------------------------
 
-void openThread(const uint8_t from[16]) {
+void openThreadScreen(const uint8_t from[16]) {
   memcpy(sThreadDest, from, 16);
   char title[12];
   hex8(from, title);
@@ -311,7 +311,7 @@ void listRebuild() {
     static uint8_t dests[16][16];        // stable storage the callback points at
     memcpy(dests[i], th[i].from, 16);
     lv_obj_add_event_cb(btn, [](lv_event_t* e) {
-      openThread((const uint8_t*)lv_event_get_user_data(e));
+      openThreadScreen((const uint8_t*)lv_event_get_user_data(e));
     }, LV_EVENT_CLICKED, dests[i]);
   }
 }
@@ -319,6 +319,8 @@ void listRebuild() {
 } // namespace
 
 namespace Ui {
+
+void openThread(const uint8_t from[16]) { openThreadScreen(from); }
 
 void openMessages() {
   lv_obj_t* body = newScreen("Messages");

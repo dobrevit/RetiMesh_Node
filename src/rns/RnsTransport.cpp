@@ -1446,6 +1446,8 @@ static void announceSoon() {
   if ((int32_t)(at - sNextAnnounceMs) < 0) sNextAnnounceMs = at;
 }
 
+void announceNow() { announceSoon(); }
+
 // Drop whatever is registered under this interface's hash. Names are unique
 // per registration now, so this only fires if one ever repeats — but a
 // collision costs the new peer every packet it should have received, silently

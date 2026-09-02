@@ -73,6 +73,8 @@ lv_obj_t* textarea(lv_obj_t* parent, const char* placeholder,
 
 void openHome();                         // builds and loads the root screen
 void openMessages();                     // push()es the messages screen
+void openThread(const uint8_t from[16]);  // one conversation, directly
+void openDestinations();                 // the mesh: peers by hops and freshness
 void openSettings();                     // push()es the category list
 void openWifiJoin();                     // scan, pick, key if locked, save on success
 void openAbout();                        // a dialog: version, addresses

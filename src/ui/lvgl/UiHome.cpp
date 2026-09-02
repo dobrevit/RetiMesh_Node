@@ -217,11 +217,11 @@ void openHome() {
   // The action bar, in the design's vocabulary: terse caps, always the same
   // slots. MESH joins the row when the destinations screen exists.
   shortcut(bar, LV_SYMBOL_ENVELOPE, "MSG",  [](lv_event_t*) { openMessages(); });
-  shortcut(bar, LV_SYMBOL_SETTINGS, "SET",  [](lv_event_t*) { openSettings(); });
+  shortcut(bar, LV_SYMBOL_SHUFFLE,  "MESH", [](lv_event_t*) { openDestinations(); });
 #if HAS_GPS
   shortcut(bar, LV_SYMBOL_GPS,      "GPS",  [](lv_event_t*) { openGps(); });
 #endif
-  shortcut(bar, LV_SYMBOL_LIST,     "INFO", [](lv_event_t*) { openAbout(); });
+  shortcut(bar, LV_SYMBOL_SETTINGS, "SET",  [](lv_event_t*) { openSettings(); });
 
   // The bar steals the bottom 50 px from the card column.
   lv_obj_set_style_pad_bottom(body, 54, 0);
