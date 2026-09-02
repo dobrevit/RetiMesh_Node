@@ -13,6 +13,15 @@ PlatformIO's own `board_upload.maximum_size` does not stop this: it feeds the
 "Flash: NN%" line and nothing else, and a build 8 % over its stated maximum
 still succeeds. Verified, not assumed — that is why this script exists.
 
+That "Flash:" line is also not this one, and the difference is not small. It
+totals the ELF's sections; the partition is written with firmware.bin, which
+carries an image header, a header per segment, the padding that aligns them and
+a SHA-256 on the end — about 70 KiB more on a t3s3 build. Reading the ELF
+figure as slot headroom credits a node with room it does not have, which is the
+one direction that matters here: two people sized the same build at 91 % and
+94.6 % on the same afternoon and only one of them was the number the bootloader
+would meet. This line measures the file that gets written.
+
 The size comes from the partition table rather than from a number written here,
 so the two cannot disagree: the table is the thing the bootloader obeys.
 """
@@ -70,8 +79,10 @@ def check(source, target, env):  # noqa: ARG001, F811
         print("*** something a deployed node can be offered.")
         env.Exit(1)
     pct = 100.0 * size / slot
-    print(f"image: {size} bytes, {pct:.1f}% of the {slot // 1024} KiB app slot "
-          f"({headroom // 1024} KiB free for growth)")
+    # Named as the binary, because the "Flash: NN%" line a few lines above in
+    # the same build output says something else and is the friendlier number.
+    print(f"image: {size} bytes of firmware.bin, {pct:.1f}% of the {slot // 1024} KiB "
+          f"app slot ({headroom // 1024} KiB free for growth)")
 
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", check)  # noqa: F821
