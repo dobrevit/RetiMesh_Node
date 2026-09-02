@@ -46,10 +46,25 @@ uint8_t percentFor(float v) {
 
 #if HAS_BATTERY_ADC
 void sample() {
-  // 12-bit ADC with 11 dB attenuation reads up to ~3.1 V; the divider halves
-  // the cell voltage. Average a few readings; the pin floats without a cell.
+  // The board says how deep its divider is and at what attenuation the result
+  // is readable (Config.h): most halve the cell and read at 11 dB, one divides
+  // by five and reads at 2.5 dB. Average a few readings; the pin floats
+  // without a cell.
+  analogSetPinAttenuation(PIN_BATTERY_ADC, BATTERY_ADC_ATTEN);
+#if PIN_BATTERY_ADC_EN >= 0
+  // The divider is only connected while its enable line is held, so hold it
+  // for the reading and release it after: left connected it drains the cell
+  // it measures. Reading it unheld does not fail — it returns a plausible
+  // number that is not the battery, which is the worse outcome.
+  pinMode(PIN_BATTERY_ADC_EN, OUTPUT);
+  digitalWrite(PIN_BATTERY_ADC_EN, BATTERY_ADC_EN_ACTIVE);
+  delay(2);                              // let the divider settle
+#endif
   uint32_t acc = 0;
   for (int i = 0; i < 8; i++) acc += analogReadMilliVolts(PIN_BATTERY_ADC);
+#if PIN_BATTERY_ADC_EN >= 0
+  digitalWrite(PIN_BATTERY_ADC_EN, !BATTERY_ADC_EN_ACTIVE);
+#endif
   sVolts = (acc / 8) / 1000.0f * BATTERY_DIVIDER_RATIO;
   sLastSample = millis();
 }

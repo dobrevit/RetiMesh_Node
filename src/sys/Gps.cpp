@@ -204,8 +204,29 @@ bool enabled() { return sFix.enabled; }
 void setEnabled(bool on) {
   Sys::Lock held(sLock);
   if (on == sFix.enabled) return;
+  // Whichever switch this board has. A PMU board powers the receiver's rail
+  // through the chip; a board with a plain enable line drives the line; a
+  // board with neither leaves the receiver always on. Both calls are cheap
+  // no-ops where they do not apply, so no board needs to say which it is.
   Pmu::gpsPower(on);
+#if defined(PIN_GPS_EN) && PIN_GPS_EN >= 0
+  pinMode(PIN_GPS_EN, OUTPUT);
+  digitalWrite(PIN_GPS_EN, on ? GPS_EN_ACTIVE : !GPS_EN_ACTIVE);
+#endif
   if (on) {
+#if defined(PIN_GPS_STANDBY) && PIN_GPS_STANDBY >= 0
+    // Force the receiver awake: low means it may sleep, and a receiver that
+    // arrives asleep parses as absent.
+    pinMode(PIN_GPS_STANDBY, OUTPUT);
+    digitalWrite(PIN_GPS_STANDBY, HIGH);
+#endif
+#if defined(PIN_GPS_RST) && PIN_GPS_RST >= 0
+    // Reset released, never asserted here: the receiver holds its almanac
+    // through a power cycle and a reset would cost the warm start that
+    // holding it is worth.
+    pinMode(PIN_GPS_RST, OUTPUT);
+    digitalWrite(PIN_GPS_RST, HIGH);
+#endif
     sSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
     sFix.enabled = true;
     log_i("GNSS receiver on (UART1 rx %d tx %d @ %d baud)", PIN_GPS_RX, PIN_GPS_TX, GPS_BAUD);
