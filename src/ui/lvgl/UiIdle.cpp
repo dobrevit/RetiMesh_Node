@@ -69,7 +69,7 @@ void build() {
   lv_obj_add_flag(sPanel, LV_OBJ_FLAG_CLICKABLE);   // the waking tap ends here
 
   sTime = lv_label_create(sPanel);
-  lv_obj_set_style_text_font(sTime, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_font(sTime, &font_barlow_28, 0);
   lv_obj_set_style_text_color(sTime, lv_color_hex(UiTheme::kInk), 0);
   lv_label_set_text(sTime, "--:--");
   lv_obj_align(sTime, LV_ALIGN_CENTER, 0, -46);

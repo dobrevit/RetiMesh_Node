@@ -277,7 +277,7 @@ bool shellInit(TftPanel& panel) {
     UiTheme::screen(splash);
     lv_obj_t* name = lv_label_create(splash);
     lv_label_set_text(name, "RETIMESH");
-    lv_obj_set_style_text_font(name, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(name, &font_barlow_28, 0);
     lv_obj_set_style_text_letter_space(name, 3, 0);
     lv_obj_align(name, LV_ALIGN_CENTER, 0, -30);
     lv_obj_t* fw = lv_label_create(splash);
@@ -383,7 +383,7 @@ lv_obj_t* newScreen(const char* title) {
     lv_obj_add_event_cb(backBtn, backEvent, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* tl = lv_label_create(head);
     lv_label_set_text(tl, title);
-    lv_obj_set_style_text_font(tl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(tl, &font_barlow_16, 0);
     lv_obj_align(tl, LV_ALIGN_CENTER, 0, 0);
   }
 

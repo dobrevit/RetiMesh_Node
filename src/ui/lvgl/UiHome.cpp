@@ -178,7 +178,7 @@ void openHome() {
 
   // The board, in the spec's order: the clock first, then the readings.
   sClock = lv_label_create(body);
-  lv_obj_set_style_text_font(sClock, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_font(sClock, &font_barlow_28, 0);
   lv_label_set_text(sClock, "--:--");
   sDate = lv_label_create(body);
   lv_obj_set_style_text_color(sDate, lv_color_hex(UiTheme::kInkDim), 0);

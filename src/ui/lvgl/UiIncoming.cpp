@@ -39,7 +39,7 @@ void showIncoming(const char* sender, const char* text) {
 
   lv_obj_t* from = lv_label_create(sAlert);
   lv_label_set_text(from, sender);
-  lv_obj_set_style_text_font(from, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_font(from, &font_barlow_16, 0);
   lv_obj_align(from, LV_ALIGN_TOP_MID, 0, 58);
 
   lv_obj_t* body = lv_label_create(sAlert);

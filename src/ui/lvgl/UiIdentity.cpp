@@ -99,7 +99,7 @@ void openIdentity() {
   }
   grouped[w] = 0;
   lv_label_set_text(hash, grouped);
-  lv_obj_set_style_text_font(hash, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_font(hash, &font_plexmono_16, 0);
   lv_obj_align_to(hash, hl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
 
   char v[32];

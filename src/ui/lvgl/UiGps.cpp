@@ -177,10 +177,10 @@ void openGps() {
   lv_obj_t* body = newScreen("Position");
 
   sLat = lv_label_create(body);
-  lv_obj_set_style_text_font(sLat, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_font(sLat, &font_barlow_28, 0);
   lv_label_set_text(sLat, "--.-----");
   sLon = lv_label_create(body);
-  lv_obj_set_style_text_font(sLon, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_font(sLon, &font_barlow_28, 0);
   lv_label_set_text(sLon, "--.-----");
   sMgrs = lv_label_create(body);
   lv_obj_set_style_text_color(sMgrs, lv_color_hex(UiTheme::kInkDim), 0);

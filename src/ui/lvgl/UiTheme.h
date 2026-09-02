@@ -17,6 +17,14 @@
 
 #if HAS_LVGL_UI
 
+// The design's own faces, converted from its font files: Barlow for the
+// body and the big readings, IBM Plex Mono for values and hashes, Barlow
+// Condensed for the caps labels.
+LV_FONT_DECLARE(font_barlow_16);
+LV_FONT_DECLARE(font_barlow_28);
+LV_FONT_DECLARE(font_plexmono_16);
+LV_FONT_DECLARE(font_condensed_14);
+
 namespace UiTheme {
 
 // Grounds, darkest to lightest.

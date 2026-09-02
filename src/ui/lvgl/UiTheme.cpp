@@ -15,8 +15,13 @@ lv_style_t sCard, sCaps, sValue, sBar, sAction, sActionPressed;
 void init(lv_display_t* disp) {
   // The default theme in dark mode carries the widgets we do not restyle —
   // switches, dropdowns, msgboxes — with our accent as its primary.
+  // The Montserrat built-ins stay compiled only as the symbol bank: the
+  // design fonts carry no icon glyphs, so LV_SYMBOL_* falls through — the
+  // fallback pointers are set statically in the generated font files,
+  // because those structs live in flash and a runtime write to them is a
+  // panic (the bench found that as a boot loop with no console).
   lv_theme_default_init(disp, lv_color_hex(kAccent), lv_color_hex(kGood),
-                        true /* dark */, &lv_font_montserrat_14);
+                        true /* dark */, &font_barlow_16);
 
   lv_style_init(&sCard);
   lv_style_set_bg_color(&sCard, lv_color_hex(kSurface));
@@ -27,11 +32,12 @@ void init(lv_display_t* disp) {
 
   lv_style_init(&sCaps);
   lv_style_set_text_color(&sCaps, lv_color_hex(kInkLabel));
-  lv_style_set_text_font(&sCaps, &lv_font_montserrat_14);
+  lv_style_set_text_font(&sCaps, &font_condensed_14);
   lv_style_set_text_letter_space(&sCaps, 1);
 
   lv_style_init(&sValue);
   lv_style_set_text_color(&sValue, lv_color_hex(kInk));
+  lv_style_set_text_font(&sValue, &font_plexmono_16);   // readings are instrument voice
 
   lv_style_init(&sBar);
   lv_style_set_bg_color(&sBar, lv_color_hex(kGround2));

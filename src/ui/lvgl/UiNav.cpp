@@ -63,7 +63,7 @@ void openBearing(const char* peer) {
   compassLetters(dial, 84);
   lv_obj_t* deg = lv_label_create(dial);
   lv_label_set_text(deg, "—°");
-  lv_obj_set_style_text_font(deg, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_font(deg, &font_barlow_28, 0);
   lv_obj_align(deg, LV_ALIGN_CENTER, 0, -26);
 
   lv_obj_t* why = lv_label_create(body);
@@ -120,7 +120,7 @@ void showFirmware(const char* stage, uint32_t written, uint32_t total) {
     lv_obj_align(head, LV_ALIGN_TOP_MID, 0, 40);
 
     sFwStage = lv_label_create(sFw);
-    lv_obj_set_style_text_font(sFwStage, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(sFwStage, &font_barlow_16, 0);
     lv_obj_align(sFwStage, LV_ALIGN_TOP_MID, 0, 66);
 
     sFwBar = lv_bar_create(sFw);
