@@ -153,8 +153,10 @@
 #define PIN_BUTTON2         35
 #define HAS_BUTTON2         1
 
-// A piezo sounder on a PWM channel — not an audio path. What can be asked of
-// it is a tone at a frequency for a length of time.
+// A piezo sounder on a PWM channel — not an audio path. The pin is the
+// published map's; the bench unit produced no sound from it at any drive
+// while everything else worked, so the part may not be fitted on all builds
+// of the board. Driving it costs nothing either way.
 #define HAS_BUZZER          1
 #define PIN_BUZZER          6
 

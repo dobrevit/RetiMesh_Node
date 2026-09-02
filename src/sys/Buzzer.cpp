@@ -43,8 +43,8 @@ void step(void*) {
   // The boot pair: first note has ended, either start the second or finish.
   if (sTune == 1 && sStep == 1) {
     sStep = 2;
-    tone(1568);                                  // up a fifth
-    esp_timer_start_once(sTimer, 90 * 1000);
+    tone(4000);                                  // up to the piezo's sweet spot
+    esp_timer_start_once(sTimer, 120 * 1000);
     return;
   }
   tone(0);                                       // silence, and done
@@ -80,8 +80,13 @@ void begin() {
   if (esp_timer_create(&args, &sTimer) != ESP_OK) sTimer = nullptr;
 }
 
-void boot()    { start(1, 1047, 90); }           // C6 then G6, 90 ms each
-void message() { start(2, 2093, 120); }          // one C7, long enough to place
+// Near a small piezo's resonance, short enough to be polite. Worth saying:
+// the first bench V4 produced no sound at any drive or frequency while every
+// other function worked, so its sounder is likely simply not fitted — the pin
+// is driven regardless, because a board that has one should be heard and one
+// that does not loses nothing.
+void boot()    { start(1, 2000, 120); }          // 2 kHz then 4 kHz
+void message() { start(2, 4000, 150); }
 
 } // namespace Buzzer
 
