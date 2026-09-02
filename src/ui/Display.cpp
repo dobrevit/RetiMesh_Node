@@ -43,7 +43,8 @@ Display display;
 
 
 bool Display::begin() {
-#if DISPLAY_KIND == DISPLAY_KIND_OLED || DISPLAY_KIND == DISPLAY_KIND_EINK
+#if DISPLAY_KIND == DISPLAY_KIND_OLED || DISPLAY_KIND == DISPLAY_KIND_EINK || \
+    DISPLAY_KIND == DISPLAY_KIND_TFT
   _panel = &_panelImpl;
 #endif
   if (!_panel || !_panel->begin()) return false;
