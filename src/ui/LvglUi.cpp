@@ -60,6 +60,10 @@ bool touchActive() { return Ui::consumeTouch(); }
 
 void swallowTouch() { Ui::swallowTouch(); }
 
+void openPowerMenu() { Ui::openPowerMenu(); }
+uint8_t takePowerAction() { return Ui::takePowerAction(); }
+void setRotation(uint8_t q) { Ui::setRotation(q); }
+
 } // namespace LvglUi
 
 #endif // HAS_LVGL_UI

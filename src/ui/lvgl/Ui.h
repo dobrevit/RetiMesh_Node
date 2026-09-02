@@ -75,6 +75,9 @@ void openHome();                         // builds and loads the root screen
 void openMessages();                     // push()es the messages screen
 void openSettings();                     // push()es the category list
 void openAbout();                        // a dialog: version, addresses
+void openPowerMenu();                    // sleep / restart / power off
+uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off
+void setRotation(uint8_t quarterTurns);  // the accelerometer's verdict
 #if HAS_GPS
 void openGps();                          // push()es the receiver's readings
 #endif

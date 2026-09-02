@@ -143,7 +143,7 @@ void barTick(lv_timer_t*) {
 void barCreate() {
   sBar = lv_obj_create(lv_layer_top());
   lv_obj_remove_style_all(sBar);
-  lv_obj_set_size(sBar, LV_HOR_RES, kBarH);
+  lv_obj_set_size(sBar, lv_pct(100), kBarH);   // pct, so rotation re-fits it
   lv_obj_align(sBar, LV_ALIGN_TOP_MID, 0, 0);
   lv_obj_set_style_bg_color(sBar, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(sBar, LV_OPA_COVER, 0);
@@ -240,6 +240,15 @@ bool shellInit(TftPanel& panel) {
 }
 
 uint32_t shellLoop() { return lv_timer_handler(); }
+
+void setRotation(uint8_t quarterTurns) {
+  lv_display_t* d = lv_display_get_default();
+  if (!d) return;
+  const lv_display_rotation_t want = (lv_display_rotation_t)(quarterTurns & 3);
+  if (lv_display_get_rotation(d) == want) return;
+  lv_display_set_rotation(d, want);
+  lv_obj_invalidate(lv_screen_active());
+}
 
 // Whether a finger has touched the glass since this was last asked. The
 // display's blanking timer consumes it: the shell reads the touch layer, so

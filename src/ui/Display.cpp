@@ -42,6 +42,10 @@ Display display;
 #include "QrCode.h"
 #include "TouchInput.h"
 #include "LvglUi.h"
+#include "Bootloader.h"
+#include "Bq25896.h"
+#include "Imu.h"
+#include <esp_sleep.h>
 
 
 bool Display::begin() {
@@ -130,6 +134,33 @@ void Display::displayTask(void* self) {
     // glass wakes to a tap the way a phone does: while dark, the touch
     // controller is polled gently here, since the shell's loop is stopped.
     if (LvglUi::touchActive()) d->_lastActivityMs = now;
+    switch (LvglUi::takePowerAction()) {
+      case 1: d->setBlank(true); break;
+      case 2: Bootloader::reboot(Bootloader::Source::Ui); break;
+      case 3:
+        // Ship mode if the charger answers; the deepest sleep the chip has
+        // otherwise, with the user button as the way back.
+        Bq25896::shipMode();
+        esp_sleep_enable_ext1_wakeup(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
+        esp_deep_sleep_start();
+        break;
+      default: break;
+    }
+#if HAS_DA217
+    // The panel follows the hand: two agreeing readings a second apart turn
+    // the display, so a wobble costs nothing and a real turn costs a second.
+    {
+      static uint32_t lastImuMs = 0;
+      static Imu::Facing lastF = Imu::Facing::Unknown;
+      if (now - lastImuMs >= 1000) {
+        lastImuMs = now;
+        const Imu::Facing f = Imu::facing();
+        if (f == lastF && f != Imu::Facing::Flat && f != Imu::Facing::Unknown)
+          LvglUi::setRotation((uint8_t)f);
+        lastF = f;
+      }
+    }
+#endif
     if (d->_panel->blanks() && !d->_blank &&
         now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
     if (d->_blank) {
@@ -210,7 +241,16 @@ void Display::pollButton() {
   const uint32_t now = millis();
   switch (_btn.update(digitalRead(PIN_BUTTON) == LOW, now)) {
     case PressTracker::Event::Press: _lastActivityMs = now; break;
-    case PressTracker::Event::Long:  setBlank(!_blank); break;
+    case PressTracker::Event::Long:
+#if HAS_LVGL_UI
+      // The case's power button is the charger's /QON — hardware, invisible
+      // to firmware — so the long press that used to blank asks the power
+      // question instead: sleep, restart, power off. Blank lives in the menu.
+      if (!_blank) LvglUi::openPowerMenu(); else setBlank(false);
+#else
+      setBlank(!_blank);
+#endif
+      break;
     case PressTracker::Event::Short: advancePage(true); break;
     default: break;
   }

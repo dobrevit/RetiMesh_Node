@@ -24,6 +24,7 @@
 #include <WiFi.h>
 #include <esp32-hal-cpu.h>
 #include "Settings.h"
+#include "Bq25896.h"
 
 namespace {
 Power::Profile sProfile = Power::Profile::Performance;
@@ -167,6 +168,14 @@ Battery battery() {
   b.volts   = sVolts;
   b.present = sVolts >= BATTERY_MIN_V && sVolts <= BATTERY_MAX_V;
   b.percent = b.present ? percentFor(sVolts) : 0;
+#if HAS_BQ25896
+  // The divider still measures the cell; the charger answers the one
+  // question the divider cannot.
+  if (Bq25896::present()) {
+    b.chargeKnown = true;
+    b.charging = Bq25896::charging();
+  }
+#endif
   return b;
 #else
   // Neither a power-management chip nor a divider: this board cannot see a

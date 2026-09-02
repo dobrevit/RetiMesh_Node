@@ -73,6 +73,9 @@
 #include "LocalLink.h"
 #include "Bootloader.h"
 #include "Buzzer.h"
+#include "Bq25896.h"
+#include "Imu.h"
+#include <Wire.h>
 #include "Leds.h"
 #include "Maintenance.h"
 #include "ConsoleServer.h"
@@ -199,6 +202,14 @@ void setup() {
     // radio first would simply find nothing.
     Pmu::begin();
   #endif
+#if HAS_BQ25896 || HAS_DA217
+  // The main I2C and the case's residents, before the battery gauge asks the
+  // charger anything.
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Bq25896::begin();
+  Imu::begin();
+  Diag::cost("i2c case parts");
+#endif
   Power::begin();                          // profile (CPU clock, Wi-Fi sleep) + battery gauge
   Diag::cost("power");
 

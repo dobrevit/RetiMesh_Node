@@ -78,6 +78,11 @@ bool touchActive();
 // tap wakes the panel, so waking is all that tap does.
 void swallowTouch();
 
+// The long press's question and its answer, and the accelerometer's say.
+void openPowerMenu();
+uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off
+void setRotation(uint8_t quarterTurns);
+
 } // namespace LvglUi
 
 #else
@@ -90,6 +95,9 @@ inline void stepTab(int8_t) {}
 inline void onBlank(bool) {}
 inline bool touchActive() { return false; }
 inline void swallowTouch() {}
+inline void openPowerMenu() {}
+inline uint8_t takePowerAction() { return 0; }
+inline void setRotation(uint8_t) {}
 } // namespace LvglUi
 
 #endif // HAS_LVGL_UI

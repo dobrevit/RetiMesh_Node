@@ -556,6 +556,15 @@
 #ifndef HAS_TOUCH
   #define HAS_TOUCH         0
 #endif
+// A BQ25896 charge manager on the main I2C: honest charging state, and ship
+// mode as the power-off the case's button undoes.
+#ifndef HAS_BQ25896
+  #define HAS_BQ25896       0
+#endif
+// A DA217 accelerometer on the main I2C: the panel follows the hand.
+#ifndef HAS_DA217
+  #define HAS_DA217         0
+#endif
 // The LVGL shell on colour boards: set by the env, because it is a build
 // decision (the toolkit is a library dependency), not a board fact.
 #ifndef HAS_LVGL_UI

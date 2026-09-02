@@ -131,10 +131,15 @@
 #define PIN_TOUCH_INT       -1
 #define TOUCH_ADDR          0x2E
 
-// The board's general-purpose I2C, which carries nothing this firmware knows
-// about yet — named so that a sensor added later has somewhere to go.
+// The board's general-purpose I2C, and the case's two residents on it: the
+// BQ25896 charge manager whose /QON pin is what the physical power button
+// presses (the schematic shows the bare module has only RESET and USER — the
+// power button belongs to the case), and the DA217 accelerometer that
+// tells the panel which way up it is being held.
 #define PIN_I2C_SDA         4
 #define PIN_I2C_SCL         3
+#define HAS_BQ25896         1
+#define HAS_DA217           1
 
 // No OLED here, but the display module's I2C names still have to resolve.
 #define PIN_OLED_SDA        PIN_I2C_SDA
