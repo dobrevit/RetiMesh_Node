@@ -86,6 +86,9 @@ public:
   // the glass does the turning. Quarter turns, 0..3. The mono canvas path
   // stays portrait and never calls this.
   void setRotation(uint8_t quarterTurns);
+  // Backlight in percent, through PWM — the panel's real dimmer. Applied
+  // immediately while lit; a blanked panel stays dark and remembers.
+  void setBrightness(uint8_t pct);
 
 private:
   // Drawing geometry, from the layout — the one declaration of it
@@ -105,8 +108,11 @@ private:
   // What the glass last saw, so flush() streams only the band of rows that
   // changed: a ticking counter costs one band, not the whole 153 KB frame.
   uint8_t*    _shadow = nullptr;
+  void applyBacklight();                // pct through PWM, unless blanked
   bool        _ok = false;
   bool        _lit = false;             // backlight state, so blank() is idempotent
+  bool        _blanked = false;
+  uint8_t     _brightPct = 80;
 };
 
 #endif // HAS_DISPLAY && TFT

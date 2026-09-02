@@ -350,6 +350,10 @@ const Entry kFields[] = {
       RadioSettings r = settings.radio(); r.gpsSharePosition = b; return commitRadio(r, e, n); } },
 
   // --- display -----------------------------------------------------------
+  { "display.brightness",
+    [](char* o, size_t n) { snprintf(o, n, "%u", settings.display().brightness); },
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 100, u, e, n)) return Result::BadValue;
+      DisplaySettings d = settings.display(); d.brightness = (uint8_t)u; return commitDisplay(d, e, n); } },
   { "display.touch_wake",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.display().touchWake ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }

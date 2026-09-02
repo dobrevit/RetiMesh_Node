@@ -63,4 +63,8 @@ struct Battery {
 Battery battery();
 uint32_t displaySleepMs();          // profile-dependent
 
+// The last eight hours of charge, one percent-point per five minutes,
+// oldest first — the discharge sparkline's data. Returns how many exist.
+size_t batteryHistory(uint8_t* out, size_t max);
+
 } // namespace Power

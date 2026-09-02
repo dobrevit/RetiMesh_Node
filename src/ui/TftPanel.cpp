@@ -70,7 +70,17 @@ void TftPanel::blitArea(int16_t x1, int16_t y1, int16_t x2, int16_t y2, const ui
   _spi.writeBytes(px, (size_t)(x2 - x1 + 1) * (size_t)(y2 - y1 + 1) * 2);
   digitalWrite(PIN_TFT_CS, HIGH);
   _spi.endTransaction();
-  if (!_lit) { digitalWrite(PIN_TFT_BL, HIGH); _lit = true; }
+  if (!_lit) { _lit = true; applyBacklight(); }
+}
+
+void TftPanel::applyBacklight() {
+  if (!_lit || _blanked) return;
+  ledcWrite(PIN_TFT_BL, (uint32_t)_brightPct * 255u / 100u);
+}
+
+void TftPanel::setBrightness(uint8_t pct) {
+  _brightPct = pct > 100 ? 100 : pct;
+  applyBacklight();
 }
 
 void TftPanel::setRotation(uint8_t quarterTurns) {
@@ -104,7 +114,10 @@ bool TftPanel::begin() {
 
   pinMode(PIN_TFT_CS, OUTPUT);  digitalWrite(PIN_TFT_CS, HIGH);
   pinMode(PIN_TFT_DC, OUTPUT);  digitalWrite(PIN_TFT_DC, HIGH);
-  pinMode(PIN_TFT_BL, OUTPUT);  digitalWrite(PIN_TFT_BL, LOW);   // dark until there is a frame
+  // PWM rather than a switch: brightness is a setting now. 20 kHz keeps the
+  // dimming above anything a camera or an ear could catch.
+  ledcAttach(PIN_TFT_BL, 20000, 8);
+  ledcWrite(PIN_TFT_BL, 0);                                       // dark until there is a frame
 
   // Hardware reset: low for a moment, then the controller wants 120 ms
   // before it will take SLPOUT seriously.
@@ -157,7 +170,7 @@ void TftPanel::flush(bool full) {
   if (!full) {
     while (y0 < kH && memcmp(fb + y0 * stride, _shadow + y0 * stride, stride) == 0) y0++;
     if (y0 == kH) {                       // nothing changed at all
-      if (!_lit) { digitalWrite(PIN_TFT_BL, HIGH); _lit = true; }
+      if (!_lit) { _lit = true; applyBacklight(); }
       return;
     }
     while (y1 > y0 && memcmp(fb + y1 * stride, _shadow + y1 * stride, stride) == 0) y1--;
@@ -201,7 +214,7 @@ void TftPanel::flush(bool full) {
 
   // The first frame is on the glass; only now is the backlight worth its
   // current. Before this the panel shows the controller's power-on noise.
-  if (!_lit) { digitalWrite(PIN_TFT_BL, HIGH); _lit = true; }
+  if (!_lit) { _lit = true; applyBacklight(); }
 }
 
 void TftPanel::blank(bool on) {
@@ -211,7 +224,8 @@ void TftPanel::blank(bool on) {
   cmd(on ? DISPOFF : DISPON);
   digitalWrite(PIN_TFT_CS, HIGH);
   _spi.endTransaction();
-  digitalWrite(PIN_TFT_BL, on ? LOW : HIGH);
+  _blanked = on;
+  if (on) ledcWrite(PIN_TFT_BL, 0); else applyBacklight();
   _lit = !on;
 }
 

@@ -141,6 +141,12 @@ void Display::displayTask(void* self) {
     // about fingers — the buttons alone left the panel blanking under an
     // operator mid-navigation.
     if (sShellUp && LvglUi::touchActive()) d->_lastActivityMs = now;
+    {
+      // The brightness setting reaches the glass here, once per change.
+      static uint8_t lastB = 255;
+      const uint8_t b = settings.display().brightness;
+      if (b != lastB) { lastB = b; d->_panelImpl.setBrightness(b); }
+    }
     if (sShellUp) {
       // A fresh message interrupts everything: wake the glass and put the
       // sender on it — the spec's full-screen alert, not a corner toast,

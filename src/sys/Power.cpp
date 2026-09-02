@@ -149,6 +149,33 @@ void begin() {
   apply((Profile)settings.transport().powerProfile);
 }
 
+// One point per five minutes, 96 slots — eight hours, the spec's window.
+static uint8_t     sHist[96];
+static uint32_t    sHistCount = 0;
+static uint32_t    sHistLastMs = 0;
+static portMUX_TYPE sHistMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void recordHistory(bool present, uint8_t percent) {
+  if (!present) return;
+  const uint32_t now = millis();
+  if (sHistCount && now - sHistLastMs < 300000) return;
+  taskENTER_CRITICAL(&sHistMux);
+  sHist[sHistCount % 96] = percent;
+  sHistCount++;
+  sHistLastMs = now;
+  taskEXIT_CRITICAL(&sHistMux);
+}
+
+size_t batteryHistory(uint8_t* out, size_t max) {
+  taskENTER_CRITICAL(&sHistMux);
+  const uint32_t n = sHistCount < 96 ? sHistCount : 96;
+  size_t w = 0;
+  for (uint32_t i = 0; i < n && w < max; i++)
+    out[w++] = sHist[(sHistCount - n + i) % 96];
+  taskEXIT_CRITICAL(&sHistMux);
+  return w;
+}
+
 Battery battery() {
 #if HAS_PMU
   // The power-management chip measures the cell itself, and knows things an
@@ -161,6 +188,7 @@ Battery battery() {
   b.charging = p.charging;
   b.chargeKnown = true;             // the chip is asked directly
   b.percent  = p.present ? p.percent : 0;
+  recordHistory(b.present, b.percent);
   return b;
 #elif HAS_BATTERY_ADC
   if (millis() - sLastSample > BATTERY_SAMPLE_MS) sample();
@@ -176,6 +204,7 @@ Battery battery() {
     b.charging = Bq25896::charging();
   }
 #endif
+  recordHistory(b.present, b.percent);
   return b;
 #else
   // Neither a power-management chip nor a divider: this board cannot see a

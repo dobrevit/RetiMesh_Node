@@ -40,6 +40,7 @@
 #include "Settings.h"
 #include "Power.h"
 #include "Airtime.h"
+#include "Bootloader.h"
 #include "WifiManager.h"
 
 namespace {
@@ -393,6 +394,56 @@ void openCategory(lv_event_t* e) {
     radioFootTick(nullptr);
   }
 
+  if (strcmp(section, "display") == 0) {
+    // The discharge sparkline: the evidence that a power profile is doing
+    // something, one point per five minutes over eight hours.
+    uint8_t h[96];
+    const size_t hn = Power::batteryHistory(h, 96);
+    if (hn >= 2) {
+      lv_obj_t* card = lv_obj_create(body);
+      UiTheme::card(card);
+      lv_obj_set_width(card, lv_pct(100));
+      lv_obj_set_height(card, 84);
+      lv_obj_set_style_pad_all(card, 6, 0);
+      lv_obj_t* cl = lv_label_create(card);
+      lv_label_set_text(cl, "BATTERY · LAST 8 H");
+      UiTheme::labelCaps(cl);
+      lv_obj_t* chart = lv_chart_create(card);
+      lv_obj_set_size(chart, lv_pct(100), 52);
+      lv_obj_align(chart, LV_ALIGN_BOTTOM_MID, 0, 0);
+      lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+      lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+      lv_chart_set_point_count(chart, (uint32_t)hn);
+      lv_chart_set_div_line_count(chart, 3, 0);
+      lv_chart_series_t* ser =
+          lv_chart_add_series(chart, lv_color_hex(UiTheme::kGood), LV_CHART_AXIS_PRIMARY_Y);
+      for (size_t i = 0; i < hn; i++) lv_chart_set_next_value(chart, ser, h[i]);
+    }
+  }
+
+  if (strcmp(section, "maintenance") == 0) {
+    // The one irreversible control, in the one irreversible colour, behind
+    // the one gesture gloves and rain cannot fake: a real two-second hold.
+    lv_obj_t* erase = lv_button_create(body);
+    UiTheme::actionButton(erase);
+    lv_obj_set_width(erase, lv_pct(100));
+    lv_obj_set_height(erase, 40);
+    lv_obj_t* el = lv_label_create(erase);
+    lv_label_set_text(el, "ERASE NODE — HOLD 2 s");
+    lv_obj_set_style_text_color(el, lv_color_hex(UiTheme::kBad), 0);
+    lv_obj_center(el);
+    lv_obj_add_event_cb(erase, [](lv_event_t* e) {
+      static uint8_t held = 0;
+      const lv_event_code_t code = lv_event_get_code(e);
+      if (code == LV_EVENT_PRESSED) held = 0;
+      else if (code == LV_EVENT_LONG_PRESSED_REPEAT && ++held == 16) {
+        settings.factoryReset();
+        Ui::toast("erased — restarting");
+        Bootloader::reboot(Bootloader::Source::Ui);
+      }
+    }, LV_EVENT_ALL, nullptr);
+  }
+
   // Cancel and Save, side by side, the row every form ends with.
   lv_obj_t* btns = lv_obj_create(body);
   lv_obj_remove_style_all(btns);
@@ -448,6 +499,9 @@ void openSettings() {
     lv_obj_add_event_cb(btn, openCategory, LV_EVENT_CLICKED, sSections[nSections]);
     nSections++;
   }
+
+  lv_obj_t* ident = lv_list_add_button(list, LV_SYMBOL_HOME, "Identity");
+  lv_obj_add_event_cb(ident, [](lv_event_t*) { Ui::openIdentity(); }, LV_EVENT_CLICKED, nullptr);
 
   // About lives here now — the action bar's slots belong to the spec's
   // three destinations plus the receiver.
