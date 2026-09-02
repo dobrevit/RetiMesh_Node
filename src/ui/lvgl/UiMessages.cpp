@@ -37,10 +37,6 @@ lv_obj_t* sThreadTa = nullptr;
 uint8_t   sThreadDest[16];
 uint32_t  sThreadStamp = 0;              // outbound-state hash, to redraw only on change
 
-void hex8(const uint8_t* h, char* out) {
-  snprintf(out, 10, "%02x%02x%02x%02x", h[0], h[1], h[2], h[3]);
-}
-
 
 void ageText(uint32_t ms, char* out, size_t n) {
   const uint32_t s = (millis() - ms) / 1000;
@@ -57,6 +53,7 @@ struct Bubble {
   char     text[81];
   uint32_t sentMs;                       // ours only
   bool     ok;
+  uint8_t  standing;                     // theirs only (Rns::Standing*)
 };
 
 void bubbleRow(lv_obj_t* col, const Bubble& b) {
@@ -87,11 +84,15 @@ void bubbleRow(lv_obj_t* col, const Bubble& b) {
     if (!b.sentMs)      { snprintf(meta, sizeof(meta), "queued"); tint = UiTheme::kWarn; }
     else if (!b.ok)     { snprintf(meta, sizeof(meta), "failed — no key?"); tint = UiTheme::kBad; }
     else { char a[8]; ageText(b.sentMs, a, sizeof(a)); snprintf(meta, sizeof(meta), "sent · %s ago", a); }
-  } else if (b.ms) {
-    char a[8]; ageText(b.ms, a, sizeof(a));
-    snprintf(meta, sizeof(meta), "%s ago", a);
   } else {
-    snprintf(meta, sizeof(meta), "earlier");
+    // Identity trust first: an unverified sender's words carry the flag in
+    // the meta line, in the warning colour.
+    const bool verified = b.standing == Rns::StandingVerified;
+    char a[8] = "";
+    if (b.ms) ageText(b.ms, a, sizeof(a));
+    snprintf(meta, sizeof(meta), "%s%s%s", b.ms ? a : "earlier",
+             b.ms ? " ago" : "", verified ? "" : " · unverified");
+    if (!verified) tint = UiTheme::kWarn;
   }
   lv_obj_t* m = lv_label_create(box);
   lv_label_set_text(m, meta);
@@ -99,6 +100,8 @@ void bubbleRow(lv_obj_t* col, const Bubble& b) {
   lv_obj_align_to(m, t, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, 2);
   lv_obj_set_height(box, LV_SIZE_CONTENT);
 }
+
+uint32_t inboundStamp() { return Rns::Inbox::newest(); }
 
 uint32_t outboundStamp() {
   RnsTransport::OutMessage o[8];
@@ -122,10 +125,13 @@ void threadRebuild() {
     if (*c->n >= 20 || memcmp(r.from, c->dest, 16) != 0) return;
     Bubble& x = c->b[(*c->n)++];
     x.ours = false;
-    x.ms = r.bootMs;                     // honest only within this run; 0-ish sorts old
+    // Another boot's millis is a foreign clock: those records sort oldest
+    // and say "earlier" instead of wearing an age computed across runs.
+    x.ms = (r.bootId == Rns::Inbox::bootId()) ? r.bootMs : 0;
     const size_t tn = r.textLen < 80 ? r.textLen : 80;
     memcpy(x.text, r.text, tn); x.text[tn] = 0;
     x.sentMs = 0; x.ok = false;
+    x.standing = r.standing;
   }, &ctx);
 
   RnsTransport::OutMessage o[8];
@@ -153,7 +159,15 @@ void threadRebuild() {
 
 void threadTick(lv_timer_t*) {
   if (!sThreadCol || !lv_obj_is_valid(sThreadCol)) return;
-  if (outboundStamp() != sThreadStamp) threadRebuild();
+  // Both directions: the outbound log for our fates, the inbox for their
+  // words — a reply that arrived used to stay invisible until the operator
+  // backed out and returned.
+  static uint32_t lastIn = 0;
+  const uint32_t in = inboundStamp();
+  if (outboundStamp() != sThreadStamp || in != lastIn) {
+    lastIn = in;
+    threadRebuild();
+  }
 }
 
 void sendCurrent(const char* text) {
@@ -306,16 +320,23 @@ void listRebuild() {
   }, &ctx);
 
   if (!n) { lv_list_add_text(sList, "no messages yet"); return; }
+  // The rows' destinations live and die with this screen: a shared static
+  // here once let a stacked older list open the wrong peer's thread and
+  // queue a reply to the wrong destination.
+  uint8_t* dests = (uint8_t*)lv_malloc(n * 16);
+  if (!dests) return;
+  lv_obj_add_event_cb(sList, [](lv_event_t* e) {
+    lv_free(lv_event_get_user_data(e));
+  }, LV_EVENT_DELETE, dests);
   for (size_t i = 0; i < n; i++) {
     char line[96], who[34];
     Ui::peerLabel(th[i].from, who, sizeof(who));
     snprintf(line, sizeof(line), "%s · %u\n%s", who, th[i].count, th[i].preview);
     lv_obj_t* btn = lv_list_add_button(sList, LV_SYMBOL_ENVELOPE, line);
-    static uint8_t dests[16][16];        // stable storage the callback points at
-    memcpy(dests[i], th[i].from, 16);
+    memcpy(dests + i * 16, th[i].from, 16);
     lv_obj_add_event_cb(btn, [](lv_event_t* e) {
       openThreadScreen((const uint8_t*)lv_event_get_user_data(e));
-    }, LV_EVENT_CLICKED, dests[i]);
+    }, LV_EVENT_CLICKED, dests + i * 16);
   }
 }
 
@@ -344,7 +365,20 @@ void openMessages() {
   lv_obj_set_width(sList, lv_pct(100));
   lv_obj_set_flex_grow(sList, 1);
   listRebuild();
-  push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
+  // Arrivals refresh the open list; before this, a message that came in
+  // while the screen was showing stayed invisible until reopening.
+  lv_timer_t* t = lv_timer_create([](lv_timer_t*) {
+    if (!sList || !lv_obj_is_valid(sList)) return;
+    static uint32_t lastIn = 0;
+    const uint32_t in = inboundStamp();
+    if (in != lastIn) { lastIn = in; listRebuild(); }
+  }, 2000, nullptr);
+  lv_obj_add_event_cb(scr, [](lv_event_t* e) {
+    lv_timer_delete((lv_timer_t*)lv_event_get_user_data(e));
+    sList = nullptr;
+  }, LV_EVENT_DELETE, t);
+  push(scr);
 }
 
 } // namespace Ui

@@ -177,6 +177,10 @@ void Display::displayTask(void* self) {
         } else if (wasInstalling) {
           wasInstalling = false;
           LvglUi::hideFirmware();
+          // The promised verdict: a failed install must not vanish the way
+          // a successful one does — success reboots moments later, failure
+          // leaves the old firmware running and the operator must know.
+          if (ota.failed) LvglUi::showIncoming(nullptr, "Firmware update FAILED — still on the old version. See the log.");
         }
       }
       // The shell rests in two stages: first the spec's idle clock — the

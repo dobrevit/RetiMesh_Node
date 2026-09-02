@@ -41,6 +41,8 @@
 #include "Power.h"
 #include "Airtime.h"
 #include "Bootloader.h"
+#include "PeerNames.h"
+#include "LxmfInbox.h"
 #include "WifiManager.h"
 
 namespace {
@@ -214,11 +216,11 @@ void buildControl(lv_obj_t* parent, Row& r) {
       };
       lv_obj_t* minus = stepBtn(LV_SYMBOL_MINUS);
       lv_obj_t* slider = lv_slider_create(rowH);
-      // Floored at 5 on the glass: the funnel accepts 0, but a tap sequence
-      // that can black the panel you are holding is a trap, not a setting.
-      lv_slider_set_range(slider, 5, 100);
+      // The floor is BRIGHTNESS_FLOOR_PCT everywhere — funnel, load, and
+      // this slider ask the same constant.
+      lv_slider_set_range(slider, BRIGHTNESS_FLOOR_PCT, 100);
       const int init = atoi(r.initial);
-      lv_slider_set_value(slider, init < 5 ? 5 : init, LV_ANIM_OFF);
+      lv_slider_set_value(slider, init < BRIGHTNESS_FLOOR_PCT ? BRIGHTNESS_FLOOR_PCT : init, LV_ANIM_OFF);
       lv_obj_set_flex_grow(slider, 1);
       lv_obj_t* plus = stepBtn(LV_SYMBOL_PLUS);
       r.control = slider;
@@ -238,7 +240,7 @@ void buildControl(lv_obj_t* parent, Row& r) {
       auto stepCb = [](lv_event_t* e) {
         Step* st = (Step*)lv_event_get_user_data(e);
         int v = (int)lv_slider_get_value(st->row->control) + st->delta;
-        v = v < 5 ? 5 : (v > 100 ? 100 : v);
+        v = v < BRIGHTNESS_FLOOR_PCT ? BRIGHTNESS_FLOOR_PCT : (v > 100 ? 100 : v);
         lv_slider_set_value(st->row->control, v, LV_ANIM_OFF);
         applySliderRow(st->row);
       };
@@ -555,6 +557,12 @@ void openCategory(lv_event_t* e) {
       if (code == LV_EVENT_PRESSED) held = 0;
       else if (code == LV_EVENT_LONG_PRESSED_REPEAT && ++held == 16) {
         settings.factoryReset();
+        // The control says erase, so the personal data goes with the
+        // settings: the stored conversations and the remembered peer names.
+        // The RNS identity survives — destroying the key is the design's own
+        // dedicated screen, with its own words, another day.
+        Rns::Inbox::wipe();
+        PeerNames::wipe();
         Ui::toast("erased — restarting");
         Bootloader::reboot(Bootloader::Source::Ui);
       }

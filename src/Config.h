@@ -556,6 +556,14 @@
 #ifndef HAS_TOUCH
   #define HAS_TOUCH         0
 #endif
+// The backlight's floor, percent: below this a panel is dark while
+// believing itself on, and going dark is the sleep timer's job. The funnel
+// refuses less, the slider cannot ask for less, and the NVS load clamps —
+// every door, one number.
+#ifndef BRIGHTNESS_FLOOR_PCT
+  #define BRIGHTNESS_FLOOR_PCT 5
+#endif
+
 // Whether the WiFi link starts enabled on a factory-fresh node. Headless
 // field boards (no glass, battery-first) set 0 in their header: with the
 // link off the WiFi driver is never started at all (WifiManager::begin),

@@ -28,7 +28,10 @@ void status(const char* text) {
 }
 
 void join(const char* password) {
-  wifiManager.staJoin(sPickedSsid, password);
+  if (!wifiManager.staJoin(sPickedSsid, password)) {
+    Ui::toast("cannot use these credentials (too long?)");
+    return;
+  }
   char line[64];
   snprintf(line, sizeof(line), "Joining %s...", sPickedSsid);
   status(line);
@@ -63,6 +66,7 @@ void askKey(lv_event_t*) {
 // A hidden network never appears in the scan, so it is asked for by name —
 // the one case the old free-text settings rows existed for.
 void askHidden(lv_event_t*) {
+  if (!wifiManager.wifiEnabled()) { Ui::toast("WiFi is off"); return; }
   lv_obj_t* box = lv_msgbox_create(nullptr);
   lv_msgbox_add_title(box, "Hidden network");
   lv_msgbox_add_close_button(box);
@@ -142,6 +146,7 @@ void heartbeat(lv_timer_t*) {
 }
 
 void rescan(lv_event_t*) {
+  if (!wifiManager.wifiEnabled()) { Ui::toast("WiFi is off"); return; }
   lv_obj_clean(sList);
   status("Scanning...");
   wifiManager.staScanStart();
@@ -182,6 +187,9 @@ void openWifiJoin() {
   lv_obj_add_event_cb(scr, [](lv_event_t* e) {
     lv_timer_delete((lv_timer_t*)lv_event_get_user_data(e));
     sList = nullptr; sStatus = nullptr;  // the timer may already be mid-tick
+    // An abandoned scan's results are freed rather than parked on a heap
+    // this board runs tight; the pending flag dies with the screen.
+    if (sScanPending) { wifiManager.staScanDone(); sScanPending = false; }
   }, LV_EVENT_DELETE, t);
 
   if (!wifiManager.wifiEnabled()) {

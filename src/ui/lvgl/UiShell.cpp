@@ -345,7 +345,13 @@ bool consumeTouch() {
 void swallowTouch() { sSwallow = true; }
 
 void push(lv_obj_t* screen) {
-  if (sDepth >= sizeof(sStack) / sizeof(sStack[0])) return;
+  if (sDepth >= sizeof(sStack) / sizeof(sStack[0])) {
+    // A refusal owns the screen it refuses: silently dropping the pointer
+    // leaked a fully built tree per refused push.
+    lv_obj_delete(screen);
+    toast("too deep — go back first");
+    return;
+  }
   sStack[sDepth++] = lv_screen_active();
   lv_screen_load_anim(screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 150, 0, false);
 }

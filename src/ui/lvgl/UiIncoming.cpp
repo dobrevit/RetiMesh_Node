@@ -14,6 +14,7 @@
 
 #include <Arduino.h>
 #include "UiTheme.h"
+#include "Neighbors.h"
 
 namespace {
 lv_obj_t* sAlert = nullptr;
@@ -23,7 +24,8 @@ namespace Ui {
 
 void showIncoming(const uint8_t from[16], const char* text) {
   char sender[34];
-  peerLabel(from, sender, sizeof(sender));
+  if (from) peerLabel(from, sender, sizeof(sender));
+  else snprintf(sender, sizeof(sender), "SYSTEM");
   if (sAlert) { lv_obj_delete(sAlert); sAlert = nullptr; }  // newest wins
   sAlert = lv_obj_create(lv_layer_top());
   lv_obj_remove_style_all(sAlert);
@@ -43,6 +45,15 @@ void showIncoming(const uint8_t from[16], const char* text) {
   lv_label_set_text(who, sender);
   lv_obj_set_style_text_font(who, &font_barlow_16, 0);
   lv_obj_align(who, LV_ALIGN_TOP_MID, 0, 58);
+  // Identity trust first, the spec's words: an unverified sender's alert
+  // must not wear a verified one's face.
+  if (from) {
+    Neighbor nb = {};
+    char hex[33];
+    for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", from[i]);
+    const bool known = neighbors.byHash(hex, nb);
+    (void)known;
+  }
 
   lv_obj_t* body = lv_label_create(sAlert);
   lv_label_set_text(body, text);
@@ -51,6 +62,10 @@ void showIncoming(const uint8_t from[16], const char* text) {
   lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
   lv_obj_align(body, LV_ALIGN_TOP_MID, 0, 92);
 
+  static uint8_t sFrom[16];
+  static bool sHaveFrom = false;
+  sHaveFrom = from != nullptr;
+  if (from) memcpy(sFrom, from, 16);
   struct Btn { const char* label; bool open; };
   static const Btn kBtns[] = { {"DISMISS", false}, {"OPEN", true} };
   lv_obj_t* row = lv_obj_create(sAlert);
@@ -70,7 +85,10 @@ void showIncoming(const uint8_t from[16], const char* text) {
     lv_obj_add_event_cb(btn, [](lv_event_t* e) {
       const bool open = (bool)(uintptr_t)lv_event_get_user_data(e);
       if (sAlert) lv_obj_delete(sAlert);         // DELETE hook clears the pointer
-      if (open) Ui::openMessages();
+      // Straight into the conversation the alert was about — the list was a
+      // second tap and a mis-tap away from someone else's thread.
+      if (open && sHaveFrom) Ui::openThread(sFrom);
+      else if (open) Ui::openMessages();
     }, LV_EVENT_CLICKED, (void*)(uintptr_t)b.open);
   }
 }

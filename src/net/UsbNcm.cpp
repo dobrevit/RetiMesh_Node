@@ -312,12 +312,13 @@ static Driver sDriver = { { postAttach, nullptr } };
 // logging — a request made from this context died inside vsnprintf, and the
 // coredump of boot 906 named this exact handler. The loop task has the
 // stack; the touch can afford its one poll pass of latency.
-static std::atomic<bool> sTouchPending{false};
+static std::atomic<uint32_t> sTouchAtMs{0};    // 0 = none; else millis of the touch
 
 static void onLineCoding(void*, esp_event_base_t, int32_t, void* data) {
   const auto* d = static_cast<arduino_usb_cdc_event_data_t*>(data);
   if (!d || d->line_coding.bit_rate != 1200) return;
-  sTouchPending.store(true);
+  const uint32_t now = millis();
+  sTouchAtMs.store(now ? now : 1);
 }
 
 // What the device needs whether or not the network link is switched on: the
@@ -562,7 +563,11 @@ void poll(bool enabled) {
   // The 1200-baud touch, before anything else and regardless of the link
   // switch — begin() promises the touch works either way. Requested from
   // here rather than the event handler that heard it (see onLineCoding).
-  if (sTouchPending.exchange(false)) {
+  // A touch is honored only while the tool is plausibly still waiting: a
+  // flag latched during a wedged loop must not reboot the node into the
+  // downloader minutes later with nobody flashing.
+  const uint32_t touchAt = sTouchAtMs.exchange(0);
+  if (touchAt && now - touchAt < 3000) {
     const char* why = nullptr;
     const Bootloader::Refusal r = Bootloader::request(Bootloader::Target::Bootloader,
                                                       Bootloader::Source::Touch, 0, &why);

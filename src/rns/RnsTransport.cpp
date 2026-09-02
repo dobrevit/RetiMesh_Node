@@ -88,6 +88,7 @@ static RingbufHandle_t  sTxRing = nullptr, sRxRing = nullptr, sTcpInRing = nullp
 static QueueHandle_t    sEvents = nullptr;
 static SemaphoreHandle_t sSnapLock = nullptr;
 static uint32_t         sNextAnnounceMs = 0;
+static std::atomic<bool> sAnnounceForce{false};  // the glass's button; consumed on the RNS task
 static uint32_t         sAnnounceFloorMs = 0;   // nothing announces before this
 
 static RNS::Type::Interface::modes toMode(uint8_t m) {
@@ -1208,16 +1209,32 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
     memcpy(r.key, verifiedKey, kPublicKeyLen);
     r.haveKey = true;
   }
-  const bool queued = xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
-  if (queued && !telemetry) {
+  // Logged before the queue, not after: the RNS task once dequeued, sent,
+  // and ran its stamp scan in the gap between the two, leaving a delivered
+  // message amber "queued" forever.
+  uint32_t slot = UINT32_MAX;
+  if (!telemetry) {
     taskENTER_CRITICAL(&sOutMux);
-    OutMessage& o = sOutLog[sOutCount % 8];
+    slot = sOutCount % 8;
+    OutMessage& o = sOutLog[slot];
     memcpy(o.dest, destHash, 16);
     strlcpy(o.text, text ? text : "", sizeof(o.text));
     o.queuedMs = millis() ? millis() : 1;
     o.sentMs = 0;
     o.ok = false;
     sOutCount++;
+    taskEXIT_CRITICAL(&sOutMux);
+  }
+  const bool queued = xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
+  if (!queued && slot != UINT32_MAX) {
+    // The queue refused it: the entry gets its verdict now rather than
+    // sitting "queued" for a send that will never happen.
+    taskENTER_CRITICAL(&sOutMux);
+    OutMessage& o = sOutLog[slot];
+    if (!o.sentMs && memcmp(o.dest, destHash, 16) == 0) {
+      o.sentMs = millis() ? millis() : 1;
+      o.ok = false;
+    }
     taskEXIT_CRITICAL(&sOutMux);
   }
   return queued;
@@ -1448,7 +1465,13 @@ static void announceSoon() {
   if ((int32_t)(at - sNextAnnounceMs) < 0) sNextAnnounceMs = at;
 }
 
-void announceNow() { announceSoon(); }
+void announceNow() {
+  // A flag, not a schedule write: the schedule belongs to the RNS task, and
+  // an unlocked store from a button callback once raced it. The force also
+  // outranks interval 0 — quiet by default is not mute, and a pressed
+  // button that transmits nothing while toasting success is a lie.
+  sAnnounceForce.store(true);
+}
 
 // Drop whatever is registered under this interface's hash. Names are unique
 // per registration now, so this only fires if one ever repeats — but a
@@ -1752,7 +1775,11 @@ void loop() {
       sNextAnnounceMs = Rns::clampAnnounceTo(sNextAnnounceMs, interval, millis());
       sBookedFor = interval;
     }
-    if (interval && (int32_t)(millis() - sNextAnnounceMs) >= 0) {
+    bool forced = false;
+    if (sAnnounceForce.load(std::memory_order_relaxed) &&
+        (int32_t)(millis() - sAnnounceFloorMs) >= 0)
+      forced = sAnnounceForce.exchange(false);   // survives until the floor passes
+    if ((interval || forced) && (forced || (int32_t)(millis() - sNextAnnounceMs) >= 0)) {
       // Scheduled before it is attempted, not after. Advancing only on the way
       // out meant that an announce which threw left the schedule untouched, so
       // the next pass ten milliseconds later tried the same thing again, threw

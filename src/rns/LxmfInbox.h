@@ -282,6 +282,10 @@ uint32_t dropped();
 // One record, for the caller that wants only the newest.
 bool read(uint32_t seq, InboxRecord& out);
 
+// The erase control's half: removes the log and zeroes the counters, so a
+// wiped node neither lists old messages nor numbers new ones oddly.
+void wipe();
+
 // The newest arrival since last asked, exactly once — the display's
 // full-screen interrupt eats this; everything else keeps reading pages.
 bool takeNotice(InboxRecord& out);

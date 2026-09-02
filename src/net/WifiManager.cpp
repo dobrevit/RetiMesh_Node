@@ -499,9 +499,40 @@ void WifiManager::startAccessPoint() {
 }
 
 void WifiManager::tick() {
-  // A join the glass asked for owns the station while it runs: the watchdog
-  // below would otherwise reconnect to the old network mid-attempt.
-  if (_joining) return;
+  // The join the glass asked for completes here, on the task that owns the
+  // driver — connect, timeout, persist and fallback all in one place, so an
+  // abandoned screen can no longer strand any of them.
+  if (_joining) {
+    if (WiFi.status() == WL_CONNECTED) {
+      WifiSettings w = settings.wifi();
+      strlcpy(w.staSsid, _joinSsid, sizeof(w.staSsid));
+      strlcpy(w.staPassword, _joinPass, sizeof(w.staPassword));
+      char why[96];
+      // Proven on air, then written down — through the same rules the
+      // funnel holds, so no side door into the store.
+      if (SettingsRules::validateWifi(w, why, sizeof(why))) {
+        settings.saveWifi(w);
+        log_i("station: joined \"%s\", IP %s — saved", w.staSsid,
+              WiFi.localIP().toString().c_str());
+      } else {
+        log_w("station: joined \"%s\" but not saved: %s", _joinSsid, why);
+      }
+      _staRetryAt = millis() + 30000;
+      _joining = false;
+      _joinVerdict = 1;
+    } else if ((int32_t)(millis() - _joinDeadline) >= 0) {
+      log_w("station: could not join \"%s\"", _joinSsid);
+      const WifiSettings& w = settings.wifi();
+      WiFi.disconnect();
+      if (w.staSsid[0]) {
+        WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
+        _staRetryAt = millis() + 30000;
+      }
+      _joining = false;
+      _joinVerdict = 2;
+    }
+    return;                              // the watchdog waits its turn
+  }
   // Station watchdog: log transitions, kick a reconnect if auto-reconnect
   // gave up (e.g. the LAN was down at boot).
   if (wifiEnabled() && stationConfigured()) {
@@ -548,46 +579,33 @@ bool WifiManager::staScanResult(int i, StaScanEntry& out) {
 
 void WifiManager::staScanDone() { WiFi.scanDelete(); }
 
-void WifiManager::staJoin(const char* ssid, const char* password) {
-  strlcpy(_joinSsid, ssid ? ssid : "", sizeof(_joinSsid));
+bool WifiManager::staJoin(const char* ssid, const char* password) {
+  // What cannot be stored is not attempted: a 64-character raw PSK joins
+  // fine and then wedges every wifi.* change against the funnel's length
+  // rule — the funnel's truth holds at this door too.
+  if (!ssid || !ssid[0] || strlen(ssid) > 32) return false;
+  if (password && strlen(password) > 63) return false;
+  strlcpy(_joinSsid, ssid, sizeof(_joinSsid));
   strlcpy(_joinPass, password ? password : "", sizeof(_joinPass));
-  if (!_joinSsid[0]) return;
   _joinDeadline = millis() + 20000;      // WPA against a present AP settles well inside this
   _joining = true;
   WiFi.disconnect();                     // whatever the station was doing before
   WiFi.begin(_joinSsid, _joinPass[0] ? _joinPass : nullptr);
   log_i("station: joining \"%s\" (asked from the glass)", _joinSsid);
+  return true;
 }
 
 WifiManager::StaJoin WifiManager::staJoinState() {
-  if (!_joining) return StaJoin::Idle;
-  if (WiFi.status() == WL_CONNECTED) {
-    // Proven on air; only now is it written down. Straight to the store, not
-    // through commitWifi: that path asks for a restart because the AP cannot
-    // be rebuilt in place, and nothing about the AP changed here.
-    WifiSettings w = settings.wifi();
-    strlcpy(w.staSsid, _joinSsid, sizeof(w.staSsid));
-    strlcpy(w.staPassword, _joinPass, sizeof(w.staPassword));
-    settings.saveWifi(w);
-    _joining = false;
-    _staRetryAt = millis() + 30000;      // the watchdog takes over from here
-    log_i("station: joined \"%s\", IP %s — saved", w.staSsid, WiFi.localIP().toString().c_str());
-    return StaJoin::Joined;
+  // Pure, and one-shot on the verdicts: the work happens in tick() on the
+  // loop task. The screen's own poll once carried it, and a screen closed
+  // mid-join stranded the station, the watchdog, and the typed password.
+  if (_joining) return StaJoin::Trying;
+  const uint8_t v = _joinVerdict;
+  if (v) {
+    _joinVerdict = 0;
+    return v == 1 ? StaJoin::Joined : StaJoin::Failed;
   }
-  if ((int32_t)(millis() - _joinDeadline) >= 0) {
-    _joining = false;
-    log_w("station: could not join \"%s\"", _joinSsid);
-    // Back to the network the settings name, if there is one; the watchdog
-    // owns the retries from here.
-    const WifiSettings& w = settings.wifi();
-    WiFi.disconnect();
-    if (w.staSsid[0]) {
-      WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
-      _staRetryAt = millis() + 30000;
-    }
-    return StaJoin::Failed;
-  }
-  return StaJoin::Trying;
+  return StaJoin::Idle;
 }
 
 void WifiManager::staForget() {

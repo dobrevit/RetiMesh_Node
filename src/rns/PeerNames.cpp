@@ -4,25 +4,14 @@
 // PeerNames.cpp — see PeerNames.h.
 #include "PeerNames.h"
 
+#if HAS_LVGL_UI
+
 #include <string.h>
 #include <stdio.h>
-
-#if __has_include(<LittleFS.h>)
 #include <LittleFS.h>
-#define PEER_NAMES_FS 1
-#else
-#define PEER_NAMES_FS 0                  // host tests: RAM only, same behavior
-#endif
-
-#if __has_include(<freertos/FreeRTOS.h>)
 #include <freertos/FreeRTOS.h>
+
 static portMUX_TYPE sMux = portMUX_INITIALIZER_UNLOCKED;
-#define LOCK()   taskENTER_CRITICAL(&sMux)
-#define UNLOCK() taskEXIT_CRITICAL(&sMux)
-#else
-#define LOCK()
-#define UNLOCK()
-#endif
 
 namespace PeerNames {
 namespace {
@@ -35,50 +24,72 @@ size_t sNext = 0;                        // overwrite the oldest once full
 bool   sLoaded = false;
 constexpr const char* kFile = "/peer_names.txt";
 
-void load() {
-  if (sLoaded) return;
-  sLoaded = true;
-#if PEER_NAMES_FS
-  File f = LittleFS.open(kFile, "r");
-  if (!f) return;
-  char line[80];
-  size_t w = 0;
-  while (f.available() && sCount < kMax) {
-    const size_t n = f.readBytesUntil('\n', (uint8_t*)line, sizeof(line) - 1);
-    line[n] = 0;
-    char* sp = strchr(line, ' ');
-    if (!sp || sp - line != 32) continue;
-    *sp = 0;
-    Entry& e = sCache[sCount++];
-    strlcpy(e.hash, line, sizeof(e.hash));
-    strlcpy(e.name, sp + 1, sizeof(e.name));
-    (void)w;
+// The file is parsed into a scratch table with no lock held — LittleFS is
+// slow and a spinlock must never wait on it — and installed under the lock
+// in one motion, sLoaded last. Two tasks racing here both parse; one
+// installs; the other's work is discarded. The first draft set sLoaded
+// first and filled the live table unlocked, and a lookup mid-parse read a
+// half-written name.
+void loadIfNeeded() {
+  {
+    taskENTER_CRITICAL(&sMux);
+    const bool done = sLoaded;
+    taskEXIT_CRITICAL(&sMux);
+    if (done) return;
   }
-  f.close();
-  sNext = sCount % kMax;
-#endif
+  Entry scratch[kMax];
+  size_t n = 0;
+  File f = LittleFS.open(kFile, "r");
+  if (f) {
+    char line[80];
+    while (f.available() && n < kMax) {
+      const size_t got = f.readBytesUntil('\n', (uint8_t*)line, sizeof(line) - 1);
+      line[got] = 0;
+      // Older files were written with println and carry a carriage return.
+      if (got && line[got - 1] == '\r') line[got - 1] = 0;
+      char* sp = strchr(line, ' ');
+      if (!sp || sp - line != 32) continue;
+      *sp = 0;
+      strlcpy(scratch[n].hash, line, sizeof(scratch[n].hash));
+      strlcpy(scratch[n].name, sp + 1, sizeof(scratch[n].name));
+      if (scratch[n].name[0]) n++;
+    }
+    f.close();
+  }
+  taskENTER_CRITICAL(&sMux);
+  if (!sLoaded) {
+    memcpy(sCache, scratch, sizeof(Entry) * n);
+    sCount = n;
+    sNext = n % kMax;
+    sLoaded = true;
+  }
+  taskEXIT_CRITICAL(&sMux);
 }
 
 void save() {
-#if PEER_NAMES_FS
   File f = LittleFS.open(kFile, "w");
   if (!f) return;
-  for (size_t i = 0; i < sCount; i++) {
-    f.print(sCache[i].hash);
+  taskENTER_CRITICAL(&sMux);
+  Entry copy[kMax];
+  const size_t n = sCount;
+  memcpy(copy, sCache, sizeof(Entry) * n);
+  taskEXIT_CRITICAL(&sMux);
+  for (size_t i = 0; i < n; i++) {
+    f.print(copy[i].hash);
     f.print(' ');
-    f.println(sCache[i].name);
+    f.print(copy[i].name);
+    f.print('\n');                       // never println: \r poisoned the read-back
   }
   f.close();
-#endif
 }
 
 } // namespace
 
 void remember(const char* hashHex, const char* name) {
   if (!hashHex || !name || !hashHex[0] || !name[0] || strlen(hashHex) != 32) return;
-  load();
+  loadIfNeeded();
   bool changed = false;
-  LOCK();
+  taskENTER_CRITICAL(&sMux);
   size_t i = 0;
   for (; i < sCount; i++)
     if (strcmp(sCache[i].hash, hashHex) == 0) break;
@@ -92,24 +103,33 @@ void remember(const char* hashHex, const char* name) {
     strlcpy(sCache[i].name, name, sizeof(sCache[i].name));
     changed = true;
   }
-  UNLOCK();
-  // Written outside the spinlock: the file is slow and the table is not.
-  if (changed) save();
+  taskEXIT_CRITICAL(&sMux);
+  if (changed) save();                   // outside the lock; the file is slow
 }
 
 bool lookup(const char* hashHex, char* out, size_t n) {
   if (!hashHex || strlen(hashHex) < 32) return false;
-  load();
+  loadIfNeeded();
   bool found = false;
-  LOCK();
+  taskENTER_CRITICAL(&sMux);
   for (size_t i = 0; i < sCount; i++)
     if (strncmp(sCache[i].hash, hashHex, 32) == 0) {
       strlcpy(out, sCache[i].name, n);
       found = true;
       break;
     }
-  UNLOCK();
+  taskEXIT_CRITICAL(&sMux);
   return found;
 }
 
+void wipe() {
+  taskENTER_CRITICAL(&sMux);
+  sCount = 0;
+  sNext = 0;
+  sLoaded = true;                        // an emptied table is a loaded table
+  taskEXIT_CRITICAL(&sMux);
+  LittleFS.remove(kFile);
+}
+
 } // namespace PeerNames
+#endif // HAS_LVGL_UI

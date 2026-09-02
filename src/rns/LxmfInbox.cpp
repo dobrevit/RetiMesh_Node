@@ -272,8 +272,22 @@ void poll() {
   // faster than it comes round again.
   if (xQueueReceive(sQueue, &r, 0) == pdTRUE) {
     write(r);
-    if (sNotice) xQueueOverwrite(sNotice, &r);   // the glass hears about it
+    // The glass hears about messages for people. Empty bodies and the
+    // remote console's command traffic (the RM prefix is its convention)
+    // are machine chatter — waking a pocketed panel for them burned
+    // backlight and buried the real alerts.
+    const bool machine = r.textLen == 0 ||
+                         (r.textLen >= 3 && memcmp(r.text, "RM ", 3) == 0);
+    if (sNotice && !machine) xQueueOverwrite(sNotice, &r);
   }
+}
+
+void wipe() {
+  Sys::Lock held(sLock);
+  fs::FS& backend = *RnsFileSystem::backend();
+  backend.remove(kPath);
+  sNewest = 0;
+  sStored = 0;
 }
 
 bool takeNotice(InboxRecord& out) {

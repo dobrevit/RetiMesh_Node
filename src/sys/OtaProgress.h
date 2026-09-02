@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <atomic>
 
 namespace OtaProgress {
 
@@ -25,13 +26,19 @@ struct State {
 };
 
 inline State sState;
+// The gate: fields are published before active flips true, and failed
+// before it flips false — release stores against the reader's acquire, so
+// the display can never see active with a stale payload. A torn stage
+// string mid-install remains possible and costs one frame; the edges are
+// what must be exact.
+inline std::atomic<bool> sActive{false};
 
 inline void begin(uint32_t total) {
   sState.written = 0;
   sState.total = total;
   strncpy(sState.stage, "writing", sizeof(sState.stage) - 1);
   sState.failed = false;
-  sState.active = true;
+  sActive.store(true, std::memory_order_release);
 }
 inline void step(uint32_t written) { sState.written = written; }
 inline void phase(const char* s) {
@@ -39,10 +46,14 @@ inline void phase(const char* s) {
   sState.stage[sizeof(sState.stage) - 1] = 0;
 }
 inline void end(bool ok) {
-  if (!sState.active) return;
+  if (!sActive.load(std::memory_order_relaxed)) return;
   sState.failed = !ok;
-  sState.active = false;
+  sActive.store(false, std::memory_order_release);
 }
-inline State get() { return sState; }
+inline State get() {
+  State out = sState;
+  out.active = sActive.load(std::memory_order_acquire);
+  return out;
+}
 
 } // namespace OtaProgress
