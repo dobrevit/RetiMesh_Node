@@ -21,11 +21,15 @@
 // ============================================================================
 #include "SdCard.h"
 #include "Lock.h"
-#include <sd_diskio.h>
 #include "StoreHome.h"
 #include "Diag.h"
+#if HAS_SD
+#include <sd_diskio.h>
+#endif
 
 SdCard sdCard;
+
+#if HAS_SD
 
 static const char* kMount = SdCard::MOUNT_POINT;
 // Only ever mounted for the presence probe, and unmounted immediately.
@@ -392,3 +396,24 @@ void SdCard::log(const char* line) {
     }
   }
 }
+
+#else   // no slot on this board
+
+// The object still exists and still answers. Callers are written against a
+// node that may or may not have a card — the store asks where it should live,
+// the portal asks what to show, the log asks whether to write — and a runtime
+// "no" costs a return where a compile-time one would put a #if at every one
+// of those call sites.
+const char* SdCard::stateName(State) { return "absent"; }
+void        SdCard::begin() {}
+void        SdCard::startPolling() {}
+SdCard::Info SdCard::info() { return Info{}; }
+bool        SdCard::mounted() { return false; }
+const char* SdCard::requestFormat() { return "this board has no card slot"; }
+void        SdCard::reserve(bool) {}
+bool        SdCard::reserved() { return false; }
+bool        SdCard::storageLost() { return false; }
+void        SdCard::log(const char*) {}
+void        SdCard::task(void*) { vTaskDelete(nullptr); }
+
+#endif  // HAS_SD

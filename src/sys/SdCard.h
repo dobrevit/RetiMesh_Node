@@ -51,10 +51,20 @@
 
 #include <Arduino.h>
 #include <SPI.h>
-#include <SD.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include "Config.h"
+
+#if HAS_SD
+#include <SD.h>
+#else
+// A board with no slot does not build the card driver at all — the library, its
+// FatFS layer and this class's real implementation stay out of the image, and
+// the accessors below become the small always-false stubs in SdCard.cpp. Only
+// one of the library's names leaks into this header: the card type that means
+// "nothing", which is zero in the driver's own enum.
+static const uint8_t CARD_NONE = 0;
+#endif
 
 class SdCard {
 public:

@@ -759,7 +759,10 @@ void WifiManager::setupRoutes() {
   // the same facts are in boards.json.
   _http.on("/api/system/bootloader", HTTP_GET,
            [this](AsyncWebServerRequest* r) { handleBootloaderGet(r); });
-  // Event log from the SD card (admin). ?prev=1 serves the rotated file.
+  // Event log from the SD card (admin). ?prev=1 serves the rotated file. Not
+  // registered at all on a board with no slot: the route reads the card
+  // library directly, which those boards no longer build (SdCard.h).
+#if HAS_SD
   _http.on("/api/sd/log", HTTP_GET, [this](AsyncWebServerRequest* r) {
     if (!authed(r)) return;
     if (!sdCard.mounted()) { sendError(r, 404, "no card mounted"); return; }
@@ -769,6 +772,7 @@ void WifiManager::setupRoutes() {
     res->addHeader("Content-Disposition", "attachment; filename=\"retimesh-events.log\"");
     r->send(res);
   });
+#endif
 
   _http.on("/api/settings/export", HTTP_GET, [this](AsyncWebServerRequest* r) {
     if (!authed(r)) return;
