@@ -34,10 +34,17 @@
 //  Why it lands on the card first
 //  ------------------------------
 //  The installer pulls its bytes and the web server pushes them, and an
-//  adapter between the two — a queue, a semaphore, and backpressure onto the
-//  async task that must not block — is a bug farm guarding the one path that
-//  has to work. Staging turns the push back into a pull for the price of a
-//  file. It also means a transfer that dies half way costs the upload and
+//  adapter between the two — a queue, a semaphore and a second task — is a bug
+//  farm guarding the one path that has to work. Staging turns the push back
+//  into a pull for the price of a file.
+//
+//  It does not get the writes off the async task: a block is flushed to the
+//  card from the task the chunks arrive on, which blocks it for the length of
+//  a 32 KiB write. That is deliberate rather than overlooked. Blocking there
+//  is what stops the sender getting ahead of the card — the version that did
+//  not block queued the difference in the heap until an allocation elsewhere
+//  failed and took the node down — and it is the same backpressure a queue
+//  would have to reimplement, minus the queue. It also means a transfer that dies half way costs the upload and
 //  nothing else: the slot has not been touched, because nothing is written to
 //  flash until the manifest has been judged and the whole image is in hand.
 //

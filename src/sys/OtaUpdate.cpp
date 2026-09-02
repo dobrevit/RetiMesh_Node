@@ -183,6 +183,15 @@ void installTask(void*) {
   // upload is refused against — the node would never take another update.
   if (!Diag::guard("the update install", runInstall))
     say(Stage::Failed, "the install was abandoned; the node is unchanged");
+  // What the install actually cost. Ed25519, SHA-256, the installer's buffer
+  // and FATFS all share this stack, and 8 KiB was an estimate — an estimate
+  // that fails does so while a partition is half written, so the figure is
+  // reported rather than assumed.
+  const uint32_t spare = (uint32_t)uxTaskGetStackHighWaterMark(nullptr);
+  if (spare < 1024) log_w("update: the install task finished with only %lu bytes of stack to spare",
+                          (unsigned long)spare);
+  else              log_i("update: the install task finished with %lu bytes of stack to spare",
+                          (unsigned long)spare);
   vTaskDelete(nullptr);
 }
 
