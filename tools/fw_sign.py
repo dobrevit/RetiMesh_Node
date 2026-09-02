@@ -18,6 +18,8 @@ can only be replaced by visiting every deployed node.
                         --version v0.1.0 --secure-version 1 --slot-size 1966080 \\
                         --key keys/ci --delegation keys/ci.delegation \\
                         --out firmware.manifest
+    fw_sign.py bundle   --manifest firmware.manifest --image firmware.bin \\
+                        --out update.rmfw
     fw_sign.py roots    --out src/sys/OtaRoots.h keys/root-a.pub keys/root-b.pub
     fw_sign.py dump     firmware.manifest
     fw_sign.py fixture  --out test/test_firmware_manifest/fixture.h [--check]
@@ -45,7 +47,13 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 MAGIC = b"RMFW"
 FORMAT_VERSION = 1
 PURPOSE_FIRMWARE = 1 << 0
+IMAGE_RECORD_OFFSET = 0
 IMAGE_RECORD_SIZE = 100
+# Fields inside the image record, named once and read by everything that reads
+# them: image_record() writes them and cmd_bundle() checks them back, and two
+# copies of the same offset is how a field quietly moves for one of them.
+IMAGE_HASH_OFFSET = 8
+IMAGE_SIZE_OFFSET = 40
 DELEGATION_RECORD_SIZE = 56
 SIZE = 284
 BOARD_LEN, VERSION_LEN, LABEL_LEN = 16, 32, 16
@@ -88,8 +96,8 @@ def image_record(image_hash: bytes, size: int, secure_version: int,
     r = bytearray(IMAGE_RECORD_SIZE)
     r[0:4] = MAGIC
     r[4] = FORMAT_VERSION
-    r[8:40] = _exact(image_hash, 32, "an image hash")
-    struct.pack_into("<I", r, 40, size)
+    r[IMAGE_HASH_OFFSET:IMAGE_SIZE_OFFSET] = _exact(image_hash, 32, "an image hash")
+    struct.pack_into("<I", r, IMAGE_SIZE_OFFSET, size)
     struct.pack_into("<I", r, 44, secure_version)
     r[48:64] = _fixed(board, BOARD_LEN)
     r[64:96] = _fixed(version, VERSION_LEN)
@@ -170,6 +178,42 @@ def cmd_sign(args):
     Path(args.out).write_bytes(img + record + root_sig + key.sign(img))
     print(f"signed {args.board} {args.version} ({len(image)} bytes, "
           f"secure_version {args.secure_version}) -> {args.out}")
+
+
+def cmd_bundle(args):
+    """One file an operator can hand to a node: the manifest, then the image.
+
+    Two files is one file too many when the person holding them is standing in
+    a field with a phone. Worse, it is a way to install the wrong pair — a
+    manifest describes exactly one image, and nothing about two files sitting
+    in a downloads folder says which image a manifest goes with. Concatenated,
+    the question cannot be asked.
+
+    The manifest is fixed at 284 bytes and comes first, so a node knows how much
+    to read before it has decided to trust anything.
+    """
+    manifest = Path(args.manifest).read_bytes()
+    image = Path(args.image).read_bytes()
+    if len(manifest) != SIZE:
+        sys.exit(f"{args.manifest} is {len(manifest)} bytes, not a {SIZE}-byte manifest")
+    # The same four bytes the node checks on the first chunk of an upload. A
+    # bundle built from something that is not a manifest is refused here rather
+    # than after somebody has watched it go up a one-bar link.
+    if manifest[IMAGE_RECORD_OFFSET:IMAGE_RECORD_OFFSET + 4] != MAGIC:
+        sys.exit(f"{args.manifest} is the right length but does not begin with a manifest")
+    if manifest[IMAGE_RECORD_OFFSET + 4] != FORMAT_VERSION:
+        sys.exit(f"{args.manifest} is format {manifest[IMAGE_RECORD_OFFSET + 4]}, "
+                 f"not the {FORMAT_VERSION} this tool writes")
+    base = IMAGE_RECORD_OFFSET
+    declared = struct.unpack_from("<I", manifest, base + IMAGE_SIZE_OFFSET)[0]
+    if declared != len(image):
+        sys.exit(f"{args.manifest} describes a {declared}-byte image but {args.image} "
+                 f"is {len(image)}; they are not a pair")
+    digest = hashlib.sha256(image).digest()
+    if digest != manifest[base + IMAGE_HASH_OFFSET:base + IMAGE_SIZE_OFFSET]:
+        sys.exit(f"{args.image} is not the image {args.manifest} was signed over")
+    Path(args.out).write_bytes(manifest + image)
+    print(f"bundle ({SIZE} + {len(image)} bytes) -> {args.out}")
 
 
 def _label(path: str) -> str:
@@ -291,6 +335,11 @@ def main():
         p.add_argument(a, required=True)
     p.add_argument("--secure-version", type=_u32, required=True)
     p.add_argument("--slot-size", type=_u32, required=True); p.set_defaults(fn=cmd_sign)
+
+    p = sub.add_parser("bundle")
+    for a in ("--manifest", "--image", "--out"):
+        p.add_argument(a, required=True)
+    p.set_defaults(fn=cmd_bundle)
 
     p = sub.add_parser("roots"); p.add_argument("--out", required=True)
     p.add_argument("pubkeys", nargs="+"); p.set_defaults(fn=cmd_roots)
