@@ -76,6 +76,49 @@
 #include "RadioCaps.h"
 #include "Settings.h"
 
+// ---------------------------------------------------------------------------
+// The radio's side of the handoff to the transport
+// ---------------------------------------------------------------------------
+// These were in Config.h, which every translation unit in the firmware
+// includes and whose docstring says it holds compile-time configuration
+// overridable from build_flags. The layout of a private ring-buffer item and
+// an SX127x demodulation-limit formula are neither, and having them there
+// compiled the radio's wire format into the settings store, the web server and
+// the OTA installer — none of which have any business with it, and any of
+// which could come to depend on it. The two files that share this contract are
+// this one's .cpp, which fills the ring, and RnsTransport.cpp, which drains
+// it; both already include this header.
+
+// One frame on its way from the radio to the transport: what the radio
+// measured of it, then its bytes.
+//
+// The reading travels with the frame because it is a fact about *that* frame.
+// It used to be sampled from g_stats when the transport got round to draining
+// the ring, so a backlog of three handed all three the newest one's RSSI —
+// and the number a client asks for in a signal report is exactly this one.
+struct LoRaRxFrame {
+  float rssi;
+  float snr;
+};
+
+// Link quality from SNR, against a floor that moves with the spreading factor:
+// SF12 decodes far below the noise where SF7 cannot, so the same SNR means
+// something different on each. The floor is the SX127x demodulation limit at
+// each factor — -7.5 dB at SF7 down to -20 dB at SF12, i.e. 10 - 2.5*SF.
+// Below it the chip cannot decode at all, so a dead link reads empty rather
+// than showing four of seven bars.
+//
+// Here rather than in the display, because it is now two readers' answer to
+// one question: the panel's signal meter and the quality figure a client is
+// told in a signal report. RNS derives its own the same way (RNodeInterface).
+inline uint8_t loraQualityPercent(float snr, uint8_t sf) {
+  const float lo = 10.0f - 2.5f * (float)sf, hi = 6.0f;
+  if (snr <= lo) return 0;
+  if (snr >= hi) return 100;
+  return (uint8_t)((snr - lo) * 100.0f / (hi - lo));
+}
+
+
 class LoRaRadio {
 public:
   // Initializes SPI, detects the transceiver and enters receive mode with

@@ -33,6 +33,7 @@
 #include "RnsTransport.h"
 #include "Power.h"
 #include "Gps.h"
+#include "LoRaRadio.h"        // loraQualityPercent, for the signal meter
 
 Display display;
 
