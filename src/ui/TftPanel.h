@@ -59,8 +59,9 @@ public:
   // resolution and never learn the glass is finer.
   Adafruit_GFX& gfx() override { return *_canvas; }
   void clear() override { if (_canvas) _canvas->fillScreen(0); }
-  // One kind of update: the whole canvas is streamed, ~150 KB of SPI at
-  // 40 MHz, tens of milliseconds. Nothing to ghost, so `full` changes nothing.
+  // Streams the band of rows that changed since the last flush — a one-line
+  // change costs a few panel lines, not the whole ~150 KB frame. `full`
+  // forces the lot; there is nothing to ghost, so nothing else needs it.
   void flush(bool full) override;
   // A backlight is most of what this panel costs, so blanking is real money:
   // the glass goes dark and the LED goes off.
@@ -75,19 +76,23 @@ public:
   uint16_t paper() const override { return 0; }
 
 private:
-  // Drawing geometry, from the layout — the board header's DISPLAY_WIDTH and
-  // DISPLAY_HEIGHT are the physical panel, which is exactly twice this.
-  static constexpr int16_t kW = 120;
-  static constexpr int16_t kH = 160;
+  // Drawing geometry, from the layout — the one declaration of it
+  // (DisplayLayout.h's kTft120x160); the board header's DISPLAY_WIDTH and
+  // DISPLAY_HEIGHT are the physical panel, which must be exactly twice this.
+  static constexpr int16_t kW = DisplayLayout::active().width;
+  static constexpr int16_t kH = DisplayLayout::active().height;
   static_assert(kW * 2 == DISPLAY_WIDTH && kH * 2 == DISPLAY_HEIGHT,
                 "the canvas doubles onto the glass; the two must be exactly 2:1");
 
   void cmd(uint8_t c);
   void cmd(uint8_t c, const uint8_t* data, size_t len);
-  void window();                        // the full panel, ready for pixels
+  void window(int16_t y0, int16_t y1);  // panel rows [y0..y1], ready for pixels
 
   SPIClass    _spi{TFT_SPI_BUS};
   GFXcanvas1* _canvas = nullptr;
+  // What the glass last saw, so flush() streams only the band of rows that
+  // changed: a ticking counter costs one band, not the whole 153 KB frame.
+  uint8_t*    _shadow = nullptr;
   bool        _ok = false;
   bool        _lit = false;             // backlight state, so blank() is idempotent
 };

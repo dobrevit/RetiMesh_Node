@@ -718,8 +718,8 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
 
   LoRaFem::tx();                         // amplifier into the path first
   int16_t state = _radio->startTransmit((uint8_t*)frame, len);
-  if (state != RADIOLIB_ERR_NONE) LoRaFem::rx();
   if (state != RADIOLIB_ERR_NONE) {
+    LoRaFem::rx();                       // back to listening before anything else
     log_e("startTransmit failed, code %d", state);
     return false;
   }

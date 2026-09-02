@@ -89,16 +89,6 @@ void rx() {
   digitalWrite(modePin(), LOW);                 // LNA in the receive path
 }
 
-void sleep() {
-  // CSD low shuts either part down to leakage current; the rail off finishes
-  // the job. Order matters no further than "signal before power".
-  digitalWrite(modePin(), LOW);
-  digitalWrite(PIN_FEM_ENABLE, LOW);
-  digitalWrite(PIN_FEM_POWER, LOW);
-}
-
-Part part() { return sPart; }
-
 const char* partName() {
   switch (sPart) {
     case Part::GC1109:   return "GC1109";

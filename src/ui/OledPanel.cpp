@@ -69,14 +69,7 @@ static void releaseBus(int sda, int scl) {
 }
 
 bool OledPanel::begin() {
-#if HAS_DISPLAY_VEXT
-  // The panel is fed from a switched rail, active low, and needs a moment to
-  // settle before it will answer. Without this the I2C probe finds nothing and
-  // the board looks broken rather than switched off.
-  pinMode(PIN_DISPLAY_VEXT, OUTPUT);
-  digitalWrite(PIN_DISPLAY_VEXT, LOW);
-  delay(50);
-#endif
+  panelVextOn();
 
   releaseBus(PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);

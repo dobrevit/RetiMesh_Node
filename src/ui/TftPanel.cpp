@@ -27,7 +27,6 @@
 
 // The ST7789 commands this driver speaks. Names from the datasheet.
 namespace {
-constexpr uint8_t SWRESET = 0x01;
 constexpr uint8_t SLPOUT  = 0x11;
 constexpr uint8_t NORON   = 0x13;
 constexpr uint8_t INVON   = 0x21;
@@ -51,10 +50,12 @@ void TftPanel::cmd(uint8_t c, const uint8_t* data, size_t len) {
   }
 }
 
-void TftPanel::window() {
-  // The whole panel. CASET/RASET take big-endian start and end, inclusive.
-  const uint8_t ca[4] = { 0, 0, (uint8_t)((DISPLAY_WIDTH - 1) >> 8),  (uint8_t)((DISPLAY_WIDTH - 1) & 0xFF) };
-  const uint8_t ra[4] = { 0, 0, (uint8_t)((DISPLAY_HEIGHT - 1) >> 8), (uint8_t)((DISPLAY_HEIGHT - 1) & 0xFF) };
+void TftPanel::window(int16_t y0, int16_t y1) {
+  // Full width, the given rows. CASET/RASET take big-endian start and end,
+  // inclusive.
+  const uint8_t ca[4] = { 0, 0, (uint8_t)((DISPLAY_WIDTH - 1) >> 8), (uint8_t)((DISPLAY_WIDTH - 1) & 0xFF) };
+  const uint8_t ra[4] = { (uint8_t)(y0 >> 8), (uint8_t)(y0 & 0xFF),
+                          (uint8_t)(y1 >> 8), (uint8_t)(y1 & 0xFF) };
   cmd(CASET, ca, sizeof(ca));
   cmd(RASET, ra, sizeof(ra));
 }
@@ -62,16 +63,14 @@ void TftPanel::window() {
 bool TftPanel::begin() {
   // The panel sits behind the switched peripheral rail, active low, like
   // every panel on a Heltec board.
-#if HAS_DISPLAY_VEXT
-  pinMode(PIN_DISPLAY_VEXT, OUTPUT);
-  digitalWrite(PIN_DISPLAY_VEXT, LOW);
-  delay(50);
-#endif
+  panelVextOn();
 
   _canvas = new (std::nothrow) GFXcanvas1(kW, kH);
-  if (!_canvas || !_canvas->getBuffer()) {
+  _shadow = (uint8_t*)calloc(((size_t)kW + 7) / 8 * kH, 1);
+  if (!_canvas || !_canvas->getBuffer() || !_shadow) {
     log_e("tft: no room for a %dx%d canvas — display disabled", kW, kH);
     delete _canvas; _canvas = nullptr;
+    free(_shadow);  _shadow = nullptr;
     return false;
   }
 
@@ -116,34 +115,58 @@ bool TftPanel::begin() {
   return _ok;
 }
 
-void TftPanel::flush(bool) {
+void TftPanel::flush(bool full) {
   if (!_ok) return;
+
+  const uint8_t* fb = _canvas->getBuffer();
+  const size_t stride = ((size_t)kW + 7) / 8;
+
+  // The band of canvas rows that changed since the glass last saw them. A
+  // ticking counter or the charge sweep touches a row or two; streaming the
+  // other three hundred panel lines for it was most of a core's percent
+  // spent repeating what the controller's RAM already holds.
+  int16_t y0 = 0, y1 = kH - 1;
+  if (!full) {
+    while (y0 < kH && memcmp(fb + y0 * stride, _shadow + y0 * stride, stride) == 0) y0++;
+    if (y0 == kH) {                       // nothing changed at all
+      if (!_lit) { digitalWrite(PIN_TFT_BL, HIGH); _lit = true; }
+      return;
+    }
+    while (y1 > y0 && memcmp(fb + y1 * stride, _shadow + y1 * stride, stride) == 0) y1--;
+  }
+
+  // Ink white on black, as every page draws; each canvas nibble becomes 16
+  // bytes of doubled RGB565 through a table rather than four branches per
+  // pixel. GFXcanvas1 packs pixels MSB-first within each byte.
+  static const uint8_t* lut = [] {
+    static uint8_t t[16][16];
+    for (int n = 0; n < 16; n++)
+      for (int px = 0; px < 4; px++) {
+        const uint8_t v = (n & (8 >> px)) ? 0xFF : 0x00;
+        memset(&t[n][px * 4], v, 4);
+      }
+    return &t[0][0];
+  }();
 
   _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
-  window();
+  window((int16_t)(y0 * 2), (int16_t)(y1 * 2 + 1));
   cmd(RAMWR);
   digitalWrite(PIN_TFT_DC, HIGH);
 
-  // One canvas row becomes two panel lines of doubled pixels. The line buffer
-  // is built once per canvas row and written twice — 480 bytes on the stack,
-  // 320 writes per frame, which at 40 MHz is a few tens of milliseconds.
-  const uint8_t* fb = _canvas->getBuffer();
-  const size_t stride = (kW + 7) / 8;
   uint8_t line[DISPLAY_WIDTH * 2];
-  for (int16_t y = 0; y < kH; y++) {
+  for (int16_t y = y0; y <= y1; y++) {
     const uint8_t* row = fb + (size_t)y * stride;
-    for (int16_t x = 0; x < kW; x++) {
-      // Ink white on black, as every page draws. GFXcanvas1 packs pixels
-      // MSB-first within each byte.
-      const bool on = row[x >> 3] & (0x80 >> (x & 7));
-      const uint8_t v = on ? 0xFF : 0x00;
-      line[x * 4 + 0] = v; line[x * 4 + 1] = v;    // pixel doubled across...
-      line[x * 4 + 2] = v; line[x * 4 + 3] = v;
+    uint8_t* out = line;
+    for (size_t b = 0; b < stride; b++) {
+      memcpy(out, lut + (row[b] >> 4) * 16, 16);  out += 16;
+      memcpy(out, lut + (row[b] & 0x0F) * 16, 16); out += 16;
     }
+    _spi.writeBytes(line, sizeof(line));            // the row, doubled across...
     _spi.writeBytes(line, sizeof(line));            // ...and down
-    _spi.writeBytes(line, sizeof(line));
   }
+  memcpy(_shadow + (size_t)y0 * stride, fb + (size_t)y0 * stride,
+         (size_t)(y1 - y0 + 1) * stride);
 
   digitalWrite(PIN_TFT_CS, HIGH);
   _spi.endTransaction();

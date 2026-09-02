@@ -74,10 +74,6 @@ void begin();
 void tx();
 void rx();
 
-// Shut the front end down. Off the air entirely: no LNA, no PA, rail down.
-void sleep();
-
-Part part();
 const char* partName();
 
 // The part's approximate transmit gain at a given chip drive, in dB, from the
@@ -91,12 +87,9 @@ int8_t gainDb(int8_t chipDbm);
 // Boards without a front end compile the calls away rather than guarding
 // every call site.
 namespace LoRaFem {
-enum class Part : uint8_t { None, GC1109, KCT8103L };
 inline void begin() {}
 inline void tx() {}
 inline void rx() {}
-inline void sleep() {}
-inline Part part() { return Part::None; }
 inline const char* partName() { return "none"; }
 inline int8_t gainDb(int8_t) { return 0; }
 } // namespace LoRaFem

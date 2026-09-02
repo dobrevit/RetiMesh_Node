@@ -46,6 +46,19 @@
 
 #include <Adafruit_GFX.h>
 
+// The switched peripheral rail every Heltec panel hangs off: active low, and
+// worth 50 ms of settle before the part behind it is spoken to. One helper,
+// because the level and the wait are facts about the rail, not about any
+// panel — three drivers each carried their own copy before this. A no-op on
+// boards without the rail, so every panel driver may call it unconditionally.
+inline void panelVextOn() {
+#if HAS_DISPLAY_VEXT
+  pinMode(PIN_DISPLAY_VEXT, OUTPUT);
+  digitalWrite(PIN_DISPLAY_VEXT, LOW);
+  delay(50);
+#endif
+}
+
 class Panel {
 public:
   virtual ~Panel() {}

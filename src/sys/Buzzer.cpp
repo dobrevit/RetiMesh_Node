@@ -33,33 +33,45 @@
 
 namespace {
 
-esp_timer_handle_t sTimer = nullptr;
-volatile uint8_t   sStep  = 0;   // where in the current little tune we are
-volatile uint8_t   sTune  = 0;   // 0 idle, 1 boot pair, 2 message note
+esp_timer_handle_t sTimer  = nullptr;
+volatile bool      sBusy   = false;   // a note is on the air
+volatile uint32_t  sNextHz = 0;       // and this one is owed after it (0: none)
+uint32_t           sLenUs  = 0;       // note length of the current tune
+portMUX_TYPE       sMux    = portMUX_INITIALIZER_UNLOCKED;
 
 void tone(uint32_t hz) { ledcWriteTone(PIN_BUZZER, hz); }
 
+// The state machine's whole content is "one more note may be owed" — a
+// review found the tune-id/step pair encoding exactly that, and the claim
+// below un-races it: start() runs on whichever task has news (the RNS task,
+// mostly) while this runs on the esp_timer task.
 void step(void*) {
-  // The boot pair: first note has ended, either start the second or finish.
-  if (sTune == 1 && sStep == 1) {
-    sStep = 2;
-    tone(4000);                                  // up to the piezo's sweet spot
-    esp_timer_start_once(sTimer, 120 * 1000);
-    return;
+  uint32_t next;
+  portENTER_CRITICAL(&sMux);
+  next = sNextHz;
+  sNextHz = 0;
+  if (!next) sBusy = false;
+  portEXIT_CRITICAL(&sMux);
+  if (next) {
+    tone(next);
+    esp_timer_start_once(sTimer, sLenUs);
+  } else {
+    tone(0);                                     // silence, and done
   }
-  tone(0);                                       // silence, and done
-  sTune = 0;
-  sStep = 0;
 }
 
-// Start a tune if the sounder is idle. One at a time and none queued: the
+// Start a sound if the sounder is idle. One at a time and none queued: the
 // news a second sound would carry is already in the air.
-bool start(uint8_t tune, uint32_t hz, uint32_t ms) {
-  if (!sTimer || sTune) return false;
-  sTune = tune;
-  sStep = 1;
+bool start(uint32_t hz, uint32_t ms, uint32_t nextHz) {
+  if (!sTimer) return false;
+  portENTER_CRITICAL(&sMux);
+  if (sBusy) { portEXIT_CRITICAL(&sMux); return false; }
+  sBusy = true;
+  sNextHz = nextHz;
+  portEXIT_CRITICAL(&sMux);
+  sLenUs = ms * 1000;
   tone(hz);
-  esp_timer_start_once(sTimer, ms * 1000);
+  esp_timer_start_once(sTimer, sLenUs);
   return true;
 }
 
@@ -85,8 +97,8 @@ void begin() {
 // other function worked, so its sounder is likely simply not fitted — the pin
 // is driven regardless, because a board that has one should be heard and one
 // that does not loses nothing.
-void boot()    { start(1, 2000, 120); }          // 2 kHz then 4 kHz
-void message() { start(2, 4000, 150); }
+void boot()    { start(2000, 120, 4000); }       // 2 kHz then 4 kHz
+void message() { start(4000, 150, 0); }
 
 } // namespace Buzzer
 
