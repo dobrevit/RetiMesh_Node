@@ -93,6 +93,12 @@ const char* runningSlot();
 // without that the node refuses every later attempt against a transfer it can
 // no longer receive.
 const char* receiveStart(uint32_t totalBytes, const void* owner);
+
+// Whether there is somewhere to stage an update right now: the card on a
+// board with a slot, LittleFS on one without. The portal's can-upload answer
+// and receiveStart() both ask this, so they cannot disagree.
+bool stagingReady();
+
 // `index` is where this chunk belongs in the body. It is checked rather than
 // assumed: a browser that retries, a connection that restarts, or two clients
 // posting at once all arrive as chunks whose index does not follow the last,

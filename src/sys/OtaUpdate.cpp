@@ -37,26 +37,31 @@
 #include "SdCard.h"
 
 namespace Ota {
-namespace {
 
 // The filesystem the bundle is staged on, asked once so every use below is
 // the same question with the same answer.
-inline fs::FS& stagingFs() {
+static fs::FS& stagingFs() {
 #if HAS_SD
   return SD;
 #else
   return LittleFS;
 #endif
 }
-// Whether that filesystem is there to write on. LittleFS is mounted at boot
-// and stays mounted; a card can be absent.
-inline bool stagingReady() {
+
+// Whether there is somewhere to put the bytes as they arrive. Public, because
+// the portal asks the same question when it decides whether to offer the
+// upload control at all — and while this was a private helper the portal went
+// on asking sdCard.mounted() instead, refusing on the one board that stages
+// on LittleFS the very upload the endpoint would accept.
+bool stagingReady() {
 #if HAS_SD
   return sdCard.mounted();
 #else
-  return true;
+  return true;   // LittleFS is mounted at boot and stays mounted
 #endif
 }
+
+namespace {
 
 Floor<NvsStore>* sFloor = nullptr;
 Progress         sProgress;

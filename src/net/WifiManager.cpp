@@ -1106,7 +1106,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
       up["slot"]  = Ota::runningSlot();
       if (p.message[0]) up["message"] = JsonString(p.message);
     }
-    const char* why = Ota::uploadRefusal(sdCard.mounted(), Ota::canSelfUpdate(), p.stage);
+    const char* why = Ota::uploadRefusal(Ota::stagingReady(), Ota::canSelfUpdate(), p.stage);
     up["can_upload"] = (why == nullptr);
     if (why) up["refusal"] = why;
   }

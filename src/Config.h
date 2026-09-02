@@ -625,6 +625,21 @@
 #ifndef HAS_GPS
   #define HAS_GPS           0
 #endif
+// Optional receiver control lines, -1 where a board has none — the same
+// convention the battery divider's enable uses, so every optional pin in the
+// tree is expressed one way.
+#ifndef PIN_GPS_EN
+  #define PIN_GPS_EN        -1
+#endif
+#ifndef GPS_EN_ACTIVE
+  #define GPS_EN_ACTIVE     LOW
+#endif
+#ifndef PIN_GPS_RST
+  #define PIN_GPS_RST       -1
+#endif
+#ifndef PIN_GPS_STANDBY
+  #define PIN_GPS_STANDBY   -1
+#endif
 #ifndef HAS_BATTERY_ADC
   #define HAS_BATTERY_ADC   1
 #endif
