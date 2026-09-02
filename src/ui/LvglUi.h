@@ -88,7 +88,7 @@ void setRotation(uint8_t quarterTurns);
 // interrupt — a field device is glanced at, not watched.
 void showIdle(bool on);
 bool idleShowing();
-void showIncoming(const char* sender, const char* text);
+void showIncoming(const uint8_t from[16], const char* text);
 void showFirmware(const char* stage, uint32_t written, uint32_t total);
 void hideFirmware();
 
@@ -109,7 +109,7 @@ inline uint8_t takePowerAction() { return 0; }
 inline void setRotation(uint8_t) {}
 inline void showIdle(bool) {}
 inline bool idleShowing() { return false; }
-inline void showIncoming(const char*, const char*) {}
+inline void showIncoming(const uint8_t*, const char*) {}
 inline void showFirmware(const char*, uint32_t, uint32_t) {}
 inline void hideFirmware() {}
 } // namespace LvglUi

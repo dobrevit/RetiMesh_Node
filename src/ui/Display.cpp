@@ -157,13 +157,10 @@ void Display::displayTask(void* self) {
         d->_lastActivityMs = now;
         LvglUi::showIdle(false);
         if (d->_blank) d->setBlank(false);
-        char sender[12];
-        snprintf(sender, sizeof(sender), "%02x%02x%02x%02x",
-                 nr.from[0], nr.from[1], nr.from[2], nr.from[3]);
         char text[81];
         const size_t tn = nr.textLen < sizeof(text) - 1 ? nr.textLen : sizeof(text) - 1;
         memcpy(text, nr.text, tn); text[tn] = 0;
-        LvglUi::showIncoming(sender, text);
+        LvglUi::showIncoming(nr.from, text);
       }
       {
         // An install owns the glass while it runs: woken, told what is

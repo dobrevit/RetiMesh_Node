@@ -74,6 +74,10 @@ lv_obj_t* textarea(lv_obj_t* parent, const char* placeholder,
 void openHome();                         // builds and loads the root screen
 void openMessages();                     // push()es the messages screen
 void openThread(const uint8_t from[16]);  // one conversation, directly
+// The rule for naming a peer, stated once: the live announce table first,
+// the persistent name memory second, the shortened hash last.
+void peerLabelHex(const char* hashHex, char* out, size_t n);
+void peerLabel(const uint8_t hash[16], char* out, size_t n);
 void openDestinations();                 // the mesh: peers by hops and freshness
 void openSettings();                     // push()es the category list
 void openWifiJoin();                     // scan, pick, key if locked, save on success
@@ -82,7 +86,7 @@ void openIdentity();                     // who this node is, and its QR
 void openPowerMenu();                    // sleep / restart / power off
 void showIdle(bool on);                  // the low-draw clock the panel rests on
 bool idleShowing();
-void showIncoming(const char* sender, const char* text);  // full-screen interrupt
+void showIncoming(const uint8_t from[16], const char* text);  // full-screen interrupt
 void showFirmware(const char* stage, uint32_t written, uint32_t total);
 void hideFirmware();
 void openBearing(const char* peer);      // the dial, honest about what it lacks

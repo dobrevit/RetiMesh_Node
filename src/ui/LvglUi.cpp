@@ -63,7 +63,7 @@ void swallowTouch() { Ui::swallowTouch(); }
 void openPowerMenu() { Ui::openPowerMenu(); }
 void showIdle(bool on) { Ui::showIdle(on); }
 bool idleShowing() { return Ui::idleShowing(); }
-void showIncoming(const char* s, const char* t) { Ui::showIncoming(s, t); }
+void showIncoming(const uint8_t* f, const char* t) { Ui::showIncoming(f, t); }
 void showFirmware(const char* st, uint32_t w, uint32_t t) { Ui::showFirmware(st, w, t); }
 void hideFirmware() { Ui::hideFirmware(); }
 uint8_t takePowerAction() { return Ui::takePowerAction(); }

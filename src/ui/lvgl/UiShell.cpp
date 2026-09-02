@@ -255,6 +255,12 @@ bool shellInit(TftPanel& panel) {
   lv_display_set_buffers(disp, sBuf1, nullptr, sizeof(sBuf1),
                          LV_DISPLAY_RENDER_MODE_PARTIAL);
   UiTheme::init(disp);                   // before any widget exists
+  // text_font is an inherited style, and overlays live on the top layer —
+  // outside any themed screen's inheritance. Without this, their labels
+  // fall back to LV_FONT_DEFAULT, which lacks the design's delimiters: the
+  // idle clock drew its middle dots as hollow rectangles.
+  lv_obj_set_style_text_font(lv_layer_top(), &font_barlow_16, 0);
+  lv_obj_set_style_text_color(lv_layer_top(), lv_color_hex(UiTheme::kInk), 0);
 
   lv_indev_t* touch = lv_indev_create();
   lv_indev_set_type(touch, LV_INDEV_TYPE_POINTER);

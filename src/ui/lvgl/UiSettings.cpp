@@ -47,9 +47,10 @@ namespace {
 
 // --- what kind of control a key wants ---------------------------------------
 
-enum class Kind : uint8_t { Text, Secret, Number, Switch, Region, Words };
+enum class Kind : uint8_t { Text, Secret, Number, Switch, Region, Words, Slider };
 
 Kind kindFor(const char* key, const char* value, bool quoted) {
+  if (strcmp(key, "display.brightness") == 0)       return Kind::Slider;
   if (strcmp(key, "radio.region") == 0)             return Kind::Region;
   if (strcmp(key, "wifi.security") == 0)            return Kind::Words;
   if (strcmp(key, "transport.power_profile") == 0)  return Kind::Words;
@@ -107,6 +108,9 @@ Row sRows[kMaxRows];
 // The value a control holds now, in the words SettingsFields::set eats.
 void rowValue(const Row& r, char* out, size_t len) {
   switch (r.kind) {
+    case Kind::Slider:
+      snprintf(out, len, "%d", (int)lv_slider_get_value(r.control));
+      break;
     case Kind::Switch:
       snprintf(out, len, "%s", lv_obj_has_state(r.control, LV_STATE_CHECKED) ? "on" : "off");
       break;
@@ -176,6 +180,60 @@ void buildControl(lv_obj_t* parent, Row& r) {
       }
       lv_dropdown_set_selected(r.control, sel);
       lv_obj_set_width(r.control, lv_pct(100));
+      break;
+    }
+    case Kind::Slider: {
+      // Typing a percentage is tedious on glass: a slider with step keys on
+      // either side, applied through the funnel the moment the finger lifts,
+      // so the backlight answers while the hand is still on the panel.
+      lv_obj_t* rowH = lv_obj_create(parent);
+      lv_obj_remove_style_all(rowH);
+      lv_obj_set_size(rowH, lv_pct(100), 36);
+      lv_obj_set_flex_flow(rowH, LV_FLEX_FLOW_ROW);
+      lv_obj_set_style_pad_column(rowH, 8, 0);
+      lv_obj_set_flex_align(rowH, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+      auto stepBtn = [&](const char* sym) {
+        lv_obj_t* b = lv_button_create(rowH);
+        UiTheme::actionButton(b);
+        lv_obj_set_size(b, 40, lv_pct(100));
+        lv_obj_t* l = lv_label_create(b);
+        lv_label_set_text(l, sym);
+        lv_obj_center(l);
+        return b;
+      };
+      lv_obj_t* minus = stepBtn(LV_SYMBOL_MINUS);
+      lv_obj_t* slider = lv_slider_create(rowH);
+      lv_slider_set_range(slider, 0, 100);
+      lv_slider_set_value(slider, atoi(r.initial), LV_ANIM_OFF);
+      lv_obj_set_flex_grow(slider, 1);
+      lv_obj_t* plus = stepBtn(LV_SYMBOL_PLUS);
+      r.control = slider;
+      auto apply = [](lv_event_t* e) {
+        Row* row = (Row*)lv_event_get_user_data(e);
+        char v[8], err[96] = "";
+        snprintf(v, sizeof(v), "%d", (int)lv_slider_get_value(row->control));
+        const SettingsFields::Result res = SettingsFields::set(row->key, v, err, sizeof(err));
+        if (res == SettingsFields::Result::Ok)
+          strlcpy(row->initial, v, sizeof(row->initial));   // Save has nothing left to do
+        else Ui::toast(err[0] ? err : SettingsFields::resultText(res));
+      };
+      lv_obj_add_event_cb(slider, apply, LV_EVENT_RELEASED, &r);
+      struct Step { Row* row; int delta; };
+      static Step steps[kMaxRows * 2];
+      static size_t stepN = 0;
+      if (stepN + 2 > kMaxRows * 2) stepN = 0;
+      steps[stepN] = { &r, -5 };
+      steps[stepN + 1] = { &r, +5 };
+      auto stepCb = [](lv_event_t* e) {
+        Step* st = (Step*)lv_event_get_user_data(e);
+        int v = (int)lv_slider_get_value(st->row->control) + st->delta;
+        v = v < 0 ? 0 : (v > 100 ? 100 : v);
+        lv_slider_set_value(st->row->control, v, LV_ANIM_OFF);
+        lv_obj_send_event(st->row->control, LV_EVENT_RELEASED, nullptr);
+      };
+      lv_obj_add_event_cb(minus, stepCb, LV_EVENT_CLICKED, &steps[stepN]);
+      lv_obj_add_event_cb(plus, stepCb, LV_EVENT_CLICKED, &steps[stepN + 1]);
+      stepN += 2;
       break;
     }
     case Kind::Secret:

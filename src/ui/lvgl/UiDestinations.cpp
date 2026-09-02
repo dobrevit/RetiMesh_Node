@@ -63,11 +63,8 @@ lv_obj_t* reading(lv_obj_t* parent, const char* label, const char* value) {
 void openDetail(lv_event_t* e) {
   const RnsTransport::PathInfo* pi =
       (const RnsTransport::PathInfo*)lv_event_get_user_data(e);
-  Neighbor nb = {};
-  const bool heard = neighbors.byHash(pi->hash, nb) && nb.name[0];
   char title[34];
-  snprintf(title, sizeof(title), "%s", heard ? nb.name : "");
-  if (!title[0]) snprintf(title, sizeof(title), "%.8s", pi->hash);
+  Ui::peerLabelHex(pi->hash, title, sizeof(title));
   lv_obj_t* body = Ui::newScreen(title);
 
   // The full hash, grouped in fours across two lines — the spec's rule: it
@@ -91,7 +88,8 @@ void openDetail(lv_event_t* e) {
   reading(body, "LAST HEARD", av);
   reading(body, "VIA", pi->via);
   // The signal rows the spec drew, filled only when this node truly heard
-  // the peer itself — a announce that came over RF carries its own figures.
+  // the peer itself — an announce that came over RF carries its own figures.
+  Neighbor nb = {};
   if (neighbors.byHash(pi->hash, nb) && !nb.viaWifi && nb.rssi != 0) {
     snprintf(v, sizeof(v), "%.0f dBm", (double)nb.rssi);
     reading(body, "LAST RSSI", v);
@@ -130,11 +128,8 @@ void openDetail(lv_event_t* e) {
   lv_obj_add_event_cb(nav, [](lv_event_t* ev) {
     const RnsTransport::PathInfo* p2 =
         (const RnsTransport::PathInfo*)lv_event_get_user_data(ev);
-    Neighbor nb = {};
-    const bool named = neighbors.byHash(p2->hash, nb) && nb.name[0];
     char t[34];
-    snprintf(t, sizeof(t), "%.*s", (int)sizeof(t) - 1, named ? nb.name : p2->hash);
-    if (!named) t[8] = 0;
+    Ui::peerLabelHex(p2->hash, t, sizeof(t));
     Ui::openBearing(t);
   }, LV_EVENT_CLICKED, (void*)pi);
   lv_obj_t* ann = lv_button_create(row);
@@ -179,10 +174,11 @@ void openDestinations() {
     // The peer's name leads when an announce carried one; the shortened key
     // id sits beneath it either way — the name is for people, the hash is
     // what the mesh actually routes on.
-    Neighbor nb = {};
-    const bool named = neighbors.byHash(sPaths[i].hash, nb) && nb.name[0];
+    char who[34];
+    Ui::peerLabelHex(sPaths[i].hash, who, sizeof(who));
+    const bool named = strncmp(who, sPaths[i].hash, 8) != 0;
     snprintf(line, sizeof(line), "%s%s%.8s · %u hop%s · %s",
-             named ? nb.name : "", named ? "\n" : "", sPaths[i].hash,
+             named ? who : "", named ? "\n" : "", sPaths[i].hash,
              sPaths[i].hops, sPaths[i].hops == 1 ? "" : "s", age);
     lv_obj_t* btn = lv_list_add_button(list, LV_SYMBOL_SHUFFLE, line);
     // Stale peers stay listed but recede — quiet an hour is still a fact.

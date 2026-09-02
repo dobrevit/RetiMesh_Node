@@ -50,6 +50,7 @@
 #include "RetiTransportServer.h"
 #include "WifiManager.h"
 #include "AutoInterface.h"
+#include "PeerNames.h"
 
 using RNS::Bytes;
 
@@ -315,6 +316,7 @@ public:
     n.rssi = n.viaWifi ? 0 : packet.rssi();
     n.snr  = n.viaWifi ? 0 : packet.snr();
     neighbors.seen(n);
+    if (n.name[0]) PeerNames::remember(n.hash, n.name);   // a name heard is a name kept
     g_stats.announcesRx++;
     log_i("announce via %s: %s <%s> \"%s\" hops %u", iface.c_str(), aspect ? aspect : "unknown-aspect", n.hash, n.name, n.hops);
     char line[160];

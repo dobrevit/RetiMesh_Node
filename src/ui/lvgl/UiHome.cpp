@@ -147,9 +147,10 @@ void refreshHome(lv_timer_t*) {
   struct Latest { char line[80]; bool got; } latest{{0}, false};
   Rns::Inbox::readPage(0, 1, [](const Rns::InboxRecord& r, void* ctx) {
     Latest* o = (Latest*)ctx;
+    char who[34];
+    Ui::peerLabel(r.from, who, sizeof(who));
     const size_t n = r.textLen < 40 ? r.textLen : 40;
-    snprintf(o->line, sizeof(o->line), "%02x%02x%02x%02x · %.*s",
-             r.from[0], r.from[1], r.from[2], r.from[3], (int)n, r.text);
+    snprintf(o->line, sizeof(o->line), "%s · %.*s", who, (int)n, r.text);
     o->got = true;
   }, &latest);
   setIf(sLatestVal, latest.got ? latest.line : "no messages yet");

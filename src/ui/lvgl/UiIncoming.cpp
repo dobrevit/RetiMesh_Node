@@ -21,7 +21,9 @@ lv_obj_t* sAlert = nullptr;
 
 namespace Ui {
 
-void showIncoming(const char* sender, const char* text) {
+void showIncoming(const uint8_t from[16], const char* text) {
+  char sender[34];
+  peerLabel(from, sender, sizeof(sender));
   if (sAlert) { lv_obj_delete(sAlert); sAlert = nullptr; }  // newest wins
   sAlert = lv_obj_create(lv_layer_top());
   lv_obj_remove_style_all(sAlert);
@@ -37,10 +39,10 @@ void showIncoming(const char* sender, const char* text) {
   lv_obj_set_style_text_color(head, lv_color_hex(UiTheme::kWarn), 0);
   lv_obj_align(head, LV_ALIGN_TOP_MID, 0, 34);
 
-  lv_obj_t* from = lv_label_create(sAlert);
-  lv_label_set_text(from, sender);
-  lv_obj_set_style_text_font(from, &font_barlow_16, 0);
-  lv_obj_align(from, LV_ALIGN_TOP_MID, 0, 58);
+  lv_obj_t* who = lv_label_create(sAlert);
+  lv_label_set_text(who, sender);
+  lv_obj_set_style_text_font(who, &font_barlow_16, 0);
+  lv_obj_align(who, LV_ALIGN_TOP_MID, 0, 58);
 
   lv_obj_t* body = lv_label_create(sAlert);
   lv_label_set_text(body, text);
