@@ -55,9 +55,7 @@ bool EinkPanel::begin() {
   // The panel sits on the switched peripheral rail, active low, as the OLED
   // boards' panels do, and it has to be up before the line below means
   // anything.
-  pinMode(PIN_DISPLAY_VEXT, OUTPUT);
-  digitalWrite(PIN_DISPLAY_VEXT, LOW);
-  delay(50);
+  panelVextOn();
 
   if (!panelAnswers()) {
     log_w("e-paper: BUSY never went low after reset (pin %d) — no panel, running headless",

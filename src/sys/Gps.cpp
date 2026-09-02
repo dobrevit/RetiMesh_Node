@@ -203,9 +203,36 @@ bool enabled() { return sFix.enabled; }
 
 void setEnabled(bool on) {
   Sys::Lock held(sLock);
-  if (on == sFix.enabled) return;
+  // The switches are driven before the already-in-that-state early return,
+  // deliberately: at boot nothing has driven them yet, and "already off"
+  // used to return here with the enable line floating — on a board whose
+  // line idles toward on, a receiver drawing tens of mA under a UI that
+  // said GNSS was disabled. Re-writing a pin to the level it already holds
+  // costs nothing.
+  //
+  // A PMU board powers the receiver's rail through the chip; a board with a
+  // plain enable line drives the line; a board with neither leaves the
+  // receiver always on. Each call is a cheap no-op where it does not apply.
   Pmu::gpsPower(on);
+#if PIN_GPS_EN >= 0
+  pinMode(PIN_GPS_EN, OUTPUT);
+  digitalWrite(PIN_GPS_EN, on ? GPS_EN_ACTIVE : !GPS_EN_ACTIVE);
+#endif
+  if (on == sFix.enabled) return;
   if (on) {
+#if PIN_GPS_STANDBY >= 0
+    // Force the receiver awake: low means it may sleep, and a receiver that
+    // arrives asleep parses as absent.
+    pinMode(PIN_GPS_STANDBY, OUTPUT);
+    digitalWrite(PIN_GPS_STANDBY, HIGH);
+#endif
+#if PIN_GPS_RST >= 0
+    // Reset released, never asserted here: the receiver holds its almanac
+    // through a power cycle and a reset would cost the warm start that
+    // holding it is worth.
+    pinMode(PIN_GPS_RST, OUTPUT);
+    digitalWrite(PIN_GPS_RST, HIGH);
+#endif
     sSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
     sFix.enabled = true;
     log_i("GNSS receiver on (UART1 rx %d tx %d @ %d baud)", PIN_GPS_RX, PIN_GPS_TX, GPS_BAUD);
@@ -223,7 +250,10 @@ void begin() {
   setenv("TZ", "UTC0", 1);
   tzset();
   setEnabled(settings.radio().gpsEnabled);
-  Diag::startTask(task, "gps", 3072, nullptr, 1, 0);
+  // 4 KB, not 3: the first boot on hardware measured 1216 B of headroom at
+  // 3072 with a receiver talking — enough to run, not enough to trust under
+  // the guard's worst case (Diag.h). The margin is cheap; the overflow is not.
+  Diag::startTask(task, "gps", 4096, nullptr, 1, 0);
 }
 
 Fix fix() {

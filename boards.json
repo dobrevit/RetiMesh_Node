@@ -271,7 +271,7 @@
     "display": "2.13\" e-ink (250x122, E0213A367), driven",
     "extras": "PPP over the CP2102 bridge (no SD, no GNSS)",
     "status": "verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board",
-    "notes": "The WiFi LoRa 32 V3's ESP32-S3 and SX1262 with a 2.13\" e-ink panel in place of the OLED, 8 MB flash and no PSRAM, no SD slot and no GNSS. The panel is driven through the display abstraction: pages draw on a GFX canvas and a refresh policy decides what reaches the glass, because an e-ink screen is written in whole frames and takes most of a second to do it. Revisions differ only in the panel — V1.0 is a DEPG0213BNS800, V1.1 an LCMEN2R13EFC1, V1.1.1 and V1.2 an E0213A367 — while the pins are the same across all of them; this build drives the E0213A367, so it covers V1.1.1 and V1.2. A CP2102 bridge rather than the S3's native USB, so it appears as /dev/ttyUSB* and not as an Espressif JTAG device — and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. The serial port also carries PPP, as on the other Heltec boards. The radio's reset, busy and IRQ pins are the Heltec S3 family's rather than sourced twice for this board, so it boots with the radio self-test on \u2014 which passed on the first flash, one packet out and one back, and is what settles them.",
+    "notes": "The WiFi LoRa 32 V3's ESP32-S3 and SX1262 with a 2.13\" e-ink panel in place of the OLED, 8 MB flash and no PSRAM, no SD slot and no GNSS. The panel is driven through the display abstraction: pages draw on a GFX canvas and a refresh policy decides what reaches the glass, because an e-ink screen is written in whole frames and takes most of a second to do it. Revisions differ only in the panel — V1.0 is a DEPG0213BNS800, V1.1 an LCMEN2R13EFC1, V1.1.1 and V1.2 an E0213A367 — while the pins are the same across all of them; this build drives the E0213A367, so it covers V1.1.1 and V1.2. A CP2102 bridge rather than the S3's native USB, so it appears as /dev/ttyUSB* and not as an Espressif JTAG device — and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. The serial port also carries PPP, as on the other Heltec boards. The radio's reset, busy and IRQ pins are the Heltec S3 family's rather than sourced twice for this board, so it boots with the radio self-test on — which passed on the first flash, one packet out and one back, and is what settles them.",
     "local_link": {
       "usb": {
         "native": false,
@@ -295,6 +295,32 @@
           460800,
           921600
         ]
+      },
+      "wifi": true
+    }
+  },
+  "heltec-v4": {
+    "name": "Heltec V4 (TFT)",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "mcu": "ESP32-S3: 16 MB flash, 2 MB PSRAM in package",
+    "radio": "SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end",
+    "display": "2.4\" 240x320 ST7789 with a CHSC6X touch layer",
+    "extras": "two buttons, piezo sounder, battery ADC, GNSS on the expansion header (no SD)",
+    "status": "verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder silent — possibly not fitted",
+    "notes": "The first colour panel and the first amplified front end in this firmware, and the first 16 MB board. The pin map has one published source — the board definition in the open-source firmware it ships with (variants/esp32s3/heltec_v4, the TFT build) — rather than the two this project prefers, so the panel, touch, button and sounder pins are unverified; the LoRa pins are the V3's and carry more weight. The front end is the part with no equivalent elsewhere here: the radio is deaf and mute until the amplifier rail is powered and its mode pins are driven, and which of two parts is fitted is read off GPIO 2 at boot. Native USB, so it enumerates as an Espressif JTAG/serial device with its MAC in the by-id name and none of the CP2102 ambiguity the rest of this bench has. OTG runs the composite device: CDC-ACM console plus CDC-NCM networking, the same stack the T3-S3s carry — note the by-id name changes to the RetiMesh identity once this firmware boots.",
+    "local_link": {
+      "usb": {
+        "native": true,
+        "otg": true,
+        "serial_jtag": true,
+        "ncm": true,
+        "cdc_acm": true,
+        "bridge": "none",
+        "auto_reset_dtr_rts": true
+      },
+      "uart": {
+        "network": false
       },
       "wifi": true
     }

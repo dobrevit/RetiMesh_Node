@@ -14,6 +14,7 @@
 | `heltec-wb` | Heltec Wireless Bridge | ESP32-D0WDQ6: 8 MB flash, 8 MB PSRAM | SX1276 | — (headless) | front LEDs for Wi-Fi and LoRa (the BLE one stays dark), aluminium shell, two SMA sockets, internal 2-pin battery connector, PPP over the CP2102 bridge; no SD, no GNSS | verified on hardware; PPP built, not yet run on this board |
 | `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
 | `heltec-wp` | Heltec Wireless Paper | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 2.13" e-ink (250x122, E0213A367), driven | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board |
+| `heltec-v4` | Heltec V4 (TFT) | ESP32-S3: 16 MB flash, 2 MB PSRAM in package | SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end | 2.4" 240x320 ST7789 with a CHSC6X touch layer | two buttons, piezo sounder, battery ADC, GNSS on the expansion header (no SD) | verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder silent — possibly not fitted |
 <!-- boards.json:end -->
 
 ### The Wireless Stick's memory
@@ -148,6 +149,62 @@ display shows `bat 42%+` while charging and the status page says so in words.
 | PMU IRQ | 35 |
 | GPS RX / TX | 34 / 12 |
 | User button | 38 |
+
+## Heltec V4 (TFT)
+
+The `heltec-v4` environment was written from the board's published pin map and then
+proven on the bench (2026-09-02): radio both directions on air through the front end,
+GNSS fix and clock, panel, touch and both buttons — the table row above carries the
+status. The sounder alone stayed silent and may not be fitted on every build of the
+board. What follows is what that first session had to know; a new unit re-checks the
+same list.
+
+What is different about this board, in the order it can bite:
+
+**The radio sits behind an amplified front end.** An SX1262 wired straight to its antenna
+works the moment SPI does; this one is deaf and mute until the front end's rail is up and
+its mode pins are driven (`src/radio/LoRaFem.h`). The firmware powers it before the radio
+is probed and points it per direction around every frame. Two parts exist across board
+revisions — GC1109 and KCT8103L — wired to mostly the same pins; which is fitted is read
+off the shared enable net at boot and the log says which was found. The boot self-test
+transmission is the proof: tens of milliseconds to TxDone through a working front end, the
+full timeout through a dead one.
+
+**The configured TX power is the chip's drive, not the antenna's.** House convention, as
+on the SX1280+PA board — but here the amplifier adds 7–13 dB depending on drive, so the
+default 7 dBm leaves the antenna at roughly 18 dBm. That is legal in the 869.4–869.65 MHz
+sub-band the default channel sits in and **over the limit in most of the rest of EU868**:
+changing frequency on this board is a power decision too.
+
+**The panel is colour, driven monochrome at half resolution.** Pages draw on a 120x160
+canvas and the panel shows each pixel as a 2x2 block (`src/ui/TftPanel.h`); at the glass's
+dot pitch that lands the text at the e-paper's size. The panel is write-only — no probe
+can tell whether it is there, so a wrong pin map shows as a dark panel with a healthy log.
+
+**Flashing, once this firmware is on it:** the OTG composite CDC does not wire the
+DTR/RTS bootloader dance, so esptool alone cannot enter the downloader — the upload
+hook's hand-off (the default) asks the running node over the console and works every
+time. `RETIMESH_NO_AUTO_BOOTLOADER=1` is only for a factory-fresh board that cannot
+answer; set it on this board once our firmware runs and the upload fails with
+"No serial data received". The by-id name is the RetiMesh identity while the
+application runs and the Espressif JTAG identity in the downloader.
+
+**What the bench verified, in the order a new unit should re-check it:**
+
+1. Boot log: which front end was detected, and the self-test's TxDone time.
+2. A frame heard by another node — the front end's TX path proven on air.
+3. A frame *received* from a distant node — the LNA path, which the self-test cannot prove.
+4. The panel lights and shows the status page; touch is polled (CHSC6X at 0x2E on its
+   own I2C pair) and speaks the button's grammar — tap turns the page, holding blanks the
+   panel. The second case button walks the pages backwards, and its long press deliberately
+   does nothing, so a button held by a case or a pocket cannot blank the panel. The sounder
+   plays two notes up when the node finishes booting and one high note when a message for
+   this node arrives.
+5. Battery: a plausible voltage with a cell attached, and `0.0` without one — the divider
+   is switched (GPIO 37) and deep (÷5.1), both firsts here.
+6. GNSS: sentences counted on the GPS page with the expansion kit fitted.
+7. An OTA update staged on LittleFS and installed — this is the first board that stages
+   without an SD card, and the first flashed A/B from day one.
 
 ## T3-S3 pin map (defaults in `Config.h`)
 | Function | GPIO |

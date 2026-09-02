@@ -133,11 +133,31 @@ constexpr Layout kEink250x122 = {
   /*refreshMs*/ 300000, /*activeRefreshMs*/ 5000, /*fullEveryUpdates*/ 5,
 };
 
+// 2.4" colour TFT, 240x320, as on the Heltec V4 — described here at half its
+// resolution, deliberately. The pages are written for panels a few dozen
+// characters wide, and at this panel's dot pitch the 6x8 font is under a
+// millimetre tall: correct, and unreadable at arm's length. So the pages draw
+// on a 120x160 canvas and the panel puts each canvas pixel on the glass as a
+// 2x2 block (TftPanel.h), which lands the text at the size the e-paper shows
+// it. The panel's real geometry is the board header's DISPLAY_WIDTH/HEIGHT;
+// this layout is the drawing surface, and no page needs to know they differ.
+//
+// Portrait, so the row count is the luxury here: twice the e-paper's ten.
+// Updates cost a burst of SPI and nothing else — OLED intervals, no ghosting.
+constexpr Layout kTft120x160 = {
+  120, 160,
+  /*columns*/ 20, /*rows*/ 14, /*rowY0*/ 15, /*rowPitch*/ 10,
+  /*header*/ true, /*pageDots*/ false, /*batteryW*/ 7, /*batteryH*/ 10,
+  /*headerH*/ 12, /*iconSize*/ 10, /*statusIcons*/ true,
+  /*refreshMs*/ 500, /*activeRefreshMs*/ 500, /*fullEveryUpdates*/ 0,
+};
+
 // Chosen at build time from the panel the board header declares. Runtime
 // probing tells us a panel answered, not how big it is — an SSD1306 reports
 // nothing about its own geometry — so the board is what knows.
 constexpr Layout active() {
   return (DISPLAY_KIND == DISPLAY_KIND_EINK) ? kEink250x122
+       : (DISPLAY_KIND == DISPLAY_KIND_TFT)  ? kTft120x160
        : (DISPLAY_HEIGHT <= 32)              ? kOled64x32
                                              : kOled128x64;
 }

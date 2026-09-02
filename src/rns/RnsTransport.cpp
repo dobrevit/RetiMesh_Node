@@ -32,6 +32,7 @@
 #include "RnsAnnounce.h"
 #include "LxmfFormat.h"
 #include "LxmfInbox.h"
+#include "Buzzer.h"
 #include "LxmfCommands.h"
 #include "Telemetry.h"
 #include "NomadNet.h"
@@ -675,6 +676,8 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
                         via, m.sentAt, (const char*)text,
                         Rns::utf8TrimLen(text, textLen, Rns::kInboxTextMax), sig))
     log_d("lxmf: not stored (a repeat, or arriving faster than the store is written)");
+  else
+    Buzzer::message();                   // carried devices get told out loud
   // The same three standings the counters keep, said in words. This used to
   // read off `verified` alone, so a sender whose signature did not match was
   // reported as one this node had never heard announce — which is the one

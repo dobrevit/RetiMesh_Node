@@ -19,7 +19,16 @@
 #include "OtaUpdate.h"
 
 #include <Arduino.h>
+// Where an update waits while it arrives. A board with a card slot stages on
+// the card, beside the node's other files and off the flash the node is about
+// to rewrite. A board without one stages on LittleFS — the V4 has 7.8 MB of
+// it against a 1.7 MB firmware, and a slotless board with room to spare should
+// not be the one board that cannot take its own updates.
+#if HAS_SD
 #include <SD.h>
+#else
+#include <LittleFS.h>
+#endif
 
 #include "Bootloader.h"
 #include "Config.h"
@@ -28,6 +37,30 @@
 #include "SdCard.h"
 
 namespace Ota {
+
+// The filesystem the bundle is staged on, asked once so every use below is
+// the same question with the same answer.
+static fs::FS& stagingFs() {
+#if HAS_SD
+  return SD;
+#else
+  return LittleFS;
+#endif
+}
+
+// Whether there is somewhere to put the bytes as they arrive. Public, because
+// the portal asks the same question when it decides whether to offer the
+// upload control at all — and while this was a private helper the portal went
+// on asking sdCard.mounted() instead, refusing on the one board that stages
+// on LittleFS the very upload the endpoint would accept.
+bool stagingReady() {
+#if HAS_SD
+  return sdCard.mounted();
+#else
+  return true;   // LittleFS is mounted at boot and stays mounted
+#endif
+}
+
 namespace {
 
 Floor<NvsStore>* sFloor = nullptr;
@@ -125,7 +158,7 @@ class StagedImage : public Source {
 void runInstall() {
   say(Stage::Installing, "reading the staged update");
 
-  File bundle = SD.open(STAGING_PATH, FILE_READ);
+  File bundle = stagingFs().open(STAGING_PATH, FILE_READ);
   if (!bundle) {
     say(Stage::Failed, "the staged update could not be reopened");
     return;
@@ -154,7 +187,7 @@ void runInstall() {
     sdCard.log("update: installed, restarting into it");
     // The staged copy has done its job. Leaving it would install itself again
     // on the next upload that failed before it replaced the file.
-    SD.remove(STAGING_PATH);
+    stagingFs().remove(STAGING_PATH);
     // A refused restart is not a failed install — the boot slot has already
     // been switched, so the update runs at the next restart whenever it comes.
     // Saying so is the difference between an operator power-cycling the node
@@ -204,8 +237,8 @@ void begin(Floor<NvsStore>& floor) {
   // between staging and installing. It is not resumed: a partial file would
   // fail the length check anyway, and a whole one that was never asked for
   // should not install itself because the node happened to reboot.
-  if (sdCard.mounted() && SD.exists(STAGING_PATH)) {
-    SD.remove(STAGING_PATH);
+  if (stagingReady() && stagingFs().exists(STAGING_PATH)) {
+    stagingFs().remove(STAGING_PATH);
     log_i("update: cleared a staged update left over from a previous run");
   }
 }
@@ -249,7 +282,7 @@ Progress progress() {
 namespace {
 void abandon(bool removeFile) {
   if (sStaging) sStaging.close();
-  if (removeFile) SD.remove(STAGING_PATH);
+  if (removeFile) stagingFs().remove(STAGING_PATH);
   releaseBlock();
   sOwner = nullptr;
 }
@@ -265,7 +298,7 @@ const char* receiveStart(uint32_t totalBytes, const void* owner) {
   }
   if (sOwner) return "an update is already in progress";
   if (!sFloor) return "the node is still starting up";
-  if (const char* why = uploadRefusal(sdCard.mounted(), canSelfUpdate(), progress().stage)) {
+  if (const char* why = uploadRefusal(stagingReady(), canSelfUpdate(), progress().stage)) {
     say(Stage::Failed, why);
     return why;
   }
@@ -284,11 +317,11 @@ const char* receiveStart(uint32_t totalBytes, const void* owner) {
     say(Stage::Failed, why);
     return why;
   }
-  SD.mkdir(STAGING_DIR);
-  SD.remove(STAGING_PATH);
-  sStaging = SD.open(STAGING_PATH, FILE_WRITE);
+  stagingFs().mkdir(STAGING_DIR);
+  stagingFs().remove(STAGING_PATH);
+  sStaging = stagingFs().open(STAGING_PATH, FILE_WRITE);
   if (!sStaging) {
-    const char* why = "the card would not take the upload";
+    const char* why = "the staging storage would not take the upload";
     say(Stage::Failed, why);
     return why;
   }
@@ -348,7 +381,7 @@ bool receiveChunk(const void* owner, uint32_t index, const uint8_t* data, size_t
     len  -= take;
     if (sFill == BLOCK && !flushBlock()) {
       char why[112];
-      snprintf(why, sizeof(why), "the card stopped accepting the upload at %lu bytes",
+      snprintf(why, sizeof(why), "the storage stopped accepting the upload at %lu bytes",
                (unsigned long)received);
       abandon(true);
       say(Stage::Failed, why);
@@ -364,7 +397,7 @@ bool receiveEnd(const void* owner) {
   const bool flushed = flushBlock();
   abandon(!flushed);
   if (!flushed) {
-    say(Stage::Failed, "the last of the upload would not go onto the card");
+    say(Stage::Failed, "the last of the upload would not go onto the storage");
     return false;
   }
   say(Stage::Staged, "staged; verifying");
@@ -372,7 +405,7 @@ bool receiveEnd(const void* owner) {
   // hashes them and writes a partition, and the task it arrived on has other
   // sockets waiting on it.
   if (!Diag::startTask(installTask, "ota", 8192, nullptr, 1, 1)) {
-    SD.remove(STAGING_PATH);
+    stagingFs().remove(STAGING_PATH);
     say(Stage::Failed, "there was not enough memory to start the install");
     return false;
   }

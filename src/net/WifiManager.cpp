@@ -32,6 +32,7 @@
 #include <esp_heap_caps.h>
 #include <ESPmDNS.h>
 #include "LoRaRadio.h"
+#include "LoRaFem.h"
 #include "Neighbors.h"
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
@@ -759,7 +760,10 @@ void WifiManager::setupRoutes() {
   // the same facts are in boards.json.
   _http.on("/api/system/bootloader", HTTP_GET,
            [this](AsyncWebServerRequest* r) { handleBootloaderGet(r); });
-  // Event log from the SD card (admin). ?prev=1 serves the rotated file.
+  // Event log from the SD card (admin). ?prev=1 serves the rotated file. Not
+  // registered at all on a board with no slot: the route reads the card
+  // library directly, which those boards no longer build (SdCard.h).
+#if HAS_SD
   _http.on("/api/sd/log", HTTP_GET, [this](AsyncWebServerRequest* r) {
     if (!authed(r)) return;
     if (!sdCard.mounted()) { sendError(r, 404, "no card mounted"); return; }
@@ -769,6 +773,7 @@ void WifiManager::setupRoutes() {
     res->addHeader("Content-Disposition", "attachment; filename=\"retimesh-events.log\"");
     r->send(res);
   });
+#endif
 
   _http.on("/api/settings/export", HTTP_GET, [this](AsyncWebServerRequest* r) {
     if (!authed(r)) return;
@@ -1101,7 +1106,7 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
       up["slot"]  = Ota::runningSlot();
       if (p.message[0]) up["message"] = JsonString(p.message);
     }
-    const char* why = Ota::uploadRefusal(sdCard.mounted(), Ota::canSelfUpdate(), p.stage);
+    const char* why = Ota::uploadRefusal(Ota::stagingReady(), Ota::canSelfUpdate(), p.stage);
     up["can_upload"] = (why == nullptr);
     if (why) up["refusal"] = why;
   }
@@ -1449,6 +1454,13 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
     // An amplifier does not change what the chip may be driven at, but it does
     // change what leaves the antenna, and the operator has to account for it.
     cp["pa_fitted"]    = LoRaRadio::hasPa();
+#if HAS_LORA_FEM
+    // Which front end the boot detection found, and roughly what it adds at
+    // the configured drive — the two numbers an operator needs to work out
+    // what is actually leaving the antenna.
+    cp["fem"]          = LoRaFem::partName();
+    cp["fem_gain_db"]  = LoRaFem::gainDb(settings.radio().txDbm);
+#endif
     JsonArray bws = cp["bandwidths_khz"].to<JsonArray>();
     for (const float* b = c.bandwidthsKhz; *b != 0.0f; b++) bws.add(*b);
     // Which rulebook the configured channel falls under, and what it caps

@@ -40,10 +40,12 @@ Display display;
 #if HAS_DISPLAY
 #include "DisplayIcons.h"
 #include "QrCode.h"
+#include "TouchInput.h"
 
 
 bool Display::begin() {
-#if DISPLAY_KIND == DISPLAY_KIND_OLED || DISPLAY_KIND == DISPLAY_KIND_EINK
+#if DISPLAY_KIND == DISPLAY_KIND_OLED || DISPLAY_KIND == DISPLAY_KIND_EINK || \
+    DISPLAY_KIND == DISPLAY_KIND_TFT
   _panel = &_panelImpl;
 #endif
   if (!_panel || !_panel->begin()) return false;
@@ -53,6 +55,8 @@ bool Display::begin() {
   // Something on the glass before the first page is drawn: the panel holds
   // whatever the last firmware left in it otherwise, and on e-paper that
   // survives a power cut.
+  TouchInput::begin();                   // input for a panel someone can now see
+
   _panel->clear();
   _gfx->setCursor(0, 0);
   _gfx->print(FW_NAME);
@@ -93,6 +97,9 @@ void Display::displayTask(void* self) {
   auto* d = static_cast<Display*>(self);
   if (!d->_ok) { vTaskDelete(nullptr); return; }
   pinMode(PIN_BUTTON, INPUT_PULLUP);
+#if HAS_BUTTON2
+  pinMode(PIN_BUTTON2, INPUT_PULLUP);
+#endif
   d->_lastActivityMs = millis();
   for (;;) {
     // A page that cannot allocate skips that pass rather than taking the node
@@ -100,6 +107,12 @@ void Display::displayTask(void* self) {
     // pressure and must be the first to give way (Diag.h).
     Diag::guard("the display task", [d] {
     d->pollButton();
+#if HAS_TOUCH
+    d->pollTouch();
+#endif
+#if HAS_BUTTON2
+    d->pollButton2();
+#endif
     uint32_t now = millis();
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
       d->_page = STATUS; d->_pageChangedMs = now;
@@ -134,33 +147,30 @@ void Display::displayTask(void* self) {
   }
 }
 
-// Debounced by the poll interval: a press is registered on release (short)
-// or once the long threshold passes while still held (long).
+// What a short press does, whoever delivered it: wake a blanked panel, or
+// turn the page and show it now. Three inputs share this — the button, the
+// touch layer, and the second button where a board has one — and it is one
+// function so they cannot drift apart in what a tap means.
+void Display::advancePage(bool forward) {
+  if (_blank) { setBlank(false); return; }       // wake only
+  _page = stepPage(_page, forward ? 1 : -1);
+  _pageChangedMs = millis();
+  _refresh.interval(cadence());          // the page decides how live it is
+  _refresh.urgent();                     // and this press is not waiting for it
+  _lastPaintMs = _pageChangedMs;
+  _paintDue = false;
+  paint();
+}
+
+// Debounced by the poll interval; the grammar lives in PressTracker so the
+// three inputs cannot drift apart in what a press means.
 void Display::pollButton() {
-  bool down = digitalRead(PIN_BUTTON) == LOW;
-  uint32_t now = millis();
-  if (down && _pressedAtMs == 0) { _pressedAtMs = now; _longFired = false; _lastActivityMs = now; return; }
-  if (down && !_longFired && now - _pressedAtMs >= BUTTON_LONG_MS) {
-    _longFired = true;
-    setBlank(!_blank);
-    return;
-  }
-  if (!down && _pressedAtMs != 0) {
-    if (!_longFired && now - _pressedAtMs >= 30) {          // short press
-      if (_blank) setBlank(false);                           // wake only
-      // The press is the one change nobody should wait for: paint now, and
-      // tell the policy not to hold it back for the panel's usual gap.
-      else {
-        _page = nextPage(_page);
-        _pageChangedMs = now;
-        _refresh.interval(cadence());        // the page decides how live it is
-        _refresh.urgent();                   // and this press is not waiting for it
-        _lastPaintMs = now;
-        _paintDue = false;
-        paint();
-      }
-    }
-    _pressedAtMs = 0;
+  const uint32_t now = millis();
+  switch (_btn.update(digitalRead(PIN_BUTTON) == LOW, now)) {
+    case PressTracker::Event::Press: _lastActivityMs = now; break;
+    case PressTracker::Event::Long:  setBlank(!_blank); break;
+    case PressTracker::Event::Short: advancePage(true); break;
+    default: break;
   }
 }
 
@@ -168,13 +178,58 @@ void Display::pollButton() {
 // point, and with Wi-Fi off there is no access point to join: a panel that
 // still offered it would send someone hunting for a network that is not on
 // the air. It is skipped rather than drawn empty.
-Display::Page Display::nextPage(Page p) const {
-  Page n = (Page)((p + 1) % PAGE_COUNT);
-#if !DISPLAY_COMPACT
-  if (n == QR && !wifiManager.wifiEnabled()) n = (Page)((n + 1) % PAGE_COUNT);
-#endif
+Display::Page Display::stepPage(Page p, int8_t dir) const {
+  Page n = p;
+  do { n = (Page)((n + PAGE_COUNT + dir) % PAGE_COUNT); } while (skipPage(n) && n != p);
   return n;
 }
+
+// Which pages mean nothing right now. The QR page shows a code for joining
+// the access point, and with Wi-Fi off there is no access point to join: a
+// panel that still offered it would send someone hunting for a network that
+// is not on the air. Stated once, so forward and backward navigation cannot
+// disagree about which pages exist.
+bool Display::skipPage(Page p) const {
+#if !DISPLAY_COMPACT
+  if (p == QR && !wifiManager.wifiEnabled()) return true;
+#else
+  (void)p;
+#endif
+  return false;
+}
+
+#if HAS_TOUCH
+// The glass as a button: the same grammar as the physical one, from the same
+// tracker. Polled slowly while idle — the controller only answers under a
+// finger, and fifty blocking bus transactions a second bought nothing — and
+// at the display task's full rate from first contact to release.
+void Display::pollTouch() {
+  const uint32_t now = millis();
+  if (_touch.pressedAt == 0 && now - _lastTouchPollMs < 60) return;
+  _lastTouchPollMs = now;
+  switch (_touch.update(TouchInput::poll().down, now)) {
+    case PressTracker::Event::Press: _lastActivityMs = now; break;
+    case PressTracker::Event::Long:  setBlank(!_blank); break;
+    case PressTracker::Event::Short: advancePage(true); break;
+    default: break;
+  }
+}
+#endif
+
+#if HAS_BUTTON2
+// The second button walks the pages backwards. Its long press does nothing on
+// purpose — the tracker latches, so a case that squeezes the button for an
+// hour neither turns a page on release nor (activity marked only on the press
+// edge) holds the backlight on while it does.
+void Display::pollButton2() {
+  const uint32_t now = millis();
+  switch (_btn2.update(digitalRead(PIN_BUTTON2) == LOW, now)) {
+    case PressTracker::Event::Press: _lastActivityMs = now; break;
+    case PressTracker::Event::Short: advancePage(false); break;
+    default: break;                     // Long: latched silence, by design
+  }
+}
+#endif
 
 void Display::setBlank(bool blank) {
   _blank = blank;

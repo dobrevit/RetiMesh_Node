@@ -37,6 +37,8 @@
   #include "OledPanel.h"
 #elif HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_EINK
   #include "EinkPanel.h"
+#elif HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_TFT
+  #include "TftPanel.h"
 #endif
 
 class Display {
@@ -99,7 +101,8 @@ private:
 #endif
   // Typed, so paint()'s switch can list every page and let the compiler
   // object when one is added without being drawn (-Werror=switch).
-  Page nextPage(Page p) const;           // the button's next stop; skips pages that mean nothing right now
+  Page stepPage(Page p, int8_t dir) const;   // the next page that means something, either way
+  bool skipPage(Page p) const;               // the rule, stated once
   Page     _page = STATUS;
   uint8_t  _chargeSweep = 0;             // animates the battery fill while charging
   // Sampled once per frame in paint(). Reading the PMU costs four I2C
@@ -110,14 +113,50 @@ private:
   uint32_t _pageChangedMs = 0;
   uint32_t _lastActivityMs = 0;          // last button press (boot counts)
   void setBlank(bool blank);             // DISPLAYOFF/ON on the panel
-  uint32_t _pressedAtMs = 0;             // 0 = not pressed
-  bool     _longFired = false;
+  void advancePage(bool forward);        // what any short press does
+  // One press grammar for every input, written once (a review found it
+  // hand-copied three times, already drifting): press is registered on the
+  // edge, a hold past BUTTON_LONG_MS fires Long exactly once and latches so
+  // the release stays silent, and a release counts as Short only after 30 ms
+  // of press and two consecutive "up" polls — the touch layer answers only
+  // while touched, and one dropped report mid-hold must not read as a tap.
+  struct PressTracker {
+    enum class Event : uint8_t { None, Press, Short, Long };
+    uint32_t pressedAt = 0;              // 0 = not pressed
+    bool     longFired = false;
+    uint8_t  upStreak  = 0;
+    Event update(bool down, uint32_t now) {
+      if (down) {
+        upStreak = 0;
+        if (pressedAt == 0) { pressedAt = now; longFired = false; return Event::Press; }
+        if (!longFired && now - pressedAt >= BUTTON_LONG_MS) { longFired = true; return Event::Long; }
+        return Event::None;
+      }
+      if (pressedAt == 0) return Event::None;
+      if (++upStreak < 2) return Event::None;
+      const bool tapped = !longFired && now - pressedAt >= 30;
+      pressedAt = 0; upStreak = 0;
+      return tapped ? Event::Short : Event::None;
+    }
+  };
+  PressTracker _btn;
+#if HAS_TOUCH
+  PressTracker _touch;                   // separate state: a finger and a thumb
+  uint32_t _lastTouchPollMs = 0;         // the bus is asked slowly while idle
+  void pollTouch();
+#endif
+#if HAS_BUTTON2
+  PressTracker _btn2;
+  void pollButton2();
+#endif
 
 #if HAS_DISPLAY
   #if DISPLAY_KIND == DISPLAY_KIND_OLED
   OledPanel     _panelImpl;
   #elif DISPLAY_KIND == DISPLAY_KIND_EINK
   EinkPanel     _panelImpl;
+  #elif DISPLAY_KIND == DISPLAY_KIND_TFT
+  TftPanel      _panelImpl;
   #endif
   Panel*        _panel = nullptr;        // the glass; null until begin() succeeds
   Adafruit_GFX* _gfx   = nullptr;        // what the pages draw on, from the panel
