@@ -89,6 +89,8 @@ void setRotation(uint8_t quarterTurns);
 void showIdle(bool on);
 bool idleShowing();
 void showIncoming(const char* sender, const char* text);
+void showFirmware(const char* stage, uint32_t written, uint32_t total);
+void hideFirmware();
 
 } // namespace LvglUi
 
@@ -108,6 +110,8 @@ inline void setRotation(uint8_t) {}
 inline void showIdle(bool) {}
 inline bool idleShowing() { return false; }
 inline void showIncoming(const char*, const char*) {}
+inline void showFirmware(const char*, uint32_t, uint32_t) {}
+inline void hideFirmware() {}
 } // namespace LvglUi
 
 #endif // HAS_LVGL_UI

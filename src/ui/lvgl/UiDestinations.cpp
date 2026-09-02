@@ -120,6 +120,23 @@ void openDetail(lv_event_t* e) {
     uint8_t dest[16];
     if (hexToBytes(p2->hash, dest)) Ui::openThread(dest);
   }, LV_EVENT_CLICKED, (void*)pi);
+  lv_obj_t* nav = lv_button_create(row);
+  UiTheme::actionButton(nav);
+  lv_obj_set_flex_grow(nav, 1);
+  lv_obj_set_height(nav, lv_pct(100));
+  lv_obj_t* nl = lv_label_create(nav);
+  lv_label_set_text(nl, "NAV");
+  lv_obj_center(nl);
+  lv_obj_add_event_cb(nav, [](lv_event_t* ev) {
+    const RnsTransport::PathInfo* p2 =
+        (const RnsTransport::PathInfo*)lv_event_get_user_data(ev);
+    Neighbor nb = {};
+    const bool named = neighbors.byHash(p2->hash, nb) && nb.name[0];
+    char t[34];
+    snprintf(t, sizeof(t), "%.*s", (int)sizeof(t) - 1, named ? nb.name : p2->hash);
+    if (!named) t[8] = 0;
+    Ui::openBearing(t);
+  }, LV_EVENT_CLICKED, (void*)pi);
   lv_obj_t* ann = lv_button_create(row);
   UiTheme::actionButton(ann);
   lv_obj_set_flex_grow(ann, 1);
@@ -174,10 +191,23 @@ void openDestinations() {
     lv_obj_add_event_cb(btn, openDetail, LV_EVENT_CLICKED, &sPaths[i]);
   }
 
-  lv_obj_t* ann = lv_button_create(body);
+  lv_obj_t* foot = lv_obj_create(body);
+  lv_obj_remove_style_all(foot);
+  lv_obj_set_size(foot, lv_pct(100), 38);
+  lv_obj_set_flex_flow(foot, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(foot, 6, 0);
+  lv_obj_t* map = lv_button_create(foot);
+  UiTheme::actionButton(map);
+  lv_obj_set_flex_grow(map, 1);
+  lv_obj_set_height(map, lv_pct(100));
+  lv_obj_t* mpl = lv_label_create(map);
+  lv_label_set_text(mpl, "MAP");
+  lv_obj_center(mpl);
+  lv_obj_add_event_cb(map, [](lv_event_t*) { Ui::openPlot(); }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* ann = lv_button_create(foot);
   UiTheme::actionButton(ann);
-  lv_obj_set_width(ann, lv_pct(100));
-  lv_obj_set_height(ann, 38);
+  lv_obj_set_flex_grow(ann, 2);
+  lv_obj_set_height(ann, lv_pct(100));
   lv_obj_t* al = lv_label_create(ann);
   lv_label_set_text(al, LV_SYMBOL_UPLOAD "  ANNOUNCE THIS NODE");
   lv_obj_center(al);

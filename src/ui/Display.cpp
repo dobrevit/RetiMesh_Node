@@ -47,6 +47,7 @@ Display display;
 #include "Imu.h"
 #include <esp_sleep.h>
 #include "LxmfInbox.h"
+#include "OtaProgress.h"
 
 #if HAS_LVGL_UI
 // The runtime half of HAS_LVGL_UI: begin() promised a fall-back to the mono
@@ -163,6 +164,23 @@ void Display::displayTask(void* self) {
         const size_t tn = nr.textLen < sizeof(text) - 1 ? nr.textLen : sizeof(text) - 1;
         memcpy(text, nr.text, tn); text[tn] = 0;
         LvglUi::showIncoming(sender, text);
+      }
+      {
+        // An install owns the glass while it runs: woken, told what is
+        // happening, and told equally clearly that there is nothing to
+        // cancel. On the edge back to idle a failure earns its toast.
+        static bool wasInstalling = false;
+        const OtaProgress::State ota = OtaProgress::get();
+        if (ota.active) {
+          d->_lastActivityMs = now;
+          LvglUi::showIdle(false);
+          if (d->_blank) d->setBlank(false);
+          LvglUi::showFirmware(ota.stage, ota.written, ota.total);
+          wasInstalling = true;
+        } else if (wasInstalling) {
+          wasInstalling = false;
+          LvglUi::hideFirmware();
+        }
       }
       // The shell rests in two stages: first the spec's idle clock — the
       // screen this device spends its life on, radio still listening — and
