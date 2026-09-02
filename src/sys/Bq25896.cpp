@@ -11,6 +11,11 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+// The case wires its parts to whichever bus suited the layout: the reference
+// firmware finds them by scanning both, and the bench proved ours silent on
+// the main bus alone. sBus points at whichever answered.
+static TwoWire* sBus = &Wire;
+
 namespace {
 constexpr uint8_t kAddr    = 0x6B;
 constexpr uint8_t kReg09   = 0x09;       // BATFET_DIS lives here, bit 5
@@ -20,31 +25,40 @@ constexpr uint8_t kReg14   = 0x14;       // part number + revision
 bool sPresent = false;
 
 int readReg(uint8_t reg) {
-  Wire.beginTransmission(kAddr);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return -1;
-  if (Wire.requestFrom(kAddr, (uint8_t)1) != 1) return -1;
-  return Wire.read();
+  sBus->beginTransmission(kAddr);
+  sBus->write(reg);
+  if (sBus->endTransmission(false) != 0) return -1;
+  if (sBus->requestFrom(kAddr, (uint8_t)1) != 1) return -1;
+  return sBus->read();
 }
 
 bool writeReg(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(kAddr);
-  Wire.write(reg);
-  Wire.write(val);
-  return Wire.endTransmission() == 0;
+  sBus->beginTransmission(kAddr);
+  sBus->write(reg);
+  sBus->write(val);
+  return sBus->endTransmission() == 0;
 }
 } // namespace
 
 namespace Bq25896 {
 
 void begin() {
-  // The caller owns Wire.begin(); this only asks who answers. The part
-  // number field is 0b100 for the BQ25896 — checked, because 0x6B is a
-  // popular address and ship mode pointed at the wrong chip is a brick.
-  const int id = readReg(kReg14);
-  sPresent = id >= 0 && ((id >> 3) & 0x07) == 0b100;
-  if (sPresent) log_i("charger: BQ25896 answers at 0x6B (rev %d)", id & 0x03);
-  else if (id >= 0) log_w("charger: 0x6B answers but is not a BQ25896 (reg14=0x%02x)", id);
+  // The part number field is 0b100 for the BQ25896 — checked, because 0x6B
+  // is a popular address and ship mode pointed at the wrong chip is a brick.
+  // Both buses are asked: the case's board picked whichever suited it.
+  for (TwoWire* bus : { &Wire, &Wire1 }) {
+    sBus = bus;
+    const int id = readReg(kReg14);
+    if (id >= 0 && ((id >> 3) & 0x07) == 0b100) {
+      sPresent = true;
+      log_i("charger: BQ25896 answers at 0x6B on %s (rev %d)",
+            bus == &Wire ? "the main bus" : "the touch bus", id & 0x03);
+      return;
+    }
+    if (id >= 0) log_w("charger: 0x6B answers on %s but is not a BQ25896 (reg14=0x%02x)",
+                       bus == &Wire ? "the main bus" : "the touch bus", id);
+  }
+  sBus = &Wire;
 }
 
 bool present() { return sPresent; }

@@ -205,7 +205,19 @@ void setup() {
 #if HAS_BQ25896 || HAS_DA217
   // The main I2C and the case's residents, before the battery gauge asks the
   // charger anything.
+#if HAS_DISPLAY_VEXT
+  // The case's I2C parts sit behind the switched peripheral rail (Vext), so
+  // the probe has to power it and let it settle first — the reference waits a
+  // full second on this exact board. Without it the accelerometer is simply
+  // not on the bus yet, which read as "absent".
+  pinMode(PIN_DISPLAY_VEXT, OUTPUT);
+  digitalWrite(PIN_DISPLAY_VEXT, LOW);   // active low
+  delay(300);
+#endif
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+#if HAS_TOUCH
+  Wire1.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL, 400000);  // the case's other bus
+#endif
   Bq25896::begin();
   Imu::begin();
   Diag::cost("i2c case parts");

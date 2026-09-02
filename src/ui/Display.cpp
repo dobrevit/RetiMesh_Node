@@ -308,7 +308,15 @@ void Display::pollButton2() {
   switch (_btn2.update(digitalRead(PIN_BUTTON2) == LOW, now)) {
     case PressTracker::Event::Press: _lastActivityMs = now; break;
     case PressTracker::Event::Short: advancePage(false); break;
-    default: break;                     // Long: latched silence, by design
+    case PressTracker::Event::Long:
+#if HAS_LVGL_UI
+      // GPIO35 is the case's power button; the factory firmware put its power
+      // menu on this button's long press, so ours does too. A short press
+      // still steps back a screen.
+      if (!_blank) LvglUi::openPowerMenu(); else setBlank(false);
+#endif
+      break;
+    default: break;
   }
 }
 #endif

@@ -14,43 +14,53 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+// The case wires its parts to whichever bus suited the layout: the reference
+// firmware finds them by scanning both, and the bench proved ours silent on
+// the main bus alone. sBus points at whichever answered.
+static TwoWire* sBus = &Wire;
+
 namespace {
 uint8_t sAddr = 0;                       // 0x26 or 0x27, SDO-strapped; 0 = absent
 
 int readReg(uint8_t reg) {
-  Wire.beginTransmission(sAddr);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return -1;
-  if (Wire.requestFrom(sAddr, (uint8_t)1) != 1) return -1;
-  return Wire.read();
+  sBus->beginTransmission(sAddr);
+  sBus->write(reg);
+  if (sBus->endTransmission(false) != 0) return -1;
+  if (sBus->requestFrom(sAddr, (uint8_t)1) != 1) return -1;
+  return sBus->read();
 }
 
 bool readRegs(uint8_t reg, uint8_t* out, size_t n) {
-  Wire.beginTransmission(sAddr);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(sAddr, (uint8_t)n) != n) return false;
-  for (size_t i = 0; i < n; i++) out[i] = Wire.read();
+  sBus->beginTransmission(sAddr);
+  sBus->write(reg);
+  if (sBus->endTransmission(false) != 0) return false;
+  if (sBus->requestFrom(sAddr, (uint8_t)n) != n) return false;
+  for (size_t i = 0; i < n; i++) out[i] = sBus->read();
   return true;
 }
 
 bool writeReg(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(sAddr);
-  Wire.write(reg);
-  Wire.write(val);
-  return Wire.endTransmission() == 0;
+  sBus->beginTransmission(sAddr);
+  sBus->write(reg);
+  sBus->write(val);
+  return sBus->endTransmission() == 0;
 }
 } // namespace
 
 namespace Imu {
 
 void begin() {
-  for (uint8_t addr : { (uint8_t)0x26, (uint8_t)0x27 }) {
-    sAddr = addr;
-    if (readReg(0x01) == 0x13) break;    // chip id says DA217
-    sAddr = 0;
+  for (TwoWire* bus : { &Wire, &Wire1 }) {
+    sBus = bus;
+    for (uint8_t addr : { (uint8_t)0x26, (uint8_t)0x27 }) {
+      sAddr = addr;
+      if (readReg(0x01) == 0x13) break;  // chip id says DA217
+      sAddr = 0;
+    }
+    if (sAddr) break;
   }
-  if (!sAddr) { log_i("imu: no DA217 on the main bus"); return; }
+  if (!sAddr) { sBus = &Wire; log_i("imu: no DA217 on either bus"); return; }
+  log_i("imu: found on %s", sBus == &Wire ? "the main bus" : "the touch bus");
   writeReg(0x11, 0x00);                  // normal power mode
   writeReg(0x0F, 0x00);                  // ±2g — orientation needs no more
   log_i("imu: DA217 at 0x%02x, accelerometer running", sAddr);
