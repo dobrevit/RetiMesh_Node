@@ -35,6 +35,7 @@
 #include "Diag.h"
 #include "OtaDevice.h"
 #include "SdCard.h"
+#include "OtaProgress.h"
 
 namespace Ota {
 
@@ -231,6 +232,15 @@ void installTask(void*) {
 }  // namespace
 
 void begin(Floor<NvsStore>& floor) {
+  // The installer's byte-and-phase feed lands in the same Progress record
+  // the portal serves — one truth for every face of the update. During
+  // Installing, received/expected become written/declared, which is the
+  // honest figure for that stage.
+  OtaProgress::setSink({
+      [](uint32_t total) { countReceived(0, total); },
+      [](uint32_t done) { countReceived(done, progress().expected); },
+      [](const char* w) { say(Stage::Installing, w); },
+  });
   sFloor = &floor;
   if (!sLock) sLock = xSemaphoreCreateMutex();
   // A bundle left by a transfer that died, or by a node that lost power

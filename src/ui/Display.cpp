@@ -47,7 +47,7 @@ Display display;
 #include "Imu.h"
 #include <esp_sleep.h>
 #include "LxmfInbox.h"
-#include "OtaProgress.h"
+#include "OtaUpdate.h"
 
 #if HAS_LVGL_UI
 // The runtime half of HAS_LVGL_UI: begin() promised a fall-back to the mono
@@ -163,24 +163,28 @@ void Display::displayTask(void* self) {
         LvglUi::showIncoming(nr.from, text);
       }
       {
-        // An install owns the glass while it runs: woken, told what is
-        // happening, and told equally clearly that there is nothing to
-        // cancel. On the edge back to idle a failure earns its toast.
-        static bool wasInstalling = false;
-        const OtaProgress::State ota = OtaProgress::get();
-        if (ota.active) {
+        // An update owns the glass for its whole journey — receive, staging
+        // and install alike, from the same Progress record the portal
+        // serves, so the two can never tell different stories. On the edge
+        // back to idle a failure takes the glass with its own message.
+        static bool wasBusy = false;
+        const Ota::Progress op = Ota::progress();
+        const bool busy = op.stage == Ota::Stage::Receiving ||
+                          op.stage == Ota::Stage::Staged ||
+                          op.stage == Ota::Stage::Installing;
+        if (busy) {
           d->_lastActivityMs = now;
           LvglUi::showIdle(false);
           if (d->_blank) d->setBlank(false);
-          LvglUi::showFirmware(ota.stage, ota.written, ota.total);
-          wasInstalling = true;
-        } else if (wasInstalling) {
-          wasInstalling = false;
+          LvglUi::showFirmware(Ota::describe(op.stage), op.received, op.expected);
+          wasBusy = true;
+        } else if (wasBusy) {
+          wasBusy = false;
           LvglUi::hideFirmware();
-          // The promised verdict: a failed install must not vanish the way
-          // a successful one does — success reboots moments later, failure
-          // leaves the old firmware running and the operator must know.
-          if (ota.failed) LvglUi::showIncoming(nullptr, "Firmware update FAILED — still on the old version. See the log.");
+          if (op.stage == Ota::Stage::Failed)
+            LvglUi::showIncoming(nullptr, op.message[0]
+                ? op.message
+                : "Firmware update failed — still on the old version.");
         }
       }
       // The shell rests in two stages: first the spec's idle clock — the
