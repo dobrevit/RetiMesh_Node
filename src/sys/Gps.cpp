@@ -244,7 +244,10 @@ void begin() {
   setenv("TZ", "UTC0", 1);
   tzset();
   setEnabled(settings.radio().gpsEnabled);
-  Diag::startTask(task, "gps", 3072, nullptr, 1, 0);
+  // 4 KB, not 3: the first boot on hardware measured 1216 B of headroom at
+  // 3072 with a receiver talking — enough to run, not enough to trust under
+  // the guard's worst case (Diag.h). The margin is cheap; the overflow is not.
+  Diag::startTask(task, "gps", 4096, nullptr, 1, 0);
 }
 
 Fix fix() {
