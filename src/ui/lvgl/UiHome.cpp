@@ -25,6 +25,7 @@
 //  is one button here, not a navigation redesign.
 // ============================================================================
 #include "Ui.h"
+#include "UiTheme.h"
 
 #if HAS_LVGL_UI
 
@@ -45,13 +46,16 @@ lv_obj_t* sNodeVal = nullptr;
 
 lv_obj_t* card(lv_obj_t* parent, const char* title, lv_obj_t** valueOut) {
   lv_obj_t* c = lv_obj_create(parent);
+  UiTheme::card(c);
   lv_obj_set_width(c, lv_pct(100));
   lv_obj_set_height(c, LV_SIZE_CONTENT);
   lv_obj_set_style_pad_all(c, 8, 0);
+  // The design's reading shape: a small caps label over a bright value.
   lv_obj_t* t = lv_label_create(c);
   lv_label_set_text(t, title);
-  lv_obj_set_style_text_font(t, &lv_font_montserrat_16, 0);
+  UiTheme::labelCaps(t);
   lv_obj_t* v = lv_label_create(c);
+  UiTheme::value(v);
   lv_obj_set_width(v, lv_pct(100));
   lv_label_set_long_mode(v, LV_LABEL_LONG_WRAP);
   lv_obj_align_to(v, t, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
@@ -102,6 +106,7 @@ void refreshHome(lv_timer_t*) {
 void shortcut(lv_obj_t* bar, const char* symbol, const char* name,
               void (*open)(lv_event_t*)) {
   lv_obj_t* btn = lv_button_create(bar);
+  UiTheme::actionButton(btn);
   lv_obj_set_flex_grow(btn, 1);
   lv_obj_set_height(btn, 46);
   lv_obj_t* col = lv_label_create(btn);
@@ -119,25 +124,28 @@ void openHome() {
   lv_obj_t* body = newScreen(nullptr);   // home carries no back arrow
   lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
 
-  card(body, "Radio", &sRadioVal);
-  card(body, "Network", &sNetVal);
-  card(body, "Node", &sNodeVal);
+  card(body, "RADIO", &sRadioVal);
+  card(body, "NETWORK", &sNetVal);
+  card(body, "NODE", &sNodeVal);
 
   // The shortcut bar, pinned to the bottom of the screen itself so the cards
   // scroll behind it rather than pushing it away.
   lv_obj_t* bar = lv_obj_create(scr);
   lv_obj_remove_style_all(bar);
+  UiTheme::bar(bar);
   lv_obj_set_size(bar, lv_pct(100), 50);
   lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, 0);
   lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_all(bar, 2, 0);
   lv_obj_set_style_pad_column(bar, 2, 0);
-  shortcut(bar, LV_SYMBOL_ENVELOPE, "Messages", [](lv_event_t*) { openMessages(); });
-  shortcut(bar, LV_SYMBOL_SETTINGS, "Settings", [](lv_event_t*) { openSettings(); });
+  // The action bar, in the design's vocabulary: terse caps, always the same
+  // slots. MESH joins the row when the destinations screen exists.
+  shortcut(bar, LV_SYMBOL_ENVELOPE, "MSG",  [](lv_event_t*) { openMessages(); });
+  shortcut(bar, LV_SYMBOL_SETTINGS, "SET",  [](lv_event_t*) { openSettings(); });
 #if HAS_GPS
-  shortcut(bar, LV_SYMBOL_GPS,      "GNSS",     [](lv_event_t*) { openGps(); });
+  shortcut(bar, LV_SYMBOL_GPS,      "GPS",  [](lv_event_t*) { openGps(); });
 #endif
-  shortcut(bar, LV_SYMBOL_LIST,     "About",    [](lv_event_t*) { openAbout(); });
+  shortcut(bar, LV_SYMBOL_LIST,     "INFO", [](lv_event_t*) { openAbout(); });
 
   // The bar steals the bottom 50 px from the card column.
   lv_obj_set_style_pad_bottom(body, 54, 0);

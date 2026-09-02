@@ -25,6 +25,7 @@
 //  It sits on the top layer, so every screen inherits it without carrying it.
 // ============================================================================
 #include "Ui.h"
+#include "UiTheme.h"
 
 #if HAS_LVGL_UI
 
@@ -164,16 +165,15 @@ void barCreate() {
   lv_obj_remove_style_all(sBar);
   lv_obj_set_size(sBar, lv_pct(100), kBarH);   // pct, so rotation re-fits it
   lv_obj_align(sBar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(sBar, lv_color_black(), 0);
-  lv_obj_set_style_bg_opa(sBar, LV_OPA_COVER, 0);
+  UiTheme::bar(sBar);
   lv_obj_set_style_pad_hor(sBar, 6, 0);
 
   sBarName = lv_label_create(sBar);
-  lv_obj_set_style_text_color(sBarName, lv_color_white(), 0);
+  lv_obj_set_style_text_color(sBarName, lv_color_hex(UiTheme::kInkDim), 0);
   lv_obj_align(sBarName, LV_ALIGN_LEFT_MID, 0, 0);
 
   sBarIcons = lv_label_create(sBar);
-  lv_obj_set_style_text_color(sBarIcons, lv_color_white(), 0);
+  lv_obj_set_style_text_color(sBarIcons, lv_color_hex(UiTheme::kInkDim), 0);
   lv_obj_align(sBarIcons, LV_ALIGN_RIGHT_MID, 0, 0);
 
   lv_timer_create(barTick, 1000, nullptr);
@@ -254,6 +254,7 @@ bool shellInit(TftPanel& panel) {
   lv_display_set_flush_cb(disp, flushCb);
   lv_display_set_buffers(disp, sBuf1, nullptr, sizeof(sBuf1),
                          LV_DISPLAY_RENDER_MODE_PARTIAL);
+  UiTheme::init(disp);                   // before any widget exists
 
   lv_indev_t* touch = lv_indev_create();
   lv_indev_set_type(touch, LV_INDEV_TYPE_POINTER);
@@ -262,6 +263,7 @@ bool shellInit(TftPanel& panel) {
   barCreate();
 
   sKeyboard = lv_keyboard_create(lv_layer_top());
+  lv_obj_set_style_bg_color(sKeyboard, lv_color_hex(UiTheme::kGround2), 0);
   lv_obj_set_height(sKeyboard, 132);     // four ~33 px rows: tappable, compact
   lv_keyboard_set_mode(sKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_obj_add_event_cb(sKeyboard, kbEvent, LV_EVENT_ALL, nullptr);
@@ -329,6 +331,7 @@ bool atRoot() { return sDepth == 0; }
 
 lv_obj_t* newScreen(const char* title) {
   lv_obj_t* scr = lv_obj_create(nullptr);
+  UiTheme::screen(scr);
   lv_obj_set_style_pad_top(scr, kBarH, 0);   // the status bar's lane
 
   lv_obj_t* col = lv_obj_create(scr);
