@@ -1,0 +1,32 @@
+# A/B over-the-air updates on the 16 MB part.
+#
+# The same shape as ota_4mb.csv and for the same reason — a node that cannot be
+# reached by cable has to write a new firmware while running the old one, and
+# fall back when the new one does not come up. Equal slots, no bespoke
+# installer in the boot path. See that table for the full argument; this one
+# only records what 16 MB changes.
+#
+# What it changes is that nothing is thin. Two 4 MB slots hold a firmware that
+# is 1.7 MB today with 135 % of headroom, and the filesystem is not squeezed to
+# make room for them: 7.8 MB, more than any board here has had, on a board with
+# no SD slot where the filesystem carries the web assets and the whole
+# Reticulum transport store. The 4 MB table had to take its slots out of the
+# filesystem's hide; this one takes them out of room that was going spare.
+#
+# App slots are 64 KiB aligned because the bootloader requires it. The
+# filesystem partition is named spiffs even though it holds LittleFS:
+# LittleFS.begin() looks the partition up by that label, and a name it cannot
+# find fails the mount without formatting anything — the node then runs with no
+# filesystem at all while the flash still holds every file.
+#
+# A partition table is a one-way door: it can only be changed by writing the
+# whole flash over a cable. This board gets the A/B layout from its first
+# flash so that door never has to be gone back through.
+#
+# Name,     Type, SubType,  Offset,   Size,
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+ota_0,      app,  ota_0,    0x10000,  0x400000,
+ota_1,      app,  ota_1,    0x410000, 0x400000,
+spiffs,     data, spiffs,   0x810000, 0x7D0000,
+coredump,   data, coredump, 0xFE0000, 0x10000,

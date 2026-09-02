@@ -43,6 +43,8 @@
   #include "boards/heltec_wb.h"
 #elif defined(BOARD_HELTEC_WP)
   #include "boards/heltec_wp.h"
+#elif defined(BOARD_HELTEC_V4)
+  #include "boards/heltec_v4.h"
 #elif defined(BOARD_T3S3_SX1280_PA)
   #include "boards/t3s3_sx1280_pa.h"
 #elif defined(BOARD_T3S3_SX1280)
@@ -406,6 +408,14 @@
   #define HAS_RF_SWITCH     0
 #endif
 
+// An amplified front end that has to be powered and steered before the radio
+// can do anything (src/radio/LoRaFem.h). Distinct from HAS_RF_SWITCH, which is
+// a bare transmit/receive switch RadioLib drives by itself, and from HAS_PA,
+// which only says an amplifier is in the path.
+#ifndef HAS_LORA_FEM
+  #define HAS_LORA_FEM      0
+#endif
+
 // True where the board puts a power amplifier after the transceiver. It does
 // not change what the chip may be driven at — the driver's own maximum still
 // applies — but it does change what leaves the antenna, which is the operator's
@@ -474,6 +484,11 @@
 // the OLED every board so far has had.
 #define DISPLAY_KIND_OLED   1
 #define DISPLAY_KIND_EINK   2
+// A colour TFT, which is neither of the others in the way that matters here:
+// an update costs a burst of SPI rather than a kilobyte of I2C or a second of
+// the panel's life, and the panel has a backlight — so "off" is a real state
+// that saves real current, unlike an e-paper film that keeps its image.
+#define DISPLAY_KIND_TFT    3
 #ifndef DISPLAY_KIND
   #define DISPLAY_KIND      DISPLAY_KIND_OLED
 #endif
@@ -521,6 +536,25 @@
 // short press = next page, long press = blank/wake the panel.
 #ifndef PIN_BUTTON
   #define PIN_BUTTON        0
+#endif
+// A second button, where the case has one. Boards without it say nothing and
+// everything that reads it compiles out.
+#ifndef HAS_BUTTON2
+  #define HAS_BUTTON2       0
+#endif
+#ifndef PIN_BUTTON2
+  #define PIN_BUTTON2       -1
+#endif
+// A piezo sounder on a PWM channel, where one is fitted.
+#ifndef HAS_BUZZER
+  #define HAS_BUZZER        0
+#endif
+#ifndef PIN_BUZZER
+  #define PIN_BUZZER        -1
+#endif
+// A capacitive touch layer over the panel.
+#ifndef HAS_TOUCH
+  #define HAS_TOUCH         0
 #endif
 // Boards that wire an indicator LED name it here. Nothing drives it yet; it is
 // claimed at boot and held off so the pin is not left floating.
@@ -612,7 +646,25 @@
   #define PMU_VBUS_LIMIT_MA 500
 #endif
 
-#define BATTERY_DIVIDER_RATIO 2.0f
+// Boards halve the cell into the ADC unless they say otherwise; one that
+// divides deeper says so, and says at what attenuation the result is readable.
+#ifndef BATTERY_DIVIDER_RATIO
+  #define BATTERY_DIVIDER_RATIO 2.0f
+#endif
+// The enable line for a divider that is only connected while it is held. A
+// board without one reads a divider that is always there; a board with one
+// that is not driven reads a plausible number that is not the battery.
+#ifndef PIN_BATTERY_ADC_EN
+  #define PIN_BATTERY_ADC_EN  -1
+#endif
+#ifndef BATTERY_ADC_EN_ACTIVE
+  #define BATTERY_ADC_EN_ACTIVE HIGH
+#endif
+// 11 dB reads to about 3.1 V, which suits a divider that halves. A deeper one
+// needs less attenuation to keep the reading in range.
+#ifndef BATTERY_ADC_ATTEN
+  #define BATTERY_ADC_ATTEN   ADC_11db
+#endif
 #define BATTERY_MIN_V       3.0f            // below: no cell attached (USB bench)
 #define BATTERY_MAX_V       4.35f
 #define BATTERY_SAMPLE_MS   10000
