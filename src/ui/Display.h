@@ -113,7 +113,8 @@ private:
   uint32_t _pageChangedMs = 0;
   uint32_t _lastActivityMs = 0;          // last button press (boot counts)
   void setBlank(bool blank);             // DISPLAYOFF/ON on the panel
-  void advancePage(bool forward);        // what any short press does
+  void advancePage(bool forward);
+  void longPressAction();               // both buttons' long press, stated once        // what any short press does
   // One press grammar for every input, written once (a review found it
   // hand-copied three times, already drifting): press is registered on the
   // edge, a hold past BUTTON_LONG_MS fires Long exactly once and latches so
