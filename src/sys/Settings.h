@@ -118,7 +118,7 @@ struct AdminSettings {
 // every board: the node then answers only on USB or PPP where it has them,
 // and on the maintenance console everywhere (WIFI ON turns it back on).
 struct LinkSettings {
-  bool wifiEnabled = true;
+  bool wifiEnabled = WIFI_ENABLED_DEFAULT != 0;   // headless boards ship it off
   bool usbEnabled  = true;              // USB networking, where the board and build carry it
   bool pppEnabled  = false;             // PPP over the bridge UART, likewise
   // The serial port's speed while PPP is on — console and log included,
