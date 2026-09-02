@@ -178,6 +178,14 @@ canvas and the panel shows each pixel as a 2x2 block (`src/ui/TftPanel.h`); at t
 dot pitch that lands the text at the e-paper's size. The panel is write-only — no probe
 can tell whether it is there, so a wrong pin map shows as a dark panel with a healthy log.
 
+**Flashing, once this firmware is on it:** the OTG composite CDC does not wire the
+DTR/RTS bootloader dance, so esptool alone cannot enter the downloader — the upload
+hook's hand-off (the default) asks the running node over the console and works every
+time. `RETIMESH_NO_AUTO_BOOTLOADER=1` is only for a factory-fresh board that cannot
+answer; set it on this board once our firmware runs and the upload fails with
+"No serial data received". The by-id name is the RetiMesh identity while the
+application runs and the Espressif JTAG identity in the downloader.
+
 **Verification checklist, first bench session:**
 
 1. Boot log: which front end was detected, and the self-test's TxDone time.
