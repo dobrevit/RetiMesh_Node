@@ -144,7 +144,14 @@ bool queueLxmfReply(const uint8_t destHash[16], const char* text);
 // `signal` is what the radio measured of the packet that asked, carried here
 // rather than read again at send time: by then the node may have heard a much
 // closer neighbour, and the answer would describe that link instead.
+//
+// `verifiedKey`, where given, is the 64-byte public key the request was checked
+// against — both halves, as get_public_key() returns them. Carrying it saves
+// looking the sender up a second time on the task that also drives the library,
+// and makes the answer go to the identity that was verified rather than to
+// whatever the hash resolves to a pass later.
 bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry,
-                        const Rns::Commands::Signal& signal);
+                        const Rns::Commands::Signal& signal,
+                        const uint8_t* verifiedKey = nullptr);
 
 } // namespace RnsTransport

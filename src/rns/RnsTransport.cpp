@@ -401,7 +401,13 @@ static void applyLogMute() {
 // first, and losing one costs nothing: the sender identifies again on its
 // next link. Touched only from the RNS task — the identify callback and
 // message handling both run inside reticulum.loop() — so no lock.
-struct ProvenKey { uint8_t hash[16]; uint8_t key[32]; uint32_t atMs; bool used; };
+// A whole public key, which for Reticulum is two: the X25519 half used to
+// encrypt to a peer and the Ed25519 half used to check what it signed.
+// get_public_key() hands back both halves concatenated, so 32 bytes is exactly
+// half a key. Taken from the library rather than written out, so that a node
+// and the stack it runs on cannot disagree about how long a key is.
+static const size_t kPublicKeyLen = RNS::Type::Identity::KEYSIZE / 8;
+struct ProvenKey { uint8_t hash[16]; uint8_t key[kPublicKeyLen]; uint32_t atMs; bool used; };
 static ProvenKey sProven[8];
 
 static const ProvenKey* provenKeyFor(const uint8_t* sourceHash) {
@@ -411,7 +417,12 @@ static const ProvenKey* provenKeyFor(const uint8_t* sourceHash) {
 }
 
 static void rememberProvenKey(const Bytes& source, const Bytes& key) {
-  if (source.size() != 16 || key.size() != 32) return;
+  // 32 here rejected every key there is. get_public_key() returns both halves,
+  // so nothing was ever remembered: the table stayed empty, provenKeyFor()
+  // always said no, and a sender who identified on a link but had never
+  // announced was counted unverified and answered with silence — the one case
+  // this table exists for.
+  if (source.size() != 16 || key.size() != kPublicKeyLen) return;
   ProvenKey* slot = nullptr;
   for (auto& e : sProven) {
     if (e.used && memcmp(e.hash, source.data(), 16) == 0) { slot = &e; break; }
@@ -422,7 +433,7 @@ static void rememberProvenKey(const Bytes& source, const Bytes& key) {
     for (auto& e : sProven) if ((int32_t)(e.atMs - slot->atMs) < 0) slot = &e;
   }
   memcpy(slot->hash, source.data(), 16);
-  memcpy(slot->key, key.data(), 32);
+  memcpy(slot->key, key.data(), kPublicKeyLen);
   slot->atMs = millis();
   slot->used = true;
 }
@@ -462,7 +473,45 @@ static bool commandCooldownActive(const uint8_t* sourceHash) {
   return false;
 }
 
+// What every sender gets between them.
+//
+// The table above holds eight hashes and evicts the oldest, so it gates a
+// sender who keeps one identity and nothing else: announce nine throwaway
+// identities and each request evicts the entry that would have stopped the
+// next one, so the gate never fires. Announcing is free and being `verified`
+// asks for nothing more, so the cost of defeating a per-sender rule is the
+// cost of generating keys.
+//
+// What that bought an attacker was the node's transmit budget. Every answer is
+// a signed LXMF packet; enough of them and refreshAirtimeStats() sets
+// dutyLocked, LoRaRadio stops draining the TX ring, and the node's own
+// transport traffic and admin answers stop with it — for the rest of the hour.
+//
+// So there is a second rule that no identity can be rotated out of: a bucket
+// of four answers, refilling one every fifteen seconds. A person pressing a
+// button gets an immediate answer and three more; a flood gets four per
+// minute however many names it wears.
+static const uint32_t kCommandBurst    = 4;
+static const uint32_t kCommandRefillMs = 15000;
+static uint32_t sCommandTokens   = kCommandBurst;
+static uint32_t sCommandFilledMs = 0;
+
+static void refillCommandBudget() {
+  const uint32_t now = millis();
+  const uint32_t due = (uint32_t)(now - sCommandFilledMs) / kCommandRefillMs;
+  if (!due) return;
+  sCommandTokens = (sCommandTokens + due > kCommandBurst) ? kCommandBurst : sCommandTokens + due;
+  sCommandFilledMs += due * kCommandRefillMs;         // keep the remainder, so it does not drift
+}
+
+// The one question both rules live behind, so a caller cannot ask half of it.
+static bool mayAnswerCommand(const uint8_t* sourceHash) {
+  refillCommandBudget();
+  return sCommandTokens > 0 && !commandCooldownActive(sourceHash);
+}
+
 static void noteCommandAnswered(const uint8_t* sourceHash) {
+  if (sCommandTokens) sCommandTokens--;
   CommandSeen* slot = nullptr;
   for (auto& e : sCommandSeen) {
     if (e.used && memcmp(e.hash, sourceHash, 16) == 0) { slot = &e; break; }
@@ -489,7 +538,11 @@ static RNS::Identity senderKey(const uint8_t sourceHash[16]) {
   if (known) return known;
   if (const ProvenKey* proven = provenKeyFor(sourceHash)) {
     RNS::Identity fromLink(false);
-    fromLink.load_public_key(RNS::Bytes(proven->key, 32));
+    // Both halves. Given 32, load_public_key() left _sig_pub_bytes empty, so
+    // validate() had nothing to check a signature with and the identity hash
+    // was derived from half the key — addressing a reply to a destination that
+    // is not the sender's.
+    fromLink.load_public_key(RNS::Bytes(proven->key, kPublicKeyLen));
     return fromLink;
   }
   return {RNS::Type::NONE};
@@ -673,8 +726,9 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
     if (Rns::lxmfField(m.fields, m.fieldsLen, Rns::kFieldCommands, val, valLen)) {
       Rns::LxmfCommand cmds[4];
       const size_t n = Rns::lxmfCommands(val, valLen, cmds, 4);
-      if (n && commandCooldownActive(m.sourceHash)) {
-        log_d("lxmf: not answering %s so soon after the last time", source.toHex().c_str());
+      if (n && !mayAnswerCommand(m.sourceHash)) {
+        log_d("lxmf: not answering %s (%u answer(s) left in the budget)",
+              source.toHex().c_str(), (unsigned)sCommandTokens);
       } else {
         // One answer per message, whatever was asked. The reply queue is two
         // deep and shared with remote administration, so a message carrying
@@ -694,7 +748,13 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
           // them would appear in the conversation as a message somebody sent.
           if (!wantsTelemetry &&
               !Rns::Commands::reply(cmds[k], signal, answer, sizeof(answer))) continue;
-          if (queueLxmfTelemetry(m.sourceHash, answer, wantsTelemetry, signal)) {
+          // The key this message was checked against, so the answer does not
+          // ask who the sender is a second time and cannot get a different
+          // answer than the check did.
+          const RNS::Bytes senderPub = sender.get_public_key();
+          const uint8_t* verifiedKey =
+              senderPub.size() == kPublicKeyLen ? senderPub.data() : nullptr;
+          if (queueLxmfTelemetry(m.sourceHash, answer, wantsTelemetry, signal, verifiedKey)) {
             // Stamped only now. Stamping before knowing an answer exists spent
             // the sender's ten seconds on a command this node does not answer,
             // so a telemetry request made the ping after it look like silence.
@@ -1096,6 +1156,13 @@ struct PendingReply {
   char     text[256];
   bool     telemetry;
   Rns::Commands::Signal signal;
+  // The key the request was verified against, where there was one. Carrying it
+  // saves the second Identity::recall — which can reach the SD card, on the
+  // task that also drives reticulum.loop() — and settles a question the second
+  // lookup could get a different answer to: the reply goes to the identity
+  // that was checked, not to whatever that hash resolves to a pass later.
+  uint8_t  key[kPublicKeyLen];
+  bool     haveKey;
 };
 static QueueHandle_t sReplyQueue = nullptr;
 
@@ -1104,20 +1171,27 @@ bool queueLxmfReply(const uint8_t destHash[16], const char* text) {
 }
 
 bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telemetry,
-                        const Rns::Commands::Signal& signal) {
+                        const Rns::Commands::Signal& signal, const uint8_t* verifiedKey) {
   if (!sReplyQueue) return false;
   PendingReply r{};
   memcpy(r.dest, destHash, 16);
   strlcpy(r.text, text ? text : "", sizeof(r.text));
   r.telemetry = telemetry;
   r.signal = signal;
+  if (verifiedKey) {
+    memcpy(r.key, verifiedKey, kPublicKeyLen);
+    r.haveKey = true;
+  }
   return xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
 }
 
 static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry,
-                     const Rns::Commands::Signal& signal) {
+                     const Rns::Commands::Signal& signal,
+                     const uint8_t* verifiedKey = nullptr) {
   if (!sStarted || !lxmfDest) return false;
-  RNS::Identity peer = senderKey(destHash);
+  RNS::Identity peer(false);
+  if (verifiedKey) peer.load_public_key(RNS::Bytes(verifiedKey, kPublicKeyLen));
+  else             peer = senderKey(destHash);
   if (!peer) {
     log_w("lxmf: no key for %s; cannot answer", RNS::Bytes(destHash, 16).toHex().c_str());
     return false;
@@ -1529,7 +1603,8 @@ void loop() {
     // that owns the library (queueLxmfReply above).
     if (sReplyQueue) {
       PendingReply r;
-      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE && !sendLxmf(r.dest, r.text, r.telemetry, r.signal))
+      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE &&
+          !sendLxmf(r.dest, r.text, r.telemetry, r.signal, r.haveKey ? r.key : nullptr))
         log_w("lxmf: could not send an answer to %s", RNS::Bytes(r.dest, 16).toHex().c_str());
     }
     processEvents();

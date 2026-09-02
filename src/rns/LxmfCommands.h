@@ -131,6 +131,12 @@ inline size_t reply(const LxmfCommand& c, const Signal& s, char* out, size_t cap
     memcpy(out, kPrefix, plen);
     const size_t n = utf8SafeCopy(c.text, c.textLen, out + plen,
                                   room < 64 ? room : 64);
+    // Nothing to echo is not an answer. An echo whose argument is not a string
+    // — msgpackNext leaves val null for every other type — used to return the
+    // prefix alone, so a node put "Echo reply: " on the air over its own
+    // signature, spent the sender's cooldown on it, and stopped looking at the
+    // rest of the message. A stranger sending {echo: true} should get nothing.
+    if (n == 0) { out[0] = '\0'; return 0; }
     return plen + n;
   }
 
@@ -139,8 +145,10 @@ inline size_t reply(const LxmfCommand& c, const Signal& s, char* out, size_t cap
     // users already expect. A line whose figure this node does not have is
     // left out rather than filled in.
     size_t i = 0;
+    bool haveAny = false;               // a reading existed, whether or not it fitted
     auto line = [&](const char* fmt, float v) {
       if (isnan(v)) return;
+      haveAny = true;
       // Formatted aside first. snprintf writes what it can before telling you
       // it did not fit, so measuring in the output buffer left a half-written
       // line behind on a return of zero — and every other branch here promises
@@ -155,7 +163,12 @@ inline size_t reply(const LxmfCommand& c, const Signal& s, char* out, size_t cap
     line("Link Quality: %.0f%%\n", s.q);
     line("RSSI: %.0f dBm\n", s.rssi);
     line("SNR: %.1f dB\n", s.snr);
+    if (i == 0 && haveAny) return 0;    // measured, but nothing could be rendered
     if (i == 0) {
+      // Only when every figure was NaN. Saying this because a line would not
+      // format or would not fit tells the asker the node heard nothing, over
+      // its own signature, when it had a measurement — a positive claim, and
+      // the wrong one.
       static const char* none = "No reception info available";
       const size_t n = strlen(none);
       if (cap <= n) { out[0] = '\0'; return 0; }
