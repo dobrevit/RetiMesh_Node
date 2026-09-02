@@ -202,26 +202,6 @@ void setup() {
     // radio first would simply find nothing.
     Pmu::begin();
   #endif
-#if HAS_BQ25896 || HAS_DA217
-  // The main I2C and the case's residents, before the battery gauge asks the
-  // charger anything.
-#if HAS_DISPLAY_VEXT
-  // The case's I2C parts sit behind the switched peripheral rail (Vext), so
-  // the probe has to power it and let it settle first — the reference waits a
-  // full second on this exact board. Without it the accelerometer is simply
-  // not on the bus yet, which read as "absent".
-  pinMode(PIN_DISPLAY_VEXT, OUTPUT);
-  digitalWrite(PIN_DISPLAY_VEXT, LOW);   // active low
-  delay(300);
-#endif
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-#if HAS_TOUCH
-  Wire1.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL, 400000);  // the case's other bus
-#endif
-  Bq25896::begin();
-  Imu::begin();
-  Diag::cost("i2c case parts");
-#endif
   Power::begin();                          // profile (CPU clock, Wi-Fi sleep) + battery gauge
   Diag::cost("power");
 
@@ -252,6 +232,17 @@ void setup() {
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   Diag::cost("display");
+#if HAS_BQ25896 || HAS_DA217
+  // After the display, deliberately: the case's I2C parts sit behind the
+  // switched peripheral rail, and the panel is what brings that rail up and
+  // settles it (Panel.h). Powering it a second time from here left the panel
+  // dark — one owner for the rail, and the probe simply comes later.
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Bq25896::begin();
+  Imu::begin();
+  Diag::cost("i2c case parts");
+#endif
+
   #if HAS_SD
     // Before the card task exists: it is the task that reads the card's
     // ownership marker for everyone else, and it needs somewhere to put it.
