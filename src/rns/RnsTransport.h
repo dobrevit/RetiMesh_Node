@@ -94,6 +94,27 @@ struct Tables {
 };
 Tables tables();
 
+// One reading, taken under one lock.
+//
+// The calls above each take the lock separately, so a caller that wants a
+// count and the list it counts gets them from two different refreshes — and
+// prints a total that does not match the rows under it. Anything assembling a
+// picture of the node's tables should ask for it in one go.
+//
+// `ageMs` is how long ago the reading was last successfully rebuilt, which is
+// not the same as how long ago one was attempted: a refresh that throws leaves
+// the previous values in place, and this is what says so.
+struct Snapshot {
+  Tables   tables;
+  size_t   pathTotal;      // the whole table, however many rows came back
+  size_t   ifaceTotal;
+  size_t   pathRows;       // rows actually written to the caller's arrays
+  size_t   ifaceRows;
+  uint32_t ageMs;
+};
+Snapshot snapshot(PathInfo* pathOut, size_t maxPaths,
+                  IfaceInfo* ifaceOut, size_t maxIfaces);
+
 const char* modeName(uint8_t mode);        // settings value -> "full", ...
 
 // Where the microStore files live: "sd" or "littlefs" (chosen at boot).

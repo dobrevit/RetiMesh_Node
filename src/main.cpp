@@ -323,9 +323,14 @@ void setup() {
   // The RNS task owns every call into microReticulum (Transport is
   // single-threaded): interface loops, forwarding, announces, persistence.
   sRnsTaskUp = Diag::startTask([](void*) {
-    // RnsTransport::loop() catches what microReticulum throws inside its own
-    // pass; this catches everything else, so the one task that must keep
-    // running cannot be ended by an allocation (Diag.h).
+    // A backstop, and only that. RnsTransport::loop() now guards both halves
+    // of its own pass and each of those catches everything, so nothing the
+    // library throws reaches here any more — what is left is a throw from the
+    // reporting itself, or from a future edit to loop() outside either guard.
+    // Kept because the cost is nothing and the one task that must keep running
+    // must not be ended by an allocation (Diag.h); described honestly because
+    // a reader working out which layer contains what should not be sent to
+    // this one.
     for (;;) { Diag::guard("the rns task", [] { RnsTransport::loop(); }); vTaskDelay(pdMS_TO_TICKS(10)); }
   }, "rns", 16384, nullptr, 3, 1);
   // Online means Reticulum is both initialised and being driven: begin()

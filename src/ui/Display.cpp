@@ -634,17 +634,22 @@ void Display::paintTransport() {
   // separately. A node on a busy LAN has an interface per peer — many more
   // than fit here, and more than a stack buffer on this task wants to hold.
   RnsTransport::IfaceInfo ifs[4];
-  const size_t n = RnsTransport::interfaceCount();
+  // One reading. Asked separately, the count and the rows came from different
+  // refreshes, so this panel could print "+2 more" for interfaces that had
+  // already gone. The rows are taken now and the remainder worked out from the
+  // same total, rather than from whatever the next pass publishes.
+  const RnsTransport::Snapshot snap = RnsTransport::snapshot(nullptr, 0, ifs, 4);
+  const size_t n = snap.ifaceTotal;
   // "Transport 2 paths" is 17 of the 18 columns the battery leaves, and says
   // what it means without a legend.
-  const unsigned paths = (unsigned)RnsTransport::pathCount();
+  const unsigned paths = (unsigned)snap.pathTotal;
   // The path count moves to the counters row below: the header has icons and a
   // page number to carry now, and nine columns left for a name.
   snprintf(line, sizeof(line), g_stats.transportOnline ? "Transport" : "Trans off");
   header(line);
   // When there are more than fit, the last row counts the remainder instead
   // of letting a live interface vanish.
-  const size_t listed = RnsTransport::interfaces(ifs, (n > 4) ? 3 : 4);
+  const size_t listed = (n > 4) ? min(snap.ifaceRows, (size_t)3) : snap.ifaceRows;
   uint8_t row = 0;
   for (size_t i = 0; i < listed; i++, row++) {
     // Nine columns for a name that carries an address: drop the kind prefix,
