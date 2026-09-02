@@ -92,7 +92,20 @@ void taFocusEvent(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED) {
     lv_keyboard_set_textarea(sKeyboard, ta);
     lv_obj_remove_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
-    // The field must stay visible above the keyboard.
+    // The editors are modal message boxes, and modals live on the same top
+    // layer as the keyboard — created later, they stack above it, which on
+    // the bench put the keys underneath the dialog and out of reach. The
+    // keyboard comes to the front of the layer every time it is summoned,
+    // and the dialog is lifted to the top of the glass so the field sits in
+    // the upper half while the keys take the lower.
+    lv_obj_move_foreground(sKeyboard);
+    lv_obj_t* dlg = ta;
+    while (lv_obj_get_parent(dlg) &&
+           lv_obj_get_parent(dlg) != lv_layer_top() &&
+           lv_obj_get_parent(dlg) != lv_screen_active())
+      dlg = lv_obj_get_parent(dlg);
+    if (lv_obj_get_parent(dlg) == lv_layer_top())
+      lv_obj_align(dlg, LV_ALIGN_TOP_MID, 0, 6);
     lv_obj_scroll_to_view(ta, LV_ANIM_ON);
   } else if (code == LV_EVENT_DEFOCUSED) {
     lv_keyboard_set_textarea(sKeyboard, nullptr);
