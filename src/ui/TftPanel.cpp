@@ -225,8 +225,11 @@ void TftPanel::blank(bool on) {
   digitalWrite(PIN_TFT_CS, HIGH);
   _spi.endTransaction();
   _blanked = on;
-  if (on) ledcWrite(PIN_TFT_BL, 0); else applyBacklight();
+  // _lit before the relight, not after: applyBacklight() refuses to light a
+  // panel that says it is unlit, and the old order left the PWM at zero on
+  // every wake from a full blank — a black glass only a reboot recovered.
   _lit = !on;
+  if (on) ledcWrite(PIN_TFT_BL, 0); else applyBacklight();
 }
 
 #endif // HAS_DISPLAY && TFT
