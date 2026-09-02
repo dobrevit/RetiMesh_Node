@@ -341,7 +341,12 @@ void staStatusTick(lv_timer_t*) {
   if (!sStaStatus || !lv_obj_is_valid(sStaStatus)) return;
   const char* ssid = settings.wifi().staSsid;
   char line[96];
-  if (!ssid[0]) {
+  if (!settings.links().wifiEnabled) {
+    // The truth outranks the saved network: with the adapter off nothing is
+    // looking for anything — a "searching" line here once claimed a hunt the
+    // driver was never even started for.
+    snprintf(line, sizeof(line), "WiFi is off — the switch above turns it on.");
+  } else if (!ssid[0]) {
     snprintf(line, sizeof(line), "No network saved — scan to join one.");
   } else if (wifiManager.stationConnected()) {
     char ip[20];
@@ -416,6 +421,9 @@ void openCategory(lv_event_t* e) {
     lv_label_set_text(sl, LV_SYMBOL_WIFI "  Join a network...");
     lv_obj_center(sl);
     lv_obj_add_event_cb(scan, [](lv_event_t*) { Ui::openWifiJoin(); }, LV_EVENT_CLICKED, nullptr);
+    // Locked, not hidden, while the adapter is off — the master switch's
+    // restart rebuilds this page, so build-time state is the truth.
+    if (!settings.links().wifiEnabled) lv_obj_add_state(scan, LV_STATE_DISABLED);
 
     if (wifiManager.stationConfigured()) {
       lv_obj_t* forget = lv_button_create(body);
@@ -423,6 +431,7 @@ void openCategory(lv_event_t* e) {
       lv_obj_t* fl = lv_label_create(forget);
       lv_label_set_text(fl, LV_SYMBOL_CLOSE "  Disconnect & forget");
       lv_obj_center(fl);
+      if (!settings.links().wifiEnabled) lv_obj_add_state(forget, LV_STATE_DISABLED);
       lv_obj_add_event_cb(forget, [](lv_event_t* ev) {
         wifiManager.staForget();
         Ui::toast("Network forgotten");
