@@ -45,6 +45,7 @@ namespace Ui {
 
 bool shellInit(TftPanel& panel);         // lvgl, buffers, touch, bar, keyboard
 uint32_t shellLoop();                    // lv_timer_handler + the bar's second
+bool consumeTouch();                     // a finger since last asked (sticky)
 
 // The navigation stack. push() loads `screen` and keeps the current one to
 // come back to; back() returns and deletes the screen it leaves. Home never

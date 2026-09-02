@@ -56,6 +56,8 @@ void onBlank(bool on) {
   if (!on) lv_obj_invalidate(lv_screen_active());
 }
 
+bool touchActive() { return Ui::consumeTouch(); }
+
 } // namespace LvglUi
 
 #endif // HAS_LVGL_UI

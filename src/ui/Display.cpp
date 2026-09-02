@@ -124,11 +124,23 @@ void Display::displayTask(void* self) {
     uint32_t now = millis();
 #if HAS_LVGL_UI
     // The shell's pass: LVGL timers, then done — the page machinery below
-    // belongs to the mono boards. Blanking still applies; the buttons landed
-    // above as tab steps and the blank toggle.
+    // belongs to the mono boards. The shell owns the touch layer, so the
+    // activity timer has to ask it about fingers — the buttons alone left
+    // the panel blanking under an operator mid-navigation. And a blanked
+    // glass wakes to a tap the way a phone does: while dark, the touch
+    // controller is polled gently here, since the shell's loop is stopped.
+    if (LvglUi::touchActive()) d->_lastActivityMs = now;
     if (d->_panel->blanks() && !d->_blank &&
         now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
-    if (!d->_blank) LvglUi::loop();
+    if (d->_blank) {
+      static uint32_t lastWakePoll = 0;
+      if (now - lastWakePoll >= 100) {
+        lastWakePoll = now;
+        if (TouchInput::poll().down) d->setBlank(false);
+      }
+    } else {
+      LvglUi::loop();
+    }
     return;
 #endif
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {

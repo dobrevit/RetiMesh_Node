@@ -70,6 +70,10 @@ void stepTab(int8_t dir);
 // Blank/unblank hooks so the panel sleep logic stays where it is.
 void onBlank(bool on);
 
+// Whether the glass has been touched since last asked — the display's
+// activity timer eats this, since the shell owns the touch layer.
+bool touchActive();
+
 } // namespace LvglUi
 
 #else
@@ -80,6 +84,7 @@ inline bool begin(TftPanel&) { return false; }
 inline uint32_t loop() { return 1000; }
 inline void stepTab(int8_t) {}
 inline void onBlank(bool) {}
+inline bool touchActive() { return false; }
 } // namespace LvglUi
 
 #endif // HAS_LVGL_UI
