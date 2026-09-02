@@ -319,7 +319,9 @@ void setup() {
   // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
   // transaction to every network page.
   #if HAS_DISPLAY
-    Diag::startTask(Display::displayTask, "display", 6144, &display, 1, 0);
+    // The LVGL shell renders whole widget trees on this stack; the page
+    // stack's 6 KB starved it in the first bench build.
+    Diag::startTask(Display::displayTask, "display", HAS_LVGL_UI ? 12288 : 6144, &display, 1, 0);
   #endif
 
   // The RNS task owns every call into microReticulum (Transport is

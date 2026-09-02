@@ -50,14 +50,27 @@ void TftPanel::cmd(uint8_t c, const uint8_t* data, size_t len) {
   }
 }
 
-void TftPanel::window(int16_t y0, int16_t y1) {
-  // Full width, the given rows. CASET/RASET take big-endian start and end,
-  // inclusive.
-  const uint8_t ca[4] = { 0, 0, (uint8_t)((DISPLAY_WIDTH - 1) >> 8), (uint8_t)((DISPLAY_WIDTH - 1) & 0xFF) };
+void TftPanel::window(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+  // CASET/RASET take big-endian start and end, inclusive.
+  const uint8_t ca[4] = { (uint8_t)(x0 >> 8), (uint8_t)(x0 & 0xFF),
+                          (uint8_t)(x1 >> 8), (uint8_t)(x1 & 0xFF) };
   const uint8_t ra[4] = { (uint8_t)(y0 >> 8), (uint8_t)(y0 & 0xFF),
                           (uint8_t)(y1 >> 8), (uint8_t)(y1 & 0xFF) };
   cmd(CASET, ca, sizeof(ca));
   cmd(RASET, ra, sizeof(ra));
+}
+
+void TftPanel::blitArea(int16_t x1, int16_t y1, int16_t x2, int16_t y2, const uint8_t* px) {
+  if (!_ok) return;
+  _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_TFT_CS, LOW);
+  window(x1, y1, x2, y2);
+  cmd(RAMWR);
+  digitalWrite(PIN_TFT_DC, HIGH);
+  _spi.writeBytes(px, (size_t)(x2 - x1 + 1) * (size_t)(y2 - y1 + 1) * 2);
+  digitalWrite(PIN_TFT_CS, HIGH);
+  _spi.endTransaction();
+  if (!_lit) { digitalWrite(PIN_TFT_BL, HIGH); _lit = true; }
 }
 
 bool TftPanel::begin() {
@@ -150,7 +163,7 @@ void TftPanel::flush(bool full) {
 
   _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
-  window((int16_t)(y0 * 2), (int16_t)(y1 * 2 + 1));
+  window(0, (int16_t)(y0 * 2), (int16_t)(DISPLAY_WIDTH - 1), (int16_t)(y1 * 2 + 1));
   cmd(RAMWR);
   digitalWrite(PIN_TFT_DC, HIGH);
 

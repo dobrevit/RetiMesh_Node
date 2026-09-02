@@ -41,6 +41,7 @@ Display display;
 #include "DisplayIcons.h"
 #include "QrCode.h"
 #include "TouchInput.h"
+#include "LvglUi.h"
 
 
 bool Display::begin() {
@@ -57,6 +58,13 @@ bool Display::begin() {
   // survives a power cut.
   TouchInput::begin();                   // input for a panel someone can now see
 
+#if HAS_LVGL_UI
+  // The shell owns the glass from the first frame: pages, splash and the
+  // refresh policy stay out of its way. The mono page stack below remains
+  // exactly what every other board runs.
+  if (LvglUi::begin(_panelImpl)) return _ok;
+  log_w("display: the GUI shell could not start; falling back to the pages");
+#endif
   _panel->clear();
   _gfx->setCursor(0, 0);
   _gfx->print(FW_NAME);
@@ -107,13 +115,22 @@ void Display::displayTask(void* self) {
     // pressure and must be the first to give way (Diag.h).
     Diag::guard("the display task", [d] {
     d->pollButton();
-#if HAS_TOUCH
-    d->pollTouch();
+#if !HAS_LVGL_UI && HAS_TOUCH
+    d->pollTouch();                      // the shell reads the glass itself
 #endif
 #if HAS_BUTTON2
     d->pollButton2();
 #endif
     uint32_t now = millis();
+#if HAS_LVGL_UI
+    // The shell's pass: LVGL timers, then done — the page machinery below
+    // belongs to the mono boards. Blanking still applies; the buttons landed
+    // above as tab steps and the blank toggle.
+    if (d->_panel->blanks() && !d->_blank &&
+        now - d->_lastActivityMs > Power::displaySleepMs()) d->setBlank(true);
+    if (!d->_blank) LvglUi::loop();
+    return;
+#endif
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
       d->_page = STATUS; d->_pageChangedMs = now;
       d->_refresh.interval(d->cadence());    // back to what the node rests at
@@ -153,6 +170,10 @@ void Display::displayTask(void* self) {
 // function so they cannot drift apart in what a tap means.
 void Display::advancePage(bool forward) {
   if (_blank) { setBlank(false); return; }       // wake only
+#if HAS_LVGL_UI
+  LvglUi::stepTab(forward ? 1 : -1);             // the buttons walk the tabs
+  return;
+#endif
   _page = stepPage(_page, forward ? 1 : -1);
   _pageChangedMs = millis();
   _refresh.interval(cadence());          // the page decides how live it is
@@ -233,6 +254,7 @@ void Display::pollButton2() {
 
 void Display::setBlank(bool blank) {
   _blank = blank;
+  LvglUi::onBlank(blank);
   if (blank) {
     _panel->blank(true);                 // panel + charge pump off
   } else {

@@ -556,6 +556,11 @@
 #ifndef HAS_TOUCH
   #define HAS_TOUCH         0
 #endif
+// The LVGL shell on colour boards: set by the env, because it is a build
+// decision (the toolkit is a library dependency), not a board fact.
+#ifndef HAS_LVGL_UI
+  #define HAS_LVGL_UI       0
+#endif
 // Boards that wire an indicator LED name it here. Nothing drives it yet; it is
 // claimed at boot and held off so the pin is not left floating.
 // LEDs, where the board has them (Leds.h): -1 for none. Boards whose LEDs
