@@ -77,6 +77,7 @@
 #include "ConsoleServer.h"
 #include "PppUart.h"
 #include "OtaDevice.h"
+#include "OtaUpdate.h"
 
 NodeStats g_stats;
 
@@ -347,6 +348,7 @@ void setup() {
   // update to be judged against. On a first boot after a cable flash there is
   // nothing pending and nothing staged, and this does nothing at all.
   otaStore.begin();
+  Ota::begin(otaFloor);
   {
     const Ota::Settlement s = Ota::confirmBoot(otaFloor);
     if (s.advanced) log_i("update confirmed: the version floor is now %lu", (unsigned long)s.floor);

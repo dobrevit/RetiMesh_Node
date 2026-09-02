@@ -15,6 +15,14 @@ data/assets.json
 src/idf_component.yml
 src/idf_component.yml.orig
 
+# Signed artefacts, which are build output: a manifest and a bundle are made
+# from an image that is itself not committed, and a bundle is most of two
+# megabytes that git would keep for ever. Publish them on a release, not here.
+*.rmfw
+/*.manifest
+/manifest.bin
+/delegation.bin
+
 # Private halves of the OTA signing keys, which tools/fw_sign.py writes into
 # the working tree by default. A committed root key is the whole trust chain,
 # and replacing one costs a visit to every deployed node. Public keys and

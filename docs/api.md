@@ -95,6 +95,8 @@ past the checks on the way in.
   ],
   "sd": { "state": "partial", "type": "SDHC", "card_bytes": 15931539456, "volume_bytes": 268435456,
           "used_bytes": 60000000, "last_format": "" },
+  "update": { "stage": "receiving", "received": 655360, "expected": 1855676,
+              "floor": 3, "slot": "app1", "can_upload": true },
   "transport": { "enabled": true, "online": true, "lora_mode": "full", "wifi_mode": "full", "auto_mode": "full",
                  "autointerface": { "enabled": true, "online": true, "address": "fe80::1cdb:d4ff:fe82:49cc", "peers": 1, "group_id": "reticulum",
                                     "peer_list": [ { "address": "fe80::2cdb:d4ff:fe82:1f20", "age_s": 3, "datagrams": 118 } ] },
@@ -265,6 +267,20 @@ the card's marker, `migrating` while a move is queued or running, and
 node's own answer about whether it would accept each move; a page draws its
 buttons from those rather than working the rule out again from the fields above.
 
+### Firmware update
+`update` is where an over-the-air update has got to and whether one may be
+started. `stage` is `idle`, `receiving`, `staged` (the whole bundle is on the
+card, not yet judged), `installing`, `installed` (written and switched to; the
+node is restarting into it) or `failed`; `message` carries the sentence behind
+the last one, and `received`/`expected` appear while a transfer is in flight.
+`floor` is the anti-rollback version this node has reached — the lowest
+`secure_version` it will still accept — and `slot` the app partition it is
+running from, which is how an update is proved to have taken. `can_upload` is
+the node's own answer about whether `POST /api/system/update` would be accepted
+right now, and `refusal` the sentence to show when it is false; a page draws
+its button from those rather than working the rule out again from the board and
+the card.
+
 ### Local links
 `local_links` lists every way a host can reach the node — see
 [local-link.md](local-link.md). `type` is `wifi_ap`, `wifi_sta`, `usb_ncm` or
@@ -290,6 +306,7 @@ Reticulum. Details and the recovery procedure: [local-link.md](local-link.md#the
 - `GET /api/system/bootloader` (public) → `{ "software_entry", "api_enabled", "pending", "state", "primary", "methods": ["software_api","auto_reset_dtr_rts","manual_recovery"], "recovery", "board", "confirm": "BOOTLOADER", "allowed_from_here" }` — what this board can do and whether a request from the caller's link would be accepted. While `pending` is true the object also carries `target` (`app` or `bootloader`), `source` (`http`, `console`, `settings` or `touch`) and `due_in_ms`, the time left before the restart fires. After a restart the object carries `last_restart` — `to_persist_ms` and `to_boot_ms`: the milliseconds from entering the restart to handing over to the core's persist-restart (native USB only), and from there to this boot, kept in RTC memory across the ROM session — so a restart that took the long way round can say where it went. The first seven fields are the same object `GET /api/settings` returns as `bootloader`; "from here" is decided by the link the request arrived on, not by the caller's address
 - `POST /api/system/bootloader` `{"confirm":"BOOTLOADER"}` → `202 { "ok":true, "restart":true, "target":"bootloader", "method":"software_api", "delay_ms":600, "expect":"…", "recovery":"…" }`; the node restarts into the ROM downloader 600 ms later. `400` without the confirm word, `403` when switched off or from a non-local link, `409` while a restart is already in progress, `500` when the request was accepted but the ROM could not be armed (the node restarts into the application instead), `501` where this board cannot (a classic ESP32, or a native-USB S3 built without the composite device, whose serial-JTAG unit survives the reset; use esptool's DTR/RTS reset — the shipped S3 images present the composite device and answer `202`). The console's `BOOTLOADER CONFIRM` answers with the same codes, and over a network session it answers to the same two switches — `bootloader_api`, and `bootloader_from_lan` unless the caller is on a host-facing link. Over the cable neither applies: physical access already allows dumping the firmware and reflashing it
 - `POST /api/system/reboot` `{"confirm":"REBOOT"}` → `202 { "ok":true, "restart":true, "target":"app" }`
+- `POST /api/system/update` — the raw body is a signed bundle (`Content-Type: application/octet-stream`), the `.rmfw` file `tools/fw_sign.py bundle` writes: the 284-byte manifest followed by the image, one file so the two cannot be mismatched. → `202 { "ok":true, "stage":"staged", "message":"…" }` once the whole body is on the card; the install then runs on its own task and `GET /api/status`'s `update` object reports it. The body is streamed to the SD card as it arrives, so a board with no card cannot take one. Refusals are answered on the **first chunk**, before the rest of the upload is spent: `401` without the admin password, `409` when the node will not take an update now — a single app partition, no card, or one already in progress — with the reason in `error`, `415` when the body did not arrive as a raw body (a form-encoded post is read as parameters and never reaches the card), `503` while a restart is already armed, and `400` for a body that does not begin with a manifest or is shorter than one, or that arrives out of order. The node checks the signature chain against its compiled-in roots, writes the far app slot, hashes that slot back off the flash and only then switches to it, so nothing that fails changes the node; the image it restarts into has to reach the end of start-up or the bootloader puts the previous one back. See [`FirmwareManifest.h`](../src/sys/FirmwareManifest.h) for the format and the checks
 
 `503` now has two meanings, and the `error` string is what tells them apart.
 A node too short of memory to build a reply answers `503` with a reason ending

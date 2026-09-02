@@ -253,6 +253,22 @@
       and flash with esptool; a power cycle always boots the firmware that is there.</div>
   </form>
 
+  <h2>Firmware update</h2>
+  <div class="card">
+    <div class="note" id="otaState">Checking&hellip;</div>
+    <div class="row">
+      <div><input type="file" id="otaFile" accept=".rmfw"></div>
+      <div><button type="button" id="otaSend" disabled>Install update</button></div>
+    </div>
+    <div class="msg" id="otaMsg"></div>
+    <div class="note">Takes a signed update bundle &mdash; the <code>.rmfw</code> file produced by <code>tools/fw_sign.py bundle</code>, which holds
+      the manifest and the firmware image together so the two cannot be mismatched. The node stages it on the SD card, checks the signature chain
+      against the trust anchors built into this firmware, writes it to the spare app slot, hashes that slot back off the flash and only then
+      switches to it. Anything that does not check out leaves the node exactly as it is.</div>
+    <div class="note">The node restarts into the new firmware and has to reach the end of start-up to keep it. If it does not, the bootloader puts
+      the previous firmware back on the next restart, so a bad update costs a reboot rather than a visit.</div>
+  </div>
+
   <h2>Danger zone</h2>
   <div class="card">
     <button class="danger" id="resetBtn">Factory reset settings &amp; restart</button>
@@ -609,7 +625,15 @@ $("resetBtn").addEventListener("click", async () => {
 let sdLastFormat = "";     // last_format as of the most recent refresh
 let lastMigration = "";    // ...and the migration result already reported
 let formatWas = null;      // ...as it stood when a format was requested
+// Set while a transfer is in flight. The poll below tells us nothing during
+// one — the progress comes from the upload's own events — and every poll
+// builds a status document on the same task that is writing the upload to the
+// card. Harmless on a desk; this runs over an access point in a field.
+let otaUploading = false;
+let lastOtaFailure = "";   // ...and the failure already put in front of the reader
+
 async function refreshSd() {
+  if (otaUploading) return;
   try {
     const s = await (await fetch("/api/status")).json();
     const sd = s.sd || { state: "absent" };
@@ -675,6 +699,7 @@ async function refreshSd() {
     else if (sd.card === "blank" && sd.owner)
       home += ` This card was released by "${sd.owner}" and is free to take.`;
     $("sdHome").textContent = home;
+    showUpdate(s.update);
     if (sd.migrating) setMsg("sdMsg", "The store moves as the node restarts…", "warn");
     else if (sd.migration && sd.migration !== lastMigration) {
       setMsg("sdMsg", sd.migration, sd.migration.indexOf("failed") === 0 ? "bad" : "good");
@@ -709,6 +734,77 @@ $("sdFormat").addEventListener("click", async () => {
     [500, 2000, 5000, 20000, 60000].forEach(ms => setTimeout(refreshSd, ms));
   } catch (e) { setMsg("sdMsg", e.message, "bad"); }
 });
+// --- firmware update -------------------------------------------------------
+// The node's own answer about whether it can take one: a board with a single
+// app slot or no card cannot, and the button should say why rather than fail
+// after somebody has waited out an upload.
+function showUpdate(u) {
+  if (!u) { $("otaState").textContent = "This firmware does not report update support."; return; }
+  const busy = u.stage === "receiving" || u.stage === "installing";
+  let text;
+  if (u.stage === "installed") text = "Update installed. The node is restarting into it.";
+  else if (u.stage === "installing") text = "Verifying and writing the update\u2026";
+  else if (u.stage === "receiving" && u.expected)
+    text = `Receiving: ${Math.round(100 * u.received / u.expected)}%`;
+  else if (u.can_upload) text = "Ready to take an update.";
+  else text = u.refusal || "Updates are not available on this node.";
+  $("otaState").textContent = text;
+  $("otaSend").disabled = busy || !u.can_upload || !$("otaFile").files.length;
+  // Reported once, like the migration result below it. The stage stays
+  // "failed" until the next upload, so re-applying it every poll would put a
+  // red line back over whatever the reader had done since — including the
+  // progress of the retry they started because of it.
+  if (u.stage === "failed" && u.message && u.message !== lastOtaFailure) {
+    setMsg("otaMsg", u.message, "bad");
+    lastOtaFailure = u.message;
+  } else if (u.stage !== "failed") {
+    lastOtaFailure = "";
+  }
+}
+
+$("otaFile").addEventListener("change", () => {
+  $("otaSend").disabled = !$("otaFile").files.length;
+  setMsg("otaMsg", "", "");
+  lastOtaFailure = "";
+});
+
+$("otaSend").addEventListener("click", () => {
+  const file = $("otaFile").files[0];
+  if (!file) return;
+  if (!confirm(`Install ${file.name} (${file.size} bytes)? The node restarts into it if it checks out.`)) return;
+  $("otaSend").disabled = true;
+  otaUploading = true;
+  // XHR rather than fetch: the upload is most of two megabytes over a link that
+  // may be one bar of an access point in a field, and fetch cannot report how
+  // far it has got.
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/system/update");
+  // Say what this is. Without it the browser may send no content type, and a
+  // body that arrives looking like form data is parsed as form data — the node
+  // then holds the whole upload in memory instead of streaming it to the card.
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.upload.addEventListener("progress", e => {
+    if (e.lengthComputable)
+      setMsg("otaMsg", `Uploading: ${Math.round(100 * e.loaded / e.total)}%`, "warn");
+  });
+  xhr.addEventListener("load", () => {
+    otaUploading = false;
+    let data = {};
+    try { data = JSON.parse(xhr.responseText); } catch (e) {}
+    if (xhr.status >= 200 && xhr.status < 300)
+      setMsg("otaMsg", data.message || "Uploaded; the node is verifying it.", "good");
+    else
+      setMsg("otaMsg", data.error || ("HTTP " + xhr.status), "bad");
+    [500, 2000, 5000, 15000].forEach(ms => setTimeout(refreshSd, ms));
+  });
+  xhr.addEventListener("error", () => {
+    otaUploading = false;
+    setMsg("otaMsg", "The upload did not complete.", "bad");
+    $("otaSend").disabled = false;
+  });
+  xhr.send(file);
+});
+
 refreshSd(); setInterval(refreshSd, 10000);
 
 load().catch(e => setMsg("radioMsg", "Could not load settings: " + e.message, "bad"));

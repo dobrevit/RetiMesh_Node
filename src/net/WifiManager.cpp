@@ -43,6 +43,7 @@
 #include "SettingsFields.h"
 #include "SdCard.h"
 #include "StoreHome.h"
+#include "OtaUpdate.h"
 #include "AutoInterface.h"
 #include "Power.h"
 #include "LocalLink.h"
@@ -568,6 +569,20 @@ static void serveGuarded(const char* what, AsyncWebServerRequest* r,
   Diag::guard("the reply to a failed request", [&] { sendError(r, 503, apology); });
 }
 
+// One byte carried on the firmware-update request, freed with it: absent means
+// the body handler never ran, zero that it ran and said nothing yet, and
+// kUpdateAnswered that it has already replied. AsyncWebServerRequest::send()
+// *replaces* a response that has not gone out rather than refusing, so a reply
+// from the request handler would silently overwrite the 401 or 409 the body
+// handler put there — and a browser would never see the auth challenge it was
+// sent. `create` only on the first chunk; a failed allocation is not fatal,
+// it just costs the early answer.
+static constexpr uint8_t kUpdateAnswered = 1;
+static uint8_t* updateMark(AsyncWebServerRequest* r, bool create) {
+  if (!r->_tempObject && create) r->_tempObject = calloc(1, 1);
+  return static_cast<uint8_t*>(r->_tempObject);
+}
+
 // ---------------------------------------------------------------------------
 void WifiManager::setupRoutes() {
   // Handlers are matched in registration order: API and the protected
@@ -625,6 +640,72 @@ void WifiManager::setupRoutes() {
     if (!authed(r)) return;
     serveGuarded("/api/settings", r, kLowMemoryMsg, [&] { handleSettingsGet(r); });
   });
+
+  // A firmware bundle, posted as the raw body rather than a form: the file is
+  // most of two megabytes and multipart would have the node parsing a boundary
+  // out of it. Chunks go straight to the card as they land, so nothing here
+  // ever holds more than one of them.
+  //
+  // The refusal is both decided *and answered* on the first chunk. Deciding it
+  // there and replying from the request handler would still have a node with no
+  // card in it spend two minutes of somebody's afternoon receiving an update it
+  // was never going to take — the reply does not leave until the body has
+  // arrived. The marker below is how the request handler knows the body handler
+  // has already spoken; without it the 401 or 409 sent here is replaced by
+  // whatever the request handler sends next.
+  _http.on("/api/system/update", HTTP_POST,
+           [this](AsyncWebServerRequest* r) {
+             const uint8_t* mark = updateMark(r, false);
+             // Nothing reached the body handler. It is not called for a request
+             // the server took to be a form, so an update posted without a
+             // content type is read into memory as parameters and never
+             // reaches the card — which looks like a node that accepted an
+             // update and then did nothing with it.
+             if (!mark) {
+               sendError(r, 415, "send the bundle as the raw request body with "
+                                 "Content-Type: application/octet-stream");
+               return;
+             }
+             if (*mark == kUpdateAnswered) return;      // already refused, with its own reason
+             serveGuarded("/api/system/update", r, kLowMemoryMsg, [&] {
+               const Ota::Progress p = Ota::progress();
+               JsonDocument doc;
+               doc["ok"] = p.stage != Ota::Stage::Failed;
+               doc["stage"] = Ota::describe(p.stage);
+               doc["message"] = p.message;
+               sendJson(r, p.stage == Ota::Stage::Failed ? 400 : 202, doc);
+             });
+           },
+           nullptr,
+           [this](AsyncWebServerRequest* r, uint8_t* d, size_t l, size_t i, size_t t) {
+             // Marked before anything can answer, so the request handler knows
+             // the body reached here at all — including on the paths below that
+             // reply and stop.
+             uint8_t* mark = updateMark(r, i == 0);
+             auto answered = [&](int code, const char* why) {
+               if (mark) *mark = kUpdateAnswered;
+               if (why) sendError(r, code, why);
+             };
+             if (i == 0) {
+               if (!authed(r)) { answered(401, nullptr); return; }   // 401 already sent
+               // The gate every other privileged POST is behind: a restart is
+               // already armed, and an install that starts now is one the node
+               // reboots out from under.
+               if (Bootloader::pending()) { answered(503, kRestartingMsg); return; }
+               if (const char* why = Ota::receiveStart((uint32_t)t, r)) { answered(409, why); return; }
+             }
+             if (!Ota::receiveChunk(r, (uint32_t)i, d, l)) {
+               // The first chunk is where a bundle that is not one is caught.
+               // Later chunks have nobody left to tell: the transfer is down
+               // and the request handler reports what happened to it.
+               if (i == 0) {
+                 const Ota::Progress p = Ota::progress();
+                 answered(400, p.message);
+               }
+               return;
+             }
+             if (i + l >= t) Ota::receiveEnd(r);
+           });
 
   struct Route { const char* path; void (WifiManager::*fn)(AsyncWebServerRequest*, const char*, size_t); bool ungated; };   // trailing member: rows that omit it are gated (value-initialised false)
   static const Route posts[] = {
@@ -999,6 +1080,25 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
       if (sn.clientKnown) o["clients"] = sn.clients;
       if (l->reason()[0]) o["reason"] = l->reason();
     }
+  }
+
+  // Whether this node can take an update, and how one in flight is getting on.
+  // The page needs the first to decide whether to offer the control at all, and
+  // asking the node rather than inferring it from the board means one answer
+  // rather than two that can disagree.
+  {
+    const Ota::Progress p = Ota::progress();
+    JsonObject up = doc["update"].to<JsonObject>();
+    up["stage"] = Ota::describe(p.stage);
+    // JsonString copies; p is a local that dies before this document is
+    // serialised, and the stage names beside it are literals that do not.
+    if (p.message[0]) up["message"] = JsonString(p.message);
+    if (p.expected)   { up["received"] = p.received; up["expected"] = p.expected; }
+    up["floor"] = Ota::acceptedFloor();
+    up["slot"]  = Ota::runningSlot();
+    const char* why = Ota::uploadRefusal(sdCard.mounted(), Ota::canSelfUpdate(), p.stage);
+    up["can_upload"] = (why == nullptr);
+    if (why) up["refusal"] = why;
   }
 
 #if HAS_SD
