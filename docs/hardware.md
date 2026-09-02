@@ -183,8 +183,12 @@ can tell whether it is there, so a wrong pin map shows as a dark panel with a he
 1. Boot log: which front end was detected, and the self-test's TxDone time.
 2. A frame heard by another node — the front end's TX path proven on air.
 3. A frame *received* from a distant node — the LNA path, which the self-test cannot prove.
-4. The panel lights and shows the status page; touch is polled (`chsc6x` at 0x2E on its
-   own I2C pair) and turns pages.
+4. The panel lights and shows the status page; touch is polled (CHSC6X at 0x2E on its
+   own I2C pair) and speaks the button's grammar — tap turns the page, holding blanks the
+   panel. The second case button walks the pages backwards, and its long press deliberately
+   does nothing, so a button held by a case or a pocket cannot blank the panel. The sounder
+   plays two notes up when the node finishes booting and one high note when a message for
+   this node arrives.
 5. Battery: a plausible voltage with a cell attached, and `0.0` without one — the divider
    is switched (GPIO 37) and deep (÷5.1), both firsts here.
 6. GNSS: sentences counted on the GPS page with the expansion kit fitted.

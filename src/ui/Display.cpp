@@ -40,6 +40,7 @@ Display display;
 #if HAS_DISPLAY
 #include "DisplayIcons.h"
 #include "QrCode.h"
+#include "TouchInput.h"
 
 
 bool Display::begin() {
@@ -54,6 +55,8 @@ bool Display::begin() {
   // Something on the glass before the first page is drawn: the panel holds
   // whatever the last firmware left in it otherwise, and on e-paper that
   // survives a power cut.
+  TouchInput::begin();                   // input for a panel someone can now see
+
   _panel->clear();
   _gfx->setCursor(0, 0);
   _gfx->print(FW_NAME);
@@ -94,6 +97,9 @@ void Display::displayTask(void* self) {
   auto* d = static_cast<Display*>(self);
   if (!d->_ok) { vTaskDelete(nullptr); return; }
   pinMode(PIN_BUTTON, INPUT_PULLUP);
+#if HAS_BUTTON2
+  pinMode(PIN_BUTTON2, INPUT_PULLUP);
+#endif
   d->_lastActivityMs = millis();
   for (;;) {
     // A page that cannot allocate skips that pass rather than taking the node
@@ -101,6 +107,12 @@ void Display::displayTask(void* self) {
     // pressure and must be the first to give way (Diag.h).
     Diag::guard("the display task", [d] {
     d->pollButton();
+#if HAS_TOUCH
+    d->pollTouch();
+#endif
+#if HAS_BUTTON2
+    d->pollButton2();
+#endif
     uint32_t now = millis();
     if (d->_page != STATUS && now - d->_pageChangedMs > DISPLAY_PAGE_TIMEOUT_MS) {
       d->_page = STATUS; d->_pageChangedMs = now;
@@ -135,6 +147,21 @@ void Display::displayTask(void* self) {
   }
 }
 
+// What a short press does, whoever delivered it: wake a blanked panel, or
+// turn the page and show it now. Three inputs share this — the button, the
+// touch layer, and the second button where a board has one — and it is one
+// function so they cannot drift apart in what a tap means.
+void Display::advancePage(bool forward) {
+  if (_blank) { setBlank(false); return; }       // wake only
+  _page = forward ? nextPage(_page) : prevPage(_page);
+  _pageChangedMs = millis();
+  _refresh.interval(cadence());          // the page decides how live it is
+  _refresh.urgent();                     // and this press is not waiting for it
+  _lastPaintMs = _pageChangedMs;
+  _paintDue = false;
+  paint();
+}
+
 // Debounced by the poll interval: a press is registered on release (short)
 // or once the long threshold passes while still held (long).
 void Display::pollButton() {
@@ -147,20 +174,7 @@ void Display::pollButton() {
     return;
   }
   if (!down && _pressedAtMs != 0) {
-    if (!_longFired && now - _pressedAtMs >= 30) {          // short press
-      if (_blank) setBlank(false);                           // wake only
-      // The press is the one change nobody should wait for: paint now, and
-      // tell the policy not to hold it back for the panel's usual gap.
-      else {
-        _page = nextPage(_page);
-        _pageChangedMs = now;
-        _refresh.interval(cadence());        // the page decides how live it is
-        _refresh.urgent();                   // and this press is not waiting for it
-        _lastPaintMs = now;
-        _paintDue = false;
-        paint();
-      }
-    }
+    if (!_longFired && now - _pressedAtMs >= 30) advancePage(true);
     _pressedAtMs = 0;
   }
 }
@@ -176,6 +190,52 @@ Display::Page Display::nextPage(Page p) const {
 #endif
   return n;
 }
+
+// The same walk the other way, with the same skip rule.
+Display::Page Display::prevPage(Page p) const {
+  Page n = (Page)((p + PAGE_COUNT - 1) % PAGE_COUNT);
+#if !DISPLAY_COMPACT
+  if (n == QR && !wifiManager.wifiEnabled()) n = (Page)((n + PAGE_COUNT - 1) % PAGE_COUNT);
+#endif
+  return n;
+}
+
+#if HAS_TOUCH
+// The glass as a button: contact is a press, release before the long
+// threshold is a tap, holding past it blanks — the same grammar as the
+// button, learned once. Coordinates are read and ignored for now; the day a
+// page grows something worth pointing at, they are already here.
+void Display::pollTouch() {
+  const bool down = TouchInput::poll().down;
+  const uint32_t now = millis();
+  if (down) _lastActivityMs = now;
+  if (down && _touchAtMs == 0) { _touchAtMs = now; _touchLongFired = false; return; }
+  if (down && !_touchLongFired && now - _touchAtMs >= BUTTON_LONG_MS) {
+    _touchLongFired = true;
+    setBlank(!_blank);
+    return;
+  }
+  if (!down && _touchAtMs != 0) {
+    if (!_touchLongFired) advancePage(true);
+    _touchAtMs = 0;
+  }
+}
+#endif
+
+#if HAS_BUTTON2
+// The second button walks the pages backwards; its long press is nothing, so
+// a held case button cannot blank a panel the user is looking at.
+void Display::pollButton2() {
+  const bool down = digitalRead(PIN_BUTTON2) == LOW;
+  const uint32_t now = millis();
+  if (down) _lastActivityMs = now;
+  if (down && _pressed2AtMs == 0) { _pressed2AtMs = now; return; }
+  if (!down && _pressed2AtMs != 0) {
+    if (now - _pressed2AtMs >= 30) advancePage(false);
+    _pressed2AtMs = 0;
+  }
+}
+#endif
 
 void Display::setBlank(bool blank) {
   _blank = blank;

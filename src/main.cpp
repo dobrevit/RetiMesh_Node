@@ -72,6 +72,7 @@
 #include "Diag.h"
 #include "LocalLink.h"
 #include "Bootloader.h"
+#include "Buzzer.h"
 #include "Leds.h"
 #include "Maintenance.h"
 #include "ConsoleServer.h"
@@ -361,6 +362,11 @@ void setup() {
       log_w("this board has a single app partition: it cannot install its own updates, "
             "and an update needs a cable");
   }
+
+  // The audible version of the lines below, for a device carried rather than
+  // benched: two notes up means the node is running before the panel says so.
+  Buzzer::begin();
+  Buzzer::boot();
 
   if (settings.links().wifiEnabled)
     log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",

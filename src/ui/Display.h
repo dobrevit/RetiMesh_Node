@@ -101,7 +101,8 @@ private:
 #endif
   // Typed, so paint()'s switch can list every page and let the compiler
   // object when one is added without being drawn (-Werror=switch).
-  Page nextPage(Page p) const;           // the button's next stop; skips pages that mean nothing right now
+  Page nextPage(Page p) const;
+  Page prevPage(Page p) const;           // the button's next stop; skips pages that mean nothing right now
   Page     _page = STATUS;
   uint8_t  _chargeSweep = 0;             // animates the battery fill while charging
   // Sampled once per frame in paint(). Reading the PMU costs four I2C
@@ -112,8 +113,21 @@ private:
   uint32_t _pageChangedMs = 0;
   uint32_t _lastActivityMs = 0;          // last button press (boot counts)
   void setBlank(bool blank);             // DISPLAYOFF/ON on the panel
+  void advancePage(bool forward);        // what any short press does
   uint32_t _pressedAtMs = 0;             // 0 = not pressed
   bool     _longFired = false;
+#if HAS_TOUCH
+  // The touch layer, read as a second button: the same short/long rules as
+  // the physical one, tracked separately so a finger and a thumb on both at
+  // once cannot share state.
+  uint32_t _touchAtMs = 0;               // 0 = not touched
+  bool     _touchLongFired = false;
+  void pollTouch();
+#endif
+#if HAS_BUTTON2
+  uint32_t _pressed2AtMs = 0;
+  void pollButton2();
+#endif
 
 #if HAS_DISPLAY
   #if DISPLAY_KIND == DISPLAY_KIND_OLED
