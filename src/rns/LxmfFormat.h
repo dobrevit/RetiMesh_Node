@@ -619,8 +619,14 @@ inline size_t lxmfCommands(const uint8_t* val, size_t n, LxmfCommand* out, size_
   size_t count = 0, i = 0, found = 0;
   if (!msgpackContainerHeader(val, n, 0, /*wantMap*/ false, count, i)) return 0;
   for (size_t k = 0; k < count && found < max; k++) {
-    const uint8_t* ev = nullptr; size_t evl = 0, afterElem = 0;
-    if (!msgpackNext(val, n, i, ev, evl, afterElem)) return found;   // bounds come from here
+    // Where this element ends. A one-pair map is the shape every real client
+    // sends, and reading its key and value already establishes that — so in
+    // that case the walk below yields the end for free and the element is
+    // parsed once rather than twice. Anything else (no pairs, more than one,
+    // or a member this cannot read) falls back to walking the element whole,
+    // which is what bounds it.
+    size_t afterElem = 0;
+    bool   haveEnd   = false;
     size_t pairs = 0, at = 0;
     if (msgpackContainerHeader(val, n, i, /*wantMap*/ true, pairs, at) && pairs >= 1) {
       uint32_t id = 0; size_t afterKey = 0;
@@ -631,8 +637,13 @@ inline size_t lxmfCommands(const uint8_t* val, size_t n, LxmfCommand* out, size_
           out[found].text = av;        // msgpackNext sets this only for a string or binary
           out[found].textLen = avl;
           found++;
+          if (pairs == 1) { afterElem = afterVal; haveEnd = true; }
         }
       }
+    }
+    if (!haveEnd) {
+      const uint8_t* ev = nullptr; size_t evl = 0;
+      if (!msgpackNext(val, n, i, ev, evl, afterElem)) return found;  // bounds come from here
     }
     i = afterElem;
   }
