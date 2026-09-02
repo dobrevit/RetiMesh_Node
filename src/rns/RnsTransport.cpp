@@ -51,6 +51,7 @@
 #include "WifiManager.h"
 #include "AutoInterface.h"
 #include "PeerNames.h"
+#include "PeerPositions.h"
 
 using RNS::Bytes;
 
@@ -716,6 +717,22 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
     log_i("lxmf: ...and %u field%s this node does not read, %u bytes (attachment, telemetry "
           "or a command)", (unsigned)m.fieldsCount, m.fieldsCount == 1 ? "" : "s",
           (unsigned)m.fieldsLen);
+#if HAS_LVGL_UI
+  // A position riding the message's telemetry lands in the peer store — the
+  // bearing dial and the plot draw from it, honest about when it was heard.
+  if (m.fieldsCount) {
+    Rns::Telemetry::ParsedPosition pp;
+    if (Rns::Telemetry::parsePosition(m.fields, m.fieldsLen, pp)) {
+      PeerPositions::Position pos;
+      pos.latitude = pp.latitude;
+      pos.longitude = pp.longitude;
+      pos.altitudeM = pp.altitudeM;
+      pos.accuracyM = pp.accuracyM;
+      pos.heardMs = millis() ? millis() : 1;
+      PeerPositions::seen(m.sourceHash, pos);
+    }
+  }
+#endif
   // Last, and only after the message has been recorded and said out loud: a
   // command that turns out to be one is still a message, and a node that ran
   // it without keeping a copy would have no account of what it was told to do.

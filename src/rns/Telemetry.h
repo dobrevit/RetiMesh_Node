@@ -204,5 +204,150 @@ inline size_t fields(const Snapshot& s, uint8_t* out, size_t cap) {
   return n ? head.size() + n : 0;
 }
 
+// ---------------------------------------------------------------------------
+// The inbound mirror: a peer's position out of the fields a message carried.
+// Reads exactly what build() above writes — and what Sideband's Telemeter
+// writes, since matching it was the point — and skips everything else
+// unread. Pure, so the host suite proves it as a round-trip against the
+// encoder it mirrors.
+// ---------------------------------------------------------------------------
+struct ParsedPosition {
+  double   latitude = 0.0, longitude = 0.0;
+  float    altitudeM = 0.0f;
+  float    accuracyM = 0.0f;
+  uint64_t positionAt = 0;               // the sender's clock, 0 when absent
+};
+
+namespace detail {
+
+// One msgpack value's total size, for skipping what is not the location.
+// Handles the subset a telemetry document can contain; anything else fails
+// the parse rather than guessing.
+inline bool skipValue(const uint8_t* p, size_t n, size_t& used);
+
+inline bool skipN(const uint8_t* p, size_t n, size_t count, size_t& used) {
+  size_t at = 0;
+  for (size_t i = 0; i < count; i++) {
+    size_t u = 0;
+    if (!skipValue(p + at, n - at, u)) return false;
+    at += u;
+  }
+  used = at;
+  return true;
+}
+
+inline bool skipValue(const uint8_t* p, size_t n, size_t& used) {
+  if (!n) return false;
+  const uint8_t b = p[0];
+  if (b <= 0x7F || b >= 0xE0) { used = 1; return true; }                 // fixint
+  if ((b & 0xF0) == 0x90) { size_t u; if (!skipN(p + 1, n - 1, b & 0x0F, u)) return false; used = 1 + u; return true; }
+  if ((b & 0xF0) == 0x80) { size_t u; if (!skipN(p + 1, n - 1, (size_t)(b & 0x0F) * 2, u)) return false; used = 1 + u; return true; }
+  if ((b & 0xE0) == 0xA0) { used = 1 + (b & 0x1F); return used <= n; }   // fixstr
+  switch (b) {
+    case 0xC0: case 0xC2: case 0xC3: used = 1; return true;              // nil, bool
+    case 0xC4: if (n < 2) return false; used = 2 + p[1]; return used <= n;         // bin8
+    case 0xCC: used = 2; return used <= n;
+    case 0xCD: used = 3; return used <= n;
+    case 0xCE: used = 5; return used <= n;
+    case 0xCF: used = 9; return used <= n;
+    case 0xD0: used = 2; return used <= n;
+    case 0xD1: used = 3; return used <= n;
+    case 0xD2: used = 5; return used <= n;
+    case 0xD3: used = 9; return used <= n;
+    case 0xCA: used = 5; return used <= n;
+    case 0xCB: used = 9; return used <= n;
+    case 0xD9: if (n < 2) return false; used = 2 + p[1]; return used <= n;         // str8
+    default:   return false;
+  }
+}
+
+inline bool readUint(const uint8_t* p, size_t n, uint64_t& v, size_t& used) {
+  if (!n) return false;
+  const uint8_t b = p[0];
+  if (b <= 0x7F) { v = b; used = 1; return true; }
+  size_t w = 0;
+  switch (b) { case 0xCC: w = 1; break; case 0xCD: w = 2; break;
+               case 0xCE: w = 4; break; case 0xCF: w = 8; break; default: return false; }
+  if (n < 1 + w) return false;
+  v = 0;
+  for (size_t i = 0; i < w; i++) v = (v << 8) | p[1 + i];
+  used = 1 + w;
+  return true;
+}
+
+// A bin8 of big-endian bytes, as the fixed-point packing writes them.
+inline bool readBinBE(const uint8_t* p, size_t n, int64_t& v, size_t& lenOut, size_t& used) {
+  if (n < 2 || p[0] != 0xC4) return false;
+  const size_t len = p[1];
+  if (len < 1 || len > 8 || n < 2 + len) return false;
+  uint64_t u = 0;
+  for (size_t i = 0; i < len; i++) u = (u << 8) | p[2 + i];
+  // Sign-extend the widths the encoder uses signed.
+  if (len == 4 && (u & 0x80000000ULL)) u |= 0xFFFFFFFF00000000ULL;
+  v = (int64_t)u;
+  lenOut = len;
+  used = 2 + len;
+  return true;
+}
+
+} // namespace detail
+
+inline bool parsePosition(const uint8_t* fields, size_t len, ParsedPosition& out) {
+  using namespace detail;
+  if (!fields || len < 2) return false;
+  const uint8_t* p = fields;
+  size_t n = len, at = 0, used = 0;
+  if ((p[0] & 0xF0) != 0x80) return false;             // the fields fixmap
+  size_t pairs = p[0] & 0x0F;
+  at = 1;
+  for (size_t i = 0; i < pairs; i++) {
+    uint64_t key;
+    if (!readUint(p + at, n - at, key, used)) return false;
+    at += used;
+    if (key != kFieldTelemetry) {
+      if (!skipValue(p + at, n - at, used)) return false;
+      at += used;
+      continue;
+    }
+    // The document: {sensor id: reading}.
+    if (at >= n || (p[at] & 0xF0) != 0x80) return false;
+    size_t sensors = p[at] & 0x0F;
+    at++;
+    for (size_t sIdx = 0; sIdx < sensors; sIdx++) {
+      uint64_t sid;
+      if (!readUint(p + at, n - at, sid, used)) return false;
+      at += used;
+      if (sid != kSidLocation) {
+        if (!skipValue(p + at, n - at, used)) return false;
+        at += used;
+        continue;
+      }
+      if (at >= n || (p[at] & 0xF0) != 0x90) return false;
+      const size_t elems = p[at] & 0x0F;
+      at++;
+      if (elems < 2) return false;
+      int64_t v; size_t bl;
+      if (!readBinBE(p + at, n - at, v, bl, used)) return false;
+      out.latitude = (double)v / 1e6;
+      at += used;
+      if (!readBinBE(p + at, n - at, v, bl, used)) return false;
+      out.longitude = (double)v / 1e6;
+      at += used;
+      // Optional tail, positional: altitude, speed, bearing, accuracy, time.
+      for (size_t e = 2; e < elems; e++) {
+        if (e == 2 && readBinBE(p + at, n - at, v, bl, used)) { out.altitudeM = (float)((double)v / 1e2); at += used; continue; }
+        if (e == 5 && readBinBE(p + at, n - at, v, bl, used)) { out.accuracyM = (float)((double)v / 1e2); at += used; continue; }
+        if (e == 6) { uint64_t ts; if (readUint(p + at, n - at, ts, used)) { out.positionAt = ts; at += used; continue; } }
+        if (!skipValue(p + at, n - at, used)) return false;
+        at += used;
+      }
+      // A position at the null island is a fix nobody took.
+      return out.latitude != 0.0 || out.longitude != 0.0;
+    }
+    return false;
+  }
+  return false;
+}
+
 } // namespace Telemetry
 } // namespace Rns
