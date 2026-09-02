@@ -21,6 +21,7 @@
 // ============================================================================
 #include "Diag.h"
 #include "LoRaRadio.h"
+#include "LoRaFem.h"
 #include <esp_random.h>
 #include "Neighbors.h"
 #include "WifiManager.h"
@@ -132,9 +133,11 @@ void LoRaRadio::irqSelfTest() {
   const uint8_t probe[] = { 0x00, 0x01, 0x02, 0x03 };
   const uint32_t started = millis();
   ulTaskNotifyTake(pdTRUE, 0);                   // clear anything stale
+  LoRaFem::tx();                                 // the probe proves the front end too
   if (_radio->startTransmit((uint8_t*)probe, sizeof(probe)) != RADIOLIB_ERR_NONE) {
     log_w("radio self-test: could not start a transmission — skipping the IRQ check");
     s_taskHandle = previous;
+    LoRaFem::rx();
     _radio->startReceive();
     return;
   }
@@ -142,6 +145,7 @@ void LoRaRadio::irqSelfTest() {
   const uint32_t took = millis() - started;
   s_taskHandle = previous;
   _radio->finishTransmit();
+  LoRaFem::rx();
   _radio->startReceive();
 
   // Which pin is the interrupt depends on the family: DIO1 on an SX126x or
@@ -253,6 +257,10 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
 }
 
 bool LoRaRadio::probeSX1262(const RadioSettings& s) {
+  // Boards with an amplified front end power and point it before the chip is
+  // asked anything: the boot self-test transmits, and a probe through a dead
+  // front end proves nothing but the front end (LoRaFem.h). A no-op elsewhere.
+  LoRaFem::begin();
   Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
   SX1262* sx  = new SX1262(mod);
   int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
@@ -708,7 +716,9 @@ void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
 bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
   ulTaskNotifyTake(pdTRUE, 0);           // flush stale notifications
 
+  LoRaFem::tx();                         // amplifier into the path first
   int16_t state = _radio->startTransmit((uint8_t*)frame, len);
+  if (state != RADIOLIB_ERR_NONE) LoRaFem::rx();
   if (state != RADIOLIB_ERR_NONE) {
     log_e("startTransmit failed, code %d", state);
     return false;
@@ -718,6 +728,7 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
   // radio wedged, in which case finishTransmit() cleans up.
   ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(8000));
   _radio->finishTransmit();
+  LoRaFem::rx();                         // back to the LNA before listening resumes
   _airtime.addTx(millis(), _airtime.timeOnAirMs(len));
   return true;
 }
