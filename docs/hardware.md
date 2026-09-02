@@ -14,7 +14,7 @@
 | `heltec-wb` | Heltec Wireless Bridge | ESP32-D0WDQ6: 8 MB flash, 8 MB PSRAM | SX1276 | — (headless) | front LEDs for Wi-Fi and LoRa (the BLE one stays dark), aluminium shell, two SMA sockets, internal 2-pin battery connector, PPP over the CP2102 bridge; no SD, no GNSS | verified on hardware; PPP built, not yet run on this board |
 | `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
 | `heltec-wp` | Heltec Wireless Paper | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 2.13" e-ink (250x122, E0213A367), driven | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board |
-| `heltec-v4` | Heltec V4 (TFT) | ESP32-S3: 16 MB flash, 2 MB PSRAM in package | SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end | 2.4" 240x320 ST7789 with a CHSC6X touch layer | two buttons, piezo sounder, battery ADC, GNSS on the expansion header (no SD) | verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder silent — possibly not fitted |
+| `heltec-v4` | Heltec V4 (TFT) | ESP32-S3: 16 MB flash, 2 MB PSRAM in package | SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end | 2.4" 240x320 ST7789 with a CHSC6X touch layer | two buttons, battery ADC, GNSS on the expansion header; expansion slots for sounder/sensors (no SD) | verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder is on an expansion module, none fitted on the bench unit |
 <!-- boards.json:end -->
 
 ### The Wireless Stick's memory
@@ -155,8 +155,9 @@ display shows `bat 42%+` while charging and the status page says so in words.
 The `heltec-v4` environment was written from the board's published pin map and then
 proven on the bench (2026-09-02): radio both directions on air through the front end,
 GNSS fix and clock, panel, touch and both buttons — the table row above carries the
-status. The sounder alone stayed silent and may not be fitted on every build of the
-board. What follows is what that first session had to know; a new unit re-checks the
+status. The sounder alone stayed silent, and for a reason that took opening the case
+to learn: it is an expansion module — the pin runs to a slot, and the bench
+unit's slots are empty. A fitted module should sound without a firmware change. What follows is what that first session had to know; a new unit re-checks the
 same list.
 
 What is different about this board, in the order it can bite:

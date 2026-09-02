@@ -155,10 +155,11 @@
 #define PIN_BUTTON2         35
 #define HAS_BUTTON2         1
 
-// A piezo sounder on a PWM channel — not an audio path. The pin is the
-// published map's; the bench unit produced no sound from it at any drive
-// while everything else worked, so the part may not be fitted on all builds
-// of the board. Driving it costs nothing either way.
+// A piezo sounder on a PWM channel — not an audio path, and not on the board
+// itself: the pin runs to an expansion slot, and the sounder is one of the
+// modules that plug into it. The bench unit's silence at every drive was a
+// slot with nothing in it. Driving the pin costs nothing without a module
+// and is what makes one work the moment it is plugged in.
 #define HAS_BUZZER          1
 #define PIN_BUZZER          6
 

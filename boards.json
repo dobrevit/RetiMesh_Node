@@ -306,8 +306,8 @@
     "mcu": "ESP32-S3: 16 MB flash, 2 MB PSRAM in package",
     "radio": "SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end",
     "display": "2.4\" 240x320 ST7789 with a CHSC6X touch layer",
-    "extras": "two buttons, piezo sounder, battery ADC, GNSS on the expansion header (no SD)",
-    "status": "verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder silent — possibly not fitted",
+    "extras": "two buttons, battery ADC, GNSS on the expansion header; expansion slots for sounder/sensors (no SD)",
+    "status": "verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder is on an expansion module, none fitted on the bench unit",
     "notes": "The first colour panel and the first amplified front end in this firmware, and the first 16 MB board. The pin map has one published source — the board definition in the open-source firmware it ships with (variants/esp32s3/heltec_v4, the TFT build) — rather than the two this project prefers, so the panel, touch, button and sounder pins are unverified; the LoRa pins are the V3's and carry more weight. The front end is the part with no equivalent elsewhere here: the radio is deaf and mute until the amplifier rail is powered and its mode pins are driven, and which of two parts is fitted is read off GPIO 2 at boot. Native USB, so it enumerates as an Espressif JTAG/serial device with its MAC in the by-id name and none of the CP2102 ambiguity the rest of this bench has. OTG runs the composite device: CDC-ACM console plus CDC-NCM networking, the same stack the T3-S3s carry — note the by-id name changes to the RetiMesh identity once this firmware boots.",
     "local_link": {
       "usb": {
