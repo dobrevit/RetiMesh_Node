@@ -88,6 +88,7 @@ void flushCb(lv_display_t* disp, const lv_area_t* area, uint8_t* px) {
 
 volatile bool sTouchSeen = false;
 volatile bool sSwallow = false;          // the wake tap must not press anything
+uint8_t sRot = 0;                        // quarter turns, mirrored in the panel's MADCTL
 
 void touchCb(lv_indev_t*, lv_indev_data_t* data) {
   const TouchInput::Point p = TouchInput::poll();
@@ -100,7 +101,17 @@ void touchCb(lv_indev_t*, lv_indev_data_t* data) {
     return;
   }
   data->state = p.down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-  if (p.down) { data->point.x = p.x; data->point.y = p.y; sTouchSeen = true; }
+  if (p.down) {
+    // The glass reports portrait-native points; the UI lives in the turned
+    // frame, so the point turns the same way the MADCTL did.
+    int16_t x = p.x, y = p.y;
+    switch (sRot) {
+      case 1: x = p.y;                                  y = (int16_t)(DISPLAY_WIDTH  - 1 - p.x); break;
+      case 2: x = (int16_t)(DISPLAY_WIDTH  - 1 - p.x);  y = (int16_t)(DISPLAY_HEIGHT - 1 - p.y); break;
+      case 3: x = (int16_t)(DISPLAY_HEIGHT - 1 - p.y);  y = p.x;                                 break;
+    }
+    data->point.x = x; data->point.y = y; sTouchSeen = true;
+  }
 }
 
 // --- the status bar ---------------------------------------------------------
@@ -242,12 +253,22 @@ bool shellInit(TftPanel& panel) {
 uint32_t shellLoop() { return lv_timer_handler(); }
 
 void setRotation(uint8_t quarterTurns) {
+  const uint8_t want = quarterTurns & 3;
+  if (want == sRot) return;
   lv_display_t* d = lv_display_get_default();
-  if (!d) return;
-  const lv_display_rotation_t want = (lv_display_rotation_t)(quarterTurns & 3);
-  if (lv_display_get_rotation(d) == want) return;
-  lv_display_set_rotation(d, want);
+  if (!d || !sPanel) return;
+  sRot = want;
+  // The controller turns the frame (TftPanel::setRotation); LVGL is told
+  // only the logical resolution and the pct-sized chrome re-fits itself.
+  // LVGL's own rotation stays at zero deliberately: in this version it
+  // hands the flush turned coordinates and expects the driver to rotate
+  // every buffer in software — the mangled panel that taught us so.
+  sPanel->setRotation(want);
+  const bool sideways = want & 1;
+  lv_display_set_resolution(d, sideways ? DISPLAY_HEIGHT : DISPLAY_WIDTH,
+                               sideways ? DISPLAY_WIDTH  : DISPLAY_HEIGHT);
   lv_obj_invalidate(lv_screen_active());
+  lv_obj_invalidate(lv_layer_top());
 }
 
 // Whether a finger has touched the glass since this was last asked. The

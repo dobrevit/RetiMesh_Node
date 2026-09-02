@@ -80,6 +80,12 @@ public:
   // play no part — LVGL keeps its own idea of what changed and hands over
   // exactly that. Coordinates are panel-native and inclusive.
   void blitArea(int16_t x1, int16_t y1, int16_t x2, int16_t y2, const uint8_t* px);
+  // The GUI's other request: turn the whole frame inside the controller.
+  // MADCTL swaps and mirrors the axes in hardware, so a rotated UI costs
+  // nothing per pixel — the render buffer is streamed exactly as drawn and
+  // the glass does the turning. Quarter turns, 0..3. The mono canvas path
+  // stays portrait and never calls this.
+  void setRotation(uint8_t quarterTurns);
 
 private:
   // Drawing geometry, from the layout — the one declaration of it

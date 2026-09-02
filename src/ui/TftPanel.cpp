@@ -73,6 +73,21 @@ void TftPanel::blitArea(int16_t x1, int16_t y1, int16_t x2, int16_t y2, const ui
   if (!_lit) { digitalWrite(PIN_TFT_BL, HIGH); _lit = true; }
 }
 
+void TftPanel::setRotation(uint8_t quarterTurns) {
+  if (!_ok) return;
+  // MV swaps the axes, MX/MY mirror them — the standard four for an ST7789
+  // whose RAM is exactly the glass, so no window offsets appear. With MV set
+  // the controller reads CASET as the long axis by itself, which is why
+  // blitArea needs no help: callers simply address the turned frame.
+  static constexpr uint8_t kMad[4] = { 0x00, 0x60, 0xC0, 0xA0 };
+  const uint8_t m = kMad[quarterTurns & 3];
+  _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_TFT_CS, LOW);
+  cmd(MADCTL, &m, 1);
+  digitalWrite(PIN_TFT_CS, HIGH);
+  _spi.endTransaction();
+}
+
 bool TftPanel::begin() {
   // The panel sits behind the switched peripheral rail, active low, like
   // every panel on a Heltec board.
