@@ -34,8 +34,8 @@
 //
 //   * the LoRa pins are the same as the V3's, a board this bench has verified,
 //     and the V4 keeps that module's wiring — two sources agreeing;
-//   * the panel, touch, button and sounder pins have that one source only, and
-//     docs/hardware.md marks them unverified;
+//   * the panel, touch, button and sounder pins had that one source only,
+//     until the bench proved all but the sounder;
 //   * the front end is described twice there, once as a comment on the wiring
 //     and once in the code that drives it, and the two agree.
 //
@@ -43,8 +43,10 @@
 // so nothing is borrowed here but the facts: every line of the driver below
 // and in src/radio/LoRaFem.cpp is this project's own.
 //
-// Nothing here has been run on the hardware. See docs/hardware.md for what to
-// check first.
+// Bench-verified 2026-09-02: radio both directions through the front end,
+// GNSS, panel, touch, both buttons. boards.json carries the status — the one
+// copy of it — and docs/hardware.md the story; the sounder alone stayed
+// silent and may not be fitted.
 
 #define BOARD_NAME          "Heltec V4 TFT"
 
@@ -181,7 +183,6 @@
 #define HAS_BATTERY_ADC     1
 #define PIN_BATTERY_ADC     1
 #define PIN_BATTERY_ADC_EN  37
-#define BATTERY_ADC_EN_ACTIVE HIGH
 #define BATTERY_DIVIDER_RATIO (4.9f * 1.045f)
 #define BATTERY_ADC_ATTEN   ADC_2_5db
 

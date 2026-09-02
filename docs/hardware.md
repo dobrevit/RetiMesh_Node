@@ -152,9 +152,12 @@ display shows `bat 42%+` while charging and the status page says so in words.
 
 ## Heltec V4 (TFT)
 
-The `heltec-v4` environment is written from the board's published pin map and has **not
-yet run on hardware** — it is the only board in the table in that state, and this section
-is the checklist for the first session on the bench.
+The `heltec-v4` environment was written from the board's published pin map and then
+proven on the bench (2026-09-02): radio both directions on air through the front end,
+GNSS fix and clock, panel, touch and both buttons — the table row above carries the
+status. The sounder alone stayed silent and may not be fitted on every build of the
+board. What follows is what that first session had to know; a new unit re-checks the
+same list.
 
 What is different about this board, in the order it can bite:
 
@@ -186,7 +189,7 @@ answer; set it on this board once our firmware runs and the upload fails with
 "No serial data received". The by-id name is the RetiMesh identity while the
 application runs and the Espressif JTAG identity in the downloader.
 
-**Verification checklist, first bench session:**
+**What the bench verified, in the order a new unit should re-check it:**
 
 1. Boot log: which front end was detected, and the self-test's TxDone time.
 2. A frame heard by another node — the front end's TX path proven on air.
