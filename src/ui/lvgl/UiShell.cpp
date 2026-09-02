@@ -269,6 +269,35 @@ bool shellInit(TftPanel& panel) {
   lv_obj_add_event_cb(sKeyboard, kbEvent, LV_EVENT_ALL, nullptr);
   lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
 
+  // One real frame before setup() continues: the boot splash. The display
+  // task is not running yet, so this paints synchronously and holds the
+  // glass until openHome replaces (and deletes) it.
+  {
+    lv_obj_t* splash = lv_obj_create(nullptr);
+    UiTheme::screen(splash);
+    lv_obj_t* name = lv_label_create(splash);
+    lv_label_set_text(name, "RETIMESH");
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_letter_space(name, 3, 0);
+    lv_obj_align(name, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_t* fw = lv_label_create(splash);
+    lv_label_set_text_fmt(fw, "%s · lvgl %d.%d", FW_VERSION,
+                          lv_version_major(), lv_version_minor());
+    lv_obj_set_style_text_color(fw, lv_color_hex(UiTheme::kInkDim), 0);
+    lv_obj_align(fw, LV_ALIGN_CENTER, 0, 4);
+    lv_obj_t* bd = lv_label_create(splash);
+    lv_label_set_text(bd, BOARD_NAME);
+    lv_obj_set_style_text_color(bd, lv_color_hex(UiTheme::kInkLabel), 0);
+    lv_obj_align(bd, LV_ALIGN_CENTER, 0, 26);
+    lv_obj_t* st = lv_label_create(splash);
+    lv_label_set_text_fmt(st, "LXMF · %s", settings.radio().region[0]
+                          ? settings.radio().region : "region unset");
+    lv_obj_set_style_text_color(st, lv_color_hex(UiTheme::kInkLabel), 0);
+    lv_obj_align(st, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_screen_load(splash);
+    lv_refr_now(disp);
+  }
+
   log_i("gui: LVGL %d.%d.%d shell up — status bar, %u B render buffer",
         lv_version_major(), lv_version_minor(), lv_version_patch(),
         (unsigned)sizeof(sBuf1));
