@@ -237,7 +237,7 @@ void setup() {
   // switched peripheral rail, and the panel is what brings that rail up and
   // settles it (Panel.h). Powering it a second time from here left the panel
   // dark — one owner for the rail, and the probe simply comes later.
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);  // both residents are 400 kHz parts
   Bq25896::begin();
   Imu::begin();
   Diag::cost("i2c case parts");

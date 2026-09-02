@@ -10,11 +10,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-
-// The case wires its parts to whichever bus suited the layout: the reference
-// firmware finds them by scanning both, and the bench proved ours silent on
-// the main bus alone. sBus points at whichever answered.
-static TwoWire* sBus = &Wire;
+#include "I2cReg.h"
 
 namespace {
 constexpr uint8_t kAddr    = 0x6B;
@@ -24,57 +20,50 @@ constexpr uint8_t kReg14   = 0x14;       // part number + revision
 
 bool sPresent = false;
 
-int readReg(uint8_t reg) {
-  sBus->beginTransmission(kAddr);
-  sBus->write(reg);
-  if (sBus->endTransmission(false) != 0) return -1;
-  if (sBus->requestFrom(kAddr, (uint8_t)1) != 1) return -1;
-  return sBus->read();
-}
-
-bool writeReg(uint8_t reg, uint8_t val) {
-  sBus->beginTransmission(kAddr);
-  sBus->write(reg);
-  sBus->write(val);
-  return sBus->endTransmission() == 0;
-}
+int  readReg(uint8_t reg)               { return I2cReg::read(Wire, kAddr, reg); }
+bool writeReg(uint8_t reg, uint8_t val) { return I2cReg::write(Wire, kAddr, reg, val); }
 } // namespace
 
 namespace Bq25896 {
 
 void begin() {
-  // The part number field is 0b100 for the BQ25896 — checked, because 0x6B
-  // is a popular address and ship mode pointed at the wrong chip is a brick.
-  // Both buses are asked: the case's board picked whichever suited it.
-  for (TwoWire* bus : { &Wire, &Wire1 }) {
-    sBus = bus;
-    const int id = readReg(kReg14);
-    if (id >= 0 && ((id >> 3) & 0x07) == 0b100) {
-      sPresent = true;
-      log_i("charger: BQ25896 answers at 0x6B on %s (rev %d)",
-            bus == &Wire ? "the main bus" : "the touch bus", id & 0x03);
-      return;
-    }
-    if (id >= 0) log_w("charger: 0x6B answers on %s but is not a BQ25896 (reg14=0x%02x)",
-                       bus == &Wire ? "the main bus" : "the touch bus", id);
+  // Checked, because 0x6B is a popular address and ship mode pointed at the
+  // wrong chip is a brick. The part number field reads 0b000 on a real
+  // BQ25896 — the family value it shares with the BQ25890/92; revision 2 is
+  // what sets the '96 apart, and the kernel's driver keys on the same pair.
+  // The first draft demanded 0b100 and rejected the genuine part.
+  const int id = readReg(kReg14);
+  if (id >= 0 && ((id >> 3) & 0x07) == 0b000) {
+    sPresent = true;
+    log_i("charger: BQ25896 answers at 0x6B (rev %d)", id & 0x03);
+    return;
   }
-  sBus = &Wire;
+  if (id >= 0) log_w("charger: 0x6B answers but is not a BQ25896 (reg14=0x%02x)", id);
 }
 
 bool present() { return sPresent; }
 
 bool charging() {
   if (!sPresent) return false;
-  const int s = readReg(kReg0B);
-  if (s < 0) return false;
-  const uint8_t chrg = (s >> 3) & 0x03;  // 00 none, 01 pre, 10 fast, 11 done
-  return chrg == 1 || chrg == 2;
-}
-
-bool vbusPowered() {
-  if (!sPresent) return false;
-  const int s = readReg(kReg0B);
-  return s >= 0 && ((s >> 5) & 0x07) != 0;
+  // Cached on the gauge's own cadence: the status bar asks every second, and
+  // a fresh bus transaction per ask bought nothing for a state that changes
+  // over minutes. A failed read keeps the previous answer — "not charging"
+  // invented from a bus hiccup is the confident wrong answer Power.h warns
+  // against.
+  static bool     sCharging = false;
+  static uint32_t sReadMs   = 0;
+  static bool     sEverRead = false;
+  const uint32_t now = millis();
+  if (!sEverRead || now - sReadMs >= BATTERY_SAMPLE_MS) {
+    const int s = readReg(kReg0B);
+    if (s >= 0) {
+      const uint8_t chrg = (s >> 3) & 0x03;  // 00 none, 01 pre, 10 fast, 11 done
+      sCharging = chrg == 1 || chrg == 2;
+      sEverRead = true;
+    }
+    sReadMs = now;
+  }
+  return sCharging;
 }
 
 void shipMode() {

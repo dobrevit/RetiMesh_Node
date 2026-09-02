@@ -24,8 +24,7 @@ namespace Bq25896 {
 void begin();
 bool present();
 
-bool charging();                         // CHRG_STAT: pre or fast charge
-bool vbusPowered();                      // a charger or USB is feeding VBUS
+bool charging();                         // CHRG_STAT: pre or fast charge, cached
 
 // BATFET off: the node is dead until the power button (QON) or a charger
 // brings it back. Does not return when it works.
@@ -38,7 +37,6 @@ namespace Bq25896 {
 inline void begin() {}
 inline bool present() { return false; }
 inline bool charging() { return false; }
-inline bool vbusPowered() { return false; }
 inline void shipMode() {}
 } // namespace Bq25896
 #endif // HAS_BQ25896
