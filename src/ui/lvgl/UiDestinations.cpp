@@ -36,29 +36,6 @@ bool hexToBytes(const char* hex, uint8_t out[16]) {
   return true;
 }
 
-void ageText(uint32_t s, char* out, size_t n) {
-  if (s < 60)        snprintf(out, n, "%lus", (unsigned long)s);
-  else if (s < 3600) snprintf(out, n, "%lum", (unsigned long)(s / 60));
-  else               snprintf(out, n, "%luh", (unsigned long)(s / 3600));
-}
-
-lv_obj_t* reading(lv_obj_t* parent, const char* label, const char* value) {
-  lv_obj_t* row = lv_obj_create(parent);
-  UiTheme::card(row);
-  lv_obj_set_width(row, lv_pct(100));
-  lv_obj_set_height(row, LV_SIZE_CONTENT);
-  lv_obj_set_style_pad_hor(row, 8, 0);
-  lv_obj_set_style_pad_ver(row, 5, 0);
-  lv_obj_t* l = lv_label_create(row);
-  lv_label_set_text(l, label);
-  UiTheme::labelCaps(l);
-  lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_t* v = lv_label_create(row);
-  UiTheme::value(v);
-  lv_label_set_text(v, value);
-  lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
-  return v;
-}
 
 void openDetail(lv_event_t* e) {
   const RnsTransport::PathInfo* pi =
@@ -71,33 +48,28 @@ void openDetail(lv_event_t* e) {
   // exists to be verified out loud against another device.
   lv_obj_t* hash = lv_label_create(body);
   char grouped[48];
-  size_t w = 0;
-  for (size_t i = 0; i < 32 && pi->hash[i] && w < sizeof(grouped) - 3; i++) {
-    grouped[w++] = pi->hash[i];
-    if ((i % 4) == 3) grouped[w++] = (i == 15) ? '\n' : ' ';
-  }
-  grouped[w] = 0;
+  Ui::groupedHash(pi->hash, grouped, sizeof(grouped));
   lv_label_set_text(hash, grouped);
   lv_obj_set_style_text_color(hash, lv_color_hex(UiTheme::kInkDim), 0);
 
   char v[40];
   snprintf(v, sizeof(v), "%u", pi->hops);
-  reading(body, "HOPS", v);
-  ageText(pi->ageS, v, sizeof(v));
+  UiTheme::reading(body, "HOPS", v);
+  Ui::ageTextS(pi->ageS, v, sizeof(v));
   char av[44]; snprintf(av, sizeof(av), "%s ago", v);
-  reading(body, "LAST HEARD", av);
-  reading(body, "VIA", pi->via);
+  UiTheme::reading(body, "LAST HEARD", av);
+  UiTheme::reading(body, "VIA", pi->via);
   // The signal rows the spec drew, filled only when this node truly heard
   // the peer itself — an announce that came over RF carries its own figures.
   Neighbor nb = {};
   if (neighbors.byHash(pi->hash, nb) && !nb.viaWifi && nb.rssi != 0) {
     snprintf(v, sizeof(v), "%.0f dBm", (double)nb.rssi);
-    reading(body, "LAST RSSI", v);
+    UiTheme::reading(body, "LAST RSSI", v);
     snprintf(v, sizeof(v), "%.1f dB", (double)nb.snr);
-    reading(body, "SNR", v);
+    UiTheme::reading(body, "SNR", v);
   }
   snprintf(v, sizeof(v), "self -> %s -> %.8s", pi->via, pi->hash);
-  lv_obj_t* path = reading(body, "PATH", v);
+  lv_obj_t* path = UiTheme::reading(body, "PATH", v);
   lv_obj_set_style_text_color(path, lv_color_hex(UiTheme::kInkDim), 0);
 
   lv_obj_t* row = lv_obj_create(body);
@@ -170,7 +142,7 @@ void openDestinations() {
   if (!sCount) lv_list_add_text(list, "nothing announced yet");
   for (size_t i = 0; i < sCount; i++) {
     char age[8], line[80];
-    ageText(sPaths[i].ageS, age, sizeof(age));
+    Ui::ageTextS(sPaths[i].ageS, age, sizeof(age));
     // The peer's name leads when an announce carried one; the shortened key
     // id sits beneath it either way — the name is for people, the hash is
     // what the mesh actually routes on.

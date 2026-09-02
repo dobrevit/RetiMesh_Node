@@ -1213,6 +1213,7 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
   // and ran its stamp scan in the gap between the two, leaving a delivered
   // message amber "queued" forever.
   uint32_t slot = UINT32_MAX;
+#if HAS_LVGL_UI                          // the log's only reader is the glass
   if (!telemetry) {
     taskENTER_CRITICAL(&sOutMux);
     slot = sOutCount % 8;
@@ -1225,7 +1226,9 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
     sOutCount++;
     taskEXIT_CRITICAL(&sOutMux);
   }
+#endif
   const bool queued = xQueueSend(sReplyQueue, &r, 0) == pdTRUE;
+#if HAS_LVGL_UI
   if (!queued && slot != UINT32_MAX) {
     // The queue refused it: the entry gets its verdict now rather than
     // sitting "queued" for a send that will never happen.
@@ -1237,6 +1240,8 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
     }
     taskEXIT_CRITICAL(&sOutMux);
   }
+#endif
+  (void)slot;
   return queued;
 }
 
@@ -1740,6 +1745,7 @@ void loop() {
                                  r.haveKey ? r.key : nullptr);
         if (!ok) log_w("lxmf: could not send an answer to %s",
                        RNS::Bytes(r.dest, 16).toHex().c_str());
+#if HAS_LVGL_UI
         if (!r.telemetry) {
           // The queue is FIFO, so this send belongs to the oldest unsent
           // log entry for the same destination.
@@ -1755,6 +1761,7 @@ void loop() {
           }
           taskEXIT_CRITICAL(&sOutMux);
         }
+#endif
       }
     }
     processEvents();

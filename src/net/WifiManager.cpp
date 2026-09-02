@@ -622,7 +622,10 @@ void WifiManager::staForget() {
 int WifiManager::staRssi() const { return stationConnected() ? WiFi.RSSI() : 0; }
 
 void WifiManager::staIpText(char* out, size_t n) const {
-  snprintf(out, n, "%s", WiFi.localIP().toString().c_str());
+  // Octets, not String: this runs at 1 Hz on the display task while the
+  // wifi page is open, and the UI path is otherwise allocation-free.
+  const IPAddress ip = WiFi.localIP();
+  snprintf(out, n, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
 }
 
 // ---------------------------------------------------------------------------

@@ -158,11 +158,15 @@ static portMUX_TYPE sHistMux = portMUX_INITIALIZER_UNLOCKED;
 static void recordHistory(bool present, uint8_t percent) {
   if (!present) return;
   const uint32_t now = millis();
-  if (sHistCount && now - sHistLastMs < 300000) return;
+  // The gate lives inside the lock: two callers crossing the five-minute
+  // boundary together once double-inserted and quietly compressed the
+  // sparkline's clock.
   taskENTER_CRITICAL(&sHistMux);
-  sHist[sHistCount % 96] = percent;
-  sHistCount++;
-  sHistLastMs = now;
+  if (!sHistCount || now - sHistLastMs >= 300000) {
+    sHist[sHistCount % 96] = percent;
+    sHistCount++;
+    sHistLastMs = now;
+  }
   taskEXIT_CRITICAL(&sHistMux);
 }
 

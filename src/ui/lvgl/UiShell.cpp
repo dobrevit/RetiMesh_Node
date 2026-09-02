@@ -344,6 +344,43 @@ bool consumeTouch() {
 
 void swallowTouch() { sSwallow = true; }
 
+void setLabel(lv_obj_t* label, const char* text) {
+  if (!label || !lv_obj_is_valid(label)) return;
+  if (strcmp(lv_label_get_text(label), text)) lv_label_set_text(label, text);
+}
+
+void ageTextS(uint32_t s, char* out, size_t n) {
+  if (s < 60)        snprintf(out, n, "%lus", (unsigned long)s);
+  else if (s < 3600) snprintf(out, n, "%lum", (unsigned long)(s / 60));
+  else               snprintf(out, n, "%luh", (unsigned long)(s / 3600));
+}
+
+void onHeld2s(lv_obj_t* btn, void (*fire)(void*), void* userData) {
+  // LONG_PRESSED at the indev's 400 ms, then repeats every ~100 ms: sixteen
+  // repeats is the two-second bar. A resistive panel in rain produces stray
+  // taps, never a stray hold — which is why the irreversible actions live
+  // behind exactly this and nothing shorter.
+  struct Held { void (*fire)(void*); void* ud; uint8_t count; };
+  Held* h = (Held*)lv_malloc(sizeof(Held));
+  h->fire = fire; h->ud = userData; h->count = 0;
+  lv_obj_add_event_cb(btn, [](lv_event_t* e) {
+    Held* hh = (Held*)lv_event_get_user_data(e);
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) hh->count = 0;
+    else if (code == LV_EVENT_LONG_PRESSED_REPEAT && ++hh->count == 16) hh->fire(hh->ud);
+    else if (code == LV_EVENT_DELETE) lv_free(hh);
+  }, LV_EVENT_ALL, h);
+}
+
+void groupedHash(const char* hex, char* out, size_t n) {
+  size_t w = 0;
+  for (size_t i = 0; hex[i] && w < n - 3; i++) {
+    out[w++] = hex[i];
+    if ((i % 4) == 3 && hex[i + 1]) out[w++] = (i == 15) ? '\n' : ' ';
+  }
+  out[w] = 0;
+}
+
 void push(lv_obj_t* screen) {
   if (sDepth >= sizeof(sStack) / sizeof(sStack[0])) {
     // A refusal owns the screen it refuses: silently dropping the pointer

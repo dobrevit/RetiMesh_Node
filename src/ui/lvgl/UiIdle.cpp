@@ -30,9 +30,6 @@ lv_obj_t*   sListen = nullptr;
 lv_obj_t*   sFoot = nullptr;
 lv_timer_t* sTick = nullptr;
 
-void set(lv_obj_t* l, const char* t) {
-  if (strcmp(lv_label_get_text(l), t)) lv_label_set_text(l, t);
-}
 
 void tick(lv_timer_t*) {
   if (!sPanel) return;
@@ -41,23 +38,23 @@ void tick(lv_timer_t*) {
   const Gps::Fix f = Gps::fix();
   if (f.clockSet && strlen(f.utc) >= 16) {
     char hm[6] = { f.utc[11], f.utc[12], f.utc[13], f.utc[14], f.utc[15], 0 };
-    set(sTime, hm);
+    Ui::setLabel(sTime, hm);
     snprintf(v, sizeof(v), "%.10s UTC", f.utc);
-    set(sDate, v);
-  } else { set(sTime, "--:--"); set(sDate, ""); }
+    Ui::setLabel(sDate, v);
+  } else { Ui::setLabel(sTime, "--:--"); Ui::setLabel(sDate, ""); }
   if (f.valid) snprintf(v, sizeof(v), "GNSS 3D · %u sv", f.satellites);
   else if (f.enabled) snprintf(v, sizeof(v), "GNSS searching");
   else snprintf(v, sizeof(v), "GNSS off");
-  set(sGnss, v);
+  Ui::setLabel(sGnss, v);
 #else
-  set(sTime, "--:--");
+  Ui::setLabel(sTime, "--:--");
 #endif
   snprintf(v, sizeof(v), "LISTENING  %.3f MHz", (double)settings.radio().freqMhz);
-  set(sListen, v);
+  Ui::setLabel(sListen, v);
   const Power::Battery b = Power::battery();
   if (b.present) snprintf(v, sizeof(v), "TAP TO WAKE  ·  %u%%", b.percent);
   else snprintf(v, sizeof(v), "TAP TO WAKE");
-  set(sFoot, v);
+  Ui::setLabel(sFoot, v);
 }
 
 void build() {

@@ -65,6 +65,24 @@ void card(lv_obj_t* obj)         { lv_obj_add_style(obj, &sCard, 0); }
 void labelCaps(lv_obj_t* label)  { lv_obj_add_style(label, &sCaps, 0); }
 void value(lv_obj_t* label)      { lv_obj_add_style(label, &sValue, 0); }
 
+lv_obj_t* reading(lv_obj_t* parent, const char* label, const char* value) {
+  lv_obj_t* row = lv_obj_create(parent);
+  card(row);
+  lv_obj_set_width(row, lv_pct(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_set_style_pad_hor(row, 8, 0);
+  lv_obj_set_style_pad_ver(row, 5, 0);
+  lv_obj_t* l = lv_label_create(row);
+  lv_label_set_text(l, label);
+  labelCaps(l);
+  lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_t* v = lv_label_create(row);
+  UiTheme::value(v);
+  lv_label_set_text(v, value ? value : "—");
+  lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
+  return v;
+}
+
 void actionButton(lv_obj_t* btn) {
   lv_obj_add_style(btn, &sAction, 0);
   lv_obj_add_style(btn, &sActionPressed, LV_STATE_PRESSED);

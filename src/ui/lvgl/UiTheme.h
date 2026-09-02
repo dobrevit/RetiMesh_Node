@@ -52,6 +52,9 @@ void card(lv_obj_t* obj);                // a reading's surface
 void labelCaps(lv_obj_t* label);         // the small field label above a value
 void value(lv_obj_t* label);             // the value itself
 void actionButton(lv_obj_t* btn);        // one slot of the bottom action bar
+// The spec's reading row — caps label left, bright value right — returned
+// as the value label. Four screens carried four drifting copies.
+lv_obj_t* reading(lv_obj_t* parent, const char* label, const char* value);
 
 } // namespace UiTheme
 

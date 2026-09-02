@@ -50,28 +50,8 @@ lv_obj_t* sBattVal = nullptr;
 lv_obj_t* sRadioVal = nullptr;
 lv_obj_t* sLatestVal = nullptr;
 
-// One reading: a caps label on the left, the value on the right, on a
-// surface row — the spec's board shape.
 lv_obj_t* reading(lv_obj_t* parent, const char* label) {
-  lv_obj_t* row = lv_obj_create(parent);
-  UiTheme::card(row);
-  lv_obj_set_width(row, lv_pct(100));
-  lv_obj_set_height(row, LV_SIZE_CONTENT);
-  lv_obj_set_style_pad_hor(row, 8, 0);
-  lv_obj_set_style_pad_ver(row, 5, 0);
-  lv_obj_t* l = lv_label_create(row);
-  lv_label_set_text(l, label);
-  UiTheme::labelCaps(l);
-  lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_t* v = lv_label_create(row);
-  UiTheme::value(v);
-  lv_label_set_text(v, "—");
-  lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
-  return v;
-}
-
-void setIf(lv_obj_t* l, const char* text) {
-  if (l && strcmp(lv_label_get_text(l), text)) lv_label_set_text(l, text);
+  return UiTheme::reading(parent, label, nullptr);
 }
 
 void tintIf(lv_obj_t* l, uint32_t hex) {
@@ -86,8 +66,10 @@ void tintIf(lv_obj_t* l, uint32_t hex) {
 }
 
 void refreshHome(lv_timer_t*) {
-  // Only while home is what the operator sees; sub-screens have their own.
-  if (!sClock || !Ui::atRoot()) return;
+  // Only while home is what the operator sees — sub-screens have their own,
+  // and the idle clock is an opaque overlay this refresh once kept painting
+  // pixels behind, every second, in the exact state the device rests in.
+  if (!sClock || !Ui::atRoot() || Ui::idleShowing()) return;
   char v[160];
 
   // Clock and date straight off the receiver, as the spec draws them; the
@@ -97,53 +79,62 @@ void refreshHome(lv_timer_t*) {
   const Gps::Fix f = Gps::fix();
   if (f.clockSet && strlen(f.utc) >= 16) {
     char hm[6] = { f.utc[11], f.utc[12], f.utc[13], f.utc[14], f.utc[15], 0 };
-    setIf(sClock, hm);
+    Ui::setLabel(sClock, hm);
     char d[20];
     snprintf(d, sizeof(d), "%.10s UTC", f.utc);
-    setIf(sDate, d);
+    Ui::setLabel(sDate, d);
   } else {
-    setIf(sClock, "--:--");
-    setIf(sDate, "time not set");
+    Ui::setLabel(sClock, "--:--");
+    Ui::setLabel(sDate, "time not set");
   }
-  if (f.valid && f.clockSet)      { setIf(sGnssVal, "locked");  tintIf(sGnssVal, UiTheme::kGood); }
-  else if (f.clockSet)            { setIf(sGnssVal, "drift");   tintIf(sGnssVal, UiTheme::kWarn); }
-  else                            { setIf(sGnssVal, "unset");   tintIf(sGnssVal, UiTheme::kInkLabel); }
+  if (f.valid && f.clockSet)      { Ui::setLabel(sGnssVal, "locked");  tintIf(sGnssVal, UiTheme::kGood); }
+  else if (f.clockSet)            { Ui::setLabel(sGnssVal, "drift");   tintIf(sGnssVal, UiTheme::kWarn); }
+  else                            { Ui::setLabel(sGnssVal, "unset");   tintIf(sGnssVal, UiTheme::kInkLabel); }
   if (f.valid) snprintf(v, sizeof(v), "%.5f %.5f", f.latitude, f.longitude);
   else snprintf(v, sizeof(v), "no fix · %u sv", f.satellites);
-  setIf(sPosVal, v);
+  Ui::setLabel(sPosVal, v);
   tintIf(sPosVal, f.valid ? UiTheme::kInk : UiTheme::kInkLabel);
 #else
-  setIf(sClock, "--:--");
-  setIf(sDate, "no receiver");
+  Ui::setLabel(sClock, "--:--");
+  Ui::setLabel(sDate, "no receiver");
 #endif
 
   snprintf(v, sizeof(v), "%lu", (unsigned long)RnsTransport::pathCount());
-  setIf(sPeersVal, v);
+  Ui::setLabel(sPeersVal, v);
 
   if (g_stats.loraRxPackets) {
     snprintf(v, sizeof(v), "%.0f dBm", (double)g_stats.lastRssi);
-    setIf(sRssiVal, v);
+    Ui::setLabel(sRssiVal, v);
     tintIf(sRssiVal, g_stats.lastRssi > -100 ? UiTheme::kInk : UiTheme::kWarn);
-  } else setIf(sRssiVal, "—");
+  } else Ui::setLabel(sRssiVal, "—");
 
   const Power::Battery b = Power::battery();
   if (b.present) {
     snprintf(v, sizeof(v), "%u%% · %.2f V%s", b.percent, (double)b.volts,
              (b.chargeKnown && b.charging) ? " · chg" : "");
-    setIf(sBattVal, v);
+    Ui::setLabel(sBattVal, v);
     tintIf(sBattVal, b.percent >= 25 ? UiTheme::kInk
                                      : (b.percent >= 10 ? UiTheme::kWarn : UiTheme::kBad));
-  } else setIf(sBattVal, "external");
+  } else Ui::setLabel(sBattVal, "external");
 
   if (g_stats.radioOnline)
-    snprintf(v, sizeof(v), "%.3f · SF%d · %d dBm", (double)settings.radio().freqMhz,
-             settings.radio().sf, (int)settings.radio().txDbm);
+    // The rx/tx pair is the one-glance "is this node hearing anything" the
+    // field checks live on; it left with the old cards and is missed.
+    snprintf(v, sizeof(v), "%.3f SF%d · %lu rx %lu tx", (double)settings.radio().freqMhz,
+             settings.radio().sf, (unsigned long)g_stats.loraRxPackets,
+             (unsigned long)g_stats.loraTxPackets);
   else
     snprintf(v, sizeof(v), "offline");
-  setIf(sRadioVal, v);
+  Ui::setLabel(sRadioVal, v);
   tintIf(sRadioVal, g_stats.radioOnline ? UiTheme::kInk : UiTheme::kWarn);
 
-  // The newest message, one line — the spec's LATEST strip.
+  // The newest message, one line — and only when there is news: the read
+  // behind this opens flash, and doing that every second forever on the
+  // resting screen was ~86k needless reads a day.
+  static uint32_t sLastSeq = UINT32_MAX;
+  const uint32_t seq = Rns::Inbox::newest();
+  if (seq == sLastSeq) return;
+  sLastSeq = seq;
   struct Latest { char line[80]; bool got; } latest{{0}, false};
   Rns::Inbox::readPage(0, 1, [](const Rns::InboxRecord& r, void* ctx) {
     Latest* o = (Latest*)ctx;
@@ -153,7 +144,7 @@ void refreshHome(lv_timer_t*) {
     snprintf(o->line, sizeof(o->line), "%s · %.*s", who, (int)n, r.text);
     o->got = true;
   }, &latest);
-  setIf(sLatestVal, latest.got ? latest.line : "no messages yet");
+  Ui::setLabel(sLatestVal, latest.got ? latest.line : "no messages yet");
 }
 
 void shortcut(lv_obj_t* bar, const char* symbol, const char* name,

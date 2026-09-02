@@ -35,26 +35,8 @@ lv_obj_t* sHdopVal = nullptr;
 lv_obj_t* sClkVal = nullptr;
 lv_obj_t* sShareLbl = nullptr;
 
-void set(lv_obj_t* l, const char* t) {
-  if (l && lv_obj_is_valid(l) && strcmp(lv_label_get_text(l), t)) lv_label_set_text(l, t);
-}
-
 lv_obj_t* reading(lv_obj_t* parent, const char* label) {
-  lv_obj_t* row = lv_obj_create(parent);
-  UiTheme::card(row);
-  lv_obj_set_width(row, lv_pct(100));
-  lv_obj_set_height(row, LV_SIZE_CONTENT);
-  lv_obj_set_style_pad_hor(row, 8, 0);
-  lv_obj_set_style_pad_ver(row, 4, 0);
-  lv_obj_t* l = lv_label_create(row);
-  lv_label_set_text(l, label);
-  UiTheme::labelCaps(l);
-  lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_t* v = lv_label_create(row);
-  UiTheme::value(v);
-  lv_label_set_text(v, "—");
-  lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
-  return v;
+  return UiTheme::reading(parent, label, nullptr);
 }
 
 void refresh(lv_timer_t*) {
@@ -64,29 +46,29 @@ void refresh(lv_timer_t*) {
 
   if (f.valid) {
     snprintf(v, sizeof(v), "%.5f°%c", fabs(f.latitude), f.latitude >= 0 ? 'N' : 'S');
-    set(sLat, v);
+    Ui::setLabel(sLat, v);
     snprintf(v, sizeof(v), "%.5f°%c", fabs(f.longitude), f.longitude >= 0 ? 'E' : 'W');
-    set(sLon, v);
+    Ui::setLabel(sLon, v);
     char g[32];
     if (Mgrs::fromLatLon(f.latitude, f.longitude, g, sizeof(g))) {
       snprintf(v, sizeof(v), "MGRS %s", g);
-      set(sMgrs, v);
-    } else set(sMgrs, "");
+      Ui::setLabel(sMgrs, v);
+    } else Ui::setLabel(sMgrs, "");
   } else {
-    set(sLat, "--.-----");
-    set(sLon, "--.-----");
-    set(sMgrs, f.enabled ? (f.sentences ? "searching..." : "no data from receiver")
+    Ui::setLabel(sLat, "--.-----");
+    Ui::setLabel(sLon, "--.-----");
+    Ui::setLabel(sMgrs, f.enabled ? (f.sentences ? "searching..." : "no data from receiver")
                          : "receiver off (settings: radio)");
   }
 
-  set(sFixVal, f.valid ? "3D" : (f.sentences ? "searching" : "none"));
+  Ui::setLabel(sFixVal, f.valid ? "3D" : (f.sentences ? "searching" : "none"));
   lv_obj_set_style_text_color(sFixVal,
       lv_color_hex(f.valid ? UiTheme::kGood : UiTheme::kWarn), 0);
-  snprintf(v, sizeof(v), "%u", f.satellites);           set(sSatVal, v);
-  snprintf(v, sizeof(v), "%.0f m", (double)f.altitude); set(sAltVal, v);
-  snprintf(v, sizeof(v), "%.1f km/h", (double)f.speedKmh); set(sSpdVal, v);
-  snprintf(v, sizeof(v), "%.1f", (double)f.hdop);       set(sHdopVal, v);
-  set(sClkVal, f.clockSet ? "GNSS" : "internal");
+  snprintf(v, sizeof(v), "%u", f.satellites);           Ui::setLabel(sSatVal, v);
+  snprintf(v, sizeof(v), "%.0f m", (double)f.altitude); Ui::setLabel(sAltVal, v);
+  snprintf(v, sizeof(v), "%.1f km/h", (double)f.speedKmh); Ui::setLabel(sSpdVal, v);
+  snprintf(v, sizeof(v), "%.1f", (double)f.hdop);       Ui::setLabel(sHdopVal, v);
+  Ui::setLabel(sClkVal, f.clockSet ? "GNSS" : "internal");
 }
 
 // --- the sky view -----------------------------------------------------------
@@ -98,6 +80,14 @@ void skyRefresh(lv_timer_t*) {
   if (!sSkyCol || !lv_obj_is_valid(sSkyCol)) return;
   Gps::Sv sv[20];
   size_t n = Gps::skyView(sv, 20);
+  // An unchanged sky costs nothing: rebuilding forty widgets every two
+  // seconds for identical readings was churn for churn's sake.
+  uint32_t stamp = (uint32_t)n;
+  for (size_t i = 0; i < n; i++)
+    stamp = stamp * 31u + ((uint32_t)sv[i].id << 8) + sv[i].cn0 + (uint8_t)sv[i].talker[0];
+  static uint32_t sLast = 0;
+  if (stamp == sLast) return;
+  sLast = stamp;
   // Strongest first — the bars should read like a story, not a lottery.
   for (size_t i = 0; i + 1 < n; i++)
     for (size_t j = 0; j + 1 < n - i; j++)
@@ -136,7 +126,7 @@ void skyRefresh(lv_timer_t*) {
   const Gps::Fix f = Gps::fix();
   char cap[40];
   snprintf(cap, sizeof(cap), "%u used · %u tracked", f.satellites, (unsigned)n);
-  set(sSkyCaption, cap);
+  Ui::setLabel(sSkyCaption, cap);
 }
 
 void openSky(lv_event_t*) {
@@ -166,7 +156,7 @@ void openSky(lv_event_t*) {
 void shareLabel() {
   char t[24];
   snprintf(t, sizeof(t), "SHARE POS: %s", settings.radio().gpsSharePosition ? "on" : "off");
-  set(sShareLbl, t);
+  Ui::setLabel(sShareLbl, t);
 }
 
 } // namespace

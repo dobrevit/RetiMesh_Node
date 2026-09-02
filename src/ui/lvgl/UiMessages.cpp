@@ -38,11 +38,9 @@ uint8_t   sThreadDest[16];
 uint32_t  sThreadStamp = 0;              // outbound-state hash, to redraw only on change
 
 
-void ageText(uint32_t ms, char* out, size_t n) {
-  const uint32_t s = (millis() - ms) / 1000;
-  if (s < 60)        snprintf(out, n, "%lus", (unsigned long)s);
-  else if (s < 3600) snprintf(out, n, "%lum", (unsigned long)(s / 60));
-  else               snprintf(out, n, "%luh", (unsigned long)(s / 3600));
+// One unit for ages everywhere: seconds in, Ui::ageTextS out.
+void ageOf(uint32_t ms, char* out, size_t n) {
+  Ui::ageTextS((millis() - ms) / 1000, out, n);
 }
 
 // --- the thread -------------------------------------------------------------
@@ -83,13 +81,13 @@ void bubbleRow(lv_obj_t* col, const Bubble& b) {
   if (b.ours) {
     if (!b.sentMs)      { snprintf(meta, sizeof(meta), "queued"); tint = UiTheme::kWarn; }
     else if (!b.ok)     { snprintf(meta, sizeof(meta), "failed — no key?"); tint = UiTheme::kBad; }
-    else { char a[8]; ageText(b.sentMs, a, sizeof(a)); snprintf(meta, sizeof(meta), "sent · %s ago", a); }
+    else { char a[8]; ageOf(b.sentMs, a, sizeof(a)); snprintf(meta, sizeof(meta), "sent · %s ago", a); }
   } else {
     // Identity trust first: an unverified sender's words carry the flag in
     // the meta line, in the warning colour.
     const bool verified = b.standing == Rns::StandingVerified;
     char a[8] = "";
-    if (b.ms) ageText(b.ms, a, sizeof(a));
+    if (b.ms) ageOf(b.ms, a, sizeof(a));
     snprintf(meta, sizeof(meta), "%s%s%s", b.ms ? a : "earlier",
              b.ms ? " ago" : "", verified ? "" : " · unverified");
     if (!verified) tint = UiTheme::kWarn;
@@ -206,17 +204,10 @@ void openQuick(lv_event_t*) {
     }
     lv_obj_center(l);
     if (c.distress) {
-      // A real two-second hold: LONG_PRESSED fires at the indev's 400 ms,
-      // then repeats every ~100 ms — the send waits for enough repeats.
-      lv_obj_add_event_cb(btn, [](lv_event_t* e) {
-        static uint8_t held = 0;
-        const lv_event_code_t code = lv_event_get_code(e);
-        if (code == LV_EVENT_PRESSED) held = 0;
-        else if (code == LV_EVENT_LONG_PRESSED_REPEAT && ++held == 16) {
-          sendCurrent("EMERGENCY: need assistance");
-          Ui::back();
-        }
-      }, LV_EVENT_ALL, nullptr);
+      Ui::onHeld2s(btn, [](void*) {
+        sendCurrent("EMERGENCY: need assistance");
+        Ui::back();
+      }, nullptr);
     } else {
       lv_obj_add_event_cb(btn, [](lv_event_t* e) {
         lv_obj_t* lbl = lv_obj_get_child((lv_obj_t*)lv_event_get_target(e), 0);

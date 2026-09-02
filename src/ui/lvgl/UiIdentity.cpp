@@ -21,24 +21,6 @@
 
 namespace {
 
-lv_obj_t* reading(lv_obj_t* parent, const char* label, const char* value) {
-  lv_obj_t* row = lv_obj_create(parent);
-  UiTheme::card(row);
-  lv_obj_set_width(row, lv_pct(100));
-  lv_obj_set_height(row, LV_SIZE_CONTENT);
-  lv_obj_set_style_pad_hor(row, 8, 0);
-  lv_obj_set_style_pad_ver(row, 5, 0);
-  lv_obj_t* l = lv_label_create(row);
-  lv_label_set_text(l, label);
-  UiTheme::labelCaps(l);
-  lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_t* v = lv_label_create(row);
-  UiTheme::value(v);
-  lv_label_set_text(v, value);
-  lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
-  return v;
-}
-
 void showQr(lv_event_t*) {
   char text[160];
   if (!Qr::payloadText(Qr::Payload::Address, text, sizeof(text))) {
@@ -78,7 +60,7 @@ namespace Ui {
 void openIdentity() {
   lv_obj_t* body = newScreen("Identity");
 
-  reading(body, "NAME", wifiManager.hostname());
+  UiTheme::reading(body, "NAME", wifiManager.hostname());
 
   const RnsTransport::LxmfState lx = RnsTransport::lxmf();
   lv_obj_t* hashCard = lv_obj_create(body);
@@ -91,13 +73,7 @@ void openIdentity() {
   UiTheme::labelCaps(hl);
   lv_obj_t* hash = lv_label_create(hashCard);
   char grouped[48];
-  size_t w = 0;
-  const char* a = lx.address[0] ? lx.address : "not up yet";
-  for (size_t i = 0; a[i] && w < sizeof(grouped) - 3; i++) {
-    grouped[w++] = a[i];
-    if ((i % 4) == 3 && a[i + 1]) grouped[w++] = (i == 15) ? '\n' : ' ';
-  }
-  grouped[w] = 0;
+  Ui::groupedHash(lx.address[0] ? lx.address : "not up yet", grouped, sizeof(grouped));
   lv_label_set_text(hash, grouped);
   lv_obj_set_style_text_font(hash, &font_plexmono_16, 0);
   lv_obj_align_to(hash, hl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
@@ -105,7 +81,7 @@ void openIdentity() {
   char v[32];
   if (SettingsFields::renderKey("radio.announce_interval", v, sizeof(v))) {
     const char* eq = strchr(v, '=');
-    reading(body, "ANNOUNCE EVERY", eq ? eq + 1 : v);
+    UiTheme::reading(body, "ANNOUNCE EVERY", eq ? eq + 1 : v);
   }
 
   lv_obj_t* row = lv_obj_create(body);

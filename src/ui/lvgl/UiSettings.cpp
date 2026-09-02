@@ -551,11 +551,8 @@ void openCategory(lv_event_t* e) {
     lv_label_set_text(el, "ERASE NODE — HOLD 2 s");
     lv_obj_set_style_text_color(el, lv_color_hex(UiTheme::kBad), 0);
     lv_obj_center(el);
-    lv_obj_add_event_cb(erase, [](lv_event_t* e) {
-      static uint8_t held = 0;
-      const lv_event_code_t code = lv_event_get_code(e);
-      if (code == LV_EVENT_PRESSED) held = 0;
-      else if (code == LV_EVENT_LONG_PRESSED_REPEAT && ++held == 16) {
+    Ui::onHeld2s(erase, [](void*) {
+      {
         settings.factoryReset();
         // The control says erase, so the personal data goes with the
         // settings: the stored conversations and the remembered peer names.
@@ -566,7 +563,7 @@ void openCategory(lv_event_t* e) {
         Ui::toast("erased — restarting");
         Bootloader::reboot(Bootloader::Source::Ui);
       }
-    }, LV_EVENT_ALL, nullptr);
+    }, nullptr);
   }
 
   // Cancel and Save, side by side, the row every form ends with.

@@ -63,6 +63,24 @@ lv_obj_t* newScreen(const char* title);
 // A transient result line, top centre, above everything.
 void toast(const char* text);
 
+// Set a label only when the text changed — LVGL reallocates and repaints on
+// every set — and only while the label still exists. Stated once; three
+// screens had grown three variants with three different guards.
+void setLabel(lv_obj_t* label, const char* text);
+
+// Seconds into the s/m/h wording every age on the glass uses. One unit on
+// purpose: two same-named helpers taking seconds and milliseconds were one
+// copy-paste away from ages wrong by a thousand.
+void ageTextS(uint32_t seconds, char* out, size_t n);
+
+// The two-second hold the system's irreversible actions demand — stated
+// once, because a timing tweak that reaches one red control and not the
+// other is the worst drift this firmware could grow.
+void onHeld2s(lv_obj_t* btn, void (*fire)(void*), void* userData);
+
+// A hash grouped in fours across two lines, to be verified out loud.
+void groupedHash(const char* hex, char* out, size_t n);
+
 // A textarea wired to the shared keyboard: focus summons it (numeric mode for
 // number fields), defocus dismisses it. The parent form scrolls the field
 // clear of the keys.
