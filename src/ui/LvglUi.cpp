@@ -99,13 +99,30 @@ void taFocusEvent(lv_event_t* e) {
     // and the dialog is lifted to the top of the glass so the field sits in
     // the upper half while the keys take the lower.
     lv_obj_move_foreground(sKeyboard);
+    // The object to move is the dialog, not its backdrop: a modal msgbox sits
+    // inside a full-screen modal container on the top layer, and aligning
+    // that container moves nothing anyone can see — measured on the bench as
+    // a keyboard still fighting the dialog for the same pixels. Walk up to
+    // the container, keep the child we arrived through (the dialog), pin it
+    // to the top and cap its height to exactly the glass above the keys; its
+    // content scrolls if the message is long.
     lv_obj_t* dlg = ta;
-    while (lv_obj_get_parent(dlg) &&
-           lv_obj_get_parent(dlg) != lv_layer_top() &&
-           lv_obj_get_parent(dlg) != lv_screen_active())
-      dlg = lv_obj_get_parent(dlg);
-    if (lv_obj_get_parent(dlg) == lv_layer_top())
-      lv_obj_align(dlg, LV_ALIGN_TOP_MID, 0, 6);
+    lv_obj_t* up  = lv_obj_get_parent(dlg);
+    while (up && up != lv_layer_top() && up != lv_screen_active()) {
+      dlg = up;
+      up = lv_obj_get_parent(dlg);
+    }
+    if (up == lv_layer_top() && dlg != sKeyboard) {
+      lv_obj_t* box = dlg;
+      // dlg is the backdrop when the dialog is modal; the dialog is the
+      // backdrop's child on our path. Find it by walking one level down
+      // toward the textarea.
+      for (lv_obj_t* n = ta; n && n != dlg; n = lv_obj_get_parent(n))
+        if (lv_obj_get_parent(n) == dlg) { box = n; break; }
+      const int32_t kbTop = LV_VER_RES - lv_obj_get_height(sKeyboard);
+      lv_obj_set_style_max_height(box, kbTop - 10, 0);
+      lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 4);
+    }
     lv_obj_scroll_to_view(ta, LV_ANIM_ON);
   } else if (code == LV_EVENT_DEFOCUSED) {
     lv_keyboard_set_textarea(sKeyboard, nullptr);
@@ -366,6 +383,9 @@ bool begin(TftPanel& panel) {
   buildSettingsTab(lv_tabview_add_tab(sTabs, "Settings"));
 
   sKeyboard = lv_keyboard_create(lv_layer_top());
+  // Four rows at ~33 px: comfortably tappable at this dot pitch, and 188 px
+  // of glass stay free above it for whatever is being typed into.
+  lv_obj_set_height(sKeyboard, 132);
   lv_keyboard_set_mode(sKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_obj_add_event_cb(sKeyboard, kbEvent, LV_EVENT_ALL, nullptr);
   lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
