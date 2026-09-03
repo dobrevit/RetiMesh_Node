@@ -46,6 +46,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "BootloaderPlan.h"
 
 struct MaintenanceSettings;
 
@@ -78,7 +79,11 @@ bool sectionExists(const char* prefix);
 bool keyInSection(size_t i, const char* prefix);
 
 // Parse, validate and apply one setting. `err` carries the refusal.
-Result set(const char* key, const char* value, char* err, size_t errLen);
+// `origin` names who is asking, so a restart the change arms is logged
+// against the glass, the console, or the generic settings machinery —
+// not always the console.
+Result set(const char* key, const char* value, char* err, size_t errLen,
+           Bootloader::Source origin = Bootloader::Source::Settings);
 
 // A form saves several keys in one gesture. Between these two calls, a
 // commit that would arm a restart records the wish instead — otherwise the

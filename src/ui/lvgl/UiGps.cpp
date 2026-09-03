@@ -143,7 +143,7 @@ void openSky(lv_event_t*) {
   sSkyCaption = lv_label_create(body);
   lv_obj_set_style_text_color(sSkyCaption, lv_color_hex(UiTheme::kInkLabel), 0);
   lv_label_set_text(sSkyCaption, "");
-  lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
+  lv_obj_t* scr = Ui::screenOf(body);
   lv_timer_t* t = lv_timer_create(skyRefresh, 2000, nullptr);
   lv_obj_add_event_cb(scr, [](lv_event_t* e) {
     lv_timer_delete((lv_timer_t*)lv_event_get_user_data(e));
@@ -208,12 +208,13 @@ void openGps() {
     char err[96] = "";
     const bool want = !settings.radio().gpsSharePosition;
     const SettingsFields::Result r =
-        SettingsFields::set("radio.gps_share_position", want ? "on" : "off", err, sizeof(err));
+        SettingsFields::set("radio.gps_share_position", want ? "on" : "off", err, sizeof(err),
+                            Bootloader::Source::Ui);
     if (r == SettingsFields::Result::Ok) shareLabel();
     else Ui::toast(err[0] ? err : SettingsFields::resultText(r));
   }, LV_EVENT_CLICKED, nullptr);
 
-  lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
+  lv_obj_t* scr = Ui::screenOf(body);
   lv_timer_t* t = lv_timer_create(refresh, 1000, nullptr);
   lv_obj_add_event_cb(scr, [](lv_event_t* e) {
     lv_timer_delete((lv_timer_t*)lv_event_get_user_data(e));

@@ -156,7 +156,7 @@ void openBearing(const char* peer, const char* hashHex) {
   lv_obj_set_width(sDialWhy, lv_pct(100));
   lv_label_set_long_mode(sDialWhy, LV_LABEL_LONG_WRAP);
 
-  lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
+  lv_obj_t* scr = Ui::screenOf(body);
   sDialOwner = scr;
 #if HAS_GPS
   lv_label_set_text(sDialWhy, "");
@@ -248,7 +248,7 @@ void openPlot() {
 #else
   lv_label_set_text(cap, "This build has no position receiver.");
 #endif
-  push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  push(Ui::screenOf(body));
 }
 
 void showFirmware(const char* stage, uint32_t written, uint32_t total) {

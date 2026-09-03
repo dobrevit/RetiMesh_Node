@@ -376,7 +376,8 @@ static void doLinkSwitch(const Request& r, const char* key) {
   char field[32];
   snprintf(field, sizeof(field), "links.%s", key);
   char detail[192] = "";
-  const SettingsFields::Result res = SettingsFields::set(field, on ? "on" : "off", detail, sizeof(detail));
+  const SettingsFields::Result res = SettingsFields::set(field, on ? "on" : "off", detail, sizeof(detail),
+                                                          Bootloader::Source::Console);
   char kv[128];
   const char* state = on ? "on" : "off";
   switch (res) {
@@ -577,7 +578,8 @@ static void doSet(const Request& r) {
   value[n] = '\0';
 
   char detail[192] = "";
-  const SettingsFields::Result res = SettingsFields::set(r.args[0], value, detail, sizeof(detail));
+  const SettingsFields::Result res = SettingsFields::set(r.args[0], value, detail, sizeof(detail),
+                                                          Bootloader::Source::Console);
   char line[224];
   switch (res) {
     case SettingsFields::Result::Ok:
