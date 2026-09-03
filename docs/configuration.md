@@ -15,7 +15,7 @@ per PlatformIO environment.
 | TX power | 7 dBm | 2–17 dBm (SX127x) / 2–22 dBm (SX1262) |
 | Sync word | 0x12 | RNode default; must match peers |
 | Preamble | 18 symbols | RNode default |
-| Announce interval | 600 s | 0 = off; the node's own `retimesh.node` announce |
+| Announce interval | 600 s | 0 = off; the node's own `lxmf.delivery` and `nomadnetwork.node` announces |
 | Beacon interval | 0 (off) | RetiMesh quick-probe beacons; 10–3600 s |
 | Callsign | (SSID) | printable, ≤ 32 chars; used in announces/beacons |
 

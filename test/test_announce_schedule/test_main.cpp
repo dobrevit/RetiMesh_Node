@@ -97,6 +97,52 @@ static void test_the_clamp_survives_the_wrap() {
   TEST_ASSERT_EQUAL_UINT32(booked, clampAnnounceTo(booked, 60, now));
 }
 
+// --- which announces earn a row -------------------------------------------
+//
+// A RetiMesh node announces itself under more than one aspect, and each one
+// arrives as its own destination with its own hash. Filing all of them fills
+// the table with rows describing one node several times over; the rule is
+// which of them tells us something.
+
+static void test_the_messaging_aspect_is_kept() {
+  // The address a person sends to. Without this row there is no peer to talk
+  // to and the whole list is decoration.
+  TEST_ASSERT_TRUE(Rns::worthRemembering("lxmf.delivery"));
+}
+
+static void test_the_page_aspect_is_not_kept() {
+  // It carries a name this node already has from the messaging announce and
+  // nothing else. Ours is still announced so a NomadNet client can find the
+  // page; that is a reason to advertise, not a reason to file everybody
+  // else's.
+  TEST_ASSERT_FALSE(Rns::worthRemembering("nomadnetwork.node"));
+}
+
+static void test_an_unknown_aspect_is_kept() {
+  // A peer running something this table has never met is the most interesting
+  // row in the list, not the one to hide. An unrecognised name hash arrives
+  // here as nullptr, and a bench with a non-RetiMesh peer on it proved the
+  // case: one row, no aspect, and worth seeing.
+  TEST_ASSERT_TRUE(Rns::worthRemembering(nullptr));
+  TEST_ASSERT_TRUE(Rns::worthRemembering(""));
+  TEST_ASSERT_TRUE(Rns::worthRemembering("something.else"));
+}
+
+static void test_the_other_known_aspects_are_kept() {
+  // Only the page aspect is dropped. Nothing else in the table was measured
+  // to be redundant, and a rule that quietly grew would hide peers.
+  TEST_ASSERT_TRUE(Rns::worthRemembering("lxmf.propagation"));
+  TEST_ASSERT_TRUE(Rns::worthRemembering("rnstransport.probe"));
+}
+
+static void test_a_node_that_still_announces_the_old_aspect_is_not_hidden() {
+  // This node stopped announcing retimesh.node, but a mesh updates one node at
+  // a time and the rest keep sending it for as long as they are unattended.
+  // Dropping it on receipt as well would make those neighbours disappear from
+  // a list whose job is to show what is out there.
+  TEST_ASSERT_TRUE(Rns::worthRemembering("retimesh.node"));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_the_jitter_is_centred_on_the_interval);
@@ -106,5 +152,10 @@ int main(int, char**) {
   RUN_TEST(test_lowering_the_interval_pulls_a_booking_forward);
   RUN_TEST(test_a_booking_already_sooner_than_the_interval_is_left_alone);
   RUN_TEST(test_the_clamp_survives_the_wrap);
+  RUN_TEST(test_the_messaging_aspect_is_kept);
+  RUN_TEST(test_the_page_aspect_is_not_kept);
+  RUN_TEST(test_an_unknown_aspect_is_kept);
+  RUN_TEST(test_the_other_known_aspects_are_kept);
+  RUN_TEST(test_a_node_that_still_announces_the_old_aspect_is_not_hidden);
   return UNITY_END();
 }

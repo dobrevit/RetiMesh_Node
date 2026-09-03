@@ -617,8 +617,9 @@
 #ifndef BEACON_INTERVAL_S
   #define BEACON_INTERVAL_S 0             // off by default: announces do this job
 #endif
-// Reticulum announces of this node's retimesh.node destination, in
-// seconds (0 = off). Sent on LoRa and to Wi-Fi clients; on boot as well.
+// Reticulum announces of this node's lxmf.delivery and nomadnetwork.node
+// destinations, in seconds (0 = off). Sent on LoRa and to Wi-Fi clients; on
+// boot as well. retimesh.node exists but is not announced (RnsTransport.cpp).
 #ifndef ANNOUNCE_INTERVAL_S
   #define ANNOUNCE_INTERVAL_S 600
 #endif

@@ -10,16 +10,24 @@
 
 ## Identity and announces
 The node has a persistent Reticulum identity (X25519 + Ed25519, NVS) used
-both as **transport identity** and for its `retimesh.node` destination. It
-announces on boot, a couple of seconds after a client or peer registers, and
-every `announce_interval` (default 10 min) — all *through Transport*, so
-interface modes apply. The announce on registration is what a phone or a node
-that has just appeared hears; without it the first announce it could see was up
-to an interval away. `/api/status` shows `identity` and
-`destination`; `rnpath -t` on a peer lists the node once its announce arrives.
+both as **transport identity** and for its destinations. It announces two of
+them — `lxmf.delivery` and `nomadnetwork.node` — on boot, a couple of seconds
+after a client or peer registers, and every `announce_interval` (default 10
+min), all *through Transport*, so interface modes apply. The announce on
+registration is what a phone or a node that has just appeared hears; without it
+the first announce it could see was up to an interval away. `/api/status` shows
+`identity`, `destination`, `lxmf_address` and `nomadnet_address`; `rnpath -t`
+on a peer lists the node once its announce arrives. Sideband displays both
+aspects, so the node itself appears in its announce stream.
 
-Announce app_data is `"<callsign> <version>"` — other RetiMesh nodes show it in
-their neighbour list; Sideband ignores non-LXMF aspects in its announce stream.
+The `retimesh.node` destination still exists — it is what `/api/status` reports
+as `destination` — but it is **no longer announced**. Its app_data was
+`"<callsign> <version>"`, nothing listened on the destination, and it cost a
+third of every node's announces and of every node's neighbour rows to duplicate
+one string that the mesh rebroadcasts per hop. The firmware version reaches an
+operator through LXMF telemetry instead (`kSidInformation`, `"RetiMesh Node
+<version> (<board>)"`). Announces from nodes still running a build that sends
+`retimesh.node` are listed as before, version column included.
 
 ## Transport
 microReticulum's Transport (a C++ port of RNS) keeps the path table,

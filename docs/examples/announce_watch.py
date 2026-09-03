@@ -3,8 +3,9 @@
 """Print every announce this Reticulum instance receives.
 
 Run on any machine with an RNS interface to the mesh (a laptop on the
-node's Wi-Fi, or an rnsd with an RNode). RetiMesh nodes announce the
-aspect retimesh.node with app_data "<callsign> <version>".
+node's Wi-Fi, or an rnsd with an RNode). RetiMesh nodes announce
+lxmf.delivery and nomadnetwork.node; builds up to v0.0.x also announced
+retimesh.node with app_data "<callsign> <version>".
 """
 import time
 import RNS

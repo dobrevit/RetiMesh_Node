@@ -249,7 +249,7 @@ async function refreshStatus() {
     nb.replaceChildren();
     if (!s.neighbors || !s.neighbors.length) {
       const d = document.createElement("div"); d.className = "post";
-      d.textContent = "Nothing heard yet — this node announces every " + Math.round(s.radio.announce_interval/60) + " min as " + s.radio.callsign + " <" + (s.destination||"").slice(0,8) + "…>";
+      d.textContent = "Nothing heard yet — this node announces every " + Math.round(s.radio.announce_interval/60) + " min as " + s.radio.callsign + " <" + (s.lxmf_address||"").slice(0,8) + "…>";
       nb.append(d);
     }
     for (const n of (s.neighbors || [])) {

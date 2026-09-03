@@ -298,7 +298,15 @@ public:
   void received_announce(const Bytes&, const RNS::Identity&, const Bytes&) override {}
   void received_announce(const Bytes& destHash, const RNS::Identity& identity, const Bytes& appData, const RNS::Packet& packet) override {
     (void)identity;
+    // This node's own announces come back: a neighbour rebroadcasts one and
+    // the next hop is heard here like anybody else's. Every destination it
+    // announces has to be named, not just the first — checking retimesh.node
+    // alone, which this firmware no longer announces at all, left the node
+    // filing itself as one of its own peers under lxmf.delivery, callsign and
+    // all, and remembering its own name against its own address.
     if (memcmp(destHash.data(), nodeIdentity.destHash(), Rns::HASH_LEN) == 0) return;
+    if (lxmfDest  && destHash == lxmfDest.hash())  return;
+    if (nomadDest && destHash == nomadDest.hash()) return;
     Neighbor n = {};
     Rns::toHex(destHash.data(), Rns::HASH_LEN, n.hash);
     const uint8_t* d = packet.data().data();               // pub(64) + name_hash(10) + ...
@@ -311,16 +319,33 @@ public:
       char* sp = strchr(n.name, ' ');
       if (sp) { strlcpy(n.version, sp + 1, sizeof(n.version)); *sp = '\0'; }
     }
+    // Heard, counted and logged — but not necessarily kept. Several announces
+    // describe one node and not all of them tell us anything; RnsAnnounce.h
+    // says which and why. Dropping one here rather than at the display keeps
+    // the table itself smaller, which is the part that costs memory on a board
+    // that has none to spare.
+    //
+    // Only this node's own peers list is affected. The path RNS learned from
+    // the announce stays: this node forwards for others, and a transport that
+    // quietly refuses to route NomadNet traffic would be breaking the mesh to
+    // tidy its own list.
+    const bool keep = Rns::worthRemembering(aspect);
     n.kind = NeighborKind::Announce;
     n.hops = packet.hops();
     std::string iface = packet.receiving_interface() ? packet.receiving_interface().name() : std::string();
     n.viaWifi = iface.rfind("LoRa", 0) != 0;
     n.rssi = n.viaWifi ? 0 : packet.rssi();
     n.snr  = n.viaWifi ? 0 : packet.snr();
-    neighbors.seen(n);
-    if (n.name[0]) PeerNames::remember(n.hash, n.name);   // a name heard is a name kept
+    if (keep) {
+      neighbors.seen(n);
+      if (n.name[0]) PeerNames::remember(n.hash, n.name);   // a name heard is a name kept
+    }
+    // Counted either way: this is the figure that separates a node whose mesh
+    // side has stopped from one that is merely surrounded by quiet neighbours,
+    // and an announce we chose not to file is still an announce we heard.
     g_stats.announcesRx++;
-    log_i("announce via %s: %s <%s> \"%s\" hops %u", iface.c_str(), aspect ? aspect : "unknown-aspect", n.hash, n.name, n.hops);
+    log_i("announce via %s: %s <%s> \"%s\" hops %u%s", iface.c_str(), aspect ? aspect : "unknown-aspect",
+          n.hash, n.name, n.hops, keep ? "" : " (not filed: nothing here consumes it)");
     char line[160];
     snprintf(line, sizeof(line), "announce %s %s <%s> \"%s\" hops=%u rssi=%.0f", iface.c_str(),
              aspect ? aspect : "?", n.hash, n.name, n.hops, (double)n.rssi);
@@ -1882,43 +1907,57 @@ void loop() {
       // expect. Reticulum's own implementation jitters for the same reason.
       sNextAnnounceMs = Rns::nextAnnounceAt(interval, millis(), esp_random());
 
-      char app[64];
-      // snprintf returns the length it *would* have written. A 32-character
-      // callsign and a git-describe version exceed this buffer, and the
-      // untruncated length would have put a stray byte from the stack into a
-      // signed announce.
-      const int n = snprintf(app, sizeof(app), "%s %s", loraRadio.callsign(), FW_VERSION);
-      const size_t appLen = n < 0 ? 0 : ((size_t)n < sizeof(app) - 1 ? (size_t)n : sizeof(app) - 1);
       // Every announce this node makes, including the page's. The counter is
       // how an operator tells a node whose mesh side has quietly stopped from
       // one that is merely quiet, so it must not under-report: an announce
       // that is sent and not counted here reads, from the other end of a
       // status page, exactly like a node that has stopped talking. Which is
-      // why each one is counted as it goes out rather than all three summed
-      // at the end: summed, a throw from the second announce took the count
-      // of the first with it, and the node that had just talked reported that
-      // it had not.
-      nodeDest.announce(Bytes((const uint8_t*)app, appLen));
-      g_stats.announcesTx++;
-      // Logged here, with the first announce that actually went out, for the
-      // same reason the counter is incremented here. At the end of the block a
-      // throw from the second or third announce took the line with it, so a
-      // node that had just announced twice left no record of having announced
-      // at all — and an operator reading the log concluded it had gone quiet.
-      log_i("announced retimesh.node <%s> on all interfaces", nodeIdentity.destHex());
-      // And the same node under its LXMF address, so it appears in the
-      // clients people actually use. The app_data is the shape LXMF expects
-      // rather than the free text above — the two announces describe one node
-      // to two audiences (RnsAnnounce.h).
+      // why each one is counted, and logged, as it goes out rather than both
+      // summed at the end: summed, a throw from the second announce took the
+      // count of the first with it, and the node that had just talked reported
+      // that it had not. For the same reason nothing is said ahead of a send —
+      // a line written first is read as proof of an announce that then threw,
+      // which is the same lie in the other direction.
+      //
+      // retimesh.node is no longer announced. It carried a callsign and a
+      // firmware version and nothing else — nothing listens on it, so nothing
+      // could ever be delivered to it — and the same version reaches an
+      // operator through LXMF telemetry as kSidInformation, "RetiMesh Node
+      // <version> (<board>)", alongside the battery, position and heap that
+      // answer the questions the version was being asked next to anyway.
+      //
+      // A third of every node's announces, and a third of every node's peer
+      // rows, to duplicate one string. The mesh rebroadcasts announces per
+      // hop, so that third was paid by every node in earshot, forever.
+      //
+      // What is given up is passive: a version used to arrive from a node this
+      // one can merely hear, where telemetry needs a path that works in both
+      // directions and somebody to ask. If that turns out to matter, the
+      // cheaper half-measure is announcing this once every several intervals
+      // rather than every one — a version changes about as often as a
+      // firmware is installed.
+      //
+      // The node under its LXMF address, so it appears in the clients people
+      // actually use. The app_data is the shape LXMF expects — the two
+      // announces describe one node to two audiences (RnsAnnounce.h).
       uint8_t lx[64];
       const size_t lxLen = Rns::lxmfAppData(loraRadio.callsign(), 0, lx, sizeof(lx));
-      if (lxLen) { lxmfDest.announce(Bytes(lx, lxLen)); g_stats.announcesTx++; }
+      if (lxLen) {
+        lxmfDest.announce(Bytes(lx, lxLen));
+        g_stats.announcesTx++;
+        // The address a peer will actually report back, not the node's
+        // retimesh.node destination: that one is no longer announced, so an
+        // operator matching the logged hash against a neighbour list or
+        // `rnpath -t` never found it.
+        log_i("announced lxmf.delivery <%s> on all interfaces", lxmfDest.hash().toHex().c_str());
+      }
       // And as something to browse. NomadNet announces its node name as plain
-      // UTF-8 rather than the msgpack array LXMF uses — a third audience, and
-      // the third shape, from one node.
+      // UTF-8 rather than the msgpack array LXMF uses — a second audience, and
+      // a second shape, from one node.
       const char* nn = loraRadio.callsign();
       nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
       g_stats.announcesTx++;
+      log_i("announced nomadnetwork.node <%s> on all interfaces", nomadDest.hash().toHex().c_str());
     }
   });
 

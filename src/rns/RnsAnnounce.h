@@ -35,6 +35,8 @@
 // ============================================================================
 #pragma once
 
+#include <string.h>
+
 #include <Arduino.h>
 #include "Config.h"
 
@@ -112,6 +114,39 @@ bool parseAnnounce(const uint8_t* raw, size_t len, Announce& out);
 // Human name for a known name hash ("lxmf.delivery", ...), else nullptr.
 const char* aspectName(const uint8_t nameHash[NAME_HASH]);
 
+// Whether an announce for this aspect earns a row in the peers table.
+//
+// One RetiMesh node arrives here as several destinations: lxmf.delivery and
+// nomadnetwork.node from this firmware, and retimesh.node as well from every
+// node still running a build that announced it — three audiences, three
+// app_data shapes, three hashes. A mesh of five nodes therefore fills the
+// table with up to fifteen rows describing five things. Measured on a bench
+// of six peers: sixteen rows, six names.
+//
+// lxmf.delivery is the address a person sends to, so it stays. retimesh.node
+// stays too: this firmware no longer sends it (RnsTransport::loop), but the
+// unattended half of a fleet does until it is updated, and it is the only
+// announce that ever carried a firmware version — dropping it on receipt as
+// well would make those neighbours vanish from the list whose job is to show
+// what is out there. nomadnetwork.node carries a name a RetiMesh node already
+// has from the other two and nothing else; its only purpose is letting a
+// NomadNet client find a page to browse, which is a reason to keep
+// *announcing* ours and no reason at all to remember another RetiMesh node's.
+//
+// The cost of doing it by aspect rather than by identity: a peer whose *only*
+// announce is nomadnetwork.node — a plain `nomadnet --daemon` page host, not
+// a RetiMesh node — has no other row to be found under, and so is not listed
+// at all. The announce handler is handed the announcing identity; keying the
+// rule on "this identity is already in the table" rather than on the aspect
+// would keep such a host and still collapse a RetiMesh node to one row.
+//
+// Unknown aspects are kept. A name this table does not recognise is a peer
+// running something we have not met, which is exactly the thing an operator
+// wants to see in the list rather than the thing to hide from it.
+inline bool worthRemembering(const char* aspect) {
+  return !(aspect && strcmp(aspect, "nomadnetwork.node") == 0);
+}
+
 // Best-effort display name from app_data (plain text, or the first element
 // of an LXMF-style msgpack array). Returns bytes written (0 = none).
 size_t displayName(const Announce& a, char* out, size_t cap);
@@ -146,17 +181,26 @@ public:
   const char*    destHex()    const { return _destHex; }
   const char*    identityHex() const { return _identityHex; }
 
-  // Builds a complete announce packet with the given app_data into `out`.
-  // Returns the packet length, 0 on error. Bumps the persisted emission
-  // counter.
-  size_t buildAnnounce(const uint8_t* appData, size_t appLen, uint8_t* out, size_t cap);
+  // The delivery address, derived here rather than read back from the running
+  // transport. Everything that tells an operator "this is the node, reach it
+  // here" — the QR, the panel, the mDNS record, the status document — needs an
+  // answer before Reticulum has started, and RnsTransport::lxmf().address is
+  // empty until it has. Both are sha256(name_hash + identity_hash) over the
+  // same identity and the same aspect, so they cannot disagree — and if they
+  // ever did, /api/status carries both (`destination` from here,
+  // `lxmf_address` from the transport) and the two would stop matching in
+  // plain sight.
+  const uint8_t* lxmfHash()   const { return _lxmfHash; }
+  const char*    lxmfHex()    const { return _lxmfHex; }
 
 private:
   uint8_t  _xPrv[32], _edSeed[32];
   uint8_t  _pub[Rns::KEY_LEN];
   uint8_t  _identityHash[Rns::HASH_LEN];
   uint8_t  _destHash[Rns::HASH_LEN];
+  uint8_t  _lxmfHash[Rns::HASH_LEN];
   char     _destHex[2 * Rns::HASH_LEN + 1];
+  char     _lxmfHex[2 * Rns::HASH_LEN + 1];
   char     _identityHex[2 * Rns::HASH_LEN + 1];
   uint32_t _emitted = 0;
   bool     _ok = false;

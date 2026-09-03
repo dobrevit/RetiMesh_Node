@@ -57,7 +57,11 @@ bool payloadText(Payload what, char* text, size_t cap) {
       break;
     }
     case Payload::Address:
-      s = nodeIdentity.destHex();
+      // The delivery address, because this code is scanned by somebody who
+      // means to reach the node. It used to be the retimesh.node destination,
+      // which nothing announces and nothing listens on — a scan produced an
+      // address that could not be messaged and could not even be pathed to.
+      s = nodeIdentity.lxmfHex();
       break;
   }
   if (s.length() + 1 > cap) return false;
