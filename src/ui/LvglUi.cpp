@@ -32,6 +32,9 @@
 #include <Arduino.h>
 #include "lvgl/Ui.h"
 #include "TftPanel.h"
+#include "LxmfInbox.h"
+#include "OtaUpdate.h"
+#include "Power.h"
 
 namespace LvglUi {
 
@@ -57,6 +60,69 @@ void onBlank(bool on) {
 }
 
 bool touchActive() { return Ui::consumeTouch(); }
+
+PanelAction restTick(uint32_t nowMs, uint32_t& lastActivityMs,
+                     bool blank, bool canBlank) {
+  // The shell owns the touch layer, so the activity timer has to ask it
+  // about fingers — the buttons alone left the panel blanking under an
+  // operator mid-navigation.
+  if (touchActive()) lastActivityMs = nowMs;
+
+  bool claimed = false;
+  // A fresh message interrupts everything: wake the glass and put the
+  // sender on it — the spec's full-screen alert, not a corner toast,
+  // because a field device is glanced at, not watched.
+  Rns::InboxRecord nr;
+  if (Rns::Inbox::takeNotice(nr)) {
+    lastActivityMs = nowMs;
+    showIdle(false);
+    claimed = true;
+    char text[81];
+    const size_t tn = nr.textLen < sizeof(text) - 1 ? nr.textLen : sizeof(text) - 1;
+    memcpy(text, nr.text, tn); text[tn] = 0;
+    showIncoming(nr.from, text);
+  }
+  {
+    // An update owns the glass for its whole journey — receive, staging
+    // and install alike, from the same Progress record the portal
+    // serves, so the two can never tell different stories. On the edge
+    // back to idle a failure takes the glass with its own message.
+    static bool wasBusy = false;
+    const Ota::Progress op = Ota::progress();
+    const bool busy = op.stage == Ota::Stage::Receiving ||
+                      op.stage == Ota::Stage::Staged ||
+                      op.stage == Ota::Stage::Installing;
+    if (busy) {
+      lastActivityMs = nowMs;
+      showIdle(false);
+      claimed = true;
+      showFirmware(Ota::describe(op.stage), op.received, op.expected);
+      wasBusy = true;
+    } else if (wasBusy) {
+      wasBusy = false;
+      hideFirmware();
+      if (op.stage == Ota::Stage::Failed)
+        showIncoming(nullptr, op.message[0]
+            ? op.message
+            : "Firmware update failed — still on the old version.");
+    }
+  }
+  if (claimed) return PanelAction::Wake;
+
+  // The shell rests in two stages: first the spec's idle clock — the
+  // screen this device spends its life on, radio still listening — and
+  // the true blank only after four quiet timeouts, because the
+  // backlight is still the real money.
+  const uint32_t quiet = nowMs - lastActivityMs;
+  if (!blank) {
+    if (canBlank && quiet > Power::displaySleepMs() * 4) {
+      showIdle(false);
+      return PanelAction::Sleep;
+    }
+    showIdle(quiet > Power::displaySleepMs());
+  }
+  return PanelAction::None;
+}
 
 void swallowTouch() { Ui::swallowTouch(); }
 
