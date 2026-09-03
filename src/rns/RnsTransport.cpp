@@ -1245,6 +1245,9 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
     o.queuedMs = millis() ? millis() : 1;
     o.sentMs = 0;
     o.ok = false;
+    o.provedMs = 0;
+    o.rttMs = 0;
+    o.noProof = false;
     sOutCount++;
     taskEXIT_CRITICAL(&sOutMux);
   }
@@ -1276,6 +1279,34 @@ size_t lxmfOutbound(OutMessage* out, size_t max) {
   taskEXIT_CRITICAL(&sOutMux);
   return w;
 }
+
+#if HAS_LVGL_UI
+// Generous because it must be: a proof over a multi-hop SF11/12 path takes
+// tens of seconds, and a receipt left at its default of zero reads as
+// already expired at the transport's first sweep.
+constexpr int16_t kProofTimeoutS = 120;
+
+// The receipt's verdict lands here, on the RNS task: the oldest sent,
+// still-unconcluded entry for this destination — the same FIFO convention
+// the sent-stamp uses.
+static void stampProof(const uint8_t dest[16], bool delivered, uint32_t rttMs) {
+  taskENTER_CRITICAL(&sOutMux);
+  const uint32_t from = sOutCount > 8 ? sOutCount - 8 : 0;
+  for (uint32_t i = from; i < sOutCount; i++) {
+    OutMessage& o = sOutLog[i % 8];
+    if (o.sentMs && !o.provedMs && !o.noProof && memcmp(o.dest, dest, 16) == 0) {
+      if (delivered) {
+        o.provedMs = millis() ? millis() : 1;
+        o.rttMs = rttMs;
+      } else {
+        o.noProof = true;
+      }
+      break;
+    }
+  }
+  taskEXIT_CRITICAL(&sOutMux);
+}
+#endif
 
 static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry,
                      const Rns::Commands::Signal& signal,
@@ -1334,6 +1365,27 @@ static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetr
   const bool sent = packet.sent();
   if (!sent) log_w("lxmf: could not send the answer to %s",
                    RNS::Bytes(destHash, 16).toHex().c_str());
+#if HAS_LVGL_UI
+  if (sent && !telemetry) {
+    // The proof's journey home: the receipt lives on in the transport's
+    // ledger after this function returns, and these handlers stamp the
+    // outbound log when it concludes — delivered with a round trip, or
+    // given up honestly.
+    RNS::PacketReceipt receipt = packet.receipt();
+    if (receipt) {
+      receipt.set_timeout(kProofTimeoutS);
+      struct DestCopy { uint8_t b[16]; } dc;
+      memcpy(dc.b, destHash, 16);
+      receipt.set_delivery_handler([dc](const RNS::PacketReceipt& r) {
+        RNS::PacketReceipt concluded = r;   // get_rtt() is non-const
+        stampProof(dc.b, true, (uint32_t)(concluded.get_rtt() * 1000.0));
+      });
+      receipt.set_timeout_handler([dc](const RNS::PacketReceipt&) {
+        stampProof(dc.b, false, 0);
+      });
+    }
+  }
+#endif
   return sent;
 }
 
@@ -1420,6 +1472,10 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
                                 RNS::Type::Destination::SINGLE, "lxmf", "delivery");
     lxmfDest.set_packet_callback(onLxmfPacket);
     lxmfDest.set_link_established_callback(onLxmfLink);
+    // Prove what arrives: the library's default is PROVE_NONE, under which
+    // a sender's client waits forever for a delivery that actually
+    // happened. Every LXMF router proves its delivery destination.
+    lxmfDest.set_proof_strategy(RNS::Type::Destination::PROVE_ALL);
     log_i("lxmf: this node can be messaged at %s", lxmfDest.hash().toHex().c_str());
 
     // The page. NomadNet asks for /page/index.mu on a bare node address, so
