@@ -112,16 +112,20 @@ block). Check your local regulations before changing frequency or power.
 ## Discovery: announces, beacons, station IDs
 
 The node has a persistent **Reticulum identity** (X25519 + Ed25519 keys in
-NVS, kept across settings resets) and a `retimesh.node` destination. It
-**announces** it on boot and every `announce_interval` seconds (default 10
-min; 0 = off) — on LoRa and to connected Wi-Fi clients — so every RNS peer
-learns a path to it (`rnpath -t` lists it, `rnstatus` counts it). Announces
-heard from either side are parsed, **signature-verified** and listed as
-neighbours with aspect (`lxmf.delivery` = Sideband/LXMF peers,
-`nomadnetwork.node`, `retimesh.node`, …), hop count, display name and signal.
-That is the normal Reticulum way to see who is on the mesh, and it costs no
-protocol violations anywhere. `/api/status` exposes the node's `identity`
-and `destination` hashes.
+NVS, kept across settings resets). It **announces** two destinations under it
+— `lxmf.delivery`, the address a person messages, and `nomadnetwork.node`, the
+page a NomadNet client browses — on boot and every `announce_interval` seconds
+(default 10 min; 0 = off), on LoRa and to connected Wi-Fi clients, so every RNS
+peer learns a path to them (`rnpath -t` lists them, `rnstatus` counts them).
+Announces heard from either side are parsed, **signature-verified** and listed
+as neighbours with aspect (`lxmf.delivery` = Sideband/LXMF peers,
+`retimesh.node` = nodes on firmware that still announces it, …), hop count,
+display name and signal; `nomadnetwork.node` announces are heard and counted
+but not listed, because the node behind one is already in the table under its
+LXMF address. That is the normal Reticulum way to see who is on the mesh, and
+it costs no protocol violations anywhere. `/api/status` exposes the node's
+`identity`, `destination`, `lxmf_address` and `nomadnet_address` hashes — the
+last two are the ones peers learn from announces.
 
 **Beacons** (`beacon_interval`, default 0 = off) are a RetiMesh-only quick
 probe: `RM1 I <callsign> <version>` after that many seconds of TX silence,

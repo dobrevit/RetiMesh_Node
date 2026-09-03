@@ -58,8 +58,8 @@ automatically; the first message may take a few seconds while the path request
 crosses the air.
 
 Remote peers appear in Sideband's *Announce stream* as their announces arrive;
-Sideband lists LXMF and NomadNet aspects only, so the stream fills once a real
-LXMF peer announces rather than on the node's own `retimesh.node`. Setting
+Sideband lists LXMF and NomadNet aspects only — which is exactly what this node
+announces, so it shows up there itself alongside any real LXMF peer. Setting
 *Client interface mode* to `access_point` withholds announces from phones
 deliberately — see [reticulum.md](reticulum.md#interface-modes).
 

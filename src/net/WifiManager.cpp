@@ -388,7 +388,9 @@ void WifiManager::begin() {
       services[nServices++] = "http";
     }
     // So a browser or a script can tell the nodes apart without opening each
-    // one: the same identity the portal and the announce carry.
+    // one: the same node hash the portal reports as `destination`. It is not
+    // an announced address — /api/status has lxmf_address and
+    // nomadnet_address for that.
     for (size_t i = 0; i < nServices; i++) {
       const char* svc = services[i];
       MDNS.addServiceTxt(svc, "tcp", "name",  _ssid);

@@ -116,20 +116,29 @@ const char* aspectName(const uint8_t nameHash[NAME_HASH]);
 
 // Whether an announce for this aspect earns a row in the peers table.
 //
-// A RetiMesh node announces itself three times — as retimesh.node, as
-// lxmf.delivery and as nomadnetwork.node — because those are three audiences,
-// and each announce carries a different app_data shape. Every one of them
-// arrives here as a separate destination with its own hash, so a mesh of five
-// nodes fills the table with fifteen rows describing five things. Measured on
-// a bench of six peers: sixteen rows, six names.
+// One RetiMesh node arrives here as several destinations: lxmf.delivery and
+// nomadnetwork.node from this firmware, and retimesh.node as well from every
+// node still running a build that announced it — three audiences, three
+// app_data shapes, three hashes. A mesh of five nodes therefore fills the
+// table with up to fifteen rows describing five things. Measured on a bench
+// of six peers: sixteen rows, six names.
 //
-// Two of the three earn their place. lxmf.delivery is the address a person
-// sends to. retimesh.node is the only announce carrying a firmware version —
-// it is how a fleet that updates over the air can be inventoried without
-// touching it. nomadnetwork.node carries a name this node already has from
-// the other two and nothing else; its only purpose is letting a NomadNet
-// client find a page to browse, which is a reason to keep *announcing* ours
-// and no reason at all to remember everybody else's.
+// lxmf.delivery is the address a person sends to, so it stays. retimesh.node
+// stays too: this firmware no longer sends it (RnsTransport::loop), but the
+// unattended half of a fleet does until it is updated, and it is the only
+// announce that ever carried a firmware version — dropping it on receipt as
+// well would make those neighbours vanish from the list whose job is to show
+// what is out there. nomadnetwork.node carries a name a RetiMesh node already
+// has from the other two and nothing else; its only purpose is letting a
+// NomadNet client find a page to browse, which is a reason to keep
+// *announcing* ours and no reason at all to remember another RetiMesh node's.
+//
+// The cost of doing it by aspect rather than by identity: a peer whose *only*
+// announce is nomadnetwork.node — a plain `nomadnet --daemon` page host, not
+// a RetiMesh node — has no other row to be found under, and so is not listed
+// at all. The announce handler is handed the announcing identity; keying the
+// rule on "this identity is already in the table" rather than on the aspect
+// would keep such a host and still collapse a RetiMesh node to one row.
 //
 // Unknown aspects are kept. A name this table does not recognise is a peer
 // running something we have not met, which is exactly the thing an operator

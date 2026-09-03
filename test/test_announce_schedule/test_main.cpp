@@ -133,7 +133,6 @@ static void test_the_other_known_aspects_are_kept() {
   // to be redundant, and a rule that quietly grew would hide peers.
   TEST_ASSERT_TRUE(Rns::worthRemembering("lxmf.propagation"));
   TEST_ASSERT_TRUE(Rns::worthRemembering("rnstransport.probe"));
-  TEST_ASSERT_TRUE(Rns::worthRemembering("retimesh.node"));
 }
 
 static void test_a_node_that_still_announces_the_old_aspect_is_not_hidden() {

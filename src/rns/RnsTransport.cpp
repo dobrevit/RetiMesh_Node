@@ -298,7 +298,15 @@ public:
   void received_announce(const Bytes&, const RNS::Identity&, const Bytes&) override {}
   void received_announce(const Bytes& destHash, const RNS::Identity& identity, const Bytes& appData, const RNS::Packet& packet) override {
     (void)identity;
+    // This node's own announces come back: a neighbour rebroadcasts one and
+    // the next hop is heard here like anybody else's. Every destination it
+    // announces has to be named, not just the first — checking retimesh.node
+    // alone, which this firmware no longer announces at all, left the node
+    // filing itself as one of its own peers under lxmf.delivery, callsign and
+    // all, and remembering its own name against its own address.
     if (memcmp(destHash.data(), nodeIdentity.destHash(), Rns::HASH_LEN) == 0) return;
+    if (lxmfDest  && destHash == lxmfDest.hash())  return;
+    if (nomadDest && destHash == nomadDest.hash()) return;
     Neighbor n = {};
     Rns::toHex(destHash.data(), Rns::HASH_LEN, n.hash);
     const uint8_t* d = packet.data().data();               // pub(64) + name_hash(10) + ...
@@ -311,11 +319,11 @@ public:
       char* sp = strchr(n.name, ' ');
       if (sp) { strlcpy(n.version, sp + 1, sizeof(n.version)); *sp = '\0'; }
     }
-    // Heard, counted and logged — but not necessarily kept. Three announces
-    // describe one node and only two of them tell us anything; RnsAnnounce.h
-    // says which and why. Dropping the third here rather than at the display
-    // keeps the table itself a third smaller, which is the part that costs
-    // memory on a board that has none to spare.
+    // Heard, counted and logged — but not necessarily kept. Several announces
+    // describe one node and not all of them tell us anything; RnsAnnounce.h
+    // says which and why. Dropping one here rather than at the display keeps
+    // the table itself smaller, which is the part that costs memory on a board
+    // that has none to spare.
     //
     // Only this node's own peers list is affected. The path RNS learned from
     // the announce stays: this node forwards for others, and a transport that
@@ -1904,10 +1912,13 @@ void loop() {
       // one that is merely quiet, so it must not under-report: an announce
       // that is sent and not counted here reads, from the other end of a
       // status page, exactly like a node that has stopped talking. Which is
-      // why each one is counted as it goes out rather than all three summed
-      // at the end: summed, a throw from the second announce took the count
-      // of the first with it, and the node that had just talked reported that
-      // it had not.
+      // why each one is counted, and logged, as it goes out rather than both
+      // summed at the end: summed, a throw from the second announce took the
+      // count of the first with it, and the node that had just talked reported
+      // that it had not. For the same reason nothing is said ahead of a send —
+      // a line written first is read as proof of an announce that then threw,
+      // which is the same lie in the other direction.
+      //
       // retimesh.node is no longer announced. It carried a callsign and a
       // firmware version and nothing else — nothing listens on it, so nothing
       // could ever be delivered to it — and the same version reaches an
@@ -1925,26 +1936,28 @@ void loop() {
       // cheaper half-measure is announcing this once every several intervals
       // rather than every one — a version changes about as often as a
       // firmware is installed.
-      // Logged here, with the first announce that actually went out, for the
-      // same reason the counter is incremented here. At the end of the block a
-      // throw from the second or third announce took the line with it, so a
-      // node that had just announced twice left no record of having announced
-      // at all — and an operator reading the log concluded it had gone quiet.
-      log_i("announced lxmf.delivery and nomadnetwork.node for <%s> on all interfaces",
-            nodeIdentity.destHex());
-      // And the same node under its LXMF address, so it appears in the
-      // clients people actually use. The app_data is the shape LXMF expects
-      // rather than the free text above — the two announces describe one node
-      // to two audiences (RnsAnnounce.h).
+      //
+      // The node under its LXMF address, so it appears in the clients people
+      // actually use. The app_data is the shape LXMF expects — the two
+      // announces describe one node to two audiences (RnsAnnounce.h).
       uint8_t lx[64];
       const size_t lxLen = Rns::lxmfAppData(loraRadio.callsign(), 0, lx, sizeof(lx));
-      if (lxLen) { lxmfDest.announce(Bytes(lx, lxLen)); g_stats.announcesTx++; }
+      if (lxLen) {
+        lxmfDest.announce(Bytes(lx, lxLen));
+        g_stats.announcesTx++;
+        // The address a peer will actually report back, not the node's
+        // retimesh.node destination: that one is no longer announced, so an
+        // operator matching the logged hash against a neighbour list or
+        // `rnpath -t` never found it.
+        log_i("announced lxmf.delivery <%s> on all interfaces", lxmfDest.hash().toHex().c_str());
+      }
       // And as something to browse. NomadNet announces its node name as plain
-      // UTF-8 rather than the msgpack array LXMF uses — a third audience, and
-      // the third shape, from one node.
+      // UTF-8 rather than the msgpack array LXMF uses — a second audience, and
+      // a second shape, from one node.
       const char* nn = loraRadio.callsign();
       nomadDest.announce(Bytes((const uint8_t*)nn, strlen(nn)));
       g_stats.announcesTx++;
+      log_i("announced nomadnetwork.node <%s> on all interfaces", nomadDest.hash().toHex().c_str());
     }
   });
 
