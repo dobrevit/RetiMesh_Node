@@ -55,6 +55,7 @@ Kind kindFor(const char* key, const char* value, bool quoted) {
   if (strcmp(key, "display.brightness") == 0)       return Kind::Slider;
   if (strcmp(key, "radio.region") == 0)             return Kind::Region;
   if (strcmp(key, "wifi.security") == 0)            return Kind::Words;
+  if (strcmp(key, "display.theme") == 0)            return Kind::Words;
   if (strcmp(key, "transport.power_profile") == 0)  return Kind::Words;
   // Quoted is the funnel's own convention for free text (renderStr quotes,
   // bools and numbers render bare) — so an SSID that happens to read "off"
@@ -79,6 +80,10 @@ Kind kindFor(const char* key, const char* value, bool quoted) {
 // went silently stale the day the enum grew.
 void wordsFor(const char* key, char* out, size_t len) {
   size_t n = 0;
+  if (strcmp(key, "display.theme") == 0) {
+    snprintf(out, len, "night\nday");
+    return;
+  }
   if (strcmp(key, "wifi.security") == 0) {
     for (uint8_t i = 0; i <= (uint8_t)ApSecurity::WPA3; i++)
       n += snprintf(out + n, len - n, "%s%s", i ? "\n" : "",

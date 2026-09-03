@@ -144,6 +144,9 @@ struct DisplaySettings {
   // nothing still believes it is on, and going dark is the sleep timer's
   // job. The panel maps it through PWM.
   uint8_t brightness = 80;
+  // Variant D: the daylight palette, for direct sun on a transflective
+  // panel. Night is the design's home ground.
+  bool daylight = false;
 };
 
 struct MaintenanceSettings {

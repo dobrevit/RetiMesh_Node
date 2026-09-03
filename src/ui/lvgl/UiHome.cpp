@@ -218,7 +218,10 @@ void openHome() {
   // The bar steals the bottom 50 px from the card column.
   lv_obj_set_style_pad_bottom(body, 54, 0);
 
-  lv_timer_create(refreshHome, 1000, nullptr);
+  // Once: retheme rebuilds home, and the timer serves whichever home the
+  // statics point at.
+  static lv_timer_t* sHomeTimer = nullptr;
+  if (!sHomeTimer) sHomeTimer = lv_timer_create(refreshHome, 1000, nullptr);
   refreshHome(nullptr);
 
   lv_obj_t* prev = lv_screen_active();   // the boot splash, its job done

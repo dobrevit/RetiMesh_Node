@@ -153,6 +153,10 @@ void barTick(lv_timer_t*) {
   add(batterySymbol(b));
   if (b.present) { char p[8]; snprintf(p, sizeof(p), " %u%%", b.percent); add(p); }
 
+  // The daylight toggle reaches the glass here, whichever door set it —
+  // the settings form or the console funnel.
+  if (settings.display().daylight != UiTheme::daylight()) Ui::retheme();
+
   // Unchanged text is not re-set: LVGL reallocates and repaints on every
   // set, and this bar changes at most once a minute.
   if (strcmp(lv_label_get_text(sBarIcons), text)) lv_label_set_text(sBarIcons, text);
@@ -255,6 +259,7 @@ bool shellInit(TftPanel& panel) {
   lv_display_set_buffers(disp, sBuf1, nullptr, sizeof(sBuf1),
                          LV_DISPLAY_RENDER_MODE_PARTIAL);
   UiTheme::init(disp);                   // before any widget exists
+  UiTheme::setDaylight(settings.display().daylight);
   // text_font is an inherited style, and overlays live on the top layer —
   // outside any themed screen's inheritance. Without this, their labels
   // fall back to LV_FONT_DEFAULT, which lacks the design's delimiters: the
@@ -414,6 +419,27 @@ void back() {
 }
 
 bool atRoot() { return sDepth == 0; }
+
+void retheme() {
+  UiTheme::setDaylight(settings.display().daylight);
+  // The shared styles refresh in place, but colors baked into widgets at
+  // creation outlive them, so the shell rebuilds from the ground: the
+  // stacked screens die with their colors and home is born in the new
+  // ones. The keyboard unbinds first, as in back() — the textarea it
+  // points into is about to be freed.
+  lv_keyboard_set_textarea(sKeyboard, nullptr);
+  lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_bg_color(sKeyboard, lv_color_hex(UiTheme::kGround2), 0);
+  lv_obj_set_style_text_color(lv_layer_top(), lv_color_hex(UiTheme::kInk), 0);
+  lv_obj_set_style_text_color(sBarName, lv_color_hex(UiTheme::kInkDim), 0);
+  lv_obj_set_style_text_color(sBarIcons, lv_color_hex(UiTheme::kInkDim), 0);
+  while (sDepth) {
+    lv_obj_t* s = sStack[--sDepth];
+    if (s && lv_obj_is_valid(s)) lv_obj_delete(s);
+  }
+  resetIdle();
+  openHome();   // deletes the active screen, builds home in the new palette
+}
 
 lv_obj_t* newScreen(const char* title) {
   lv_obj_t* scr = lv_obj_create(nullptr);
