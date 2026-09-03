@@ -83,8 +83,18 @@ void openPowerMenu();
 uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off
 void setRotation(uint8_t quarterTurns);
 
-// The two overlays the display's rest policy drives: the idle clock the
-// panel collapses to before it truly blanks, and the full-screen incoming
+// The shell's rest-and-alarm policy, one call per display pass: glass
+// activity feeds the timer, a fresh message or a running update claims the
+// glass, and rest comes in two stages — the idle clock first, the true
+// blank after four quiet timeouts, because the backlight is the real
+// money. The caller applies the returned action to the panel and keeps
+// every backlight register to itself.
+enum class PanelAction : uint8_t { None, Wake, Sleep };
+PanelAction restTick(uint32_t nowMs, uint32_t& lastActivityMs,
+                     bool blank, bool canBlank);
+
+// The two overlays the rest policy drives: the idle clock the panel
+// collapses to before it truly blanks, and the full-screen incoming
 // interrupt — a field device is glanced at, not watched.
 void showIdle(bool on);
 bool idleShowing();
@@ -103,6 +113,8 @@ inline uint32_t loop() { return 1000; }
 inline void stepTab(int8_t) {}
 inline void onBlank(bool) {}
 inline bool touchActive() { return false; }
+enum class PanelAction : uint8_t { None, Wake, Sleep };
+inline PanelAction restTick(uint32_t, uint32_t&, bool, bool) { return PanelAction::None; }
 inline void swallowTouch() {}
 inline void openPowerMenu() {}
 inline uint8_t takePowerAction() { return 0; }

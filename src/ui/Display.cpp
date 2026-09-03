@@ -138,10 +138,6 @@ void Display::displayTask(void* self) {
 #endif
     uint32_t now = millis();
 #if HAS_LVGL_UI
-    // The shell owns the touch layer, so the activity timer has to ask it
-    // about fingers — the buttons alone left the panel blanking under an
-    // operator mid-navigation.
-    if (sShellUp && LvglUi::touchActive()) d->_lastActivityMs = now;
     {
       // The brightness setting reaches the glass here, once per change.
       static uint8_t lastB = 255;
@@ -149,56 +145,15 @@ void Display::displayTask(void* self) {
       if (b != lastB) { lastB = b; d->_panelImpl.setBrightness(b); }
     }
     if (sShellUp) {
-      // A fresh message interrupts everything: wake the glass and put the
-      // sender on it — the spec's full-screen alert, not a corner toast,
-      // because a field device is glanced at, not watched.
-      Rns::InboxRecord nr;
-      if (Rns::Inbox::takeNotice(nr)) {
-        d->_lastActivityMs = now;
-        LvglUi::showIdle(false);
-        if (d->_blank) d->setBlank(false);
-        char text[81];
-        const size_t tn = nr.textLen < sizeof(text) - 1 ? nr.textLen : sizeof(text) - 1;
-        memcpy(text, nr.text, tn); text[tn] = 0;
-        LvglUi::showIncoming(nr.from, text);
-      }
-      {
-        // An update owns the glass for its whole journey — receive, staging
-        // and install alike, from the same Progress record the portal
-        // serves, so the two can never tell different stories. On the edge
-        // back to idle a failure takes the glass with its own message.
-        static bool wasBusy = false;
-        const Ota::Progress op = Ota::progress();
-        const bool busy = op.stage == Ota::Stage::Receiving ||
-                          op.stage == Ota::Stage::Staged ||
-                          op.stage == Ota::Stage::Installing;
-        if (busy) {
-          d->_lastActivityMs = now;
-          LvglUi::showIdle(false);
+      // The rest-and-alarm policy is the shell's own (LvglUi::restTick);
+      // the panel applies the verdict and keeps the backlight to itself.
+      switch (LvglUi::restTick(now, d->_lastActivityMs, d->_blank,
+                               d->_panel->blanks())) {
+        case LvglUi::PanelAction::Wake:
           if (d->_blank) d->setBlank(false);
-          LvglUi::showFirmware(Ota::describe(op.stage), op.received, op.expected);
-          wasBusy = true;
-        } else if (wasBusy) {
-          wasBusy = false;
-          LvglUi::hideFirmware();
-          if (op.stage == Ota::Stage::Failed)
-            LvglUi::showIncoming(nullptr, op.message[0]
-                ? op.message
-                : "Firmware update failed — still on the old version.");
-        }
-      }
-      // The shell rests in two stages: first the spec's idle clock — the
-      // screen this device spends its life on, radio still listening — and
-      // the true blank only after four quiet timeouts, because the
-      // backlight is still the real money.
-      const uint32_t quiet = now - d->_lastActivityMs;
-      if (!d->_blank) {
-        if (d->_panel->blanks() && quiet > Power::displaySleepMs() * 4) {
-          LvglUi::showIdle(false);
-          d->setBlank(true);
-        } else {
-          LvglUi::showIdle(quiet > Power::displaySleepMs());
-        }
+          break;
+        case LvglUi::PanelAction::Sleep: d->setBlank(true); break;
+        case LvglUi::PanelAction::None:  break;
       }
     } else
 #endif
