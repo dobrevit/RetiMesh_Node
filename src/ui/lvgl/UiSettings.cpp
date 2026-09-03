@@ -556,14 +556,25 @@ void openCategory(lv_event_t* e) {
         settings.factoryReset();
         // The control says erase, so the personal data goes with the
         // settings: the stored conversations and the remembered peer names.
-        // The RNS identity survives — destroying the key is the design's own
-        // dedicated screen, with its own words, another day.
+        // The RNS identity survives — destroying the key is the dedicated
+        // screen below, with its own words.
         Rns::Inbox::wipe();
         PeerNames::wipe();
         Ui::toast("erased — restarting");
         Bootloader::reboot(Bootloader::Source::Ui);
       }
     }, nullptr);
+
+    lv_obj_t* eid = lv_button_create(body);
+    UiTheme::actionButton(eid);
+    lv_obj_set_width(eid, lv_pct(100));
+    lv_obj_set_height(eid, 40);
+    lv_obj_t* eil = lv_label_create(eid);
+    lv_label_set_text(eil, "ERASE IDENTITY " LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(eil, lv_color_hex(UiTheme::kBad), 0);
+    lv_obj_center(eil);
+    lv_obj_add_event_cb(eid, [](lv_event_t*) { Ui::openEraseIdentity(); },
+                        LV_EVENT_CLICKED, nullptr);
   }
 
   // Cancel and Save, side by side, the row every form ends with.
