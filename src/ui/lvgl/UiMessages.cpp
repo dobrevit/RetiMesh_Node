@@ -280,7 +280,7 @@ void openQuick(lv_event_t*) {
   lv_obj_t* note = lv_label_create(body);
   lv_label_set_text(note, "One tap, no keyboard, minimal airtime.");
   lv_obj_set_style_text_color(note, lv_color_hex(UiTheme::kInkLabel), 0);
-  Ui::push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  Ui::push(Ui::screenOf(body));
 }
 
 // --- the thread screen ------------------------------------------------------
@@ -341,7 +341,7 @@ void openThreadScreen(const uint8_t from[16]) {
     if (sList && lv_obj_is_valid(sList)) listRebuild();
   }, nullptr);
 
-  lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
+  lv_obj_t* scr = Ui::screenOf(body);
   lv_timer_t* t = lv_timer_create(threadTick, 2000, nullptr);
   lv_obj_add_event_cb(scr, [](lv_event_t* e) {
     lv_timer_delete((lv_timer_t*)lv_event_get_user_data(e));
@@ -468,7 +468,7 @@ void openMessages() {
       openThreadScreen(dest);
     }, LV_EVENT_CLICKED, &ctx);
   }, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
+  lv_obj_t* scr = Ui::screenOf(body);
   // Arrivals refresh the open list; before this, a message that came in
   // while the screen was showing stayed invisible until reopening.
   lv_timer_t* t = lv_timer_create([](lv_timer_t*) {

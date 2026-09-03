@@ -135,7 +135,7 @@ void openDetail(lv_event_t* e) {
     Ui::toast("announce asked for");
   }, LV_EVENT_CLICKED, nullptr);
 
-  Ui::push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  Ui::push(Ui::screenOf(body));
 }
 
 } // namespace
@@ -203,7 +203,7 @@ void openDestinations() {
     Ui::toast("announce asked for");
   }, LV_EVENT_CLICKED, nullptr);
 
-  push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  push(Ui::screenOf(body));
 }
 
 } // namespace Ui

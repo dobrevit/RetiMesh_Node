@@ -441,6 +441,10 @@ void retheme() {
   openHome();   // deletes the active screen, builds home in the new palette
 }
 
+// The one place that knows how deep a body sits in its screen, so pages
+// stop re-deriving "the grandparent" by hand at every push and teardown.
+lv_obj_t* screenOf(lv_obj_t* body) { return lv_obj_get_parent(lv_obj_get_parent(body)); }
+
 lv_obj_t* newScreen(const char* title) {
   lv_obj_t* scr = lv_obj_create(nullptr);
   UiTheme::screen(scr);

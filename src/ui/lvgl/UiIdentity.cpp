@@ -126,7 +126,7 @@ void openIdentity() {
   lv_obj_add_event_cb(erase, [](lv_event_t*) { openEraseIdentity(); },
                       LV_EVENT_CLICKED, nullptr);
 
-  push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  push(Ui::screenOf(body));
 }
 
 // Design screen 21: hold-to-confirm with its own words, never a second
@@ -174,7 +174,7 @@ void openEraseIdentity() {
     Bootloader::reboot(Bootloader::Source::Ui);
   }, nullptr);
 
-  push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  push(Ui::screenOf(body));
 }
 
 } // namespace Ui

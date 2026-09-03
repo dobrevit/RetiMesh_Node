@@ -59,6 +59,7 @@ bool atRoot();
 // when `title` is given — a header row carrying a back arrow and the title.
 // Returns the content container the caller fills (flex column, scrollable).
 lv_obj_t* newScreen(const char* title);
+lv_obj_t* screenOf(lv_obj_t* body);      // the screen newScreen built around body
 
 // A transient result line, top centre, above everything.
 void toast(const char* text);

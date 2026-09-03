@@ -179,7 +179,7 @@ namespace Ui {
 
 void openHome() {
   lv_obj_t* body = newScreen(nullptr);   // home carries no back arrow
-  lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
+  lv_obj_t* scr = Ui::screenOf(body);
 
   // The board, in the spec's order: the clock first, then the readings.
   sClock = lv_label_create(body);

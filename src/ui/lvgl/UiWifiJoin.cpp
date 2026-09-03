@@ -182,7 +182,7 @@ void openWifiJoin() {
   lv_obj_center(hl);
   lv_obj_add_event_cb(hidden, askHidden, LV_EVENT_CLICKED, nullptr);
 
-  lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
+  lv_obj_t* scr = Ui::screenOf(body);
   lv_timer_t* t = lv_timer_create(heartbeat, 250, nullptr);
   lv_obj_add_event_cb(scr, [](lv_event_t* e) {
     lv_timer_delete((lv_timer_t*)lv_event_get_user_data(e));

@@ -111,10 +111,15 @@ bool restartPending(char* err, size_t n) {
 // endBatch — arming per key made key N+1 Busy on key N's restart.
 bool sBatch = false;
 bool sWantRestart = false;
+// Who asked for the change now being committed — set() records it before
+// dispatching. Concurrent callers could in principle interleave; the worst
+// case is one mislabeled source on one log line, which beats threading an
+// argument through fifty entry lambdas.
+Bootloader::Source sOrigin = Bootloader::Source::Settings;
 
 Result askRestart() {
   if (sBatch) { sWantRestart = true; return Result::OkRestart; }
-  return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
+  return Bootloader::reboot(sOrigin) ? Result::OkRestart : Result::OkNextBoot;
 }
 
 Result commitRadio(RadioSettings& r, char* err, size_t n) {
@@ -174,7 +179,7 @@ Result endBatch() {
   sBatch = false;
   if (!sWantRestart) return Result::Ok;
   sWantRestart = false;
-  return Bootloader::reboot() ? Result::OkRestart : Result::OkNextBoot;
+  return Bootloader::reboot(sOrigin) ? Result::OkRestart : Result::OkNextBoot;
 }
 
 // Refused here rather than at the moment a command arrives: a list that does
@@ -234,7 +239,7 @@ Result commitAdmin(const char* password, char* err, size_t n) {
 // asks for the restart when one is needed.
 Result commitLinks(const LinkSettings& want, const bool* changed, char* err, size_t n) {
   const char* detail = nullptr;
-  switch (LocalLink::applyLinks(want, changed, Bootloader::Source::Console, &detail)) {
+  switch (LocalLink::applyLinks(want, changed, sOrigin, &detail)) {
     case LocalLink::Apply::Unchanged:
     case LocalLink::Apply::Saved:            return Result::Ok;
     case LocalLink::Apply::SavedRestarting:  return Result::OkRestart;
@@ -566,7 +571,9 @@ bool sectionExists(const char* prefix) {
   return false;
 }
 
-Result set(const char* key, const char* value, char* err, size_t errLen) {
+Result set(const char* key, const char* value, char* err, size_t errLen,
+           Bootloader::Source origin) {
+  sOrigin = origin;
   for (size_t i = 0; i < kCount; i++)
     if (!strcasecmp(kFields[i].key, key)) return kFields[i].assign(value, err, errLen);
   return Result::Unknown;

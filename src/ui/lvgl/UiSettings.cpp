@@ -153,7 +153,8 @@ bool rowChanged(const Row& r) {
 void applySliderRow(Row* row) {
   char v[8], err[96] = "";
   snprintf(v, sizeof(v), "%d", (int)lv_slider_get_value(row->control));
-  const SettingsFields::Result res = SettingsFields::set(row->key, v, err, sizeof(err));
+  const SettingsFields::Result res =
+      SettingsFields::set(row->key, v, err, sizeof(err), Bootloader::Source::Ui);
   if (res == SettingsFields::Result::Ok)
     strlcpy(row->initial, v, sizeof(row->initial));
   else Ui::toast(err[0] ? err : SettingsFields::resultText(res));
@@ -282,7 +283,8 @@ void saveForm(lv_event_t*) {
     if (!r.used || !rowChanged(r)) continue;
     char value[160], err[128] = "";
     rowValue(r, value, sizeof(value));
-    const SettingsFields::Result res = SettingsFields::set(r.key, value, err, sizeof(err));
+    const SettingsFields::Result res =
+        SettingsFields::set(r.key, value, err, sizeof(err), Bootloader::Source::Ui);
     const bool ok = res == SettingsFields::Result::Ok ||
                     res == SettingsFields::Result::OkRestart ||
                     res == SettingsFields::Result::OkNextBoot;
@@ -308,7 +310,10 @@ void saveForm(lv_event_t*) {
 // The radio form's consequence line: every parameter change costs range or
 // airtime, so the cost is printed under the controls and follows the staged
 // values — what the operator is about to APPLY, not what the node runs.
-lv_obj_t* sRadioFoot = nullptr;
+// Owner-checked like UiNav's dial: back()'s deferred 150 ms delete must
+// never null a freshly opened page's statics.
+lv_obj_t* sRadioFoot  = nullptr;
+lv_obj_t* sRadioOwner = nullptr;
 
 const Row* rowFor(const char* key) {
   for (const Row& r : sRows)
@@ -321,9 +326,16 @@ void radioFootTick(lv_timer_t*) {
   char v[24];
   Airtime::Params p;
   int8_t dbm = settings.radio().txDbm;
-  if (const Row* r = rowFor("radio.sf"))     { rowValue(*r, v, sizeof(v)); p.sf = (uint8_t)atoi(v); }
-  if (const Row* r = rowFor("radio.bw_khz")) { rowValue(*r, v, sizeof(v)); p.bwKhz = (float)atof(v); }
-  if (const Row* r = rowFor("radio.cr"))     { rowValue(*r, v, sizeof(v)); p.cr = (uint8_t)atoi(v); }
+  // All three shaping rows must be this page's own: Params' defaults pass
+  // the range check below, so a missing row — another section's rows in
+  // the arena — would print a confident estimate nobody chose.
+  const Row* rsf = rowFor("radio.sf");
+  const Row* rbw = rowFor("radio.bw_khz");
+  const Row* rcr = rowFor("radio.cr");
+  if (!rsf || !rbw || !rcr) return;
+  rowValue(*rsf, v, sizeof(v)); p.sf = (uint8_t)atoi(v);
+  rowValue(*rbw, v, sizeof(v)); p.bwKhz = (float)atof(v);
+  rowValue(*rcr, v, sizeof(v)); p.cr = (uint8_t)atoi(v);
   if (const Row* r = rowFor("radio.tx_dbm")) { rowValue(*r, v, sizeof(v)); dbm = (int8_t)atoi(v); }
   if (p.sf < 5 || p.sf > 12 || p.bwKhz < 7.0f || p.cr < 5 || p.cr > 8) return;  // mid-edit
   Airtime a;
@@ -341,8 +353,10 @@ void radioFootTick(lv_timer_t*) {
   if (strcmp(lv_label_get_text(sRadioFoot), line)) lv_label_set_text(sRadioFoot, line);
 }
 
-// The station's line on the wifi page, kept live while the page is open.
+// The station's line on the wifi page, kept live while the page is open,
+// with the same owner rule as the radio foot above.
 lv_obj_t* sStaStatus = nullptr;
+lv_obj_t* sStaOwner  = nullptr;
 
 void staStatusTick(lv_timer_t*) {
   if (!sStaStatus || !lv_obj_is_valid(sStaStatus)) return;
@@ -389,7 +403,8 @@ void wifiExtras(lv_obj_t* body) {
     const bool want = lv_obj_has_state(sw, LV_STATE_CHECKED);
     char err[128] = "";
     const SettingsFields::Result res =
-        SettingsFields::set("links.wifi", want ? "on" : "off", err, sizeof(err));
+        SettingsFields::set("links.wifi", want ? "on" : "off", err, sizeof(err),
+                            Bootloader::Source::Ui);
     const bool ok = res == SettingsFields::Result::Ok ||
                     res == SettingsFields::Result::OkRestart ||
                     res == SettingsFields::Result::OkNextBoot;
@@ -401,13 +416,25 @@ void wifiExtras(lv_obj_t* body) {
       Ui::toast(err[0] ? err : SettingsFields::resultText(res));
     } else if (res != SettingsFields::Result::Ok) {
       Ui::toast(SettingsFields::resultText(res));
+      // A restart is armed: the funnel now refuses every write, so the
+      // form below could be edited but never saved. The page steps aside
+      // instead of offering dead controls.
+      if (res == SettingsFields::Result::OkRestart) Ui::back();
     }
   }, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_timer_t* t = lv_timer_create(staStatusTick, 1000, nullptr);
-  lv_obj_add_event_cb(lv_obj_get_parent(lv_obj_get_parent(body)),
+  sStaOwner = Ui::screenOf(body);
+  lv_obj_add_event_cb(sStaOwner,
                       [](lv_event_t* ev) {
                         lv_timer_delete((lv_timer_t*)lv_event_get_user_data(ev));
-                        sStaStatus = nullptr;
+                        // The timer always dies with its screen; the
+                        // statics only when the dying screen still owns
+                        // them — a stale deferred delete must not null a
+                        // freshly opened page's.
+                        if ((lv_obj_t*)lv_event_get_target(ev) == sStaOwner) {
+                          sStaOwner = nullptr;
+                          sStaStatus = nullptr;
+                        }
                       }, LV_EVENT_DELETE, t);
   staStatusTick(nullptr);
 
@@ -436,6 +463,14 @@ void wifiExtras(lv_obj_t* body) {
   }
 }
 
+// wifiExtras' other half: the scanner (and its hidden-SSID dialog) owns
+// joining, so the raw credential rows leave the glass — a second,
+// unverified way to say the same thing. One decision, one place: removing
+// the wifi table row means removing this with it.
+bool wifiHidesKey(const char* k) {
+  return strcmp(k, "wifi.sta_ssid") == 0 || strcmp(k, "wifi.sta_password") == 0;
+}
+
 void radioExtras(lv_obj_t* body) {
   lv_obj_t* card = lv_obj_create(body);
   UiTheme::card(card);
@@ -452,10 +487,14 @@ void radioExtras(lv_obj_t* body) {
   lv_label_set_text(sRadioFoot, "");
   lv_obj_align_to(sRadioFoot, cl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 3);
   lv_timer_t* t = lv_timer_create(radioFootTick, 500, nullptr);
-  lv_obj_add_event_cb(lv_obj_get_parent(lv_obj_get_parent(body)),
+  sRadioOwner = Ui::screenOf(body);
+  lv_obj_add_event_cb(sRadioOwner,
                       [](lv_event_t* ev) {
                         lv_timer_delete((lv_timer_t*)lv_event_get_user_data(ev));
-                        sRadioFoot = nullptr;
+                        if ((lv_obj_t*)lv_event_get_target(ev) == sRadioOwner) {
+                          sRadioOwner = nullptr;
+                          sRadioFoot = nullptr;
+                        }
                       }, LV_EVENT_DELETE, t);
   radioFootTick(nullptr);
 }
@@ -499,17 +538,15 @@ void maintenanceExtras(lv_obj_t* body) {
   lv_obj_set_style_text_color(el, lv_color_hex(UiTheme::kBad), 0);
   lv_obj_center(el);
   Ui::onHeld2s(erase, [](void*) {
-    {
-      settings.factoryReset();
-      // The control says erase, so the personal data goes with the
-      // settings: the stored conversations and the remembered peer names.
-      // The RNS identity survives — destroying the key is the dedicated
-      // screen below, with its own words.
-      Rns::Inbox::wipe();
-      PeerNames::wipe();
-      Ui::toast("erased — restarting");
-      Bootloader::reboot(Bootloader::Source::Ui);
-    }
+    settings.factoryReset();
+    // The control says erase, so the personal data goes with the
+    // settings: the stored conversations and the remembered peer names.
+    // The RNS identity survives — destroying the key is the dedicated
+    // screen below, with its own words.
+    Rns::Inbox::wipe();
+    PeerNames::wipe();
+    Ui::toast("erased — restarting");
+    Bootloader::reboot(Bootloader::Source::Ui);
   }, nullptr);
 
   lv_obj_t* eid = lv_button_create(body);
@@ -523,19 +560,22 @@ void maintenanceExtras(lv_obj_t* body) {
   lv_obj_add_event_cb(eid, [](lv_event_t*) { Ui::openEraseIdentity(); },
                       LV_EVENT_CLICKED, nullptr);
 }
+
 // Every section's hand-built furniture, keyed by name: what stands above
 // the generated rows and what follows them. openCategory consults the
 // table instead of growing another strcmp branch — a new section adds a
-// row here, not a block there.
+// row here, not a block there. (Per-row tweaks — transport.wifi_mode's
+// lock-and-explain in the row loop — are about one control, not a
+// section's furniture, and stay with the row that owns them.)
 struct SectionExtras {
   const char* section;
   void (*before)(lv_obj_t* body);        // above the generated rows
   void (*after)(lv_obj_t* body);         // below them
 };
 constexpr SectionExtras kSectionExtras[] = {
-  { "wifi",        wifiExtras, nullptr          },
-  { "radio",       nullptr,    radioExtras      },
-  { "display",     nullptr,    displayExtras    },
+  { "wifi",        wifiExtras, nullptr           },
+  { "radio",       nullptr,    radioExtras       },   // after only: reads sRows
+  { "display",     nullptr,    displayExtras     },
   { "maintenance", nullptr,    maintenanceExtras },
 };
 
@@ -550,21 +590,31 @@ void openCategory(lv_event_t* e) {
   if (title[0] >= 'a' && title[0] <= 'z') title[0] -= 32;
   lv_obj_t* body = Ui::newScreen(title);
 
-  const SectionExtras* extras = nullptr;
-  for (const SectionExtras& x : kSectionExtras)
-    if (strcmp(section, x.section) == 0) { extras = &x; break; }
-  if (extras && extras->before) extras->before(body);
-
-
+  // The arena is cleared before any hook runs: a before-hook that asks
+  // rowFor() must see this page's rows (none yet), never the last page's
+  // freed controls.
   memset(sRows, 0, sizeof(sRows));
   size_t used = 0;
-  for (size_t i = 0; i < SettingsFields::count() && used < kMaxRows; i++) {
+
+  // Case-insensitive to match keyInSection: the rows and the furniture
+  // must agree on what a section name is.
+  const SectionExtras* extras = nullptr;
+  for (const SectionExtras& x : kSectionExtras)
+    if (strcasecmp(section, x.section) == 0) { extras = &x; break; }
+  if (extras && extras->before) extras->before(body);
+
+  for (size_t i = 0; i < SettingsFields::count(); i++) {
     if (!SettingsFields::keyInSection(i, section)) continue;
-    // Joining lives on the scanner now — a picked network proves itself on
-    // air before it is saved, and the hidden-SSID dialog covers the rest. A
-    // raw row here would be a second, unverified way to say the same thing.
     const char* k = SettingsFields::keyAt(i);
-    if (k && (strcmp(k, "wifi.sta_ssid") == 0 || strcmp(k, "wifi.sta_password") == 0)) continue;
+    if (k && wifiHidesKey(k)) continue;
+    if (used >= kMaxRows) {
+      // Truncation must be visible: the keys past the cap stay real on
+      // the console, and silence here would read as "that setting is
+      // gone".
+      log_w("gui: settings/%s holds more keys than the form (%u); the rest stay console-only",
+            section, (unsigned)kMaxRows);
+      break;
+    }
     char line[224];
     if (!SettingsFields::render(i, line, sizeof(line))) continue;
     char* eq = strchr(line, '=');
@@ -624,7 +674,7 @@ void openCategory(lv_event_t* e) {
   lv_obj_center(sl);
   lv_obj_add_event_cb(save, saveForm, LV_EVENT_CLICKED, nullptr);
 
-  Ui::push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  Ui::push(Ui::screenOf(body));
 }
 
 // The sections, in table order, each once. Static storage because the event
@@ -641,6 +691,17 @@ void openSettings() {
   lv_obj_t* list = lv_list_create(body);
   lv_obj_set_width(list, lv_pct(100));
   lv_obj_set_flex_grow(list, 1);
+
+  // The table's names are key prefixes by contract; a renamed section
+  // would otherwise leave a silently dead entry, sparkline and all.
+  static bool sTableChecked = false;
+  if (!sTableChecked) {
+    sTableChecked = true;
+    for (const SectionExtras& x : kSectionExtras)
+      if (!SettingsFields::sectionExists(x.section))
+        log_w("gui: the section table names \"%s\", which the key table does not know",
+              x.section);
+  }
 
   size_t nSections = 0;
   for (size_t i = 0; i < SettingsFields::count(); i++) {
@@ -669,7 +730,7 @@ void openSettings() {
   lv_obj_t* about = lv_list_add_button(list, LV_SYMBOL_LIST, "About");
   lv_obj_add_event_cb(about, [](lv_event_t*) { Ui::openAbout(); }, LV_EVENT_CLICKED, nullptr);
 
-  push(lv_obj_get_parent(lv_obj_get_parent(body)));
+  push(Ui::screenOf(body));
 }
 
 } // namespace Ui
