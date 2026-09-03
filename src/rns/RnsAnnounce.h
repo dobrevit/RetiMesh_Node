@@ -35,6 +35,8 @@
 // ============================================================================
 #pragma once
 
+#include <string.h>
+
 #include <Arduino.h>
 #include "Config.h"
 
@@ -111,6 +113,30 @@ bool parseAnnounce(const uint8_t* raw, size_t len, Announce& out);
 
 // Human name for a known name hash ("lxmf.delivery", ...), else nullptr.
 const char* aspectName(const uint8_t nameHash[NAME_HASH]);
+
+// Whether an announce for this aspect earns a row in the peers table.
+//
+// A RetiMesh node announces itself three times — as retimesh.node, as
+// lxmf.delivery and as nomadnetwork.node — because those are three audiences,
+// and each announce carries a different app_data shape. Every one of them
+// arrives here as a separate destination with its own hash, so a mesh of five
+// nodes fills the table with fifteen rows describing five things. Measured on
+// a bench of six peers: sixteen rows, six names.
+//
+// Two of the three earn their place. lxmf.delivery is the address a person
+// sends to. retimesh.node is the only announce carrying a firmware version —
+// it is how a fleet that updates over the air can be inventoried without
+// touching it. nomadnetwork.node carries a name this node already has from
+// the other two and nothing else; its only purpose is letting a NomadNet
+// client find a page to browse, which is a reason to keep *announcing* ours
+// and no reason at all to remember everybody else's.
+//
+// Unknown aspects are kept. A name this table does not recognise is a peer
+// running something we have not met, which is exactly the thing an operator
+// wants to see in the list rather than the thing to hide from it.
+inline bool worthRemembering(const char* aspect) {
+  return !(aspect && strcmp(aspect, "nomadnetwork.node") == 0);
+}
 
 // Best-effort display name from app_data (plain text, or the first element
 // of an LXMF-style msgpack array). Returns bytes written (0 = none).
