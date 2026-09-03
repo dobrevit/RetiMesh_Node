@@ -361,6 +361,14 @@ const Entry kFields[] = {
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.display().touchWake ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       DisplaySettings d = settings.display(); d.touchWake = b; return commitDisplay(d, e, n); } },
+  { "display.theme",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.display().daylight ? "day" : "night"); },
+    [](const char* v, char* e, size_t n) {
+      bool day;
+      if      (strcmp(v, "day") == 0)   day = true;
+      else if (strcmp(v, "night") == 0) day = false;
+      else { snprintf(e, n, "expected night or day"); return Result::BadValue; }
+      DisplaySettings d = settings.display(); d.daylight = day; return commitDisplay(d, e, n); } },
 
   // --- wifi --------------------------------------------------------------
   { "wifi.ssid",

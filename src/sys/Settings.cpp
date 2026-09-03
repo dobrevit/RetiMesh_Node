@@ -95,6 +95,7 @@ void Settings::load() {
   if (_prefs.isKey("a_pass")) _prefs.getString("a_pass", _admin.password, sizeof(_admin.password));
   LOAD(_display.touchWake,  "d_twake", getBool ("d_twake"));
   LOAD(_display.brightness, "d_bri",   getUChar("d_bri"));
+  LOAD(_display.daylight,   "d_day",   getBool ("d_day"));
   // The floor holds at the load too: an older build once persisted 0, and a
   // value the funnel would refuse must not walk in through NVS.
   if (_display.brightness < BRIGHTNESS_FLOOR_PCT) _display.brightness = BRIGHTNESS_FLOOR_PCT;
@@ -185,6 +186,7 @@ bool Settings::saveDisplay(const DisplaySettings& d) {
   _display = d;
   bool ok = _prefs.putBool("d_twake", d.touchWake) > 0;
   ok &= _prefs.putUChar("d_bri", d.brightness) > 0;
+  ok &= _prefs.putBool("d_day", d.daylight) > 0;
   return ok;
 }
 

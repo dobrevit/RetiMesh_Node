@@ -112,6 +112,8 @@ void openEraseIdentity();                // design screen 21: the key's own deat
 void openPowerMenu();                    // sleep / restart / power off
 void showIdle(bool on);                  // the low-draw clock the panel rests on
 bool idleShowing();
+void resetIdle();                        // drops the idle panel so it rebuilds
+void retheme();                          // applies the settings' palette, rebuilds
 void showIncoming(const uint8_t from[16], const char* text);  // full-screen interrupt
 void showFirmware(const char* stage, uint32_t written, uint32_t total);
 void hideFirmware();

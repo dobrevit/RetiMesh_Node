@@ -96,6 +96,13 @@ void build() {
 
 namespace Ui {
 
+void resetIdle() {
+  // The panel is built once and kept; a theme change deletes it so the
+  // next rest is born in the current palette.
+  if (sTick) { lv_timer_delete(sTick); sTick = nullptr; }
+  if (sPanel) { lv_obj_delete(sPanel); sPanel = nullptr; }
+}
+
 void showIdle(bool on) {
   const bool showing = sPanel && !lv_obj_has_flag(sPanel, LV_OBJ_FLAG_HIDDEN);
   if (on == showing) return;
