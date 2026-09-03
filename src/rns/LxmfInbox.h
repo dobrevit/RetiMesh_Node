@@ -282,6 +282,11 @@ uint32_t dropped();
 // One record, for the caller that wants only the newest.
 bool read(uint32_t seq, InboxRecord& out);
 
+// One conversation's erase: every record from this sender is zeroed in
+// place — a zeroed slot reads as never written, so the pages simply stop
+// mentioning them; other conversations keep their slots and numbers.
+void wipeSender(const uint8_t from[16]);
+
 // The erase control's half: removes the log and zeroes the counters, so a
 // wiped node neither lists old messages nor numbers new ones oddly.
 void wipe();

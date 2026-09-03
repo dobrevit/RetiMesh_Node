@@ -26,12 +26,44 @@
 #include "LxmfInbox.h"
 #include "RnsTransport.h"
 #include "Gps.h"
+#include "RnsAnnounce.h"
+#include <LittleFS.h>
 #include "Neighbors.h"
 #include "PeerNames.h"
 
 namespace {
 
 lv_obj_t* sList = nullptr;               // the conversations screen's list
+
+// The read cursor: the newest sequence the operator has had the list in
+// front of. Viewing the list is what "seen" means on this glass — per-thread
+// bookkeeping would be state for its own sake. A tiny file, because a badge
+// that resets to "everything is new" at each boot cries wolf.
+uint32_t sReadSeq = 0;
+bool     sReadLoaded = false;
+constexpr const char* kReadFile = "/msg_read.txt";
+
+uint32_t readCursor() {
+  if (!sReadLoaded) {
+    sReadLoaded = true;
+    File f = LittleFS.open(kReadFile, "r");
+    if (f) {
+      char b[16] = {0};
+      f.readBytes(b, sizeof(b) - 1);
+      sReadSeq = (uint32_t)strtoul(b, nullptr, 10);
+      f.close();
+    }
+  }
+  return sReadSeq;
+}
+
+void markSeen() {
+  const uint32_t n = Rns::Inbox::newest();
+  if (readCursor() == n) return;
+  sReadSeq = n;
+  File f = LittleFS.open(kReadFile, "w");
+  if (f) { f.print(sReadSeq); f.close(); }
+}
 lv_obj_t* sThreadCol = nullptr;          // the open thread's bubble column
 lv_obj_t* sThreadTa = nullptr;
 uint8_t   sThreadDest[16];
@@ -233,6 +265,8 @@ void openQuick(lv_event_t*) {
 
 // --- the thread screen ------------------------------------------------------
 
+void listRebuild();
+
 void openThreadScreen(const uint8_t from[16]) {
   memcpy(sThreadDest, from, 16);
   char title[34];
@@ -271,6 +305,21 @@ void openThreadScreen(const uint8_t from[16]) {
   lv_label_set_text(ql, "QUICK");
   lv_obj_center(ql);
   lv_obj_add_event_cb(quick, openQuick, LV_EVENT_CLICKED, nullptr);
+  // Deleting a conversation is irreversible, so it wears the system's red
+  // and demands the hold no stray tap can fake.
+  lv_obj_t* del = lv_button_create(row);
+  UiTheme::actionButton(del);
+  lv_obj_set_size(del, 40, lv_pct(100));
+  lv_obj_t* dl = lv_label_create(del);
+  lv_label_set_text(dl, LV_SYMBOL_TRASH);
+  lv_obj_set_style_text_color(dl, lv_color_hex(UiTheme::kBad), 0);
+  lv_obj_center(dl);
+  Ui::onHeld2s(del, [](void*) {
+    Rns::Inbox::wipeSender(sThreadDest);
+    Ui::toast("conversation deleted");
+    Ui::back();
+    if (sList && lv_obj_is_valid(sList)) listRebuild();
+  }, nullptr);
 
   lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
   lv_timer_t* t = lv_timer_create(threadTick, 2000, nullptr);
@@ -346,12 +395,59 @@ void peerLabel(const uint8_t hash[16], char* out, size_t n) {
 
 void openThread(const uint8_t from[16]) { openThreadScreen(from); }
 
+size_t unreadCount() {
+  const uint32_t n = Rns::Inbox::newest();
+  const uint32_t seen = readCursor();
+  // A cursor above the newest sequence is the leftover of an erased log:
+  // everything now present arrived after the wipe, so it is all unread.
+  if (seen > n) return (size_t)n;
+  return (size_t)(n - seen);
+}
+
 void openMessages() {
   lv_obj_t* body = newScreen("Messages");
   sList = lv_list_create(body);
   lv_obj_set_width(sList, lv_pct(100));
   lv_obj_set_flex_grow(sList, 1);
   listRebuild();
+  markSeen();                            // the list in front of the eyes is "seen"
+
+  // NEW, as the spec's messages screen carries it: a conversation with a
+  // destination typed by hand — the way a hash read aloud over the radio
+  // becomes a thread.
+  lv_obj_t* nb = lv_button_create(body);
+  UiTheme::actionButton(nb);
+  lv_obj_set_width(nb, lv_pct(100));
+  lv_obj_set_height(nb, 38);
+  lv_obj_t* nl = lv_label_create(nb);
+  lv_label_set_text(nl, LV_SYMBOL_PLUS "  NEW — TO A HASH");
+  lv_obj_center(nl);
+  lv_obj_add_event_cb(nb, [](lv_event_t*) {
+    lv_obj_t* box = lv_msgbox_create(nullptr);
+    lv_msgbox_add_title(box, "New conversation");
+    lv_msgbox_add_close_button(box);
+    lv_obj_t* mb = lv_msgbox_get_content(box);
+    lv_obj_set_flex_flow(mb, LV_FLEX_FLOW_COLUMN);
+    lv_obj_t* ta = Ui::textarea(mb, "destination hash (32 hex)", true, false);
+    lv_obj_t* go = lv_button_create(mb);
+    lv_obj_set_width(go, lv_pct(100));
+    lv_obj_t* gl = lv_label_create(go);
+    lv_label_set_text(gl, "Open");
+    lv_obj_center(gl);
+    struct Ctx { lv_obj_t* box; lv_obj_t* ta; };
+    static Ctx ctx;
+    ctx = { box, ta };
+    lv_obj_add_event_cb(go, [](lv_event_t* e) {
+      Ctx* c = (Ctx*)lv_event_get_user_data(e);
+      uint8_t dest[16];
+      if (!Rns::hexToBytes16(lv_textarea_get_text(c->ta), dest)) {
+        Ui::toast("that is not a 32-hex hash");
+        return;
+      }
+      lv_msgbox_close(c->box);
+      openThreadScreen(dest);
+    }, LV_EVENT_CLICKED, &ctx);
+  }, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* scr = lv_obj_get_parent(lv_obj_get_parent(body));
   // Arrivals refresh the open list; before this, a message that came in
   // while the screen was showing stayed invisible until reopening.
@@ -359,7 +455,7 @@ void openMessages() {
     if (!sList || !lv_obj_is_valid(sList)) return;
     static uint32_t lastIn = 0;
     const uint32_t in = inboundStamp();
-    if (in != lastIn) { lastIn = in; listRebuild(); }
+    if (in != lastIn) { lastIn = in; listRebuild(); markSeen(); }
   }, 2000, nullptr);
   lv_obj_add_event_cb(scr, [](lv_event_t* e) {
     lv_timer_delete((lv_timer_t*)lv_event_get_user_data(e));

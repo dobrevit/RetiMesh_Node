@@ -49,6 +49,7 @@ lv_obj_t* sPosVal = nullptr;
 lv_obj_t* sBattVal = nullptr;
 lv_obj_t* sRadioVal = nullptr;
 lv_obj_t* sLatestVal = nullptr;
+lv_obj_t* sMsgBadge = nullptr;
 
 lv_obj_t* reading(lv_obj_t* parent, const char* label) {
   return UiTheme::reading(parent, label, nullptr);
@@ -128,6 +129,17 @@ void refreshHome(lv_timer_t*) {
   Ui::setLabel(sRadioVal, v);
   tintIf(sRadioVal, g_stats.radioOnline ? UiTheme::kInk : UiTheme::kWarn);
 
+  {
+    const size_t unread = Ui::unreadCount();
+    if (unread) {
+      char b[8];
+      snprintf(b, sizeof(b), "%u", (unsigned)(unread > 99 ? 99 : unread));
+      Ui::setLabel(sMsgBadge, b);
+      lv_obj_remove_flag(sMsgBadge, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(sMsgBadge, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
   // The newest message, one line — and only when there is news: the read
   // behind this opens flash, and doing that every second forever on the
   // resting screen was ~86k needless reads a day.
@@ -147,8 +159,8 @@ void refreshHome(lv_timer_t*) {
   Ui::setLabel(sLatestVal, latest.got ? latest.line : "no messages yet");
 }
 
-void shortcut(lv_obj_t* bar, const char* symbol, const char* name,
-              void (*open)(lv_event_t*)) {
+lv_obj_t* shortcut(lv_obj_t* bar, const char* symbol, const char* name,
+                   void (*open)(lv_event_t*)) {
   lv_obj_t* btn = lv_button_create(bar);
   UiTheme::actionButton(btn);
   lv_obj_set_flex_grow(btn, 1);
@@ -158,6 +170,7 @@ void shortcut(lv_obj_t* bar, const char* symbol, const char* name,
   lv_obj_set_style_text_align(col, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_center(col);
   lv_obj_add_event_cb(btn, open, LV_EVENT_CLICKED, nullptr);
+  return btn;
 }
 
 } // namespace
@@ -208,7 +221,14 @@ void openHome() {
   lv_obj_set_style_pad_column(bar, 2, 0);
   // The action bar, in the design's vocabulary: terse caps, always the same
   // slots. MESH joins the row when the destinations screen exists.
-  shortcut(bar, LV_SYMBOL_ENVELOPE, "MSG",  [](lv_event_t*) { openMessages(); });
+  lv_obj_t* msgBtn = shortcut(bar, LV_SYMBOL_ENVELOPE, "MSG",
+                              [](lv_event_t*) { openMessages(); });
+  // The unread count rides the MSG slot, in the warning colour — the spec's
+  // "MSG 3". Hidden at zero: a badge that always shows is no badge.
+  sMsgBadge = lv_label_create(msgBtn);
+  lv_obj_set_style_text_color(sMsgBadge, lv_color_hex(UiTheme::kWarn), 0);
+  lv_obj_align(sMsgBadge, LV_ALIGN_TOP_RIGHT, -2, 0);
+  lv_obj_add_flag(sMsgBadge, LV_OBJ_FLAG_HIDDEN);
   shortcut(bar, LV_SYMBOL_SHUFFLE,  "MESH", [](lv_event_t*) { openDestinations(); });
 #if HAS_GPS
   shortcut(bar, LV_SYMBOL_GPS,      "GPS",  [](lv_event_t*) { openGps(); });

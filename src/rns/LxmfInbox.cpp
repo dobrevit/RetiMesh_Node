@@ -282,6 +282,28 @@ void poll() {
   }
 }
 
+static bool readAt(File& f, uint32_t seq, InboxRecord& out);
+
+void wipeSender(const uint8_t from[16]) {
+  Sys::Lock held(sLock);
+  fs::FS& fs = *RnsFileSystem::backend();
+  File f = fs.open(kPath, "r+");
+  if (!f) return;
+  uint8_t zero[kInboxRecordSize] = {0};
+  const uint32_t first = sNewest >= kInboxSlots ? sNewest - kInboxSlots + 1 : 1;
+  uint32_t removed = 0;
+  for (uint32_t seq = first; seq <= sNewest; seq++) {
+    InboxRecord r;
+    if (!readAt(f, seq, r)) continue;
+    if (memcmp(r.from, from, 16) != 0) continue;
+    if (f.seek(inboxSlot(seq) * kInboxRecordSize) &&
+        f.write(zero, sizeof(zero)) == sizeof(zero))
+      removed++;
+  }
+  f.close();
+  sStored = sStored > removed ? sStored - removed : 0;
+}
+
 void wipe() {
   Sys::Lock held(sLock);
   fs::FS& backend = *RnsFileSystem::backend();

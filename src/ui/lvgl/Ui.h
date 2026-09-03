@@ -98,6 +98,7 @@ lv_obj_t* textarea(lv_obj_t* parent, const char* placeholder,
 
 void openHome();                         // builds and loads the root screen
 void openMessages();                     // push()es the messages screen
+size_t unreadCount();                    // arrivals since the list was last seen
 void openThread(const uint8_t from[16]);  // one conversation, directly
 // The rule for naming a peer, stated once: the live announce table first,
 // the persistent name memory second, the shortened hash last.
