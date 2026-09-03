@@ -79,6 +79,9 @@ struct Bubble {
   char     text[81];
   uint32_t sentMs;                       // ours only
   bool     ok;
+  uint32_t provedMs;
+  uint32_t rttMs;
+  bool     noProof;
   uint8_t  standing;                     // theirs only (Rns::Standing*)
 };
 
@@ -109,6 +112,18 @@ void bubbleRow(lv_obj_t* col, const Bubble& b) {
   if (b.ours) {
     if (!b.sentMs)      { snprintf(meta, sizeof(meta), "queued"); tint = UiTheme::kWarn; }
     else if (!b.ok)     { snprintf(meta, sizeof(meta), "failed — no key?"); tint = UiTheme::kBad; }
+    else if (b.provedMs) {
+      // The other end proved it: the strongest thing this screen can say.
+      snprintf(meta, sizeof(meta), "delivered · %lu.%lu s",
+               (unsigned long)(b.rttMs / 1000), (unsigned long)(b.rttMs % 1000 / 100));
+      tint = UiTheme::kGood;
+    }
+    else if (b.noProof) {
+      // Not a verdict of failure — LoRa loses proofs it did not lose
+      // messages over — just the honest end of waiting.
+      snprintf(meta, sizeof(meta), "sent · no proof");
+      tint = UiTheme::kWarn;
+    }
     else { char a[8]; Ui::ageTextMs(millis() - b.sentMs, a, sizeof(a)); snprintf(meta, sizeof(meta), "sent · %s ago", a); }
   } else {
     // Identity trust first: an unverified sender's words carry the flag in
@@ -133,7 +148,9 @@ uint32_t outboundStamp() {
   RnsTransport::OutMessage o[8];
   const size_t n = RnsTransport::lxmfOutbound(o, 8);
   uint32_t h = (uint32_t)n;
-  for (size_t i = 0; i < n; i++) h ^= o[i].queuedMs ^ (o[i].sentMs * 31u);
+  for (size_t i = 0; i < n; i++)
+    h ^= o[i].queuedMs ^ (o[i].sentMs * 31u) ^ (o[i].provedMs * 7u) ^
+         (o[i].noProof ? 0x9e37u : 0u);
   return h;
 }
 
@@ -170,6 +187,9 @@ void threadRebuild() {
     snprintf(x.text, sizeof(x.text), "%s", o[i].text);
     x.sentMs = o[i].sentMs;
     x.ok = o[i].ok;
+    x.provedMs = o[i].provedMs;
+    x.rttMs = o[i].rttMs;
+    x.noProof = o[i].noProof;
   }
 
   // Oldest at the top, the way a conversation reads.

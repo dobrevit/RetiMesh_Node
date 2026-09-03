@@ -167,6 +167,9 @@ struct OutMessage {
   uint32_t queuedMs;
   uint32_t sentMs;                       // 0 while still queued
   bool     ok;                           // meaningful once sentMs != 0
+  uint32_t provedMs;                     // 0 until the delivery proof came back
+  uint32_t rttMs;                        // meaningful once provedMs != 0
+  bool     noProof;                      // the receipt gave up waiting
 };
 size_t lxmfOutbound(OutMessage* out, size_t max);   // newest first
 
