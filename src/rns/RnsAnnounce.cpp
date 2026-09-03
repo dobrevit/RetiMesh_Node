@@ -39,7 +39,27 @@ static const struct { const char* name; uint8_t hash[NAME_HASH]; } kAspects[] = 
   { "nomadnetwork.node", { 0x21, 0x3E, 0x63, 0x11, 0xBC, 0xEC, 0x54, 0xAB, 0x4F, 0xDE } },
   { "rnstransport.probe",{ 0xFD, 0x68, 0x80, 0x5F, 0x2E, 0xA3, 0x83, 0xC8, 0xD6, 0xF6 } },
 };
-static const uint8_t kRetiMeshNodeNameHash[NAME_HASH] = { 0xDA, 0x30, 0x6B, 0x6B, 0x52, 0xA6, 0xFA, 0xD8, 0x2D, 0xC7 };
+// The table above is the one place these bytes live. A second copy beside it
+// drifted the moment anything was renamed, and a name hash that is wrong by one
+// byte does not fail — it derives a destination nobody else computes, so the
+// node announces into a void and every peer's path request misses.
+static const uint8_t* nameHashFor(const char* aspect) {
+  for (auto& k : kAspects) if (strcmp(k.name, aspect) == 0) return k.hash;
+  return nullptr;
+}
+
+// destination = sha256(name_hash + identity_hash)[:16], Reticulum's rule.
+static bool deriveDestination(const char* aspect, const uint8_t identityHash[HASH_LEN],
+                              uint8_t out[HASH_LEN]) {
+  const uint8_t* nameHash = nameHashFor(aspect);
+  if (!nameHash) return false;
+  uint8_t material[NAME_HASH + HASH_LEN], full[32];
+  memcpy(material, nameHash, NAME_HASH);
+  memcpy(material + NAME_HASH, identityHash, HASH_LEN);
+  sha256(material, sizeof(material), full);
+  memcpy(out, full, HASH_LEN);
+  return true;
+}
 
 void sha256(const uint8_t* data, size_t len, uint8_t out[32]) {
   SHA256 h;
@@ -166,15 +186,16 @@ bool NodeIdentity::begin() {
   uint8_t full[32];
   Rns::sha256(_pub, Rns::KEY_LEN, full);
   memcpy(_identityHash, full, Rns::HASH_LEN);
-  uint8_t material[Rns::NAME_HASH + Rns::HASH_LEN];
-  memcpy(material, Rns::kRetiMeshNodeNameHash, Rns::NAME_HASH);
-  memcpy(material + Rns::NAME_HASH, _identityHash, Rns::HASH_LEN);
-  Rns::sha256(material, sizeof(material), full);
-  memcpy(_destHash, full, Rns::HASH_LEN);
+  // Both destinations, here, before Reticulum starts. The delivery address is
+  // what an operator is given to reach this node — by QR, by panel, by mDNS —
+  // and the transport's copy of it does not exist until the transport does.
+  Rns::deriveDestination("retimesh.node", _identityHash, _destHash);
+  Rns::deriveDestination("lxmf.delivery", _identityHash, _lxmfHash);
   Rns::toHex(_destHash, Rns::HASH_LEN, _destHex);
+  Rns::toHex(_lxmfHash, Rns::HASH_LEN, _lxmfHex);
   Rns::toHex(_identityHash, Rns::HASH_LEN, _identityHex);
   _ok = true;
-  log_i("identity %s, destination retimesh.node <%s>", _identityHex, _destHex);
+  log_i("identity %s, delivery address <%s>", _identityHex, _lxmfHex);
   return true;
 }
 
@@ -185,49 +206,7 @@ void NodeIdentity::destroy() {
   prefs.end();
 }
 
-size_t NodeIdentity::buildAnnounce(const uint8_t* appData, size_t appLen, uint8_t* out, size_t cap) {
-  using namespace Rns;
-  if (!_ok) return 0;
-  size_t total = 2 + HASH_LEN + 1 + KEY_LEN + NAME_HASH + RANDOM_LEN + SIG_LEN + appLen;
-  if (total > cap) return 0;
-
-  // Monotonic emission stamp (no RTC): persisted counter.
-  Preferences prefs;
-  prefs.begin("retimeshid", false);
-  _emitted = prefs.getUInt("ann_seq", 0) + 1;
-  prefs.putUInt("ann_seq", _emitted);
-  prefs.end();
-
-  uint8_t random[RANDOM_LEN];
-  esp_fill_random(random, 5);
-  random[5] = 0;                                      // 5-byte big-endian time
-  random[6] = (_emitted >> 24) & 0xFF; random[7] = (_emitted >> 16) & 0xFF;
-  random[8] = (_emitted >> 8) & 0xFF;  random[9] = _emitted & 0xFF;
-
-  // signed = dest_hash + public_key + name_hash + random + app_data
-  size_t signedLen = HASH_LEN + KEY_LEN + NAME_HASH + RANDOM_LEN + appLen;
-  uint8_t* signedData = (uint8_t*)malloc(signedLen);
-  if (!signedData) return 0;
-  uint8_t* s = signedData;
-  memcpy(s, _destHash, HASH_LEN);            s += HASH_LEN;
-  memcpy(s, _pub, KEY_LEN);                  s += KEY_LEN;
-  memcpy(s, kRetiMeshNodeNameHash, NAME_HASH); s += NAME_HASH;
-  memcpy(s, random, RANDOM_LEN);             s += RANDOM_LEN;
-  memcpy(s, appData, appLen);
-  uint8_t sig[SIG_LEN];
-  Ed25519::sign(sig, _edSeed, _pub + 32, signedData, signedLen);
-  free(signedData);
-
-  // packet: HEADER_1, no context flag, broadcast, SINGLE, ANNOUNCE
-  uint8_t* o = out;
-  *o++ = 0x01;
-  *o++ = 0;                                           // hops
-  memcpy(o, _destHash, HASH_LEN);            o += HASH_LEN;
-  *o++ = 0x00;                                        // context NONE
-  memcpy(o, _pub, KEY_LEN);                  o += KEY_LEN;
-  memcpy(o, kRetiMeshNodeNameHash, NAME_HASH); o += NAME_HASH;
-  memcpy(o, random, RANDOM_LEN);             o += RANDOM_LEN;
-  memcpy(o, sig, SIG_LEN);                   o += SIG_LEN;
-  memcpy(o, appData, appLen);                o += appLen;
-  return (size_t)(o - out);
-}
+// buildAnnounce() lived here: a hand-rolled retimesh.node announce packet,
+// signed and stamped with a persisted counter, with no caller anywhere in the
+// tree. RNS builds and sends the announces this node makes; this was the
+// shape of the one it has stopped making, kept alive by nothing.

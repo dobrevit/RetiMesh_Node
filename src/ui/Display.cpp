@@ -1072,8 +1072,11 @@ void Display::paintNetwork() {
     _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("up   not joined");
   }
   }
-  _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print("dest ");
-  _gfx->print(String(nodeIdentity.destHex()).substring(0, 16));
+  // The delivery address: the row exists so somebody standing at the node can
+  // read off where to reach it, and the retimesh.node destination it used to
+  // show is announced by nobody and answered by nothing.
+  _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print("addr ");
+  _gfx->print(String(nodeIdentity.lxmfHex()).substring(0, 16));
 #if HAS_SD
   SdCard::Info si = sdCard.info();
   if (si.state == SdCard::State::Absent) snprintf(line, sizeof(line), "SD: none");

@@ -388,13 +388,18 @@ void WifiManager::begin() {
       services[nServices++] = "http";
     }
     // So a browser or a script can tell the nodes apart without opening each
-    // one: the same node hash the portal reports as `destination`. It is not
-    // an announced address — /api/status has lxmf_address and
-    // nomadnet_address for that.
+    // one — and, now, reach the one it picked: this is the delivery address,
+    // the same value /api/status reports as lxmf_address. It used to be the
+    // retimesh.node hash, which distinguished nodes perfectly well and was
+    // useless for anything after that, since nothing announces it.
+    //
+    // Derived from the identity rather than read from the transport, which has
+    // not started when mDNS is registered and would publish an empty string
+    // here for the life of the record.
     for (size_t i = 0; i < nServices; i++) {
       const char* svc = services[i];
       MDNS.addServiceTxt(svc, "tcp", "name",  _ssid);
-      MDNS.addServiceTxt(svc, "tcp", "node",  nodeIdentity.destHex());
+      MDNS.addServiceTxt(svc, "tcp", "node",  nodeIdentity.lxmfHex());
       MDNS.addServiceTxt(svc, "tcp", "fw",    FW_VERSION);
       MDNS.addServiceTxt(svc, "tcp", "board", BOARD_NAME);
     }
@@ -1043,10 +1048,19 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     as["match"] = (_assetStamp == ASSET_STAMP);
   }
   doc["identity"]     = nodeIdentity.identityHex();
-  doc["destination"]  = nodeIdentity.destHex();      // retimesh.node
+  // Kept, because callers read it, but no longer the retimesh.node hash: that
+  // is announced by nobody and listened on by nothing, so a caller who took it
+  // for an address had one that could not be reached. It is the delivery
+  // address now, the same value as lxmf_address below — one field says "where
+  // this node is" and the other says which aspect it is, and they agree.
+  doc["destination"]  = nodeIdentity.lxmfHex();
   // The two addresses a person is given: one to message the node at, one to
   // browse it at. Both are derived from the same identity and neither is
   // guessable from the other.
+  //
+  // Read from the transport rather than derived, deliberately: this one is
+  // empty until Reticulum is actually up, which is the honest answer to "can I
+  // message this node yet".
   doc["lxmf_address"]    = RnsTransport::lxmf().address;
   doc["nomadnet_address"] = RnsTransport::nomadAddress();
   doc["uptime_s"]     = millis() / 1000;

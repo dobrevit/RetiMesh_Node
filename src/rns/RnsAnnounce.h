@@ -181,17 +181,26 @@ public:
   const char*    destHex()    const { return _destHex; }
   const char*    identityHex() const { return _identityHex; }
 
-  // Builds a complete announce packet with the given app_data into `out`.
-  // Returns the packet length, 0 on error. Bumps the persisted emission
-  // counter.
-  size_t buildAnnounce(const uint8_t* appData, size_t appLen, uint8_t* out, size_t cap);
+  // The delivery address, derived here rather than read back from the running
+  // transport. Everything that tells an operator "this is the node, reach it
+  // here" — the QR, the panel, the mDNS record, the status document — needs an
+  // answer before Reticulum has started, and RnsTransport::lxmf().address is
+  // empty until it has. Both are sha256(name_hash + identity_hash) over the
+  // same identity and the same aspect, so they cannot disagree — and if they
+  // ever did, /api/status carries both (`destination` from here,
+  // `lxmf_address` from the transport) and the two would stop matching in
+  // plain sight.
+  const uint8_t* lxmfHash()   const { return _lxmfHash; }
+  const char*    lxmfHex()    const { return _lxmfHex; }
 
 private:
   uint8_t  _xPrv[32], _edSeed[32];
   uint8_t  _pub[Rns::KEY_LEN];
   uint8_t  _identityHash[Rns::HASH_LEN];
   uint8_t  _destHash[Rns::HASH_LEN];
+  uint8_t  _lxmfHash[Rns::HASH_LEN];
   char     _destHex[2 * Rns::HASH_LEN + 1];
+  char     _lxmfHex[2 * Rns::HASH_LEN + 1];
   char     _identityHex[2 * Rns::HASH_LEN + 1];
   uint32_t _emitted = 0;
   bool     _ok = false;
