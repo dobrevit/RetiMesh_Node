@@ -349,6 +349,14 @@ void setLabel(lv_obj_t* label, const char* text) {
   if (strcmp(lv_label_get_text(label), text)) lv_label_set_text(label, text);
 }
 
+void formatKm(char* out, size_t n, double km) {
+  snprintf(out, n, km < 10.0 ? "%.2f km" : "%.1f km", km);
+}
+
+void ageTextMs(uint32_t sinceMs, char* out, size_t n) {
+  ageTextS(sinceMs / 1000, out, n);
+}
+
 void ageTextS(uint32_t s, char* out, size_t n) {
   if (s < 60)        snprintf(out, n, "%lus", (unsigned long)s);
   else if (s < 3600) snprintf(out, n, "%lum", (unsigned long)(s / 60));

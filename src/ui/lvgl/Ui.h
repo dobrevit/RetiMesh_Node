@@ -68,6 +68,13 @@ void toast(const char* text);
 // screens had grown three variants with three different guards.
 void setLabel(lv_obj_t* label, const char* text);
 
+// A distance in the one style every screen prints it.
+void formatKm(char* out, size_t n, double km);
+
+// Milliseconds-since into the age wording, through ageTextS — the ms-to-s
+// conversion had started spreading again.
+void ageTextMs(uint32_t sinceMs, char* out, size_t n);
+
 // Seconds into the s/m/h wording every age on the glass uses. One unit on
 // purpose: two same-named helpers taking seconds and milliseconds were one
 // copy-paste away from ages wrong by a thousand.
@@ -107,7 +114,7 @@ bool idleShowing();
 void showIncoming(const uint8_t from[16], const char* text);  // full-screen interrupt
 void showFirmware(const char* stage, uint32_t written, uint32_t total);
 void hideFirmware();
-void openBearing(const char* peer);      // the dial, honest about what it lacks
+void openBearing(const char* peer, const char* hashHex);  // the live dial
 void openPlot();                         // rings and a crosshair, no cartography
 uint8_t takePowerAction();               // 0 none, 1 sleep, 2 restart, 3 off
 void setRotation(uint8_t quarterTurns);  // the accelerometer's verdict

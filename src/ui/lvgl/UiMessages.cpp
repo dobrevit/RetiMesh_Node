@@ -38,10 +38,6 @@ uint8_t   sThreadDest[16];
 uint32_t  sThreadStamp = 0;              // outbound-state hash, to redraw only on change
 
 
-// One unit for ages everywhere: seconds in, Ui::ageTextS out.
-void ageOf(uint32_t ms, char* out, size_t n) {
-  Ui::ageTextS((millis() - ms) / 1000, out, n);
-}
 
 // --- the thread -------------------------------------------------------------
 
@@ -81,13 +77,13 @@ void bubbleRow(lv_obj_t* col, const Bubble& b) {
   if (b.ours) {
     if (!b.sentMs)      { snprintf(meta, sizeof(meta), "queued"); tint = UiTheme::kWarn; }
     else if (!b.ok)     { snprintf(meta, sizeof(meta), "failed — no key?"); tint = UiTheme::kBad; }
-    else { char a[8]; ageOf(b.sentMs, a, sizeof(a)); snprintf(meta, sizeof(meta), "sent · %s ago", a); }
+    else { char a[8]; Ui::ageTextMs(millis() - b.sentMs, a, sizeof(a)); snprintf(meta, sizeof(meta), "sent · %s ago", a); }
   } else {
     // Identity trust first: an unverified sender's words carry the flag in
     // the meta line, in the warning colour.
     const bool verified = b.standing == Rns::StandingVerified;
     char a[8] = "";
-    if (b.ms) ageOf(b.ms, a, sizeof(a));
+    if (b.ms) Ui::ageTextMs(millis() - b.ms, a, sizeof(a));
     snprintf(meta, sizeof(meta), "%s%s%s", b.ms ? a : "earlier",
              b.ms ? " ago" : "", verified ? "" : " · unverified");
     if (!verified) tint = UiTheme::kWarn;

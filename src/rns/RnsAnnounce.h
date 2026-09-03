@@ -121,6 +121,7 @@ size_t displayName(const Announce& a, char* out, size_t cap);
 
 void sha256(const uint8_t* data, size_t len, uint8_t out[32]);
 void toHex(const uint8_t* data, size_t len, char* out);   // out needs 2*len+1
+bool hexToBytes16(const char* hex, uint8_t out[16]);      // 32 lowercase/upper hex digits
 
 } // namespace Rns
 

@@ -19,22 +19,16 @@
 #include "UiTheme.h"
 #include "RnsTransport.h"
 #include "Neighbors.h"
+#include "RnsAnnounce.h"
+#include "PeerPositions.h"
+#include "GeoMath.h"
+#include "Gps.h"
 
 namespace {
 
 constexpr size_t kMax = 24;
 RnsTransport::PathInfo sPaths[kMax];
 size_t sCount = 0;
-
-bool hexToBytes(const char* hex, uint8_t out[16]) {
-  if (strlen(hex) < 32) return false;
-  for (int i = 0; i < 16; i++) {
-    unsigned v;
-    if (sscanf(hex + i * 2, "%2x", &v) != 1) return false;
-    out[i] = (uint8_t)v;
-  }
-  return true;
-}
 
 
 void openDetail(lv_event_t* e) {
@@ -68,6 +62,31 @@ void openDetail(lv_event_t* e) {
     snprintf(v, sizeof(v), "%.1f dB", (double)nb.snr);
     UiTheme::reading(body, "SNR", v);
   }
+#if HAS_GPS
+  {
+    // The peer's announced position is the peer's fact — shown whenever it
+    // exists. The geometry rows need our end of the baseline too, so they
+    // appear only with a fix; hiding the peer's fact behind our fix once
+    // made an arrived position invisible on a node standing indoors.
+    PeerPositions::Position pp;
+    if (PeerPositions::getByHex(pi->hash, pp)) {
+      char age[8];
+      Ui::ageTextMs(millis() - pp.heardMs, age, sizeof(age));
+      snprintf(v, sizeof(v), "%s ago · ±%.0f m", age, (double)pp.accuracyM);
+      UiTheme::reading(body, "POS HEARD", v);
+      const Gps::Fix own = Gps::fix();
+      if (own.valid) {
+        double km, deg;
+        GeoMath::distanceAndBearing(own.latitude, own.longitude,
+                                    pp.latitude, pp.longitude, km, deg);
+        Ui::formatKm(v, sizeof(v), km);
+        UiTheme::reading(body, "DISTANCE", v);
+        snprintf(v, sizeof(v), "%.0f°", deg);
+        UiTheme::reading(body, "BEARING", v);
+      }
+    }
+  }
+#endif
   snprintf(v, sizeof(v), "self -> %s -> %.8s", pi->via, pi->hash);
   lv_obj_t* path = UiTheme::reading(body, "PATH", v);
   lv_obj_set_style_text_color(path, lv_color_hex(UiTheme::kInkDim), 0);
@@ -88,7 +107,7 @@ void openDetail(lv_event_t* e) {
     const RnsTransport::PathInfo* p2 =
         (const RnsTransport::PathInfo*)lv_event_get_user_data(ev);
     uint8_t dest[16];
-    if (hexToBytes(p2->hash, dest)) Ui::openThread(dest);
+    if (Rns::hexToBytes16(p2->hash, dest)) Ui::openThread(dest);
   }, LV_EVENT_CLICKED, (void*)pi);
   lv_obj_t* nav = lv_button_create(row);
   UiTheme::actionButton(nav);
@@ -102,7 +121,7 @@ void openDetail(lv_event_t* e) {
         (const RnsTransport::PathInfo*)lv_event_get_user_data(ev);
     char t[34];
     Ui::peerLabelHex(p2->hash, t, sizeof(t));
-    Ui::openBearing(t);
+    Ui::openBearing(t, p2->hash);
   }, LV_EVENT_CLICKED, (void*)pi);
   lv_obj_t* ann = lv_button_create(row);
   UiTheme::actionButton(ann);

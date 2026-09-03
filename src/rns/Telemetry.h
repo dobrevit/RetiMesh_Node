@@ -54,6 +54,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "LxmfFormat.h"
 
 #include "MsgPackWriter.h"
 
@@ -202,6 +203,96 @@ inline size_t fields(const Snapshot& s, uint8_t* out, size_t cap) {
   if (!head.ok()) return 0;
   const size_t n = build(s, out + head.size(), cap - head.size());
   return n ? head.size() + n : 0;
+}
+
+// ---------------------------------------------------------------------------
+// The inbound mirror: a peer's position out of the fields a message carried.
+// Built on LxmfFormat's walkers — depth-capped, width-complete, map16-aware —
+// because a private walker here re-learned three of their documented bugs in
+// one evening. Two wire shapes are the wire: Sideband packs the telemetry
+// document to bytes and ships it as msgpack bin; this repo's own encoder
+// writes the map inline. Validity (range, null island, trust) is the
+// ingest's policy, not this codec's: parse answers only "did a location
+// array decode", and wrong-width coordinates answer no — no data beats
+// wrong data.
+// ---------------------------------------------------------------------------
+struct ParsedPosition {
+  double   latitude = 0.0, longitude = 0.0;
+  float    altitudeM = 0.0f;
+  float    accuracyM = 0.0f;
+  uint64_t positionAt = 0;               // the sender's clock, 0 when absent
+};
+
+inline bool parsePosition(const uint8_t* fields, size_t len, ParsedPosition& out) {
+  const uint8_t* val = nullptr; size_t vlen = 0;
+  if (!lxmfField(fields, len, kFieldTelemetry, val, vlen)) return false;
+
+  // Unwrap a bin-packed document; take an inline map as it stands.
+  const uint8_t* doc = val; size_t dlen = vlen;
+  if (vlen && (val[0] == 0xC4 || val[0] == 0xC5 || val[0] == 0xC6)) {
+    const uint8_t* inner; size_t ilen; size_t next;
+    if (!msgpackNext(val, vlen, 0, inner, ilen, next) || !inner) return false;
+    doc = inner; dlen = ilen;
+  }
+
+  size_t sensors = 0, i = 0;
+  if (!msgpackContainerHeader(doc, dlen, 0, /*wantMap*/ true, sensors, i)) return false;
+
+  // A signed big-endian fixed-point bin of exactly the width the format
+  // defines; anything else reads as absent, never as a different number.
+  auto fixedI32 = [](const uint8_t* pv, size_t pl, double scale, double& outV) -> bool {
+    if (pl != 4) return false;
+    int64_t u = ((int64_t)pv[0] << 24) | ((int64_t)pv[1] << 16) |
+                ((int64_t)pv[2] << 8) | pv[3];
+    if (u & 0x80000000LL) u |= ~0xFFFFFFFFLL;
+    outV = (double)u / scale;
+    return true;
+  };
+
+  for (size_t k = 0; k < sensors; k++) {
+    uint32_t sid = 0; size_t after = 0;
+    const bool intKey = msgpackUint(doc, dlen, i, sid, after);
+    if (!intKey) {                       // a key this node did not write
+      const uint8_t* kv; size_t kl;
+      if (!msgpackNext(doc, dlen, i, kv, kl, after)) return false;
+    }
+    i = after;
+    if (!intKey || sid != kSidLocation) {
+      const uint8_t* sv; size_t sl; size_t nx;
+      if (!msgpackNext(doc, dlen, i, sv, sl, nx)) return false;
+      i = nx;
+      continue;
+    }
+
+    size_t elems = 0, ei = 0;
+    if (!msgpackContainerHeader(doc, dlen, i, /*wantMap*/ false, elems, ei)) return false;
+    if (elems < 2) return false;
+
+    const uint8_t* pv; size_t pl; size_t nx;
+    if (!msgpackNext(doc, dlen, ei, pv, pl, nx) || !pv) return false;
+    if (!fixedI32(pv, pl, 1e6, out.latitude)) return false;
+    ei = nx;
+    if (!msgpackNext(doc, dlen, ei, pv, pl, nx) || !pv) return false;
+    if (!fixedI32(pv, pl, 1e6, out.longitude)) return false;
+    ei = nx;
+
+    // The optional tail, positional: altitude, speed, bearing, accuracy,
+    // time. Unknown or oddly-sized entries are walked past, not fatal.
+    for (size_t e = 2; e < elems; e++) {
+      if (e == 6) {
+        uint32_t ts = 0; size_t tn = 0;
+        if (msgpackUint(doc, dlen, ei, ts, tn)) { out.positionAt = ts; ei = tn; continue; }
+      }
+      if (!msgpackNext(doc, dlen, ei, pv, pl, nx)) return false;
+      ei = nx;
+      double v2;
+      if (e == 2 && pv && fixedI32(pv, pl, 1e2, v2)) out.altitudeM = (float)v2;
+      else if (e == 5 && pv && pl == 2)
+        out.accuracyM = (float)((((unsigned)pv[0] << 8) | pv[1]) / 1e2);
+    }
+    return true;
+  }
+  return false;
 }
 
 } // namespace Telemetry
