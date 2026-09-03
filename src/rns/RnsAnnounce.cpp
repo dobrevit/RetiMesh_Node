@@ -178,6 +178,13 @@ bool NodeIdentity::begin() {
   return true;
 }
 
+void NodeIdentity::destroy() {
+  Preferences prefs;
+  prefs.begin("retimeshid", false);
+  prefs.clear();
+  prefs.end();
+}
+
 size_t NodeIdentity::buildAnnounce(const uint8_t* appData, size_t appLen, uint8_t* out, size_t cap) {
   using namespace Rns;
   if (!_ok) return 0;

@@ -108,6 +108,7 @@ void openSettings();                     // push()es the category list
 void openWifiJoin();                     // scan, pick, key if locked, save on success
 void openAbout();                        // a dialog: version, addresses
 void openIdentity();                     // who this node is, and its QR
+void openEraseIdentity();                // design screen 21: the key's own death
 void openPowerMenu();                    // sleep / restart / power off
 void showIdle(bool on);                  // the low-draw clock the panel rests on
 bool idleShowing();

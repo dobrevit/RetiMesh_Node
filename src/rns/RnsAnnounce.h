@@ -133,6 +133,11 @@ public:
   // Loads the keys from NVS (namespace retimeshid) or generates them once.
   bool begin();
 
+  // The other half of begin(): forgets the stored keys, so the next boot
+  // invents a stranger. Touches nothing else — the caller decides what
+  // else dies with the persona.
+  void destroy();
+
   const uint8_t* publicKey()  const { return _pub; }        // 64 bytes
   // RNS private key layout: X25519 private (32) + Ed25519 seed (32).
   size_t privateKey(uint8_t out[64]) const { memcpy(out, _xPrv, 32); memcpy(out + 32, _edSeed, 32); return 64; }
