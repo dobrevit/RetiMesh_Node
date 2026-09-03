@@ -398,7 +398,10 @@ void openThread(const uint8_t from[16]) { openThreadScreen(from); }
 size_t unreadCount() {
   const uint32_t n = Rns::Inbox::newest();
   const uint32_t seen = readCursor();
-  return n > seen ? (size_t)(n - seen) : 0;
+  // A cursor above the newest sequence is the leftover of an erased log:
+  // everything now present arrived after the wipe, so it is all unread.
+  if (seen > n) return (size_t)n;
+  return (size_t)(n - seen);
 }
 
 void openMessages() {
