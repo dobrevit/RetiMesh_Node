@@ -39,4 +39,22 @@ inline double bearingDeg(double lat1, double lon1, double lat2, double lon2) {
   return b;
 }
 
+// The pair as every screen wants it: shared conversions computed once —
+// the S3 does doubles in software, and the two were only ever called
+// together.
+inline void distanceAndBearing(double lat1, double lon1, double lat2, double lon2,
+                               double& km, double& deg) {
+  const double p1 = lat1 * M_PI / 180.0, p2 = lat2 * M_PI / 180.0;
+  const double dl = (lon2 - lon1) * M_PI / 180.0;
+  const double sindl = sin(dl), cosdl = cos(dl);
+  const double cosp1 = cos(p1), cosp2 = cos(p2);
+  const double dp = p2 - p1;
+  const double a = sin(dp / 2) * sin(dp / 2) + cosp1 * cosp2 * sin(dl / 2) * sin(dl / 2);
+  km = 2.0 * kEarthRadiusKm * atan2(sqrt(a), sqrt(1.0 - a));
+  const double y = sindl * cosp2;
+  const double x = cosp1 * sin(p2) - sin(p1) * cosp2 * cosdl;
+  deg = atan2(y, x) * 180.0 / M_PI;
+  if (deg < 0) deg += 360.0;
+}
+
 } // namespace GeoMath

@@ -717,22 +717,27 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
     log_i("lxmf: ...and %u field%s this node does not read, %u bytes (attachment, telemetry "
           "or a command)", (unsigned)m.fieldsCount, m.fieldsCount == 1 ? "" : "s",
           (unsigned)m.fieldsLen);
-#if HAS_LVGL_UI
-  // A position riding the message's telemetry lands in the peer store — the
-  // bearing dial and the plot draw from it, honest about when it was heard.
-  if (m.fieldsCount) {
+  // A position is stored only from a sender who proved the hash is theirs —
+  // the same standing rule the signal reports follow, because these are the
+  // coordinates a search party might follow, and an unverified source hash
+  // is a claim anybody can fabricate. Range and the null island are judged
+  // here too: validity is an ingest policy, not a codec's. The stubs absorb
+  // this whole block on builds without a glass and a receiver.
+  if (m.fieldsCount && verified) {
     Rns::Telemetry::ParsedPosition pp;
-    if (Rns::Telemetry::parsePosition(m.fields, m.fieldsLen, pp)) {
+    if (Rns::Telemetry::parsePosition(m.fields, m.fieldsLen, pp) &&
+        pp.latitude >= -90.0 && pp.latitude <= 90.0 &&
+        pp.longitude >= -180.0 && pp.longitude <= 180.0 &&
+        (pp.latitude != 0.0 || pp.longitude != 0.0)) {
       PeerPositions::Position pos;
       pos.latitude = pp.latitude;
       pos.longitude = pp.longitude;
       pos.altitudeM = pp.altitudeM;
       pos.accuracyM = pp.accuracyM;
-      pos.heardMs = millis() ? millis() : 1;
+      pos.heardMs = millis();
       PeerPositions::seen(m.sourceHash, pos);
     }
   }
-#endif
   // Last, and only after the message has been recorded and said out loud: a
   // command that turns out to be one is still a message, and a node that ran
   // it without keeping a copy would have no account of what it was told to do.

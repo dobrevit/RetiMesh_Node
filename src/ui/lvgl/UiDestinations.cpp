@@ -19,6 +19,7 @@
 #include "UiTheme.h"
 #include "RnsTransport.h"
 #include "Neighbors.h"
+#include "RnsAnnounce.h"
 #include "PeerPositions.h"
 #include "GeoMath.h"
 #include "Gps.h"
@@ -28,16 +29,6 @@ namespace {
 constexpr size_t kMax = 24;
 RnsTransport::PathInfo sPaths[kMax];
 size_t sCount = 0;
-
-bool hexToBytes(const char* hex, uint8_t out[16]) {
-  if (strlen(hex) < 32) return false;
-  for (int i = 0; i < 16; i++) {
-    unsigned v;
-    if (sscanf(hex + i * 2, "%2x", &v) != 1) return false;
-    out[i] = (uint8_t)v;
-  }
-  return true;
-}
 
 
 void openDetail(lv_event_t* e) {
@@ -73,22 +64,26 @@ void openDetail(lv_event_t* e) {
   }
 #if HAS_GPS
   {
-    // Geometry, only when both ends are real: our fix and a position the
-    // peer actually announced, aged honestly.
+    // The peer's announced position is the peer's fact — shown whenever it
+    // exists. The geometry rows need our end of the baseline too, so they
+    // appear only with a fix; hiding the peer's fact behind our fix once
+    // made an arrived position invisible on a node standing indoors.
     PeerPositions::Position pp;
-    const Gps::Fix own = Gps::fix();
-    if (own.valid && PeerPositions::getByHex(pi->hash, pp)) {
-      const double km = GeoMath::distanceKm(own.latitude, own.longitude,
-                                            pp.latitude, pp.longitude);
-      snprintf(v, sizeof(v), km < 10.0 ? "%.2f km" : "%.1f km", km);
-      UiTheme::reading(body, "DISTANCE", v);
-      snprintf(v, sizeof(v), "%.0f°", GeoMath::bearingDeg(own.latitude, own.longitude,
-                                                          pp.latitude, pp.longitude));
-      UiTheme::reading(body, "BEARING", v);
+    if (PeerPositions::getByHex(pi->hash, pp)) {
       char age[8];
-      Ui::ageTextS((millis() - pp.heardMs) / 1000, age, sizeof(age));
+      Ui::ageTextMs(millis() - pp.heardMs, age, sizeof(age));
       snprintf(v, sizeof(v), "%s ago · ±%.0f m", age, (double)pp.accuracyM);
       UiTheme::reading(body, "POS HEARD", v);
+      const Gps::Fix own = Gps::fix();
+      if (own.valid) {
+        double km, deg;
+        GeoMath::distanceAndBearing(own.latitude, own.longitude,
+                                    pp.latitude, pp.longitude, km, deg);
+        Ui::formatKm(v, sizeof(v), km);
+        UiTheme::reading(body, "DISTANCE", v);
+        snprintf(v, sizeof(v), "%.0f°", deg);
+        UiTheme::reading(body, "BEARING", v);
+      }
     }
   }
 #endif
@@ -112,7 +107,7 @@ void openDetail(lv_event_t* e) {
     const RnsTransport::PathInfo* p2 =
         (const RnsTransport::PathInfo*)lv_event_get_user_data(ev);
     uint8_t dest[16];
-    if (hexToBytes(p2->hash, dest)) Ui::openThread(dest);
+    if (Rns::hexToBytes16(p2->hash, dest)) Ui::openThread(dest);
   }, LV_EVENT_CLICKED, (void*)pi);
   lv_obj_t* nav = lv_button_create(row);
   UiTheme::actionButton(nav);

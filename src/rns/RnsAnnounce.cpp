@@ -47,6 +47,22 @@ void sha256(const uint8_t* data, size_t len, uint8_t out[32]) {
   h.finalize(out, 32);
 }
 
+bool hexToBytes16(const char* hex, uint8_t out[16]) {
+  if (!hex) return false;
+  auto nib = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  for (int i = 0; i < 16; i++) {
+    const int hi = nib(hex[i * 2]), lo = nib(hex[i * 2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+  return true;
+}
+
 void toHex(const uint8_t* data, size_t len, char* out) {
   static const char* d = "0123456789abcdef";
   for (size_t i = 0; i < len; i++) { out[2*i] = d[data[i] >> 4]; out[2*i+1] = d[data[i] & 15]; }

@@ -68,6 +68,13 @@ void toast(const char* text);
 // screens had grown three variants with three different guards.
 void setLabel(lv_obj_t* label, const char* text);
 
+// A distance in the one style every screen prints it.
+void formatKm(char* out, size_t n, double km);
+
+// Milliseconds-since into the age wording, through ageTextS — the ms-to-s
+// conversion had started spreading again.
+void ageTextMs(uint32_t sinceMs, char* out, size_t n);
+
 // Seconds into the s/m/h wording every age on the glass uses. One unit on
 // purpose: two same-named helpers taking seconds and milliseconds were one
 // copy-paste away from ages wrong by a thousand.

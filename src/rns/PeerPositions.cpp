@@ -4,11 +4,11 @@
 // PeerPositions.cpp — see PeerPositions.h.
 #include "PeerPositions.h"
 
-#if HAS_LVGL_UI
+#if HAS_LVGL_UI && HAS_GPS
 
 #include <string.h>
-#include <stdio.h>
 #include <freertos/FreeRTOS.h>
+#include "RnsAnnounce.h"
 
 namespace PeerPositions {
 namespace {
@@ -16,20 +16,25 @@ namespace {
 struct Entry { uint8_t hash[16]; Position pos; bool used; };
 constexpr size_t kMax = 24;
 Entry sTable[kMax];
+// A spinlock, consciously: the holds are a short scan-and-copy, no ISR ever
+// touches the table, and Neighbors — the closest sibling — made the same
+// call. If kMax grows past a few dozen, revisit with Sys::Lock.
 portMUX_TYPE sMux = portMUX_INITIALIZER_UNLOCKED;
 
 } // namespace
 
 void seen(const uint8_t hash[16], const Position& p) {
   taskENTER_CRITICAL(&sMux);
-  Entry* slot = nullptr;
+  Entry* slot = &sTable[0];
   uint32_t oldestAge = 0;
-  const uint32_t now = p.heardMs;
+  bool matched = false;
   for (Entry& e : sTable) {
-    if (e.used && memcmp(e.hash, hash, 16) == 0) { slot = &e; break; }
-    const uint32_t age = e.used ? now - e.pos.heardMs : UINT32_MAX;
-    if (!slot || age >= oldestAge) { oldestAge = age; slot = &e; }
+    if (e.used && memcmp(e.hash, hash, 16) == 0) { slot = &e; matched = true; break; }
+    // Age, never the raw stamp: the wrap-safe form this codebase settled on.
+    const uint32_t age = e.used ? p.heardMs - e.pos.heardMs : UINT32_MAX;
+    if (age >= oldestAge) { oldestAge = age; slot = &e; }
   }
+  (void)matched;
   memcpy(slot->hash, hash, 16);
   slot->pos = p;
   slot->used = true;
@@ -46,13 +51,8 @@ bool get(const uint8_t hash[16], Position& out) {
 }
 
 bool getByHex(const char* hashHex, Position& out) {
-  if (!hashHex || strlen(hashHex) < 32) return false;
   uint8_t h[16];
-  for (int i = 0; i < 16; i++) {
-    unsigned v;
-    if (sscanf(hashHex + i * 2, "%2x", &v) != 1) return false;
-    h[i] = (uint8_t)v;
-  }
+  if (!Rns::hexToBytes16(hashHex, h)) return false;
   return get(h, out);
 }
 
@@ -65,4 +65,4 @@ size_t count() {
 }
 
 } // namespace PeerPositions
-#endif // HAS_LVGL_UI
+#endif // HAS_LVGL_UI && HAS_GPS
