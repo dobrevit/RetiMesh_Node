@@ -24,6 +24,7 @@
 #include "RnsAdmin.h"
 #include "Maintenance.h"
 #include "Power.h"
+#include "I2cReg.h"
 #include "Bq25896.h"
 #include "Imu.h"
 #include "Display.h"
@@ -114,6 +115,35 @@ static void dataf(const char* cmd, const char* fmt, ...) {
   if (sCur) sCur->dataLines++;
 }
 
+// The last enumeration of this board's I2C, kept because STATUS reports it and
+// STATUS gets polled. A scan is a hundred-odd transactions and it holds the bus
+// while it runs, which on a board whose keyboard and touch controller share
+// that bus is a stutter the operator can feel — so it is taken once and then
+// only when I2C asks for it again.
+//
+// Which is also the useful command: the interesting readings are the late ones.
+// A part that had not finished coming up when its driver looked, a bus no
+// driver has claimed, or a header naming the wrong pins all read as absent
+// hardware, and a scan on demand is what tells those apart from a part that is
+// genuinely not fitted.
+static char   sI2cLine[2][96] = {{0}, {0}};
+static size_t sI2cLines = 0;
+
+static void scanI2c() {
+  I2cReg::Host hosts[2];
+  const size_t nh = I2cReg::hosts(hosts, 2);
+  sI2cLines = 0;
+  for (size_t i = 0; i < nh && i < 2; i++) {
+    char found[64] = "";
+    const size_t n = I2cReg::scan(*hosts[i].bus, found, sizeof(found));
+    snprintf(sI2cLine[sI2cLines], sizeof(sI2cLine[0]),
+             "i2c %s sda=%d scl=%d parts=%u acked=%s",
+             hosts[i].shared ? "main" : "host1", hosts[i].sda, hosts[i].scl,
+             (unsigned)n, (n && found[0]) ? found + 1 : "none");
+    sI2cLines++;
+  }
+}
+
 // --- handlers ---------------------------------------------------------------
 static void doHelp() {
   size_t n = 0;
@@ -121,6 +151,12 @@ static void doHelp() {
   for (size_t i = 0; i < n; i++)
     dataf("HELP", "cmd=%s%s%s help=\"%s\"", all[i].name, all[i].args[0] ? " args=" : "", all[i].args, all[i].help);
   ok("HELP");
+}
+
+static void doI2c() {
+  scanI2c();
+  for (size_t i = 0; i < sI2cLines; i++) dataf("I2C", "%s", sI2cLine[i]);
+  ok("I2C");
 }
 
 static void doVersion() {
@@ -148,6 +184,12 @@ static void doStatus() {
   dataf("STATUS", "parts charger=%s imu=%s",
         Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");
 #endif
+  // Every part that answers on this board's I2C, from the last scan. Outside
+  // every HAS_ guard on purpose: the board here with the most parts on I2C is
+  // the one with no touch controller and no charger, so any guard that could
+  // have wrapped this is one that would have excluded it.
+  if (!sI2cLines) scanI2c();
+  for (size_t i = 0; i < sI2cLines; i++) dataf("STATUS", "%s", sI2cLine[i]);
 #if HAS_DISPLAY
   // What the operator can actually drive this node with. Every one of these is
   // found at boot and then never mentioned again, so a board whose touch layer
@@ -565,6 +607,7 @@ static void dispatch(const char* line) {
   }
   switch (r.cmd) {
     case Cmd::Help:          doHelp(); break;
+    case Cmd::I2c:           doI2c(); break;
     case Cmd::Status:        doStatus(); break;
     case Cmd::Version:       doVersion(); break;
     case Cmd::UsbStatus:     doUsbStatus(); break;
