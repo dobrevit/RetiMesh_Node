@@ -301,11 +301,13 @@
 // where the ESP32 listens.
 #define PIN_GPS_RX          44               // ESP32 receives here
 #define PIN_GPS_TX          43
-// The u-blox MIA-M10Q's own default. LilyGO's page for the Plus says 9600,
-// which was tried on the bench and produced no sentences at all; that page
-// also still describes the earlier Quectel this slot used to carry, so 9600
-// may belong to that part rather than this one. Neither figure has yet been
-// seen to work here, and the receiver can be configured to either — the
-// vendor's reference firmware sweeps 9600, 38400 and 115200 for exactly this
-// reason, which is the answer if this one does not hold.
+// The u-blox MIA-M10Q's own default, and the one this board actually ships
+// configured for: 38400 gives a fix and a clock, and 9600 gives not one parsed
+// sentence. LilyGO's page for the Plus says 9600, which is worth knowing is
+// wrong for this receiver — that page still describes the earlier Quectel the
+// slot used to carry. A wrong rate here looks like a receiver that is not
+// fitted rather than one that is being listened to at the wrong speed, since
+// what arrives is bytes that never parse; the vendor's own firmware sweeps
+// 9600, 38400 and 115200 rather than trusting a number, which is the answer if
+// a unit ever turns up with the other part in it.
 #define GPS_BAUD            38400
