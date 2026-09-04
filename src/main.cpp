@@ -338,15 +338,14 @@ void setup() {
   // 6 KB: the panel driver and the I2C stack are deep enough that 4 KB left
   // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
   // transaction to every network page.
-  #if HAS_DISPLAY
-    // The LVGL shell renders whole widget trees on this stack; the page
-    // stack's 6 KB starved it in the first bench build.
-    // 16 KB with the GUI: a settings form builds forty widgets inside one
-    // click callback inside lv_timer_handler, and 12 KB was the first
-    // suspect when that tap took the node down.
-    Diag::startTask(Display::displayTask, "display", HAS_LVGL_UI ? 16384 : 6144, &display, 1, 0);
-  #endif
-
+  // Before the panel, and deliberately. This is the largest single stack the
+  // firmware asks for and it used to ask last, after the web server and — on a
+  // GUI board — a 16 KB display stack had already taken their pick of a heap
+  // that fragments as it fills. A V4 lost the draw and ran nine hours with a
+  // radio, a portal and a Wi-Fi link, routing nothing, because the one task
+  // that makes it a Reticulum node could not be created. A screen can wait for
+  // memory; the reason the node exists cannot.
+  //
   // The RNS task owns every call into microReticulum (Transport is
   // single-threaded): interface loops, forwarding, announces, persistence.
   sRnsTaskUp = Diag::startTask([](void*) {
@@ -364,14 +363,69 @@ void setup() {
       Diag::guard("the rns task", [] { RnsTransport::loop(); });
       vTaskDelay(pdMS_TO_TICKS(10));
     }
-  }, "rns", 16384, nullptr, 3, 1);
+  }, "rns", 12288, nullptr, 3, 1);
+  // 12 KB, not 16. Measured at 12 KB on a board in service, the deepest this
+  // task goes is 6.64 KB — a little more than the 16 KB builds suggested, so
+  // the margin is 1.85x rather than the 2x it was cut for. Kept, because the
+  // failure being fixed is a contiguous block that could not be found and a
+  // quarter off the ask is worth having, and because an overflow here is not
+  // silent: the canary and the end-of-stack watchpoint are both on, so it
+  // panics, reboots and says so, which is the same recovery the rest of this
+  // block provides.
   // Online means Reticulum is both initialised and being driven: begin()
   // succeeding says only that the tables were built, and a node with no task
   // running its loop routes nothing and announces nothing while every status
   // it serves says "online".
-  if (!sRnsTaskUp) {
-    g_stats.transportOnline = false;
-    log_e("Reticulum is not being driven: the rns task did not start");
+  #if HAS_DISPLAY
+    // The LVGL shell renders whole widget trees on this stack; the page
+    // stack's 6 KB starved it in the first bench build.
+    // 16 KB with the GUI: a settings form builds forty widgets inside one
+    // click callback inside lv_timer_handler, and 12 KB was the first
+    // suspect when that tap took the node down.
+    Diag::startTask(Display::displayTask, "display", HAS_LVGL_UI ? 16384 : 6144, &display, 1, 0);
+  #endif
+
+  {
+    // A node that gets here is a radio, a portal and a Wi-Fi link with nothing
+    // behind them: it looks entirely healthy from outside and routes nothing.
+    // One ran that way for nine hours. The condition was already detected and
+    // logged here and then lived with, which is the wrong answer for a node on
+    // a mast — so it restarts instead, and a fresh heap almost always has the
+    // contiguous block the task could not get.
+    //
+    // Bounded, because a board that can never fit the task would otherwise
+    // spend its life rebooting, and a node that is up and half-working can at
+    // least be reached and told something. The count is persisted because the
+    // evidence of the last attempt does not survive the restart that follows
+    // it, and cleared on the first boot that works.
+    Preferences boot;
+    boot.begin("bootfault", false);
+    const uint32_t tries = boot.getUInt("rns", 0);
+    if (!sRnsTaskUp) {
+      g_stats.transportOnline = false;
+      boot.putUInt("rns", tries + 1);
+      if (tries + 1 <= REQUIRED_TASK_RETRIES) {
+        log_e("Reticulum is not being driven: the rns task did not start "
+              "(attempt %lu of %u) — restarting, which is usually enough",
+              (unsigned long)(tries + 1), (unsigned)REQUIRED_TASK_RETRIES);
+        // Scheduled, not immediate: the rest of setup() still has to run. In
+        // particular an image installed over the air marks itself healthy
+        // further down, and a node that rebooted before reaching that would be
+        // rolled back by the bootloader for a fault that had nothing to do
+        // with the image.
+        Bootloader::reboot(Bootloader::Source::Fault);
+      } else {
+        log_e("Reticulum is not being driven: the rns task did not start, and "
+              "%u restarts did not help — staying up so the node can still be "
+              "reached and reconfigured, but it is routing nothing",
+              (unsigned)REQUIRED_TASK_RETRIES);
+      }
+    } else if (tries) {
+      boot.putUInt("rns", 0);
+      log_i("the rns task started after %lu restart%s", (unsigned long)tries,
+            tries == 1 ? "" : "s");
+    }
+    boot.end();
   }
 
   // Last, so the figure beside it is what the node has left to run on.
