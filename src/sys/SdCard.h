@@ -141,7 +141,12 @@ private:
   void  doFormat();
   void  measure();
 
-  SPIClass          _spi{HSPI};
+  // HSPI on every board that gives the slot wires of its own; the board says
+  // otherwise where the card shares the radio's bus (Config.h, SD_SPI_BUS).
+  // The host's bus rather than one of this driver's own — starting a second
+  // SPIClass on a host the panel already started is what took two boards down.
+  // See sys/SpiBus.h; set in begin().
+  SPIClass*         _spi = nullptr;
   SemaphoreHandle_t _lock = nullptr;
   Info              _info;
   volatile bool     _formatRequested = false;

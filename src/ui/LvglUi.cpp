@@ -55,6 +55,14 @@ void stepTab(int8_t dir) {
   else Ui::back();
 }
 
+bool activateFocused() { return Ui::activateFocused(); }
+
+void touchDelivered(uint32_t& n, int16_t& x, int16_t& y) { Ui::touchDelivered(n, x, y); }
+
+void uiFacts(uint32_t& c, uint32_t& g, bool& i, bool& m) { Ui::uiFacts(c, g, i, m); }
+
+void firstControlBox(int16_t& a, int16_t& b, int16_t& c2, int16_t& d) { Ui::firstControlBox(a, b, c2, d); }
+
 void onBlank(bool on) {
   if (!on) lv_obj_invalidate(lv_screen_active());
 }

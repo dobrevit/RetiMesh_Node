@@ -166,6 +166,7 @@ private:
   bool probeSX1262(const RadioSettings& s);
   bool probeSX127x(const RadioSettings& s);
   bool probeSX1280(const RadioSettings& s);
+  bool probeLR1110(const RadioSettings& s);
   void irqSelfTest();                    // proves the IRQ line, see the .cpp
   uint32_t rxDoneFlag() const;           // this chip's RxDone bit, raw
   bool applySettings(const RadioSettings& s);   // radio task context only
@@ -178,9 +179,12 @@ private:
   SX1262*        _sx1262 = nullptr;      // exactly one of these is set
   SX1276*        _sx1276 = nullptr;
   SX1280*        _sx1280 = nullptr;
+  LR1110*        _lr1110 = nullptr;
   const char*    _modelName = "none";
   const RadioCaps::Caps* _caps = &RadioCaps::kUnknown;
-  SPIClass       _spi{LORA_SPI_BUS};   // bus number differs per MCU, see boards/
+  // The host's bus rather than one of this driver's own — the panel and the
+  // card may be on the same wires. See sys/SpiBus.h; set in begin().
+  SPIClass*      _spi = nullptr;
   RingbufHandle_t _txRing = nullptr;
   RingbufHandle_t _rxRing = nullptr;
   bool           _online = false;

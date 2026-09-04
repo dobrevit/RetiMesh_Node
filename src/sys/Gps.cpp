@@ -275,9 +275,13 @@ void setEnabled(bool on) {
 #if PIN_GPS_RST >= 0
     // Reset released, never asserted here: the receiver holds its almanac
     // through a power cycle and a reset would cost the warm start that
-    // holding it is worth.
+    // holding it is worth. Released is the opposite of whichever level the
+    // board says asserts it — on most a /RST line released by driving it
+    // high, on one the other way round, where driving it high held the
+    // receiver in reset and the node counted sentences for ever without
+    // seeing one.
     pinMode(PIN_GPS_RST, OUTPUT);
-    digitalWrite(PIN_GPS_RST, HIGH);
+    digitalWrite(PIN_GPS_RST, !GPS_RST_ACTIVE);
 #endif
     sSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
     sFix.enabled = true;

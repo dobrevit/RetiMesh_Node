@@ -8,11 +8,13 @@ pio run -e t3s3 -t upload             # flash firmware (asks a running node for 
 pio run -e t3s3 -t uploadfs           # flash the web app (data/ → LittleFS)
 pio device monitor                    # console, 115200
 ```
-Seven board environments ship: `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`,
-`esp32s3-qspi`, `tbeam`, `heltec-ws`, `heltec-v3`. CI and the release matrix
-build all of them, so a change has to compile everywhere — including the three
-with no SD slot, where `HAS_SD 0` has to actually work. `boards.json` is the
-registry they come from. Add `-D` overrides under `build_flags`.
+Twelve board environments ship: `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`,
+`esp32s3-qspi`, `tbeam`, `heltec-ws`, `heltec-wb`, `heltec-wp`, `heltec-v3`,
+`heltec-v4`, `t-deck` and `thinknode-m9`. CI and the release matrix build all of them — both
+matrices read `boards.json` rather than a list of their own, so a board added
+to the registry is built without touching a workflow. A change therefore has
+to compile everywhere, including the boards with no SD slot, where `HAS_SD 0`
+has to actually work. Add `-D` overrides under `build_flags`.
 
 The platform is the [pioarduino](https://github.com/pioarduino/platform-espressif32)
 fork of `espressif32`, pinned in `platformio.ini` to an exact release

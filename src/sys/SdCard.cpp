@@ -20,6 +20,7 @@
 //  SdCard.cpp — see SdCard.h
 // ============================================================================
 #include "SdCard.h"
+#include "SpiBus.h"
 #include "Lock.h"
 #include "StoreHome.h"
 #include "Diag.h"
@@ -51,7 +52,7 @@ const char* SdCard::stateName(State s) {
 
 void SdCard::begin() {
   _lock = xSemaphoreCreateMutex();
-  _spi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+  _spi = &SpiBus::get(SD_SPI_BUS, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI);
   // Mount synchronously: the transport asks right after boot whether it can
   // keep its store here, and that decision cannot be revisited later. The
   // first attempt after SPI init regularly fails ("the physical drive cannot
@@ -175,7 +176,7 @@ void SdCard::task(void* self) {
 // ---------------------------------------------------------------------------
 SdCard::Probe SdCard::probe() {
   Probe p;
-  uint8_t pdrv = sdcard_init(PIN_SD_CS, &_spi, SD_SPI_HZ);
+  uint8_t pdrv = sdcard_init(PIN_SD_CS, _spi, SD_SPI_HZ);
   if (pdrv == 0xFF) return p;
 
   // What sdcard_init actually does is take a free driver slot and allocate a
@@ -212,7 +213,7 @@ bool SdCard::mount() {
   // sd_diskio's "f_mount failed" line on a miss comes from the Arduino HAL
   // logger, which has no runtime level control — it is expected during the
   // boot retries and on a card with a foreign filesystem.
-  if (!SD.begin(PIN_SD_CS, _spi, SD_SPI_HZ, kMount, 8, false)) return false;
+  if (!SD.begin(PIN_SD_CS, *_spi, SD_SPI_HZ, kMount, 8, false)) return false;
   _mounted = true;
   measure();
   SD.mkdir(kLogDir);
@@ -334,7 +335,7 @@ void SdCard::doFormat() {
 
   if (_mounted) unmount();
 
-  uint8_t pdrv = sdcard_init(PIN_SD_CS, &_spi, SD_SPI_HZ);
+  uint8_t pdrv = sdcard_init(PIN_SD_CS, _spi, SD_SPI_HZ);
   if (pdrv == 0xFF) {
     { Sys::Lock held(_lock);
       _info.state = State::Absent;
@@ -372,7 +373,7 @@ void SdCard::doFormat() {
   }
 
   uint32_t t0 = millis();
-  bool ok = SD.begin(PIN_SD_CS, _spi, SD_SPI_HZ, kMount, 8, true);   // format_if_empty
+  bool ok = SD.begin(PIN_SD_CS, *_spi, SD_SPI_HZ, kMount, 8, true);   // format_if_empty
   if (ok) {
     _mounted = true;
     measure();

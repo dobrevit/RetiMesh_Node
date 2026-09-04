@@ -90,6 +90,17 @@ public:
   // immediately while lit; a blanked panel stays dark and remembers.
   void setBrightness(uint8_t pct);
 
+  // What the controller says it is, read once at begin(): the three ID bytes
+  // behind RDDID, packed. An ST7789 answers 0x858552 and an ILI9341 — which
+  // some panels of this size are, and which this driver's init does not suit —
+  // answers 0x009341. Zero or 0xFFFFFF means it did not answer at all, which
+  // on a panel wired write-only is the expected reading and not a fault.
+  //
+  // Here because a driver that assumes a controller should be able to say
+  // which one it found: the alternative is inferring it from how wrong the
+  // picture looks, which is a slow and unreliable way to learn it.
+  uint32_t controllerId() const { return _id; }
+
 private:
   // Drawing geometry, from the layout — the one declaration of it
   // (DisplayLayout.h's kTft120x160); the board header's DISPLAY_WIDTH and
@@ -103,12 +114,25 @@ private:
   void cmd(uint8_t c, const uint8_t* data, size_t len);
   void window(int16_t x0, int16_t y0, int16_t x1, int16_t y1);  // panel rect, ready for pixels
 
-  SPIClass    _spi{TFT_SPI_BUS};
+  // The host's bus, not one of this panel's own: on boards where the radio and
+  // the card are on these same wires, all three have to be the same object or
+  // they each re-initialise the peripheral underneath the others. See
+  // sys/SpiBus.h. Set in begin(), because that is the first moment the core is
+  // ready to start a bus.
+  SPIClass*   _spi = nullptr;
   GFXcanvas1* _canvas = nullptr;
   // What the glass last saw, so flush() streams only the band of rows that
   // changed: a ticking counter costs one band, not the whole 153 KB frame.
   uint8_t*    _shadow = nullptr;
-  void applyBacklight();                // pct through PWM, unless blanked
+  void applyBacklight();                // the current setting, unless blanked
+  // The backlight hardware, and the only two places that touch it. Which of
+  // them a board gets is BACKLIGHT_KIND's business, not the panel's: on most
+  // boards the pin is an LED driver's gate and brightness is a duty cycle, on
+  // the T-Deck it is a one-wire dimmer whose brightness is a pulse count. The
+  // callers ask for a percentage either way.
+  void backlightBegin();
+  void backlightSet(uint8_t pct);
+  uint32_t    _id = 0;                  // RDDID, read once in begin()
   bool        _ok = false;
   bool        _lit = false;             // backlight state, so blank() is idempotent
   bool        _blanked = false;

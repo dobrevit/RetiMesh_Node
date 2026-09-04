@@ -45,6 +45,19 @@ namespace Ui {
 
 bool shellInit(TftPanel& panel);         // lvgl, buffers, touch, bar, keyboard
 uint32_t shellLoop();                    // lv_timer_handler + the bar's second
+// A press on the board's button, where the shell has a focus ring: activate
+// whatever is focused. False when there is no ring, and then the caller falls
+// back to what a press has always meant.
+bool activateFocused();
+// The last point handed to LVGL, and how many have been, so a tap that pressed
+// nothing can be told from one the driver never reported.
+void touchDelivered(uint32_t& n, int16_t& x, int16_t& y);
+// What is actually on the glass: how many children the active screen has, how
+// many objects the focus ring holds, and whether an overlay is up. A tap that
+// reaches LVGL and presses nothing is answered by one of these.
+void uiFacts(uint32_t& children, uint32_t& group, bool& idle, bool& modal);
+// The focused control's box, in the coordinates a touch arrives in.
+void firstControlBox(int16_t& x1, int16_t& y1, int16_t& x2, int16_t& y2);
 bool consumeTouch();                     // a finger since last asked (sticky)
 void swallowTouch();                     // ignore the current contact until it lifts
 
@@ -53,6 +66,10 @@ void swallowTouch();                     // ignore the current contact until it 
 // leaves the bottom of the stack.
 void push(lv_obj_t* screen);
 void back();
+// Empty the stack without walking back through it, for a caller that is about
+// to jump somewhere rather than navigate there — a board's shortcut key. The
+// screen on the glass is left alone; the ones under it are deleted.
+void toRoot();
 bool atRoot();
 
 // A new screen with the standard chrome: cleared below the status bar, and —

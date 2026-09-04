@@ -26,6 +26,7 @@
 #include "Neighbors.h"
 #include "WifiManager.h"
 #include "Watchdog.h"
+#include "SpiBus.h"
 
 LoRaRadio loraRadio;
 TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
@@ -56,9 +57,40 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   _rxRing = rxRing;
   _active = s;
 
-  _spi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
+  _spi = &SpiBus::get(LORA_SPI_BUS, PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI);
 
-#if RF_MODEM_SX1280
+#if RF_MODEM_LR1110
+  // The same correction the SX1280 needs, for a narrower reason: this part is
+  // sub-GHz like the SX126x, so a stored frequency is usually fine — but its
+  // bandwidth list has four entries where the SX126x has ten, and a node moved
+  // across from one keeps the old figure in NVS. Left alone, begin() fails on
+  // the bandwidth and the log blames the wiring.
+  // Only the field that is actually unusable, unlike the SX1280 below. There
+  // the whole channel is wrong by construction — a sub-GHz plan names nothing
+  // a 2.4 GHz part can tune — so replacing it wholesale says what happened.
+  // Here the frequency and the spreading factor usually survive the move and
+  // the bandwidth usually does not, and rewriting all three would carry an
+  // operator off the frequency they chose to fix a bandwidth they did not.
+  {
+    const RadioCaps::Caps& c = RadioCaps::kLR1110;
+    const bool badFreq = _active.freqMhz < c.freqMinMhz || _active.freqMhz > c.freqMaxMhz;
+    const bool badBw   = !RadioCaps::bandwidthSupported(c, _active.bwKhz);
+    const bool badSf   = _active.sf < c.sfMin || _active.sf > c.sfMax;
+    if (badFreq || badBw || badSf) {
+      log_w("stored channel %.3f MHz / %.1f kHz / SF%u is not one an LR1110 can run "
+            "(%s%s%s) — replacing only that, the rest stands",
+            (double)_active.freqMhz, (double)_active.bwKhz, (unsigned)_active.sf,
+            badFreq ? "frequency " : "", badBw ? "bandwidth " : "", badSf ? "spreading factor" : "");
+      if (badFreq) _active.freqMhz = RF_FREQ_MHZ;
+      if (badBw)   _active.bwKhz   = RF_BW_KHZ;
+      if (badSf)   _active.sf      = RF_SF;
+    }
+  }
+  if (!probeLR1110(_active)) {
+    log_e("No LR1110 found on IRQ(DIO9)=%d/BUSY=%d — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY);
+    return false;
+  }
+#elif RF_MODEM_SX1280
   // A board reflashed from a sub-GHz image still holds that channel in NVS, and
   // none of it is usable here: the frequency is out of range and the bandwidth
   // is from a list this chip does not share a single value with. Correct the
@@ -262,7 +294,7 @@ bool LoRaRadio::probeSX1262(const RadioSettings& s) {
   // asked anything: the boot self-test transmits, and a probe through a dead
   // front end proves nothing but the front end (LoRaFem.h). A no-op elsewhere.
   LoRaFem::begin();
-  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, *_spi);
   SX1262* sx  = new SX1262(mod);
   int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
                             clampPower(s.txDbm, RadioCaps::kSX1262.txMinDbm,
@@ -284,8 +316,62 @@ bool LoRaRadio::probeSX1262(const RadioSettings& s) {
   return true;
 }
 
+#if RF_MODEM_LR1110
+// The LR1110's antenna switch is not on the MCU's GPIOs: the chip drives it
+// itself from its own DIO lines, and it has to be told which line does what
+// before it will connect the antenna in either direction. Until then the part
+// answers over SPI, reports a version, accepts a channel and transmits into a
+// disconnected pin — online by every measure this firmware has, and silent.
+// That is the same failure the amplified Heltec V4 has, arriving by a
+// different route, and it is why this radio is declared by the board rather
+// than probed for: the table is board wiring, not chip behaviour.
+//
+// The board supplies it as LR11X0_RF_SWITCH_DIOS / LR11X0_RF_SWITCH_TABLE.
+static const uint32_t kRfSwitchDios[Module::RFSWITCH_MAX_PINS] = LR11X0_RF_SWITCH_DIOS;
+static const Module::RfSwitchMode_t kRfSwitchTable[] = LR11X0_RF_SWITCH_TABLE;
+
+bool LoRaRadio::probeLR1110(const RadioSettings& s) {
+  // The fourth argument is BUSY, as on the SX126x; the second is the interrupt,
+  // which on this part is DIO9 rather than DIO1.
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, *_spi);
+  LR1110* lr  = new LR1110(mod);
+  int16_t state = lr->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
+                            clampPower(s.txDbm, RadioCaps::kLR1110.txMinDbm,
+                                       RadioCaps::kLR1110.txMaxDbm),
+                            s.preamble, RF_TCXO_VOLTAGE);
+  if (state != RADIOLIB_ERR_NONE) {
+    log_w("LR1110 not found (code %d)", state);
+    delete lr; delete mod;
+    return false;
+  }
+  // After begin(), not before: the table is written to the chip, and before
+  // begin() there is nothing there to write it to.
+  lr->setRfSwitchTable(kRfSwitchDios, kRfSwitchTable);
+  // A length here, as on the SX1280 — the sub-GHz SX126x takes a flag. For
+  // LoRa the part only cares that it is non-zero, but two bytes is what the
+  // other radios put on the air, and the framing above this layer should not
+  // be able to tell which chip it is running on.
+  lr->setCRC(2);
+  lr->explicitHeader();
+
+  // What is actually in the package, since this part carries a firmware of its
+  // own and the version is the one number that explains a chip which answers
+  // but misbehaves.
+  LR11x0VersionInfo_t v;
+  if (lr->getVersionInfo(&v) == RADIOLIB_ERR_NONE)
+    log_i("LR1110 firmware %u.%u (hardware %u, device %u)",
+          (unsigned)v.fwMajor, (unsigned)v.fwMinor,
+          (unsigned)v.hardware, (unsigned)v.device);
+
+  _radio = _lr1110 = lr;
+  _modelName = "LR1110";
+  _caps = &RadioCaps::kLR1110;
+  return true;
+}
+#endif // RF_MODEM_LR1110
+
 bool LoRaRadio::probeSX1280(const RadioSettings& s) {
-  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, *_spi);
   SX1280* sx  = new SX1280(mod);
   #if HAS_RF_SWITCH
     // The PA sits behind a transmit/receive switch. RadioLib drives it once it
@@ -316,7 +402,7 @@ bool LoRaRadio::probeSX127x(const RadioSettings& s) {
   // SX1276 and SX1278 share silicon version 0x12 and this driver; the
   // class only differs in the accepted frequency range, and SX1276 spans
   // both sub-GHz bands.
-  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO0, PIN_LORA_RST, PIN_LORA_DIO1, _spi);
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO0, PIN_LORA_RST, PIN_LORA_DIO1, *_spi);
   SX1276* sx  = new SX1276(mod);
   int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
                             clampPower(s.txDbm, RadioCaps::kSX1276.txMinDbm,
@@ -357,7 +443,14 @@ bool LoRaRadio::applySettings(const RadioSettings& s) {
   // The LoRa modulation setters are not part of PhysicalLayer, so they go
   // through whichever concrete driver was detected. Exactly one pointer is
   // ever set, so the chain resolves to one call.
-  #define CHIP(call) (_sx1262 ? _sx1262->call : _sx1280 ? _sx1280->call : _sx1276->call)
+  #if RF_MODEM_LR1110
+    // This build has exactly one radio in it and the board named it, so the
+    // chain is one call either way — but the LR1110 is not an SX126x and its
+    // pointer is only declared on the builds that carry one.
+    #define CHIP(call) (_lr1110->call)
+  #else
+    #define CHIP(call) (_sx1262 ? _sx1262->call : _sx1280 ? _sx1280->call : _sx1276->call)
+  #endif
   struct Step { const char* what; int16_t code; };
   Step steps[] = {
     { "standby",          _radio->standby() },
@@ -494,6 +587,9 @@ uint32_t LoRaRadio::rxDoneFlag() const {
   if (_sx1276) return RADIOLIB_SX127X_CLEAR_IRQ_FLAG_RX_DONE;   // 0b01000000
   if (_sx1262) return RADIOLIB_SX126X_IRQ_RX_DONE;              // 0b10
   if (_sx1280) return RADIOLIB_SX128X_IRQ_RX_DONE;              // 0x0002
+#if RF_MODEM_LR1110
+  if (_lr1110) return RADIOLIB_LR11X0_IRQ_RX_DONE;              // 1 << 3
+#endif
   return 0;
 }
 

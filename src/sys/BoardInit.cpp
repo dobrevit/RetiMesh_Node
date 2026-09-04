@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
+// ============================================================================
+//  BoardInit.cpp — see BoardInit.h
+// ============================================================================
+#include "BoardInit.h"
+
+#include <Arduino.h>
+#include "Config.h"
+
+#if HAS_USB_PAD_CONFLICT
+  #include <soc/usb_serial_jtag_reg.h>
+#endif
+
+namespace {
+
+// A chip select at rest. Driven rather than merely configured, because the
+// point is the level on the wire and not the direction of the pad.
+inline void idleSelect(int pin) {
+  if (pin < 0) return;
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, HIGH);          // every device here deselects high
+}
+
+} // namespace
+
+namespace BoardInit {
+
+void begin() {
+#if HAS_USB_PAD_CONFLICT
+  // Before any pin on the board is touched: release the chip's own USB pads.
+  // GPIO 19 and 20 are D-/D+, and a board that routes them to something else —
+  // here, one of them is a keyboard's I2C data line — has the USB peripheral
+  // driving those pins alongside whatever else is on them. The bus then reads
+  // as stuck, which looks like a wiring fault and is not.
+  //
+  // Safe only because such a board reaches the host through a bridge on a UART
+  // rather than through this peripheral: giving it up costs nothing that this
+  // board had.
+  REG_CLR_BIT(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
+  log_i("USB pad released — GPIO 19/20 belong to the board here");
+#endif
+
+#if HAS_BOARD_POWER
+  // The rail before anything else in setup() that could want it. The level is
+  // the board's to say: a high-side switch wants a high, an active-low enable
+  // wants a low, and both exist on boards this firmware runs on.
+  pinMode(PIN_BOARD_POWER, OUTPUT);
+  digitalWrite(PIN_BOARD_POWER, BOARD_POWER_ACTIVE);
+  // Long enough for the switch to settle and the parts behind it to finish
+  // their own resets before anyone addresses them. The keyboard's controller
+  // is the slowest of them and wants longer still, which is why Keypad::begin
+  // waits again rather than trusting this one number for everybody.
+  delay(BOARD_POWER_SETTLE_MS);
+  log_i("board rail on (GPIO %d -> %s)", PIN_BOARD_POWER,
+        BOARD_POWER_ACTIVE == HIGH ? "high" : "low");
+#endif
+
+#if SPI_BUS_SHARED
+  // Three devices, one set of wires. Each driver raises its own select in its
+  // own begin(), which is correct and happens too late: whichever starts first
+  // is talking on a bus where the other two selects are still floating, and a
+  // floating select is a device that may answer. Idle all of them here, before
+  // any of them exists.
+  #if HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_TFT
+    const int panelCs = PIN_TFT_CS;
+  #else
+    const int panelCs = -1;
+  #endif
+  #if HAS_SD
+    const int cardCs = PIN_SD_CS;
+  #else
+    const int cardCs = -1;
+  #endif
+  idleSelect(PIN_LORA_CS);
+  idleSelect(panelCs);
+  idleSelect(cardCs);
+  // And the one line all three drive in turn: with every device deselected
+  // nothing holds it, so it is pulled up rather than left to float into
+  // whatever the first read makes of it.
+  //
+  // Guarded the way the selects above are, not because a board needs it today:
+  // both shared-bus boards name a real pin here. It is guarded so that the rule
+  // "a negative pin is a pin this board does not have" holds everywhere in this
+  // function rather than in three places out of four, which is the version of
+  // it that gets copied into the next board and is wrong there.
+  if (PIN_LORA_MISO >= 0) pinMode(PIN_LORA_MISO, INPUT_PULLUP);
+  log_i("shared SPI bus: selects idled (radio %d, panel %d, card %d)",
+        PIN_LORA_CS, panelCs, cardCs);
+#endif
+}
+
+} // namespace BoardInit

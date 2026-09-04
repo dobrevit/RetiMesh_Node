@@ -67,6 +67,17 @@ uint32_t loop();
 // with gloves on.
 void stepTab(int8_t dir);
 
+// The button as "select" on a board with keys or a ball: presses the focused
+// control. False where there is no focus ring, leaving the press to stepTab.
+bool activateFocused();
+
+// The last touch point the shell handed to LVGL, and the count of them.
+void touchDelivered(uint32_t& n, int16_t& x, int16_t& y);
+
+// What the shell has on the glass right now — see Ui.h.
+void uiFacts(uint32_t& children, uint32_t& group, bool& idle, bool& modal);
+void firstControlBox(int16_t& x1, int16_t& y1, int16_t& x2, int16_t& y2);
+
 // Blank/unblank hooks so the panel sleep logic stays where it is.
 void onBlank(bool on);
 
@@ -111,6 +122,10 @@ namespace LvglUi {
 inline bool begin(TftPanel&) { return false; }
 inline uint32_t loop() { return 1000; }
 inline void stepTab(int8_t) {}
+inline bool activateFocused() { return false; }
+inline void touchDelivered(uint32_t& n, int16_t& x, int16_t& y) { n = 0; x = -1; y = -1; }
+inline void uiFacts(uint32_t& c, uint32_t& g, bool& i, bool& m) { c = 0; g = 0; i = false; m = false; }
+inline void firstControlBox(int16_t& a, int16_t& b, int16_t& c2, int16_t& d) { a = b = c2 = d = -1; }
 inline void onBlank(bool) {}
 inline bool touchActive() { return false; }
 enum class PanelAction : uint8_t { None, Wake, Sleep };

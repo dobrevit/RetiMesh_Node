@@ -50,6 +50,16 @@ public:
   bool begin();
   bool present() const { return _ok; }
 
+  // What the colour controller said it is, where it could be asked at all.
+  // Zero everywhere else. See TftPanel::controllerId().
+  uint32_t controllerId() const {
+#if HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_TFT
+    return _panelImpl.controllerId();
+#else
+    return 0;
+#endif
+  }
+
   // FreeRTOS entry point — created pinned to core 0 from main.cpp.
   static void displayTask(void* self);
 

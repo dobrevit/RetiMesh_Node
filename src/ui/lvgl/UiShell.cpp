@@ -33,6 +33,7 @@
 #include <esp_heap_caps.h>
 #include "TftPanel.h"
 #include "TouchInput.h"
+#include "Keypad.h"
 #include "Settings.h"
 #include "Power.h"
 #include "Gps.h"
@@ -91,7 +92,29 @@ void flushCb(lv_display_t* disp, const lv_area_t* area, uint8_t* px) {
 
 volatile bool sTouchSeen = false;
 volatile bool sSwallow = false;          // the wake tap must not press anything
+// What was actually handed to LVGL, after the turn this file may or may not
+// apply. The controller's own numbers are reported separately, and the two
+// together say whether a tap that never pressed anything was misread by the
+// driver, moved by this transform, or delivered correctly and lost inside the
+// toolkit — three faults with one symptom.
+uint32_t sSent = 0;
+int16_t  sSentX = -1, sSentY = -1;
+
+// A shortcut key waiting to be acted on, outside LVGL's read of the device
+// that produced it. KEY_NONE when there is nothing pending.
+uint8_t sPendingScreen = 0;
 uint8_t sRot = 0;                        // quarter turns, mirrored in the panel's MADCTL
+
+// What the shell had on the glass at the end of the last pass, for the console
+// to read. Snapshotted rather than fetched on demand: the console runs in the
+// Arduino loop task on the other core, LVGL is built here with LV_USE_OS =
+// LV_OS_NONE and so has no lock of its own, and a STATUS typed while the
+// display task is inside lv_timer_handler() would otherwise walk the object
+// tree from underneath it. These are plain integers, so the worst a reader can
+// see now is a figure from one pass beside a figure from the next.
+uint32_t sFactChildren = 0, sFactGroup = 0;
+bool     sFactIdle = false, sFactModal = false;
+int16_t  sFactBox[4] = { -1, -1, -1, -1 };
 
 void touchCb(lv_indev_t*, lv_indev_data_t* data) {
   const TouchInput::Point p = TouchInput::poll();
@@ -106,15 +129,156 @@ void touchCb(lv_indev_t*, lv_indev_data_t* data) {
   data->state = p.down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
   if (p.down) {
     // The glass reports portrait-native points; the UI lives in the turned
-    // frame, so the point turns the same way the MADCTL did.
+    // frame, so the point turns the same way the MADCTL did — unless the
+    // controller is already configured for the mounted orientation, in which
+    // case it agrees with the picture and turning it would move every tap.
     int16_t x = p.x, y = p.y;
-    switch (sRot) {
+    switch (TOUCH_PRE_ROTATED ? 0 : sRot) {
       case 1: x = p.y;                                  y = (int16_t)(DISPLAY_WIDTH  - 1 - p.x); break;
       case 2: x = (int16_t)(DISPLAY_WIDTH  - 1 - p.x);  y = (int16_t)(DISPLAY_HEIGHT - 1 - p.y); break;
       case 3: x = (int16_t)(DISPLAY_HEIGHT - 1 - p.y);  y = p.x;                                 break;
     }
+    // A mirrored axis, where the board has one. Measured against the display's
+    // own resolution rather than the panel's constants, because after a
+    // quarter turn those two are not the same pair of numbers.
+    if (TOUCH_MIRROR_X || TOUCH_MIRROR_Y) {
+      lv_display_t* d = lv_display_get_default();
+      if (TOUCH_MIRROR_X) x = (int16_t)(lv_display_get_horizontal_resolution(d) - 1 - x);
+      if (TOUCH_MIRROR_Y) y = (int16_t)(lv_display_get_vertical_resolution(d) - 1 - y);
+    }
     data->point.x = x; data->point.y = y; sTouchSeen = true;
+    sSent++; sSentX = x; sSentY = y;
   }
+}
+
+#if HAS_KEYPAD || HAS_TRACKBALL
+// The physical keys, as an LVGL keypad device. Its group holds the text fields
+// the shell creates, so a key goes to whichever one the operator last touched —
+// which is the same field the on-glass keyboard would have been typing into.
+lv_group_t* sKeys = nullptr;
+
+void keypadCb(lv_indev_t*, lv_indev_data_t* data) {
+  // The keyboard hands over one key per read and has no concept of a release:
+  // its controller latches what was pressed and forgets it. LVGL wants a press
+  // and then a release, so each key is held for exactly one pass and let go on
+  // the next. Typing faster than the shell polls is bounded by the poll rate,
+  // not lost — the controller's own latch queues the rest.
+  static uint32_t held = 0;
+  if (held) { data->key = held; data->state = LV_INDEV_STATE_RELEASED; held = 0; return; }
+
+  const uint8_t k = Keypad::read();
+  if (k == Keypad::KEY_NONE) { data->state = LV_INDEV_STATE_RELEASED; return; }
+
+  // The shortcut keys are screens, not characters: what they mean is "show me
+  // this", not "press the thing under the cursor". Remembered here and acted on
+  // by the shell loop rather than done now — this runs inside LVGL's own read
+  // of the input device, and opening a screen deletes the objects of the one
+  // being left, which can include the very object this device holds the focus
+  // on. Doing it here panicked the node.
+  switch (k) {
+    case Keypad::KEY_MESSAGES:
+    case Keypad::KEY_HOME:
+    case Keypad::KEY_MENU:
+    case Keypad::KEY_BACK:
+    case Keypad::KEY_MAP:
+    case Keypad::KEY_GPS:
+      sPendingScreen = k;
+      sTouchSeen = true;
+      data->state = LV_INDEV_STATE_RELEASED;
+      return;
+    default: break;
+  }
+
+  uint32_t lk;
+  switch (k) {
+    // Up and down walk the controls rather than moving inside one. LVGL moves
+    // focus around a group on NEXT and PREV and sends the plain arrows to
+    // whatever already has it — so a device with no pointer and only arrows
+    // can reach nothing at all. On the board that has no touch layer this is
+    // the difference between a usable node and an ornament, and on the one
+    // that has both a trackball and glass it is what the ball should do
+    // anyway. Left and right stay arrows, so a text cursor still moves.
+    case Keypad::KEY_UP:        lk = LV_KEY_PREV;      break;
+    case Keypad::KEY_DOWN:      lk = LV_KEY_NEXT;      break;
+    case Keypad::KEY_LEFT:      lk = LV_KEY_LEFT;      break;
+    case Keypad::KEY_RIGHT:     lk = LV_KEY_RIGHT;     break;
+    case Keypad::KEY_ENTER:     lk = LV_KEY_ENTER;     break;   // 0x0D here, 0x0A there
+    case Keypad::KEY_BACKSPACE: lk = LV_KEY_BACKSPACE; break;
+    case Keypad::KEY_ESC:       lk = LV_KEY_ESC;       break;
+    default:
+      // Anything printable is itself. Anything else is a key this firmware has
+      // no meaning for — a controller's own function key — and is dropped
+      // rather than typed as a control character into a message.
+      if (k < 0x20 || k > 0x7E) { data->state = LV_INDEV_STATE_RELEASED; return; }
+      lk = k;
+      break;
+  }
+  data->key = lk;
+  data->state = LV_INDEV_STATE_PRESSED;
+  held = lk;
+  sTouchSeen = true;                     // a keypress is activity, like a tap
+}
+
+// Everything focusable under `parent`, in the order it was built. The on-glass
+// keyboard is skipped: on a board with real keys taFocusEvent never shows it,
+// and a widget in the group that is never on the glass is one more thing the
+// focus has to walk past — it was also the first focusable object the shell
+// built, so it took the group's focus and swallowed the first key of the run.
+void groupCollect(lv_obj_t* parent) {
+  const uint32_t n = lv_obj_get_child_count(parent);
+  for (uint32_t i = 0; i < n; i++) {
+    lv_obj_t* c = lv_obj_get_child(parent, i);
+    if (c != sKeyboard && lv_obj_is_group_def(c)) lv_group_add_obj(sKeys, c);
+    groupCollect(c);
+  }
+}
+
+// The group holds what is on the glass, and nothing else.
+//
+// LVGL's default group is what makes every widget the shell builds reachable
+// from the keys, and it is also one group for the whole run: the screens push()
+// keeps alive behind this one stay in it, and lv_group_focus_next skips only
+// hidden and disabled objects — never an object on a screen nobody can see. So
+// an arrow walked the focus onto the buttons of the screen underneath, where
+// Enter pressed one nothing on the glass could explain. Rebuilt from the active
+// screen every time the screen changes; newScreen() is where each subscribes.
+void regroupOnLoad(lv_event_t*) {
+  if (!sKeys) return;
+  lv_group_remove_all_objs(sKeys);
+  groupCollect(lv_screen_active());
+  groupCollect(lv_layer_top());          // modal dialogs are built up here
+}
+#endif
+
+// The console's view of the glass, taken here where LVGL is already this
+// task's to touch. See the sFact* declarations for why it is not read on
+// demand.
+void snapshotFacts() {
+  lv_obj_t* scr = lv_screen_active();
+  sFactChildren = scr ? lv_obj_get_child_count(scr) : 0;
+  sFactIdle = Ui::idleShowing();
+  // Anything on the top layer beyond the status bar and the on-glass keyboard
+  // is an overlay, and an overlay is the obvious thing to be swallowing a tap
+  // that reaches LVGL and presses nothing.
+  sFactModal = lv_obj_get_child_count(lv_layer_top()) > 2;
+  int16_t box[4] = { -1, -1, -1, -1 };
+#if HAS_KEYPAD || HAS_TRACKBALL
+  sFactGroup = sKeys ? lv_group_get_obj_count(sKeys) : 0;
+  // Where the focused control actually is, in the coordinates a tap arrives
+  // in. A press that reaches LVGL at a point with nothing under it presses
+  // nothing, and "nothing under it" is a fact about the layout rather than
+  // about the touch layer — worth reading before blaming the glass again.
+  lv_obj_t* focused = sKeys ? lv_group_get_focused(sKeys) : nullptr;
+  if (focused) {
+    lv_area_t a;
+    lv_obj_get_coords(focused, &a);
+    box[0] = (int16_t)a.x1; box[1] = (int16_t)a.y1;
+    box[2] = (int16_t)a.x2; box[3] = (int16_t)a.y2;
+  }
+#else
+  sFactGroup = 0;
+#endif
+  memcpy(sFactBox, box, sizeof(sFactBox));
 }
 
 // --- the status bar ---------------------------------------------------------
@@ -208,6 +372,12 @@ void taFocusEvent(lv_event_t* e) {
   lv_obj_t* ta = (lv_obj_t*)lv_event_get_target(e);
   const lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED) {
+#if HAS_KEYPAD || HAS_TRACKBALL
+    // A board with keys on it does not need half its screen given over to a
+    // picture of keys. The field is scrolled into view and left alone; the
+    // keypad device is already aimed at it, because focus is what aims it.
+    if (Keypad::present()) { lv_obj_scroll_to_view(ta, LV_ANIM_ON); return; }
+#endif
     const bool numeric = (bool)(uintptr_t)lv_event_get_user_data(e);
     lv_keyboard_set_mode(sKeyboard, numeric ? LV_KEYBOARD_MODE_NUMBER
                                             : LV_KEYBOARD_MODE_TEXT_LOWER);
@@ -259,6 +429,12 @@ bool shellInit(TftPanel& panel) {
   lv_display_set_buffers(disp, sBuf1, nullptr, sizeof(sBuf1),
                          LV_DISPLAY_RENDER_MODE_PARTIAL);
   UiTheme::init(disp);                   // before any widget exists
+  // Which way up the board is built, before any chrome is laid out: the bar
+  // and the tabs size themselves in percentages of a resolution that has to be
+  // the final one. A board with an accelerometer moves on from here; a board
+  // without one stays, and without this stayed in the controller's portrait on
+  // glass mounted landscape.
+  setRotation(DISPLAY_ROTATION);
   UiTheme::setDaylight(settings.display().daylight);
   // text_font is an inherited style, and overlays live on the top layer —
   // outside any themed screen's inheritance. Without this, their labels
@@ -271,6 +447,28 @@ bool shellInit(TftPanel& panel) {
   lv_indev_set_type(touch, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(touch, touchCb);
 
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // Where the keys answered — or where there is a trackball, whose detents come
+  // out of the same reader and need the same device. Gating the device on the
+  // keyboard alone left a board whose keyboard was fitted but silent counting
+  // ball edges into a device that was never created. Only the on-glass keyboard
+  // follows present(), because a real keyboard is the thing that replaces it.
+  if (Keypad::present() || HAS_TRACKBALL) {
+    sKeys = lv_group_create();
+    lv_indev_t* keys = lv_indev_create();
+    lv_indev_set_type(keys, LV_INDEV_TYPE_KEYPAD);
+    lv_indev_set_read_cb(keys, keypadCb);
+    lv_indev_set_group(keys, sKeys);
+    // Every focusable widget the shell builds from here joins this group on
+    // its own: LVGL adds a new object to the default group when its class asks
+    // to be focusable, which buttons, lists and text fields all do. That is
+    // what makes the whole shell reachable from the keys rather than only the
+    // text fields — and it is the difference between a usable node and an
+    // ornament on the one board here that has no touch layer at all.
+    lv_group_set_default(sKeys);
+  }
+#endif
+
   barCreate();
 
   sKeyboard = lv_keyboard_create(lv_layer_top());
@@ -279,6 +477,13 @@ bool shellInit(TftPanel& panel) {
   lv_keyboard_set_mode(sKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_obj_add_event_cb(sKeyboard, kbEvent, LV_EVENT_ALL, nullptr);
   lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // A button matrix is focusable, and this one was the first focusable widget
+  // built after the default group existed — so it joined it and, being first,
+  // took the focus. The first Enter of the run went to a keyboard nobody could
+  // see. groupCollect() keeps it out from here on; this is the boot window.
+  if (sKeys) lv_group_remove_obj(sKeyboard);
+#endif
 
   // One real frame before setup() continues: the boot splash. The display
   // task is not running yet, so this paints synchronously and holds the
@@ -315,7 +520,70 @@ bool shellInit(TftPanel& panel) {
   return true;
 }
 
-uint32_t shellLoop() { return lv_timer_handler(); }
+uint32_t shellLoop() {
+  // The shortcut keys are served here, between passes rather than inside one:
+  // opening a screen deletes the screen being left, and the input device that
+  // asked for it is read from within lv_timer_handler.
+  if (sPendingScreen) {
+    const uint8_t k = sPendingScreen;
+    sPendingScreen = 0;
+    if (k == Keypad::KEY_BACK) {
+      back();
+    } else {
+      // A shortcut key means "show me this", not "and keep everything I was
+      // in". Without the unwind the screens the operator has left stay on the
+      // stack: Ui::atRoot() then answers false while home is on the glass —
+      // which is the one thing refreshHome() refuses to run under, so the
+      // clock and every reading freeze — and six presses fill sStack, after
+      // which push() refuses every shortcut with "too deep — go back first".
+      toRoot();
+      openHome();                        // the root, rebuilt, and KEY_HOME's answer
+      switch (k) {
+        case Keypad::KEY_MESSAGES: openMessages(); break;
+        case Keypad::KEY_MENU:     openSettings(); break;
+        case Keypad::KEY_MAP:      openPlot();     break;
+#if HAS_GPS
+        case Keypad::KEY_GPS:      openGps();      break;
+#endif
+        default: break;                  // KEY_HOME: home is already on the glass
+      }
+    }
+  }
+  const uint32_t next = lv_timer_handler();
+  snapshotFacts();                       // for the console, on the task that owns LVGL
+  return next;
+}
+
+void touchDelivered(uint32_t& n, int16_t& x, int16_t& y) { n = sSent; x = sSentX; y = sSentY; }
+
+void uiFacts(uint32_t& children, uint32_t& group, bool& idle, bool& modal) {
+  children = sFactChildren;
+  group    = sFactGroup;
+  idle     = sFactIdle;
+  modal    = sFactModal;
+}
+
+void firstControlBox(int16_t& x1, int16_t& y1, int16_t& x2, int16_t& y2) {
+  x1 = sFactBox[0]; y1 = sFactBox[1]; x2 = sFactBox[2]; y2 = sFactBox[3];
+}
+
+bool activateFocused() {
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // A press on a board that has a focus ring means "this one", not "go back".
+  // The trackball's click is the button this firmware has always had, and on
+  // the mono page stack a press turns the page because there is nothing on a
+  // page to choose. Here there is: the group holds the controls of the screen
+  // on the glass, one of them is focused, and the ball is pressed while
+  // looking at it. Sent through the group rather than as a click on the
+  // widget, so that a control which handles keys itself — a list, an editable
+  // field — gets what it expects.
+  if (sKeys && lv_group_get_focused(sKeys)) {
+    lv_group_send_data(sKeys, LV_KEY_ENTER);
+    return true;
+  }
+#endif
+  return false;
+}
 
 void setRotation(uint8_t quarterTurns) {
   const uint8_t want = quarterTurns & 3;
@@ -418,6 +686,22 @@ void back() {
   lv_screen_load_anim(sStack[--sDepth], LV_SCR_LOAD_ANIM_MOVE_RIGHT, 150, 0, true);
 }
 
+// Drop everything under the active screen without walking back through it.
+// The stack is what atRoot() answers from and what push() has room in, so a
+// caller that jumps somewhere rather than navigating there has to empty it or
+// both go wrong quietly. The screen on the glass is not touched: whoever is
+// jumping is about to replace it. Same unbinding as back(), for the same
+// reason — the keyboard outlives the screens it points into.
+void toRoot() {
+  if (!sDepth) return;
+  lv_keyboard_set_textarea(sKeyboard, nullptr);
+  lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+  while (sDepth) {
+    lv_obj_t* s = sStack[--sDepth];
+    if (s && lv_obj_is_valid(s)) lv_obj_delete(s);
+  }
+}
+
 bool atRoot() { return sDepth == 0; }
 
 void retheme() {
@@ -433,10 +717,7 @@ void retheme() {
   lv_obj_set_style_text_color(lv_layer_top(), lv_color_hex(UiTheme::kInk), 0);
   lv_obj_set_style_text_color(sBarName, lv_color_hex(UiTheme::kInkDim), 0);
   lv_obj_set_style_text_color(sBarIcons, lv_color_hex(UiTheme::kInkDim), 0);
-  while (sDepth) {
-    lv_obj_t* s = sStack[--sDepth];
-    if (s && lv_obj_is_valid(s)) lv_obj_delete(s);
-  }
+  toRoot();                              // the stacked screens die with their colours
   resetIdle();
   openHome();   // deletes the active screen, builds home in the new palette
 }
@@ -449,6 +730,12 @@ lv_obj_t* newScreen(const char* title) {
   lv_obj_t* scr = lv_obj_create(nullptr);
   UiTheme::screen(scr);
   lv_obj_set_style_pad_top(scr, kBarH, 0);   // the status bar's lane
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // The keys reach this screen's widgets and no others, from the moment it is
+  // the one on the glass. Every screen the shell builds comes through here, and
+  // both loads — lv_screen_load and the animated push/back — end in this event.
+  lv_obj_add_event_cb(scr, regroupOnLoad, LV_EVENT_SCREEN_LOADED, nullptr);
+#endif
 
   lv_obj_t* col = lv_obj_create(scr);
   lv_obj_remove_style_all(col);

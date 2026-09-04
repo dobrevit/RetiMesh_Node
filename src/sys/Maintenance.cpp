@@ -26,6 +26,10 @@
 #include "Power.h"
 #include "Bq25896.h"
 #include "Imu.h"
+#include "Display.h"
+#include "TouchInput.h"
+#include "LvglUi.h"
+#include "Keypad.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
 
@@ -143,6 +147,68 @@ static void doStatus() {
 #if HAS_BQ25896 || HAS_DA217
   dataf("STATUS", "parts charger=%s imu=%s",
         Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");
+#endif
+#if HAS_DISPLAY
+  // What the operator can actually drive this node with. Every one of these is
+  // found at boot and then never mentioned again, so a board whose touch layer
+  // or keyboard did not answer looks from the outside exactly like one nobody
+  // is touching — which is a day of the wrong guesses during a bring-up. The
+  // panel is here too because a glass that stays dark is the same question.
+  dataf("STATUS", "input panel=%s touch=%s keys=%s controller=0x%06lx",
+        g_stats.displayPresent ? "yes" : "no",
+        HAS_TOUCH  ? (TouchInput::present() ? "yes" : "absent") : "n/a",
+        (HAS_KEYPAD || HAS_TRACKBALL) ? (Keypad::present() ? "yes" : "absent") : "n/a",
+        (unsigned long)display.controllerId());
+#if HAS_TOUCH
+  // What the glass has actually reported, and the last raw point. A layer that
+  // never reports and one whose points the shell turns to the wrong place are
+  // the same symptom from the outside — a screen that ignores taps — and these
+  // two numbers are what tells them apart.
+  {
+    const uint8_t* r = TouchInput::lastRaw();
+    dataf("STATUS", "touch reports=%lu last=%d,%d raw=[%02x %02x %02x %02x %02x %02x]",
+          (unsigned long)TouchInput::reports(), TouchInput::lastX(), TouchInput::lastY(),
+          r[0], r[1], r[2], r[3], r[4], r[5]);
+#if HAS_LVGL_UI
+    // And what the shell handed on, after whatever turn it applies. Equal to
+    // the reading above means no transform; different means one was applied,
+    // and whether that was right is then a question with an answer.
+    uint32_t sent = 0; int16_t sx = -1, sy = -1;
+    LvglUi::touchDelivered(sent, sx, sy);
+    dataf("STATUS", "touch sent=%lu at=%d,%d", (unsigned long)sent, sx, sy);
+#endif
+  }
+#endif
+#if HAS_LVGL_UI
+  // What the shell has on the glass, and where the focus ring is sitting.
+  // Outside the touch block deliberately: the focus ring is the keys' answer
+  // to a board with no glass to point at, so the one board here without a
+  // touch layer is exactly the board these two lines were written for.
+  {
+    uint32_t kids = 0, grp = 0; bool idle = false, modal = false;
+    LvglUi::uiFacts(kids, grp, idle, modal);
+    dataf("STATUS", "ui children=%lu group=%lu idle=%s overlay=%s",
+          (unsigned long)kids, (unsigned long)grp, idle ? "yes" : "no", modal ? "yes" : "no");
+    int16_t bx1, by1, bx2, by2;
+    LvglUi::firstControlBox(bx1, by1, bx2, by2);
+    dataf("STATUS", "ui focused=%d,%d-%d,%d", bx1, by1, bx2, by2);
+  }
+#endif
+#if HAS_KEYPAD
+  // The raw codes the keyboard's own controller sent, oldest first. A board's
+  // function keys are numbered by that controller and nothing published says
+  // how, so this is how they are learned: press them in a known order and read
+  // the list back, rather than map a key to the wrong screen and wonder.
+  {
+    uint8_t raw[24];
+    const size_t n = Keypad::recentRaw(raw, sizeof(raw));
+    char list[24 * 3 + 1] = "";
+    size_t at = 0;
+    for (size_t i = 0; i < n && at < sizeof(list) - 5; i++)
+      at += snprintf(list + at, sizeof(list) - at, "%s%02x", i ? " " : "", raw[i]);
+    dataf("STATUS", "keys recent=[%s]", list);
+  }
+#endif
 #endif
 #if HAS_PMU || HAS_BATTERY_ADC
   // The cell as this board sees it — the same reading the panel's icon acts

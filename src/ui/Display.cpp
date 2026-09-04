@@ -41,6 +41,7 @@ Display display;
 #include "DisplayIcons.h"
 #include "QrCode.h"
 #include "TouchInput.h"
+#include "Keypad.h"
 #include "LvglUi.h"
 #include "Bootloader.h"
 #include "Bq25896.h"
@@ -64,6 +65,13 @@ bool Display::begin() {
     DISPLAY_KIND == DISPLAY_KIND_TFT
   _panel = &_panelImpl;
 #endif
+  // The keys first, and not behind the panel: on a board whose only input is
+  // its keyboard, a panel that could not allocate its canvas would otherwise
+  // take the keyboard down with it and the console would report no keys on a
+  // board where they were never asked. They sit behind the same rail
+  // BoardInit raised, not behind the panel's.
+  Keypad::begin();
+
   if (!_panel || !_panel->begin()) return false;
   _gfx = &_panel->gfx();
   _ok  = true;
@@ -208,9 +216,20 @@ void Display::displayTask(void* self) {
       static uint32_t lastWakePoll = 0;
       // 250 ms: a real tap lasts longer than that, and at 100 ms a node that
       // sleeps all day burned ten doomed bus reads a second to notice one.
-      if (settings.display().touchWake && now - lastWakePoll >= 250) {
+      if (now - lastWakePoll >= 250) {
         lastWakePoll = now;
-        if (TouchInput::poll().down) {
+        // Keys wake, and are not behind the touch setting. That setting exists
+        // because a capacitive layer answers a pocket as readily as a finger,
+        // which is not true of a key somebody has to press — and on a board
+        // with a keyboard and no touch layer at all, gating keys behind it
+        // leaves a panel that goes dark once and never comes back. Read even
+        // when the glass is dark: the key is consumed here so that waking is
+        // all it does, the same rule the swallowed tap follows.
+        const bool keyed = Keypad::read() != Keypad::KEY_NONE;
+        if (keyed) {
+          d->_lastActivityMs = now;
+          d->setBlank(false);
+        } else if (settings.display().touchWake && TouchInput::poll().down) {
           // Activity first — the bench found the wake flickering and dying:
           // without this the timer was still expired on the very next pass
           // and re-blanked the panel under the waking finger. And the tap
@@ -264,6 +283,11 @@ void Display::advancePage(bool forward) {
 #if HAS_LVGL_UI
   if (sShellUp) {
     if (LvglUi::idleShowing()) { LvglUi::showIdle(false); return; }  // wake from the clock only
+    // On a board with a focus ring the press means "this one". Only forward
+    // presses: a second button, where a board has one, walks backwards and
+    // should keep doing that. Where there is no ring this answers false and
+    // the press walks the tabs, which is what it has always done.
+    if (forward && LvglUi::activateFocused()) return;
     LvglUi::stepTab(forward ? 1 : -1);           // the buttons walk the tabs
     return;
   }
