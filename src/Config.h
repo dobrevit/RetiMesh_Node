@@ -590,6 +590,25 @@
 // they are not alike enough to probe for: the CHSC6X holds one report and
 // answers only while a finger is down, the GT911 is register-mapped and
 // answers always. A board names which it carries.
+// A clock the board keeps running for itself. Off unless a board says
+// otherwise: a node without one counts from the epoch until its receiver has a
+// fix, and every board here did that until the first one turned up carrying a
+// PCF8563. The pins default to the board's general I2C, which is where such a
+// part sits on every board that has one — it is a slow device with nothing to
+// gain from a bus of its own.
+#ifndef HAS_RTC
+  #define HAS_RTC           0
+#endif
+#ifndef RTC_ADDR
+  #define RTC_ADDR          0x51            // the PCF8563's, and it is not strappable
+#endif
+#ifndef PIN_RTC_SDA
+  #define PIN_RTC_SDA       PIN_I2C_SDA
+#endif
+#ifndef PIN_RTC_SCL
+  #define PIN_RTC_SCL       PIN_I2C_SCL
+#endif
+
 #define TOUCH_KIND_CHSC6X   1
 #define TOUCH_KIND_GT911    2
 #ifndef HAS_TOUCH
