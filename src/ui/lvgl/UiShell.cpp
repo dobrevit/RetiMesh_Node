@@ -92,6 +92,17 @@ void flushCb(lv_display_t* disp, const lv_area_t* area, uint8_t* px) {
 
 volatile bool sTouchSeen = false;
 volatile bool sSwallow = false;          // the wake tap must not press anything
+// What was actually handed to LVGL, after the turn this file may or may not
+// apply. The controller's own numbers are reported separately, and the two
+// together say whether a tap that never pressed anything was misread by the
+// driver, moved by this transform, or delivered correctly and lost inside the
+// toolkit — three faults with one symptom.
+uint32_t sSent = 0;
+int16_t  sSentX = -1, sSentY = -1;
+
+// A shortcut key waiting to be acted on, outside LVGL's read of the device
+// that produced it. KEY_NONE when there is nothing pending.
+uint8_t sPendingScreen = 0;
 uint8_t sRot = 0;                        // quarter turns, mirrored in the panel's MADCTL
 
 void touchCb(lv_indev_t*, lv_indev_data_t* data) {
@@ -117,6 +128,7 @@ void touchCb(lv_indev_t*, lv_indev_data_t* data) {
       case 3: x = (int16_t)(DISPLAY_HEIGHT - 1 - p.y);  y = p.x;                                 break;
     }
     data->point.x = x; data->point.y = y; sTouchSeen = true;
+    sSent++; sSentX = x; sSentY = y;
   }
 }
 
@@ -138,27 +150,26 @@ void keypadCb(lv_indev_t*, lv_indev_data_t* data) {
   const uint8_t k = Keypad::read();
   if (k == Keypad::KEY_NONE) { data->state = LV_INDEV_STATE_RELEASED; return; }
 
-  // The shortcut keys are screens, not characters: they go straight to the
-  // shell rather than through the focus ring, because what they mean is "show
-  // me this", not "press the thing under the cursor". Handled before the
-  // translation below, and reported as nothing pressed — LVGL has already been
-  // given a new screen by the time it looks.
+  // The shortcut keys are screens, not characters: what they mean is "show me
+  // this", not "press the thing under the cursor". Remembered here and acted on
+  // by the shell loop rather than done now — this runs inside LVGL's own read
+  // of the input device, and opening a screen deletes the objects of the one
+  // being left, which can include the very object this device holds the focus
+  // on. Doing it here panicked the node.
   switch (k) {
-    case Keypad::KEY_MESSAGES: Ui::openMessages();     break;
-    case Keypad::KEY_HOME:     Ui::openHome();         break;
-    case Keypad::KEY_MENU:     Ui::openSettings();     break;
-    case Keypad::KEY_BACK:     Ui::back();             break;
-    case Keypad::KEY_MAP:      Ui::openPlot();         break;
-#if HAS_GPS
-    case Keypad::KEY_GPS:      Ui::openGps();          break;
-#endif
-    default: goto notScreen;
+    case Keypad::KEY_MESSAGES:
+    case Keypad::KEY_HOME:
+    case Keypad::KEY_MENU:
+    case Keypad::KEY_BACK:
+    case Keypad::KEY_MAP:
+    case Keypad::KEY_GPS:
+      sPendingScreen = k;
+      sTouchSeen = true;
+      data->state = LV_INDEV_STATE_RELEASED;
+      return;
+    default: break;
   }
-  sTouchSeen = true;
-  data->state = LV_INDEV_STATE_RELEASED;
-  return;
 
-notScreen:
   uint32_t lk;
   switch (k) {
     // Up and down walk the controls rather than moving inside one. LVGL moves
@@ -459,7 +470,60 @@ bool shellInit(TftPanel& panel) {
   return true;
 }
 
-uint32_t shellLoop() { return lv_timer_handler(); }
+uint32_t shellLoop() {
+  // The shortcut keys are served here, between passes rather than inside one:
+  // opening a screen deletes the screen being left, and the input device that
+  // asked for it is read from within lv_timer_handler.
+  if (sPendingScreen) {
+    const uint8_t k = sPendingScreen;
+    sPendingScreen = 0;
+    switch (k) {
+      case Keypad::KEY_MESSAGES: openMessages(); break;
+      case Keypad::KEY_HOME:     openHome();     break;
+      case Keypad::KEY_MENU:     openSettings(); break;
+      case Keypad::KEY_BACK:     back();         break;
+      case Keypad::KEY_MAP:      openPlot();     break;
+#if HAS_GPS
+      case Keypad::KEY_GPS:      openGps();      break;
+#endif
+      default: break;
+    }
+  }
+  return lv_timer_handler();
+}
+
+void touchDelivered(uint32_t& n, int16_t& x, int16_t& y) { n = sSent; x = sSentX; y = sSentY; }
+
+void uiFacts(uint32_t& children, uint32_t& group, bool& idle, bool& modal) {
+  lv_obj_t* scr = lv_screen_active();
+  children = scr ? lv_obj_get_child_count(scr) : 0;
+#if HAS_KEYPAD || HAS_TRACKBALL
+  group = sKeys ? lv_group_get_obj_count(sKeys) : 0;
+#else
+  group = 0;
+#endif
+  idle = idleShowing();
+  // Anything on the top layer beyond the status bar and the on-glass keyboard
+  // is an overlay, and an overlay is the obvious thing to be swallowing a tap
+  // that reaches LVGL and presses nothing.
+  modal = lv_obj_get_child_count(lv_layer_top()) > 2;
+}
+
+void firstControlBox(int16_t& x1, int16_t& y1, int16_t& x2, int16_t& y2) {
+  x1 = y1 = x2 = y2 = -1;
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // Where the first control actually is, in the coordinates a tap arrives in.
+  // A press that reaches LVGL at a point with nothing under it presses nothing,
+  // and "nothing under it" is a fact about the layout rather than about the
+  // touch layer — worth reading before blaming the glass again.
+  if (!sKeys) return;
+  lv_obj_t* o = lv_group_get_focused(sKeys);
+  if (!o) return;
+  lv_area_t a;
+  lv_obj_get_coords(o, &a);
+  x1 = (int16_t)a.x1; y1 = (int16_t)a.y1; x2 = (int16_t)a.x2; y2 = (int16_t)a.y2;
+#endif
+}
 
 bool activateFocused() {
 #if HAS_KEYPAD || HAS_TRACKBALL

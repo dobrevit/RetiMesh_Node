@@ -28,6 +28,7 @@
 #include "Imu.h"
 #include "Display.h"
 #include "TouchInput.h"
+#include "LvglUi.h"
 #include "Keypad.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
@@ -168,6 +169,21 @@ static void doStatus() {
     dataf("STATUS", "touch reports=%lu last=%d,%d raw=[%02x %02x %02x %02x %02x %02x]",
           (unsigned long)TouchInput::reports(), TouchInput::lastX(), TouchInput::lastY(),
           r[0], r[1], r[2], r[3], r[4], r[5]);
+#if HAS_LVGL_UI
+    // And what the shell handed on, after whatever turn it applies. Equal to
+    // the reading above means no transform; different means one was applied,
+    // and whether that was right is then a question with an answer.
+    uint32_t sent = 0; int16_t sx = -1, sy = -1;
+    LvglUi::touchDelivered(sent, sx, sy);
+    dataf("STATUS", "touch sent=%lu at=%d,%d", (unsigned long)sent, sx, sy);
+    uint32_t kids = 0, grp = 0; bool idle = false, modal = false;
+    LvglUi::uiFacts(kids, grp, idle, modal);
+    dataf("STATUS", "ui children=%lu group=%lu idle=%s overlay=%s",
+          (unsigned long)kids, (unsigned long)grp, idle ? "yes" : "no", modal ? "yes" : "no");
+    int16_t bx1, by1, bx2, by2;
+    LvglUi::firstControlBox(bx1, by1, bx2, by2);
+    dataf("STATUS", "ui focused=%d,%d-%d,%d", bx1, by1, bx2, by2);
+#endif
   }
 #endif
 #if HAS_KEYPAD

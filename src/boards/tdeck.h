@@ -296,9 +296,11 @@
 // where the ESP32 listens.
 #define PIN_GPS_RX          44               // ESP32 receives here
 #define PIN_GPS_TX          43
-// 9600, which is what LilyGO's own page for the Plus says the MIA-M10Q in it
-// is set to — and it is the vendor talking about this exact product, against a
-// third-party variant that carries 38400 for the same part. The receiver can be
-// configured either way, so the number is a fact about how it was shipped
-// rather than about the module.
-#define GPS_BAUD            9600
+// The u-blox MIA-M10Q's own default. LilyGO's page for the Plus says 9600,
+// which was tried on the bench and produced no sentences at all; that page
+// also still describes the earlier Quectel this slot used to carry, so 9600
+// may belong to that part rather than this one. Neither figure has yet been
+// seen to work here, and the receiver can be configured to either — the
+// vendor's reference firmware sweeps 9600, 38400 and 115200 for exactly this
+// reason, which is the answer if this one does not hold.
+#define GPS_BAUD            38400
