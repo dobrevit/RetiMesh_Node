@@ -25,6 +25,7 @@
 #include <esp_random.h>
 #include "Neighbors.h"
 #include "WifiManager.h"
+#include "Watchdog.h"
 
 LoRaRadio loraRadio;
 TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
@@ -388,6 +389,7 @@ bool LoRaRadio::applySettings(const RadioSettings& s) {
 // ---------------------------------------------------------------------------
 void LoRaRadio::radioTask(void* self) {
   s_taskHandle = xTaskGetCurrentTaskHandle();
+  Watchdog::watch();
   // The radio is the one thing a relay exists to do, so it is the last thing
   // that should be allowed to end the node (Diag.h) — and a guard that let
   // this function *return* would end it just as surely: ESP-IDF's
@@ -409,6 +411,11 @@ void LoRaRadio::taskLoop() {
   _helloAtMs = millis() + BEACON_HELLO_DELAY_MS;
 
   for (;;) {
+    // Reported here rather than in radioTask's wrapper around this call: this
+    // loop does not return, so a feed out there ran once and never again, and
+    // the node rebooted itself thirty seconds later on a quiet channel. Found
+    // on the bench, which is the only place it is cheap to find.
+    Watchdog::feed();
     // (0) Settings changed from the web UI? Apply between packets.
     if (_reconfigure) {
       RadioSettings s;

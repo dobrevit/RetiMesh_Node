@@ -48,6 +48,7 @@ Display display;
 #include <esp_sleep.h>
 #include "LxmfInbox.h"
 #include "OtaUpdate.h"
+#include "Watchdog.h"
 
 #if HAS_LVGL_UI
 // The runtime half of HAS_LVGL_UI: begin() promised a fall-back to the mono
@@ -124,7 +125,11 @@ void Display::displayTask(void* self) {
   pinMode(PIN_BUTTON2, INPUT_PULLUP);
 #endif
   d->_lastActivityMs = millis();
+  Watchdog::watch();
   for (;;) {
+    // Fed before the pass, not after: an e-paper full refresh is seconds long
+    // and is the slowest thing WATCHDOG_TIMEOUT_S has to clear.
+    Watchdog::feed();
     // A page that cannot allocate skips that pass rather than taking the node
     // with it: the display is the least important thing on a node under
     // pressure and must be the first to give way (Diag.h).

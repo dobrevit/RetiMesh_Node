@@ -72,6 +72,7 @@
 #include "Diag.h"
 #include "LocalLink.h"
 #include "Bootloader.h"
+#include "Watchdog.h"
 #include "Buzzer.h"
 #include "Bq25896.h"
 #include "Imu.h"
@@ -187,6 +188,11 @@ void setup() {
   Diag::costStart();
 
   Leds::begin();                           // claimed and off until the services are up
+
+  // Before any task starts, so every subscription below lands on a configured
+  // watchdog rather than a default 5-second one that our slower passes would
+  // trip honestly.
+  Watchdog::begin();
 
   // Filesystem first — the web app and the bulletin board live here.
   if (!LittleFS.begin(true)) {
@@ -352,7 +358,12 @@ void setup() {
     // must not be ended by an allocation (Diag.h); described honestly because
     // a reader working out which layer contains what should not be sent to
     // this one.
-    for (;;) { Diag::guard("the rns task", [] { RnsTransport::loop(); }); vTaskDelay(pdMS_TO_TICKS(10)); }
+    Watchdog::watch();
+    for (;;) {
+      Watchdog::feed();
+      Diag::guard("the rns task", [] { RnsTransport::loop(); });
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
   }, "rns", 16384, nullptr, 3, 1);
   // Online means Reticulum is both initialised and being driven: begin()
   // succeeding says only that the tables were built, and a node with no task
@@ -387,6 +398,11 @@ void setup() {
   Buzzer::begin();
   Buzzer::boot();
 
+  // setup() runs on loopTask, so this subscribes the task that loop() below
+  // feeds. Last, so nothing during start-up — a card mount, a store migration,
+  // a first announce — is measured against a timeout meant for steady running.
+  Watchdog::watch();
+
   if (settings.links().wifiEnabled)
     log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",
           wifiManager.ssid(), AP_IP.toString().c_str(), RNS_TCP_PORT);
@@ -399,6 +415,7 @@ void setup() {
 // console, link bookkeeping and a heartbeat.
 void loop() {
   static uint32_t lastBeat = 0;
+  Watchdog::feed();
   wifiManager.tick();
   Bootloader::tick();                      // may not return: this is where restarts happen
   // Before the console reads: this is what hands it a network session when

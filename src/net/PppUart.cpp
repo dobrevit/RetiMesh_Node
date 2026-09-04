@@ -54,6 +54,7 @@
 #include "RnsTransport.h"
 #include "Diag.h"
 #include "Maintenance.h"
+#include "Watchdog.h"
 
 using LocalLink::pppNodeAddress;
 
@@ -384,7 +385,9 @@ static void service(uint32_t nowMs) {
 
 static void readerTask(void*) {
   static uint8_t buf[256];
+  Watchdog::watch();
   for (;;) {
+    Watchdog::feed();
     // The loop task is waiting on this before it destroys the interface, and
     // it asks only once the port is the console's again, so there is never a
     // session to unwind here.
