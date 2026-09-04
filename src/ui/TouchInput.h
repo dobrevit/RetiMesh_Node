@@ -61,6 +61,12 @@ void begin();
 
 Point poll();
 
+// Whether a controller answered at boot. Worth asking from outside because a
+// touch layer that was not found is indistinguishable, from the glass, from
+// one nobody is touching — and on a board being brought up that is the first
+// thing to know and the hardest to see.
+bool present();
+
 } // namespace TouchInput
 
 #else
@@ -69,6 +75,7 @@ namespace TouchInput {
 struct Point { bool down = false; int16_t x = 0; int16_t y = 0; };
 inline void begin() {}
 inline Point poll() { return Point{}; }
+inline bool present() { return false; }
 } // namespace TouchInput
 
 #endif // HAS_TOUCH

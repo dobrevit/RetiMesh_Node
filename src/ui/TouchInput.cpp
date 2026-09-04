@@ -164,6 +164,8 @@ void begin() {
 #endif
 }
 
+bool present() { return sUp; }
+
 Point poll() {
   Point p;
   if (!sUp) return p;

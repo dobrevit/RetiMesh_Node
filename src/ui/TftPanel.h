@@ -90,6 +90,17 @@ public:
   // immediately while lit; a blanked panel stays dark and remembers.
   void setBrightness(uint8_t pct);
 
+  // What the controller says it is, read once at begin(): the three ID bytes
+  // behind RDDID, packed. An ST7789 answers 0x858552 and an ILI9341 — which
+  // some panels of this size are, and which this driver's init does not suit —
+  // answers 0x009341. Zero or 0xFFFFFF means it did not answer at all, which
+  // on a panel wired write-only is the expected reading and not a fault.
+  //
+  // Here because a driver that assumes a controller should be able to say
+  // which one it found: the alternative is inferring it from how wrong the
+  // picture looks, which is a slow and unreliable way to learn it.
+  uint32_t controllerId() const { return _id; }
+
 private:
   // Drawing geometry, from the layout — the one declaration of it
   // (DisplayLayout.h's kTft120x160); the board header's DISPLAY_WIDTH and
@@ -121,6 +132,7 @@ private:
   // callers ask for a percentage either way.
   void backlightBegin();
   void backlightSet(uint8_t pct);
+  uint32_t    _id = 0;                  // RDDID, read once in begin()
   bool        _ok = false;
   bool        _lit = false;             // backlight state, so blank() is idempotent
   bool        _blanked = false;

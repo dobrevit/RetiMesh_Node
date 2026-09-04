@@ -26,6 +26,9 @@
 #include "Power.h"
 #include "Bq25896.h"
 #include "Imu.h"
+#include "Display.h"
+#include "TouchInput.h"
+#include "Keypad.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
 
@@ -143,6 +146,18 @@ static void doStatus() {
 #if HAS_BQ25896 || HAS_DA217
   dataf("STATUS", "parts charger=%s imu=%s",
         Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");
+#endif
+#if HAS_DISPLAY
+  // What the operator can actually drive this node with. Every one of these is
+  // found at boot and then never mentioned again, so a board whose touch layer
+  // or keyboard did not answer looks from the outside exactly like one nobody
+  // is touching — which is a day of the wrong guesses during a bring-up. The
+  // panel is here too because a glass that stays dark is the same question.
+  dataf("STATUS", "input panel=%s touch=%s keys=%s controller=0x%06lx",
+        g_stats.displayPresent ? "yes" : "no",
+        HAS_TOUCH  ? (TouchInput::present() ? "yes" : "absent") : "n/a",
+        (HAS_KEYPAD || HAS_TRACKBALL) ? (Keypad::present() ? "yes" : "absent") : "n/a",
+        (unsigned long)display.controllerId());
 #endif
 #if HAS_PMU || HAS_BATTERY_ADC
   // The cell as this board sees it — the same reading the panel's icon acts

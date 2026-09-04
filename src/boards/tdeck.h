@@ -62,11 +62,22 @@
 #define PIN_BOARD_POWER     10
 #define BOARD_POWER_ACTIVE  HIGH
 // Half a second, which is the vendor's own number and five times the default.
-// What is behind this rail is not just a load switch settling: the keyboard is
-// a microcontroller that has to boot, and it shares an I2C bus with the touch
-// controller. Probed while it is still coming up it can hold the bus, and then
-// *neither* part answers — which reads as two dead devices rather than one
-// impatient probe.
+// This one line was three separate bugs.
+//
+// Everything on this board is behind this rail — the panel as well as the
+// keyboard and the touch controller — and a tenth of a second is not enough
+// for any of them. The keyboard is a microcontroller that has to boot, and it
+// shares an I2C bus with the touch controller, so probing early can leave
+// neither answering; that read as two dead devices rather than one impatient
+// probe. And the panel, configured before it was ready, took only part of its
+// initialisation: the bench saw wrong colours and glyphs a pixel wide with
+// most of their dots missing, which looks like a driver that does not
+// understand the controller and is not.
+//
+// Worth remembering the shape of it: three symptoms in three subsystems, one
+// cause, and the two "fixes" aimed at the panel itself — a software reset, and
+// then the full ST7789 power and gamma block to go with it — both made it
+// worse, because neither was what was wrong.
 #define BOARD_POWER_SETTLE_MS 500
 
 // ---------------------------------------------------------------------------
@@ -258,16 +269,18 @@
 // ---------------------------------------------------------------------------
 // GNSS — the Plus only
 // ---------------------------------------------------------------------------
-// The plain T-Deck has no receiver: GPIO 43/44 reach the expansion header and
-// nothing else, which is what Meshtastic's variant says in its own words
-// (GPS_DEFAULT_NOT_PRESENT). Building GNSS into this board would report a
-// receiver that is not fitted, so it is off.
+// The Plus fits a receiver on GPIO 43/44; the plain T-Deck runs those pins out
+// to the Grove connector and fits nothing. Both are this one env, and it
+// assumes the receiver is there — the same call this project already made for
+// the Heltec V4's expansion kit, and for the same reason: the bench unit is a
+// Plus, and a board without one loses nothing but a UART nobody is talking on.
+// A plain T-Deck reports a receiver that never sends a sentence, which the GPS
+// page states plainly rather than hiding.
 //
-// The Plus does fit one on those pins, and there is no env for it yet — this
-// bench has no Plus to prove one on. The pins and the baud below are what such
-// an env would need and are recorded for whoever has the hardware; nothing
-// here reads them while HAS_GPS is 0.
-#define HAS_GPS             0
+// Worth knowing on a Plus: the Grove connector is still on the case but its
+// pins are the ones the receiver took, so it is not usable as an expansion
+// port on this variant.
+#define HAS_GPS             1
 // Which pin is which is the one place a reference firmware here gets it
 // backwards: one of the three names these from the receiver's point of view,
 // so copying its header gives a dead UART. The vendor's own call settles it —

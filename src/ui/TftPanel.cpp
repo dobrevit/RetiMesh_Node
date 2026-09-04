@@ -28,7 +28,6 @@
 
 // The ST7789 commands this driver speaks. Names from the datasheet.
 namespace {
-constexpr uint8_t SWRESET = 0x01;
 constexpr uint8_t SLPOUT  = 0x11;
 constexpr uint8_t NORON   = 0x13;
 constexpr uint8_t INVOFF  = 0x20;
@@ -221,22 +220,14 @@ bool TftPanel::begin() {
   _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
 
-#if PIN_TFT_RST < 0
-  // No reset line, so the controller did not start from its defaults: it is
-  // still holding whatever the last firmware to own this panel left in it —
-  // porch and gate timings, gamma, and the RAM/interface control that decides
-  // how a pixel write is even clocked in. This driver sets six registers and
-  // takes the rest on trust, which is safe after a reset and not otherwise:
-  // on the bench a panel inherited that way drew glyphs a pixel wide with most
-  // of their dots missing, the picture the wrong colours entirely, because the
-  // bytes were being consumed on terms this side never agreed to.
-  //
-  // A software reset is the reset that board has. Same 120 ms afterwards, and
-  // it goes before SLPOUT because it undoes it.
-  cmd(SWRESET);
-  delay(120);
-#endif
-
+  // A software reset was tried here for the board that has no reset line, on
+  // the reasoning that a controller still carrying the previous firmware's
+  // registers is not one this driver's six commands can describe. The bench
+  // disagreed twice: the reset alone left a lit backlight and no picture at
+  // all, and supplying the standard ST7789 power and gamma block alongside it
+  // made the glass darker still. Both are worse than the state they replaced,
+  // so neither is here — the panel that inherits its configuration keeps it,
+  // and what is actually wrong with the picture is being looked for elsewhere.
   cmd(SLPOUT);
   delay(120);
   const uint8_t fmt16 = 0x55;             // RGB565, the panel's native 16 bits
@@ -251,6 +242,27 @@ bool TftPanel::begin() {
 
   digitalWrite(PIN_TFT_CS, HIGH);
   _spi->endTransaction();
+
+  // Ask the controller what it is, on boards that wired its MISO back. A read
+  // wants a slower clock than a write and one dummy byte before the three ID
+  // bytes; a panel that cannot answer returns all-ones or all-zeroes, which is
+  // the expected reading on a three-wire panel rather than a fault.
+#if PIN_TFT_MISO >= 0
+  {
+    _spi->beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(PIN_TFT_CS, LOW);
+    digitalWrite(PIN_TFT_DC, LOW);
+    _spi->write(0x04);                    // RDDID
+    digitalWrite(PIN_TFT_DC, HIGH);
+    _spi->transfer(0x00);                 // dummy clock the controller needs
+    const uint8_t a = _spi->transfer(0x00);
+    const uint8_t b = _spi->transfer(0x00);
+    const uint8_t c = _spi->transfer(0x00);
+    digitalWrite(PIN_TFT_CS, HIGH);
+    _spi->endTransaction();
+    _id = ((uint32_t)a << 16) | ((uint32_t)b << 8) | c;
+  }
+#endif
 
   _canvas->setTextWrap(false);
   _canvas->setTextColor(ink());
