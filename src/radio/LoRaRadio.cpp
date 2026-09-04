@@ -404,7 +404,13 @@ void LoRaRadio::radioTask(void* self) {
 }
 
 void LoRaRadio::taskLoop() {
-  if (!_online) { vTaskDelete(nullptr); return; }
+  // Off the watchdog before the task goes, not after: radioTask() subscribed
+  // us and nothing in IDF clears a subscription when its task is deleted, so
+  // a board whose transceiver did not come up — a survivable failure, the AP
+  // and the portal stay up and say "radio offline" — would otherwise be reset
+  // by a watchdog waiting on a task that no longer exists, every thirty
+  // seconds, for ever.
+  if (!_online) { Watchdog::unwatch(); vTaskDelete(nullptr); return; }
 
   _radio->startReceive();
   _lastTxMs  = millis();
@@ -734,6 +740,12 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
   // Wait for TxDone. SF12/125k worst case is ~5 s per frame; 8 s means the
   // radio wedged, in which case finishTransmit() cleans up.
   ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(8000));
+  // Airtime is progress, and there can be more of it in one pass of taskLoop()
+  // than the watchdog allows between feeds: a beacon and a queued packet in
+  // the same pass is one deferral plus one frame, then another deferral plus
+  // two fragments — 5 + 8 + 5 + 16 s at the bounds above, comfortably past
+  // WATCHDOG_TIMEOUT_S. So each frame reports for itself.
+  Watchdog::feed();
   _radio->finishTransmit();
   LoRaFem::rx();                         // back to the LNA before listening resumes
   _airtime.addTx(millis(), _airtime.timeOnAirMs(len));
@@ -784,6 +796,9 @@ void LoRaRadio::csmaWait() {
   uint32_t waited = 0;                   // contention time accumulated so far
 
   while (millis() - started < CSMA_MAX_WAIT_MS) {
+    // Deferring to a busy channel is progress too, and this loop can hold the
+    // task for CSMA_MAX_WAIT_MS on its own before a byte is sent.
+    Watchdog::feed();
     if (!mediumFree()) {                 // someone is transmitting: start over
       waited = 0;
       if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CSMA_CAD_RETRY_MS)) > 0) handleRadioIrq();

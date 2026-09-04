@@ -23,7 +23,7 @@ flowchart LR
   end
   subgraph core1[Core 1]
     RADIO[radio 8 KB<br/>SX126x/SX127x/SX128x, CSMA,<br/>RNode framing, beacons]
-    RNS[rns 16 KB<br/>microReticulum Transport,<br/>interfaces, announces, persistence]
+    RNS[rns 12 KB<br/>microReticulum Transport,<br/>interfaces, announces, persistence]
     LOOP[loopTask<br/>heartbeat, diagnostics, scheduled restart]
   end
   ATCP -- tcpInRing --> RNS

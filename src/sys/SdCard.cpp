@@ -320,7 +320,12 @@ void SdCard::doFormat() {
   // against a hang. So this task steps out of supervision for the duration and
   // steps back in after. A hang *inside* the format is therefore not caught;
   // that is the trade, and it is why this is the only caller.
-  Watchdog::pause();
+  //
+  // Scoped rather than balanced by hand: every path out of here is a way to
+  // leave the task unsupervised for the rest of the node's life, and one of
+  // them is a throw — SD.begin() and measure() both allocate, and the caller
+  // is Diag::guard(), which catches what they throw and carries on polling.
+  Watchdog::Pause supervisionOff;
   { Sys::Lock held(_lock);
     _info.state = State::Formatting;
     strlcpy(_info.lastFormat, "in progress", sizeof(_info.lastFormat));
@@ -335,7 +340,7 @@ void SdCard::doFormat() {
       _info.state = State::Absent;
       strlcpy(_info.lastFormat, "failed: no card", sizeof(_info.lastFormat));
     }
-    { Watchdog::resume(); return; }
+    return;
   }
   // The card has to be woken before it will take a raw write. sdcard_init()
   // only registers the disk driver and leaves the card flagged not-initialised;
@@ -363,7 +368,7 @@ void SdCard::doFormat() {
       _info.state = State::Error;
       strlcpy(_info.lastFormat, "failed: write error", sizeof(_info.lastFormat));
     }
-    { Watchdog::resume(); return; }
+    return;
   }
 
   uint32_t t0 = millis();
@@ -386,7 +391,6 @@ void SdCard::doFormat() {
     }
     log_e("SD: format failed");
   }
-  Watchdog::resume();
 }
 
 // ---------------------------------------------------------------------------

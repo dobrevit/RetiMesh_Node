@@ -34,9 +34,23 @@ void begin() {
   // subscribed. All that changes here is the timeout, which several of our
   // passes exceed honestly, and which would otherwise reboot a working node
   // the first time a panel refreshed slowly.
+  //
+  // The idle mask is absolute, not a delta: whatever it says is what stays
+  // subscribed. So it is rebuilt from the build's own configuration rather
+  // than zeroed — a zero here would quietly cancel the one piece of
+  // supervision this node already had (a runaway task starving core 0's idle
+  // task, which is the only thing watching the Wi-Fi, lwIP and async_tcp
+  // tasks, none of which subscribe on their own).
+  uint32_t idleCores = 0;
+  #if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+    idleCores |= 1u << 0;
+  #endif
+  #if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+    idleCores |= 1u << 1;
+  #endif
   esp_task_wdt_config_t cfg = {
     .timeout_ms = WATCHDOG_TIMEOUT_S * 1000U,
-    .idle_core_mask = 0,          // the idle tasks are IDF's business, not ours
+    .idle_core_mask = idleCores,  // kept as the build configured it
     .trigger_panic = true,        // a miss must reset: a hang costs a field trip
   };
   const esp_err_t err = esp_task_wdt_reconfigure(&cfg);
@@ -62,14 +76,14 @@ void feed() {
   if (sArmed) esp_task_wdt_reset();
 }
 
-void pause() {
+void unwatch() {
   if (sArmed) esp_task_wdt_delete(nullptr);
 }
 
-void resume() {
-  if (sArmed) esp_task_wdt_add(nullptr);
-}
-
-bool armed() { return sArmed; }
+// The same two operations under the names the long-running callers use, so
+// there is one implementation of each and resume() reports a failed
+// re-subscribe the way watch() does rather than dropping it.
+void pause()  { unwatch(); }
+void resume() { watch(); }
 
 }  // namespace Watchdog

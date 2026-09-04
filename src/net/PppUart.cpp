@@ -391,7 +391,16 @@ static void readerTask(void*) {
     // The loop task is waiting on this before it destroys the interface, and
     // it asks only once the port is the console's again, so there is never a
     // session to unwind here.
-    if (sReaderStop) { sReaderStop = false; sReaderAlive = false; vTaskDelete(nullptr); }
+    // Off the watchdog before the aliveness flag drops, and before the task
+    // does: nothing in IDF clears a subscription when its task is deleted, so
+    // a reader left subscribed would reset the node one timeout after the
+    // switch went off — every time PPP is switched off.
+    if (sReaderStop) {
+      sReaderStop = false;
+      Watchdog::unwatch();
+      sReaderAlive = false;
+      vTaskDelete(nullptr);
+    }
     // The driver returns early only once the buffer is full, so the wait
     // is the latency a short frame pays: ten milliseconds, a hundred idle
     // wake-ups a second when nothing arrives, each of which costs nothing.

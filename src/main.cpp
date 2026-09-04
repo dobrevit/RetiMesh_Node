@@ -335,16 +335,12 @@ void setup() {
   // ---- Task layout (see the diagram above) -------------------------------
   Diag::startTask(LoRaRadio::radioTask, "radio", 8192, &loraRadio, 5, 1);
 
-  // 6 KB: the panel driver and the I2C stack are deep enough that 4 KB left
-  // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
-  // transaction to every network page.
-  // Before the panel, and deliberately. This is the largest single stack the
-  // firmware asks for and it used to ask last, after the web server and — on a
-  // GUI board — a 16 KB display stack had already taken their pick of a heap
-  // that fragments as it fills. A V4 lost the draw and ran nine hours with a
-  // radio, a portal and a Wi-Fi link, routing nothing, because the one task
-  // that makes it a Reticulum node could not be created. A screen can wait for
-  // memory; the reason the node exists cannot.
+  // Before the panel, and deliberately. This task used to ask last, after the
+  // web server and — on a GUI board — a 16 KB display stack had already taken
+  // their pick of a heap that fragments as it fills. A V4 lost the draw and
+  // ran nine hours with a radio, a portal and a Wi-Fi link, routing nothing,
+  // because the one task that makes it a Reticulum node could not be created.
+  // A screen can wait for memory; the reason the node exists cannot.
   //
   // The RNS task owns every call into microReticulum (Transport is
   // single-threaded): interface loops, forwarding, announces, persistence.
@@ -372,11 +368,11 @@ void setup() {
   // silent: the canary and the end-of-stack watchpoint are both on, so it
   // panics, reboots and says so, which is the same recovery the rest of this
   // block provides.
-  // Online means Reticulum is both initialised and being driven: begin()
-  // succeeding says only that the tables were built, and a node with no task
-  // running its loop routes nothing and announces nothing while every status
-  // it serves says "online".
+
   #if HAS_DISPLAY
+    // 6 KB: the panel driver and the I2C stack are deep enough that 4 KB left
+    // only ~700 bytes on a T-Beam, where the battery reading adds a PMU
+    // transaction to every network page.
     // The LVGL shell renders whole widget trees on this stack; the page
     // stack's 6 KB starved it in the first bench build.
     // 16 KB with the GUI: a settings form builds forty widgets inside one
@@ -386,6 +382,11 @@ void setup() {
   #endif
 
   {
+    // Online means Reticulum is both initialised and being driven: begin()
+    // succeeding says only that the tables were built, and a node with no task
+    // running its loop routes nothing and announces nothing while every status
+    // it serves says "online".
+    //
     // A node that gets here is a radio, a portal and a Wi-Fi link with nothing
     // behind them: it looks entirely healthy from outside and routes nothing.
     // One ran that way for nine hours. The condition was already detected and
@@ -399,12 +400,20 @@ void setup() {
     // evidence of the last attempt does not survive the restart that follows
     // it, and cleared on the first boot that works.
     Preferences boot;
-    boot.begin("bootfault", false);
-    const uint32_t tries = boot.getUInt("rns", 0);
+    const bool remembered = boot.begin("bootfault", false);
+    const uint32_t tries = remembered ? boot.getUInt("rns", 0) : 0;
     if (!sRnsTaskUp) {
       g_stats.transportOnline = false;
-      boot.putUInt("rns", tries + 1);
-      if (tries + 1 <= REQUIRED_TASK_RETRIES) {
+      // The count is what makes the loop bounded, so the restart is offered
+      // only once the count is known to have been written. A namespace that
+      // would not open and a write that failed — NVS full, which is not a
+      // remote possibility on the boot where memory ran out — would otherwise
+      // leave `tries` at zero for ever and turn the bound into no bound at
+      // all: a node rebooting every twenty seconds, which is worse than the
+      // degraded one this falls back to.
+      const bool again = remembered && tries < REQUIRED_TASK_RETRIES &&
+                         boot.putUInt("rns", tries + 1) == sizeof(uint32_t);
+      if (again) {
         log_e("Reticulum is not being driven: the rns task did not start "
               "(attempt %lu of %u) — restarting, which is usually enough",
               (unsigned long)(tries + 1), (unsigned)REQUIRED_TASK_RETRIES);
@@ -415,10 +424,9 @@ void setup() {
         // with the image.
         Bootloader::reboot(Bootloader::Source::Fault);
       } else {
-        log_e("Reticulum is not being driven: the rns task did not start, and "
-              "%u restarts did not help — staying up so the node can still be "
-              "reached and reconfigured, but it is routing nothing",
-              (unsigned)REQUIRED_TASK_RETRIES);
+        log_e("Reticulum is not being driven: the rns task did not start and "
+              "will not be restarted again — staying up so the node can still "
+              "be reached and reconfigured, but it is routing nothing");
       }
     } else if (tries) {
       boot.putUInt("rns", 0);

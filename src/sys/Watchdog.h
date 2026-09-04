@@ -54,8 +54,6 @@
 // ============================================================================
 #pragma once
 
-#include <stdint.h>
-
 namespace Watchdog {
 
 // Called once from setup(), before any task subscribes. Widens IDF's default
@@ -69,15 +67,31 @@ void watch();
 // "Still going." Call once per pass, at the top of the loop.
 void feed();
 
+// Unsubscribe the calling task, for good. A watched task that is about to end
+// itself must say so first: the subscription holds a task handle, nothing in
+// IDF clears it when the task goes (the FreeRTOS pre-deletion hook is off in
+// the shipped sdkconfig), and an entry belonging to a task that no longer
+// exists can never be fed again — so the node panics one timeout later, and
+// again after every reboot. A radio that failed to come up and a PPP link
+// switched off both end their task this way.
+void unwatch();
+
 // For work that is legitimately longer than the timeout and cannot be broken
 // up — formatting a card, chiefly. The task is unsubscribed for the duration
 // and re-subscribed after, so a hang *inside* the long operation is not
 // caught; that is the trade, and it is why the list of callers is short.
+// Prefer the scope guard below: the callers run under Diag::guard(), which
+// swallows what they throw, and a resume() jumped over by a throw leaves that
+// task unsupervised for the rest of the node's life.
 void pause();
 void resume();
 
-// Whether begin() got the watchdog configured. False means the node is running
-// unsupervised, which is worth saying out loud rather than assuming.
-bool armed();
+class Pause {
+public:
+  Pause()  { pause(); }
+  ~Pause() { resume(); }
+  Pause(const Pause&) = delete;
+  Pause& operator=(const Pause&) = delete;
+};
 
 }  // namespace Watchdog
