@@ -78,6 +78,7 @@
 #include "Buzzer.h"
 #include "Bq25896.h"
 #include "Imu.h"
+#include "Compass.h"
 #include "I2cReg.h"
 #include <Wire.h>
 #include "Leds.h"
@@ -255,7 +256,7 @@ void setup() {
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   Diag::cost("display");
-#if HAS_BQ25896 || HAS_DA217
+#if HAS_BQ25896 || HAS_IMU
   // After the display, deliberately: the case's I2C parts sit behind the
   // switched peripheral rail, and the panel is what brings that rail up and
   // settles it (Panel.h). Powering it a second time from here left the panel
@@ -263,6 +264,7 @@ void setup() {
   I2cReg::mainBus();                       // up already if a panel or keyboard got here first
   Bq25896::begin();
   Imu::begin();
+  Compass::begin();                        // after the accelerometer: it asks for gravity
   Diag::cost("i2c case parts");
 #endif
 

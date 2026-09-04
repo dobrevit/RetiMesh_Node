@@ -28,6 +28,7 @@
 #include "Rtc.h"
 #include "Bq25896.h"
 #include "Imu.h"
+#include "Compass.h"
 #include "Display.h"
 #include "TouchInput.h"
 #include "LvglUi.h"
@@ -249,9 +250,26 @@ static void doStatus() {
         (unsigned long)h.largestDramBlock);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
-#if HAS_BQ25896 || HAS_DA217
+#if HAS_BQ25896 || HAS_IMU
   dataf("STATUS", "parts charger=%s imu=%s",
         Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");
+#endif
+#if HAS_COMPASS
+  // The heading, and everything needed to judge whether to believe it. A
+  // compass reports a number under every condition, including the ones where
+  // the number is meaningless — held on its side, sitting next to something
+  // magnetic, or never yet turned around — so the three facts that decide are
+  // reported beside it rather than left to be guessed from a wrong bearing.
+  {
+    const Compass::Reading c = Compass::read();
+    if (!c.valid) {
+      dataf("STATUS", "compass=absent");
+    } else {
+      dataf("STATUS", "compass heading=%.1f levelled=%s tilt=%.0f field=%.1fuT cal=%u%%",
+            c.headingDeg, c.levelled ? "yes" : "no", c.tiltDeg, c.fieldUt, c.calibration);
+      dataf("STATUS", "compass mag=%.1f,%.1f,%.1f uT", c.magUt[0], c.magUt[1], c.magUt[2]);
+    }
+  }
 #endif
   // The clock, and where it came from. A node whose time is wrong sends
   // messages that arrive and are then filed under 1970, which is indistinguish-

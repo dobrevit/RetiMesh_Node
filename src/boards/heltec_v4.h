@@ -139,7 +139,8 @@
 #define PIN_I2C_SDA         4
 #define PIN_I2C_SCL         3
 #define HAS_BQ25896         1
-#define HAS_DA217           1
+#define HAS_IMU             1                // a DA217; the panel follows the hand
+#define IMU_KIND            IMU_KIND_DA217
 
 // No OLED here, but the display module's I2C names still have to resolve.
 #define PIN_OLED_SDA        PIN_I2C_SDA

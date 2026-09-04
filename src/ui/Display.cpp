@@ -197,7 +197,7 @@ void Display::displayTask(void* self) {
         break;
       default: break;
     }
-#if HAS_DA217
+#if HAS_IMU
     // The panel follows the hand: two agreeing readings a second apart turn
     // the display, so a wobble costs nothing and a real turn costs a second.
     {
