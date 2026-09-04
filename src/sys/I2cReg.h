@@ -91,6 +91,11 @@ inline TwoWire& busFor(int sda, int scl, uint32_t hz, bool* up = nullptr) {
 // 0x08–0x77 that part is invisible, which reads as a magnetometer that is not
 // fitted — and the wiring, the pins and the bus are all fine. The low end is
 // still left alone, where a general-call probe can make unrelated parts answer.
+//
+// The cost of the wider range is a phantom: the M9 acknowledges 0x7e as well as
+// the magnetometer at 0x7c, and 0x7e supports no register access at all. Worth
+// knowing before chasing it as undocumented hardware — `I2C 0x7e` on the
+// console is what separates the two, and does it in one line.
 inline size_t scan(TwoWire& bus, char* out, size_t cap) {
   size_t n = 0, found = 0;
   if (cap) out[0] = '\0';

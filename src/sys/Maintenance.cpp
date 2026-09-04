@@ -154,7 +154,75 @@ static void doHelp() {
   ok("HELP");
 }
 
-static void doI2c() {
+// What is inside one device, as opposed to which devices are there. Sixteen
+// registers from zero, which is where nearly every part of this kind keeps the
+// thing worth reading first: a chip id, a revision, a status byte.
+//
+// This is a probe rather than a driver, and the distinction is the point. A
+// part whose identity is known only from a vendor page is a part nobody has
+// checked, and a driver written against a page — register map, chip id and all
+// — fails in a way that looks like wiring. One reading beforehand costs a line
+// of typing and settles what is actually on the board.
+//
+// Two things the output can say that are not faults, both seen on the first
+// board this was pointed at:
+//
+// Sixteen copies of one byte mean the part does not advance its register
+// pointer on a burst read — the QMI8658 answers 05 05 05 … because its
+// auto-increment is a bit its driver has to set. That is the chip id repeated,
+// not a bus returning rubbish, and a driver that read a block without setting
+// the bit would get exactly this and look like a wiring fault.
+//
+// "Answers its address but not a register read" can mean the part wants wider
+// register addresses, as a GT911 does — or that nothing is really there. The
+// scan probes with a zero-length write, which a bus artefact can acknowledge,
+// and the reserved block above 0x77 is where such phantoms turn up. A device
+// that acknowledges and then supports no register at all is very likely one of
+// those rather than hardware worth hunting for.
+static void dumpI2c(uint8_t addr) {
+  I2cReg::Host hosts[2];
+  const size_t nh = I2cReg::hosts(hosts, 2);
+  for (size_t i = 0; i < nh; i++) {
+    TwoWire& b = *hosts[i].bus;
+    b.beginTransmission(addr);
+    if (b.endTransmission() != 0) continue;        // not on this bus
+
+    const char* which = hosts[i].shared ? "main" : "host1";
+    uint8_t d[16];
+    if (!I2cReg::readN(b, addr, 0x00, d, sizeof(d))) {
+      dataf("I2C", "0x%02x on %s answers its address but not a register read "
+                   "— it may want wider register addresses", addr, which);
+      ok("I2C");
+      return;
+    }
+    dataf("I2C", "0x%02x on %s regs 00-0f ="
+          " %02x %02x %02x %02x %02x %02x %02x %02x"
+          " %02x %02x %02x %02x %02x %02x %02x %02x",
+          addr, which, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
+          d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
+    ok("I2C");
+    return;
+  }
+  dataf("I2C", "0x%02x answered on no bus this board has", addr);
+  ok("I2C");
+}
+
+static void doI2c(const Request& r) {
+  // An address, in hex whether or not it is written with the prefix — every
+  // datasheet and every scan line above gives these in hex, so reading "51" as
+  // decimal would be a trap set for the one person most likely to type it.
+  if (r.argc == 1) {
+    const char* a = r.args[0];
+    if (a[0] == '0' && (a[1] == 'x' || a[1] == 'X')) a += 2;
+    char* end = nullptr;
+    const long v = strtol(a, &end, 16);
+    if (!end || *end || v < 0x08 || v > 0x7f) {
+      err("I2C", 400, "an address from 0x08 to 0x7f");
+      return;
+    }
+    dumpI2c((uint8_t)v);
+    return;
+  }
   scanI2c();
   for (size_t i = 0; i < sI2cLines; i++) dataf("I2C", "%s", sI2cLine[i]);
   ok("I2C");
@@ -644,7 +712,7 @@ static void dispatch(const char* line) {
   }
   switch (r.cmd) {
     case Cmd::Help:          doHelp(); break;
-    case Cmd::I2c:           doI2c(); break;
+    case Cmd::I2c:           doI2c(r); break;
     case Cmd::Status:        doStatus(); break;
     case Cmd::Version:       doVersion(); break;
     case Cmd::UsbStatus:     doUsbStatus(); break;

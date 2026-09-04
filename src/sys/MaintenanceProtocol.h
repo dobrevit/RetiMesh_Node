@@ -89,7 +89,7 @@ inline const CmdInfo* commands(size_t& count) {
     { Cmd::NetworkStatus, "NETWORK_STATUS", "",        "every local link: phase, address, counters" },
     { Cmd::Links,         "LINKS",          "",        "which links this board offers and which are enabled" },
     { Cmd::Messages,      "MESSAGES",       "[n]",     "the last LXMF messages, newest first (default 10, up to 50)" },
-    { Cmd::I2c,           "I2C",            "",        "scan every I2C bus now and list what answered" },
+    { Cmd::I2c,           "I2C",            "[0xNN]",  "scan every I2C bus now; with an address, dump that device's first 16 registers" },
     { Cmd::Wifi,          "WIFI",           "ON|OFF",  "enable or disable Wi-Fi (saves, restarts)" },
     { Cmd::Ppp,           "PPP",            "ON|OFF",  "enable or disable PPP on this port (saves, applies live)" },
     { Cmd::Get,           "GET",            "[key]",   "read settings: all, one section (radio), or one key (radio.sf)" },
@@ -219,6 +219,11 @@ inline ParseError parse(const char* line, Request& out) {
     case Cmd::Messages:
       // No argument shows a screenful; one says how many. What counts as a
       // number is the handler's business, not the parser's.
+      if (out.argc > 1) return ParseError::BadArgument;
+      break;
+    case Cmd::I2c:
+      // No argument scans every bus; one names a device to look inside. What
+      // counts as an address is the handler's business, as above.
       if (out.argc > 1) return ParseError::BadArgument;
       break;
     case Cmd::Set:
