@@ -199,6 +199,12 @@
 #define HAS_DA217           0
 #define HAS_PMU             0
 
+// A PCF8563 at 0x51, confirmed answering on this bus rather than taken from the
+// vendor's page. It is the only board here with a clock of its own, and it is
+// the difference between a node whose time is right at boot and one that counts
+// from 1970 until the sky clears — see Rtc.h.
+#define HAS_RTC             1
+
 // A sounder on a PWM channel, behind a driver transistor. Four sources name
 // the pin. Elecrow's tables also show a GPIO 9 in the keyboard's matrix, which
 // is a different chip's GPIO 9 and not a conflict.

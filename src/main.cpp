@@ -69,6 +69,7 @@
 #include "Power.h"
 #include "Pmu.h"
 #include "Gps.h"
+#include "Rtc.h"
 #include "Diag.h"
 #include "BoardInit.h"
 #include "LocalLink.h"
@@ -219,6 +220,13 @@ void setup() {
   #endif
   Power::begin();                          // profile (CPU clock, Wi-Fi sleep) + battery gauge
   Diag::cost("power");
+
+  // Before the radio, the transport, or anything that can write a timestamp.
+  // A board with a clock of its own is already at the right time here; without
+  // this, time() counts from the epoch until the receiver gets a fix, and an
+  // LXMF message sent in between is stamped 1970 and buried at the bottom of
+  // its recipient's list (Rtc.h).
+  Rtc::begin();
 
   txRing = psramRing(TX_RING_BYTES);
   rxRing = psramRing(RX_RING_BYTES);
