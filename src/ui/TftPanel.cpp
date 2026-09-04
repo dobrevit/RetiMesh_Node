@@ -28,6 +28,7 @@
 
 // The ST7789 commands this driver speaks. Names from the datasheet.
 namespace {
+constexpr uint8_t SWRESET = 0x01;
 constexpr uint8_t SLPOUT  = 0x11;
 constexpr uint8_t NORON   = 0x13;
 constexpr uint8_t INVOFF  = 0x20;
@@ -209,6 +210,22 @@ bool TftPanel::begin() {
   _spi = &SpiBus::get(TFT_SPI_BUS, PIN_TFT_SCK, PIN_TFT_MISO, PIN_TFT_MOSI);
   _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
+
+#if PIN_TFT_RST < 0
+  // No reset line, so the controller did not start from its defaults: it is
+  // still holding whatever the last firmware to own this panel left in it —
+  // porch and gate timings, gamma, and the RAM/interface control that decides
+  // how a pixel write is even clocked in. This driver sets six registers and
+  // takes the rest on trust, which is safe after a reset and not otherwise:
+  // on the bench a panel inherited that way drew glyphs a pixel wide with most
+  // of their dots missing, the picture the wrong colours entirely, because the
+  // bytes were being consumed on terms this side never agreed to.
+  //
+  // A software reset is the reset that board has. Same 120 ms afterwards, and
+  // it goes before SLPOUT because it undoes it.
+  cmd(SWRESET);
+  delay(120);
+#endif
 
   cmd(SLPOUT);
   delay(120);

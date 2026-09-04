@@ -112,11 +112,15 @@
 // out, so the shell is told where to start. One quarter turn puts the long
 // axis across the keyboard, which is the way the case is held.
 #define DISPLAY_ROTATION    1
-// This board's glass is not fitted inverted, unlike the other colour boards
-// here. Measured rather than read: with the driver's usual INVON the bench
-// showed the dark design as white and yellow with red accents — the exact
-// inverse of it — and text on near-matching backgrounds simply disappeared.
-#define DISPLAY_INVERT      0
+// Inverted, like the other colour boards here — both published configurations
+// for this panel say so. Stated rather than inherited because the bench once
+// argued otherwise: the first look showed the dark design as white and yellow,
+// which reads as an inversion fault. It was not one. The panel had never been
+// reset (this board gives it no reset line) and was drawing on terms left by
+// the firmware before ours, which mangles colour and geometry together —
+// TftPanel.cpp now issues a software reset, and this is the value that belongs
+// with a controller actually starting from its defaults.
+#define DISPLAY_INVERT      1
 
 // One bus for the panel, the radio and the card. Every other board here gives
 // the panel a bus of its own precisely so the radio never waits behind a
