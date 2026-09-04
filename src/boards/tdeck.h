@@ -301,13 +301,23 @@
 // where the ESP32 listens.
 #define PIN_GPS_RX          44               // ESP32 receives here
 #define PIN_GPS_TX          43
-// The u-blox MIA-M10Q's own default, and the one this board actually ships
-// configured for: 38400 gives a fix and a clock, and 9600 gives not one parsed
-// sentence. LilyGO's page for the Plus says 9600, which is worth knowing is
-// wrong for this receiver — that page still describes the earlier Quectel the
-// slot used to carry. A wrong rate here looks like a receiver that is not
-// fitted rather than one that is being listened to at the wrong speed, since
-// what arrives is bytes that never parse; the vendor's own firmware sweeps
-// 9600, 38400 and 115200 rather than trusting a number, which is the answer if
-// a unit ever turns up with the other part in it.
+// The u-blox MIA-M10Q's own default, and the rate this board is verified at:
+// a fix, twelve satellites and a UTC clock. LilyGO's page for the Plus says
+// 9600, which produced nothing here — though that page still describes the
+// earlier Quectel this slot used to carry, so it may simply belong to a
+// different part.
+//
+// Left with an unexplained gap, which is worth recording rather than papering
+// over: this same rate also read zero sentences for a while before it started
+// working, with no firmware change in between. Gps::parse counts every
+// checksum-valid sentence whether or not there is a fix, so a receiver merely
+// searching would still count — a zero means nothing parseable arrived at all,
+// and being indoors does not on its own account for it. Whatever held it quiet
+// cleared on its own across a power cycle.
+//
+// So if a unit ever reads zero here: the number below is not the first thing
+// to doubt. Power-cycle it and give it a minute before touching anything. The
+// vendor's own firmware sweeps 9600, 38400 and 115200 rather than trusting any
+// single figure, which is the fallback if a board turns up with the other
+// receiver in it.
 #define GPS_BAUD            38400
