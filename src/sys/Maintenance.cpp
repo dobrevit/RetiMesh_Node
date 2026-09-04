@@ -25,6 +25,7 @@
 #include "Maintenance.h"
 #include "Power.h"
 #include "I2cReg.h"
+#include "Rtc.h"
 #include "Bq25896.h"
 #include "Imu.h"
 #include "Display.h"
@@ -252,6 +253,42 @@ static void doStatus() {
   dataf("STATUS", "parts charger=%s imu=%s",
         Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");
 #endif
+  // The clock, and where it came from. A node whose time is wrong sends
+  // messages that arrive and are then filed under 1970, which is indistinguish-
+  // able from not arriving — so what set the clock is worth being able to read
+  // rather than infer from a timestamp that already went out.
+  {
+    const time_t now = time(nullptr);
+    struct tm g;
+    gmtime_r(&now, &g);
+    char utc[24];
+    strftime(utc, sizeof(utc), "%Y-%m-%d %H:%M:%S", &g);
+#if HAS_RTC
+    time_t held = 0;
+    const bool got = Rtc::read(held);
+    if (got) {
+      // The part's own reading beside the node's, and the gap between them.
+      // "Holding a time" only says the registers parse; this says whether what
+      // is in them is right. It is the one number that proves the write path,
+      // which otherwise runs unwatched — the receiver sets this clock, and a
+      // write that packed a field wrongly would replace a correct clock with a
+      // plausible-looking wrong one and nothing would report it.
+      char h[24];
+      struct tm hg;
+      gmtime_r(&held, &hg);
+      strftime(h, sizeof(h), "%Y-%m-%d %H:%M:%S", &hg);
+      dataf("STATUS", "clock utc=\"%s\" rtc=holding held=\"%s\" drift=%lds",
+            utc, h, (long)(held - now));
+    } else {
+      dataf("STATUS", "clock utc=\"%s\" rtc=%s%s", utc,
+            Rtc::present() ? "empty" : "absent",
+            Rtc::present() && Rtc::lostPower() ? " lost=yes" : "");
+    }
+#else
+    dataf("STATUS", "clock utc=\"%s\" rtc=n/a", utc);
+#endif
+  }
+
   // Every part that answers on this board's I2C, from the last scan. Outside
   // every HAS_ guard on purpose: the board here with the most parts on I2C is
   // the one with no touch controller and no charger, so any guard that could

@@ -8,6 +8,7 @@
 #if HAS_GPS
 
 #include "Pmu.h"
+#include "Rtc.h"
 #include "Settings.h"
 #include <HardwareSerial.h>
 #include <freertos/FreeRTOS.h>
@@ -90,6 +91,13 @@ void syncClock() {
 
   struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
+  // And into the board's own clock, if it has one. This is the direction that
+  // matters: the receiver is the only source of true time here, and a board
+  // that can hold it needs telling once for every boot afterwards to start
+  // right. Written on the same schedule this syncs on rather than only the
+  // first time, so a part that was set and then lost the time gets it back
+  // without waiting for a restart.
+  Rtc::write(epoch);
   if (!sFix.clockSet)
     log_i("clock set from GNSS: %04u-%02u-%02u %02u:%02u:%02u UTC",
           sYear, sMonth, sDay, sHour, sMinute, sSecond);
