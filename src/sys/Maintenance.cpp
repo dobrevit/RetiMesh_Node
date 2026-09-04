@@ -176,6 +176,15 @@ static void doStatus() {
     uint32_t sent = 0; int16_t sx = -1, sy = -1;
     LvglUi::touchDelivered(sent, sx, sy);
     dataf("STATUS", "touch sent=%lu at=%d,%d", (unsigned long)sent, sx, sy);
+#endif
+  }
+#endif
+#if HAS_LVGL_UI
+  // What the shell has on the glass, and where the focus ring is sitting.
+  // Outside the touch block deliberately: the focus ring is the keys' answer
+  // to a board with no glass to point at, so the one board here without a
+  // touch layer is exactly the board these two lines were written for.
+  {
     uint32_t kids = 0, grp = 0; bool idle = false, modal = false;
     LvglUi::uiFacts(kids, grp, idle, modal);
     dataf("STATUS", "ui children=%lu group=%lu idle=%s overlay=%s",
@@ -183,7 +192,6 @@ static void doStatus() {
     int16_t bx1, by1, bx2, by2;
     LvglUi::firstControlBox(bx1, by1, bx2, by2);
     dataf("STATUS", "ui focused=%d,%d-%d,%d", bx1, by1, bx2, by2);
-#endif
   }
 #endif
 #if HAS_KEYPAD

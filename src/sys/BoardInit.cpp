@@ -78,7 +78,13 @@ void begin() {
   // And the one line all three drive in turn: with every device deselected
   // nothing holds it, so it is pulled up rather than left to float into
   // whatever the first read makes of it.
-  pinMode(PIN_LORA_MISO, INPUT_PULLUP);
+  //
+  // Guarded the way the selects above are, not because a board needs it today:
+  // both shared-bus boards name a real pin here. It is guarded so that the rule
+  // "a negative pin is a pin this board does not have" holds everywhere in this
+  // function rather than in three places out of four, which is the version of
+  // it that gets copied into the next board and is wrong there.
+  if (PIN_LORA_MISO >= 0) pinMode(PIN_LORA_MISO, INPUT_PULLUP);
   log_i("shared SPI bus: selects idled (radio %d, panel %d, card %d)",
         PIN_LORA_CS, panelCs, cardCs);
 #endif

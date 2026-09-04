@@ -111,25 +111,16 @@ uint8_t trackballRead() {
 #if HAS_KEYPAD
 
 // Which bus the controller is on. Where its pins are the board's general I2C
-// it shares that bus; where they are not, the keyboard has a pair to itself
-// and this file owns it. Both arrangements exist on boards here, and the
-// difference is entirely in which object the transactions go through.
-#if (PIN_KEYPAD_SDA == PIN_I2C_SDA) && (PIN_KEYPAD_SCL == PIN_I2C_SCL)
-  #define KEYPAD_ON_MAIN_I2C 1
-#else
-  #define KEYPAD_ON_MAIN_I2C 0
-#endif
-
+// it shares that bus; where they are not, the keyboard has a pair to itself.
+// Both arrangements exist on boards here, and the difference is entirely in
+// which object the transactions go through.
+//
+// Which host that is, and starting it, is I2cReg's to answer — the touch layer
+// asks the same question about its own pins, and one place has to hold the
+// answer or both drivers claim I2C host 1 and the second begin() re-initialises
+// the bus under the first. See I2cReg::busFor().
 inline TwoWire& keypadBus() {
-#if KEYPAD_ON_MAIN_I2C
-  return I2cReg::mainBus();
-#else
-  // The core's own object for I2C 1, not a second TwoWire constructed on the
-  // same peripheral: two objects on one host is the very thing SpiBus.h exists
-  // to stop happening on SPI, and the touch layer already reaches for this
-  // controller on the boards that give it a bus of its own.
-  return Wire1;
-#endif
+  return I2cReg::busFor(PIN_KEYPAD_SDA, PIN_KEYPAD_SCL, KEYPAD_HZ);
 }
 
 // One key per read either way; what differs is how it is asked for.
@@ -193,18 +184,25 @@ uint8_t keyboardRead() {
 #else
   if (bus.requestFrom((uint8_t)KEYPAD_ADDR, (uint8_t)1) != 1) return Keypad::KEY_NONE;
   const uint8_t k = bus.read();
+  // 0xFF is a failed read, not a key — the same reading an idle bus with
+  // nobody driving it gives. Taken as a key it is a keypress four times a
+  // second for ever, which is a panel that wakes itself the moment it blanks
+  // and a cell spent overnight.
+  if (k == 0xFF) return Keypad::KEY_NONE;
   recordRaw(k);
   return k;
 #endif
 }
 
 void keyboardBegin() {
-#if !KEYPAD_ON_MAIN_I2C
-  if (!keypadBus().begin(PIN_KEYPAD_SDA, PIN_KEYPAD_SCL, KEYPAD_HZ)) {
+  // Up already where the keyboard shares the board's bus, up now where it has
+  // one of its own — either way this is the call that starts it.
+  bool busUp = false;
+  I2cReg::busFor(PIN_KEYPAD_SDA, PIN_KEYPAD_SCL, KEYPAD_HZ, &busUp);
+  if (!busUp) {
     log_w("keyboard: bus would not start (SDA %d, SCL %d)", PIN_KEYPAD_SDA, PIN_KEYPAD_SCL);
     return;
   }
-#endif
 #if PIN_KEYPAD_LED >= 0
   // The keyboard's own backlight, driven from this chip rather than asked of
   // the controller. Off until somebody wants it: it is the second-largest
@@ -227,6 +225,10 @@ void keyboardBegin() {
     // Drain whatever was typed while the node was booting, so the first thing
     // the shell sees is a key the operator meant for it.
     for (uint8_t i = 0; i < 8 && keyboardRead() != Keypad::KEY_NONE; i++) {}
+    // ...and out of the record with it: recentRaw() exists so that a bring-up
+    // can press six buttons in a known order and read them back, and a boot
+    // backlog at the head of that list is exactly what would be misread.
+    sRawAt = 0; sRawCount = 0;
   } else {
     log_w("keyboard did not answer at 0x%02x — the on-glass keyboard stays", KEYPAD_ADDR);
   }

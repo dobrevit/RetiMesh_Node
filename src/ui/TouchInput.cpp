@@ -46,17 +46,12 @@ namespace {
   #define TOUCH_ON_MAIN_I2C 0
 #endif
 
+// Which host that is, and starting it, is I2cReg's to answer: the keyboard
+// driver asks the same question about its own pins, and two drivers answering
+// it separately both reached for I2C host 1 — where the second begin() would
+// have re-initialised the bus under the first. See I2cReg::busFor().
 inline TwoWire& bus() {
-#if TOUCH_ON_MAIN_I2C
-  return I2cReg::mainBus();
-#else
-  // The core's own object for I2C 1 rather than a second TwoWire built on the
-  // same peripheral. Nothing here shares that host today, but the keyboard
-  // driver reaches for it on the boards that give it a pair of its own, and two
-  // objects calling begin() on one host is exactly what SpiBus.h exists to stop
-  // happening on SPI — the second one re-initialises the bus under the first.
-  return Wire1;
-#endif
+  return I2cReg::busFor(PIN_TOUCH_SDA, PIN_TOUCH_SCL, I2C_HZ);
 }
 
 bool    sUp   = false;
@@ -74,6 +69,22 @@ int16_t  sLastX = -1, sLastY = -1;
 // which is a byte-layout fault and not a rotation one — and the bytes are the
 // only thing that settles which field is where.
 uint8_t  sLastRaw[6] = {0};
+
+// One place records a report, because the two decoders each have to remember to
+// and one of them did not: the CHSC6X path returned a point without counting
+// it, so a board carrying that part reported reports=0 no matter how hard it
+// was pressed. That is the reading which means "the layer is found but has
+// never said anything" — a wiring or address fault, and a different search
+// entirely from the decode fault this instrumentation was added to catch. A
+// diagnostic that lies about which of the two it is costs more than none.
+//
+// raw points at the six bytes the caller actually decoded, which is not the
+// same window on both parts.
+void note(const TouchInput::Point& p, const uint8_t* raw) {
+  sReports++;
+  sLastX = p.x; sLastY = p.y;
+  memcpy(sLastRaw, raw, sizeof(sLastRaw));
+}
 
 #if TOUCH_KIND == TOUCH_KIND_GT911
 // Sixteen-bit register addresses, big-endian on the wire.
@@ -119,14 +130,11 @@ void begin() {
   delay(30);
 #endif
 
-#if TOUCH_ON_MAIN_I2C
-  bus();                                  // shared: up already, or up now
-  sUp = true;
-#else
-  sUp = bus().begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL, I2C_HZ);
+  // Up already where the layer shares the board's bus, up now where it has one
+  // of its own — either way this is the call that starts it.
+  I2cReg::busFor(PIN_TOUCH_SDA, PIN_TOUCH_SCL, I2C_HZ, &sUp);
   if (!sUp) { log_w("touch: controller bus would not start (SDA %d, SCL %d)",
                     PIN_TOUCH_SDA, PIN_TOUCH_SCL); return; }
-#endif
 
   // Who is actually on this bus. On the CHSC6X the controller is expected to
   // NACK while nothing touches the glass, so its own silence proves little —
@@ -219,9 +227,7 @@ Point poll() {
     p.down = true;
     p.y = (int16_t)(d[0] | (d[1] << 8));
     p.x = (int16_t)(d[2] | (d[3] << 8));
-    sReports++;
-    sLastX = p.x; sLastY = p.y;
-    memcpy(sLastRaw, d, sizeof(sLastRaw));
+    note(p, d);
   }
   // Cleared whether or not a point was read: the part reports nothing further
   // until this byte is zero, so an early return that skipped it would take the
@@ -247,6 +253,8 @@ Point poll() {
   p.down = true;
   p.x = (int16_t)(((r[3] & 0x0F) << 8) | r[4]);
   p.y = (int16_t)(((r[5] & 0x0F) << 8) | r[6]);
+  // From the count byte on, which is the part of the read this decoded.
+  note(p, r + 2);
   return p;
 #endif
 }

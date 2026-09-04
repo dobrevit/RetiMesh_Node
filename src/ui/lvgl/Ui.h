@@ -66,6 +66,10 @@ void swallowTouch();                     // ignore the current contact until it 
 // leaves the bottom of the stack.
 void push(lv_obj_t* screen);
 void back();
+// Empty the stack without walking back through it, for a caller that is about
+// to jump somewhere rather than navigate there — a board's shortcut key. The
+// screen on the glass is left alone; the ones under it are deleted.
+void toRoot();
 bool atRoot();
 
 // A new screen with the standard chrome: cleared below the status bar, and —

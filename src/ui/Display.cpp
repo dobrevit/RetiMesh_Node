@@ -65,6 +65,13 @@ bool Display::begin() {
     DISPLAY_KIND == DISPLAY_KIND_TFT
   _panel = &_panelImpl;
 #endif
+  // The keys first, and not behind the panel: on a board whose only input is
+  // its keyboard, a panel that could not allocate its canvas would otherwise
+  // take the keyboard down with it and the console would report no keys on a
+  // board where they were never asked. They sit behind the same rail
+  // BoardInit raised, not behind the panel's.
+  Keypad::begin();
+
   if (!_panel || !_panel->begin()) return false;
   _gfx = &_panel->gfx();
   _ok  = true;
@@ -73,7 +80,6 @@ bool Display::begin() {
   // whatever the last firmware left in it otherwise, and on e-paper that
   // survives a power cut.
   TouchInput::begin();                   // input for a panel someone can now see
-  Keypad::begin();                        // ...and the keys, where the board has them
 
 #if HAS_LVGL_UI
   // The shell owns the glass from the first frame: pages, splash and the

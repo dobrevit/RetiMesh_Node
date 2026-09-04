@@ -100,6 +100,12 @@ uint8_t sLevel = 0;                       // 0 = off, 1..16 = the counter
 void TftPanel::backlightBegin() {
   pinMode(PIN_TFT_BL, OUTPUT);
   digitalWrite(PIN_TFT_BL, LOW);          // off, and the counter forgotten
+  // Held, because the part only forgets its counter after the low it treats as
+  // "off" — half a millisecond. A reset that leaves the rail up leaves the
+  // dimmer lit and counting, and a shorter pulse than this would take sLevel =
+  // 0 as fact while the part sat on whatever level it was on: the first frame
+  // would then step from a level nothing is at and come up at the wrong one.
+  delay(3);
   sLevel = 0;
 }
 

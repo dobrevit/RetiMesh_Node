@@ -105,6 +105,17 @@ int16_t  sSentX = -1, sSentY = -1;
 uint8_t sPendingScreen = 0;
 uint8_t sRot = 0;                        // quarter turns, mirrored in the panel's MADCTL
 
+// What the shell had on the glass at the end of the last pass, for the console
+// to read. Snapshotted rather than fetched on demand: the console runs in the
+// Arduino loop task on the other core, LVGL is built here with LV_USE_OS =
+// LV_OS_NONE and so has no lock of its own, and a STATUS typed while the
+// display task is inside lv_timer_handler() would otherwise walk the object
+// tree from underneath it. These are plain integers, so the worst a reader can
+// see now is a figure from one pass beside a figure from the next.
+uint32_t sFactChildren = 0, sFactGroup = 0;
+bool     sFactIdle = false, sFactModal = false;
+int16_t  sFactBox[4] = { -1, -1, -1, -1 };
+
 void touchCb(lv_indev_t*, lv_indev_data_t* data) {
   const TouchInput::Point p = TouchInput::poll();
   if (sSwallow) {
@@ -238,6 +249,37 @@ void regroupOnLoad(lv_event_t*) {
   groupCollect(lv_layer_top());          // modal dialogs are built up here
 }
 #endif
+
+// The console's view of the glass, taken here where LVGL is already this
+// task's to touch. See the sFact* declarations for why it is not read on
+// demand.
+void snapshotFacts() {
+  lv_obj_t* scr = lv_screen_active();
+  sFactChildren = scr ? lv_obj_get_child_count(scr) : 0;
+  sFactIdle = Ui::idleShowing();
+  // Anything on the top layer beyond the status bar and the on-glass keyboard
+  // is an overlay, and an overlay is the obvious thing to be swallowing a tap
+  // that reaches LVGL and presses nothing.
+  sFactModal = lv_obj_get_child_count(lv_layer_top()) > 2;
+  int16_t box[4] = { -1, -1, -1, -1 };
+#if HAS_KEYPAD || HAS_TRACKBALL
+  sFactGroup = sKeys ? lv_group_get_obj_count(sKeys) : 0;
+  // Where the focused control actually is, in the coordinates a tap arrives
+  // in. A press that reaches LVGL at a point with nothing under it presses
+  // nothing, and "nothing under it" is a fact about the layout rather than
+  // about the touch layer — worth reading before blaming the glass again.
+  lv_obj_t* focused = sKeys ? lv_group_get_focused(sKeys) : nullptr;
+  if (focused) {
+    lv_area_t a;
+    lv_obj_get_coords(focused, &a);
+    box[0] = (int16_t)a.x1; box[1] = (int16_t)a.y1;
+    box[2] = (int16_t)a.x2; box[3] = (int16_t)a.y2;
+  }
+#else
+  sFactGroup = 0;
+#endif
+  memcpy(sFactBox, box, sizeof(sFactBox));
+}
 
 // --- the status bar ---------------------------------------------------------
 
@@ -485,52 +527,44 @@ uint32_t shellLoop() {
   if (sPendingScreen) {
     const uint8_t k = sPendingScreen;
     sPendingScreen = 0;
-    switch (k) {
-      case Keypad::KEY_MESSAGES: openMessages(); break;
-      case Keypad::KEY_HOME:     openHome();     break;
-      case Keypad::KEY_MENU:     openSettings(); break;
-      case Keypad::KEY_BACK:     back();         break;
-      case Keypad::KEY_MAP:      openPlot();     break;
+    if (k == Keypad::KEY_BACK) {
+      back();
+    } else {
+      // A shortcut key means "show me this", not "and keep everything I was
+      // in". Without the unwind the screens the operator has left stay on the
+      // stack: Ui::atRoot() then answers false while home is on the glass —
+      // which is the one thing refreshHome() refuses to run under, so the
+      // clock and every reading freeze — and six presses fill sStack, after
+      // which push() refuses every shortcut with "too deep — go back first".
+      toRoot();
+      openHome();                        // the root, rebuilt, and KEY_HOME's answer
+      switch (k) {
+        case Keypad::KEY_MESSAGES: openMessages(); break;
+        case Keypad::KEY_MENU:     openSettings(); break;
+        case Keypad::KEY_MAP:      openPlot();     break;
 #if HAS_GPS
-      case Keypad::KEY_GPS:      openGps();      break;
+        case Keypad::KEY_GPS:      openGps();      break;
 #endif
-      default: break;
+        default: break;                  // KEY_HOME: home is already on the glass
+      }
     }
   }
-  return lv_timer_handler();
+  const uint32_t next = lv_timer_handler();
+  snapshotFacts();                       // for the console, on the task that owns LVGL
+  return next;
 }
 
 void touchDelivered(uint32_t& n, int16_t& x, int16_t& y) { n = sSent; x = sSentX; y = sSentY; }
 
 void uiFacts(uint32_t& children, uint32_t& group, bool& idle, bool& modal) {
-  lv_obj_t* scr = lv_screen_active();
-  children = scr ? lv_obj_get_child_count(scr) : 0;
-#if HAS_KEYPAD || HAS_TRACKBALL
-  group = sKeys ? lv_group_get_obj_count(sKeys) : 0;
-#else
-  group = 0;
-#endif
-  idle = idleShowing();
-  // Anything on the top layer beyond the status bar and the on-glass keyboard
-  // is an overlay, and an overlay is the obvious thing to be swallowing a tap
-  // that reaches LVGL and presses nothing.
-  modal = lv_obj_get_child_count(lv_layer_top()) > 2;
+  children = sFactChildren;
+  group    = sFactGroup;
+  idle     = sFactIdle;
+  modal    = sFactModal;
 }
 
 void firstControlBox(int16_t& x1, int16_t& y1, int16_t& x2, int16_t& y2) {
-  x1 = y1 = x2 = y2 = -1;
-#if HAS_KEYPAD || HAS_TRACKBALL
-  // Where the first control actually is, in the coordinates a tap arrives in.
-  // A press that reaches LVGL at a point with nothing under it presses nothing,
-  // and "nothing under it" is a fact about the layout rather than about the
-  // touch layer — worth reading before blaming the glass again.
-  if (!sKeys) return;
-  lv_obj_t* o = lv_group_get_focused(sKeys);
-  if (!o) return;
-  lv_area_t a;
-  lv_obj_get_coords(o, &a);
-  x1 = (int16_t)a.x1; y1 = (int16_t)a.y1; x2 = (int16_t)a.x2; y2 = (int16_t)a.y2;
-#endif
+  x1 = sFactBox[0]; y1 = sFactBox[1]; x2 = sFactBox[2]; y2 = sFactBox[3];
 }
 
 bool activateFocused() {
@@ -652,6 +686,22 @@ void back() {
   lv_screen_load_anim(sStack[--sDepth], LV_SCR_LOAD_ANIM_MOVE_RIGHT, 150, 0, true);
 }
 
+// Drop everything under the active screen without walking back through it.
+// The stack is what atRoot() answers from and what push() has room in, so a
+// caller that jumps somewhere rather than navigating there has to empty it or
+// both go wrong quietly. The screen on the glass is not touched: whoever is
+// jumping is about to replace it. Same unbinding as back(), for the same
+// reason — the keyboard outlives the screens it points into.
+void toRoot() {
+  if (!sDepth) return;
+  lv_keyboard_set_textarea(sKeyboard, nullptr);
+  lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+  while (sDepth) {
+    lv_obj_t* s = sStack[--sDepth];
+    if (s && lv_obj_is_valid(s)) lv_obj_delete(s);
+  }
+}
+
 bool atRoot() { return sDepth == 0; }
 
 void retheme() {
@@ -667,10 +717,7 @@ void retheme() {
   lv_obj_set_style_text_color(lv_layer_top(), lv_color_hex(UiTheme::kInk), 0);
   lv_obj_set_style_text_color(sBarName, lv_color_hex(UiTheme::kInkDim), 0);
   lv_obj_set_style_text_color(sBarIcons, lv_color_hex(UiTheme::kInkDim), 0);
-  while (sDepth) {
-    lv_obj_t* s = sStack[--sDepth];
-    if (s && lv_obj_is_valid(s)) lv_obj_delete(s);
-  }
+  toRoot();                              // the stacked screens die with their colours
   resetIdle();
   openHome();   // deletes the active screen, builds home in the new palette
 }

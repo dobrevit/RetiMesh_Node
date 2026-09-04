@@ -278,8 +278,12 @@ key codes (`src/ui/Keypad.h`), because a detent is an arrow key by any sensible 
 why holding the ball down while pressing reset is the documented way into the ROM
 downloader — and why `PIN_BUTTON` and the click are the same number.
 
-GNSS is fitted on the T-Deck **Plus** only; GPIO 43/44 reach the expansion header on the
-plain board and nothing else, so `HAS_GPS` is 0 here.
+GNSS is fitted on the T-Deck **Plus** only; on the plain board GPIO 43/44 reach the Grove
+connector and nothing else. Both variants are this one env and it assumes the receiver is
+there — `HAS_GPS` is 1 — which is the same call this project already made for the Heltec
+V4's expansion kit: the bench unit is a Plus, and a board without a receiver loses nothing
+but a UART nobody is talking on. A plain T-Deck reports a receiver that never sends a
+sentence, which the GPS page states plainly rather than hiding.
 
 ### T-Deck pin map
 | Function | GPIO |
