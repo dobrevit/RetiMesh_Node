@@ -141,11 +141,14 @@ void TftPanel::backlightBegin() {
   // PWM rather than a switch: brightness is a setting now. 20 kHz keeps the
   // dimming above anything a camera or an ear could catch.
   ledcAttach(PIN_TFT_BL, 20000, 8);
-  ledcWrite(PIN_TFT_BL, 0);
+  backlightSet(0);                        // dark, whichever way round the pin is
 }
 
 void TftPanel::backlightSet(uint8_t pct) {
-  ledcWrite(PIN_TFT_BL, (uint32_t)pct * 255u / 100u);
+  const uint32_t duty = (uint32_t)pct * 255u / 100u;
+  // Some boards sink the LED's return rather than driving its gate, so the
+  // pin is low to light it and the duty cycle runs the other way.
+  ledcWrite(PIN_TFT_BL, BACKLIGHT_ACTIVE_LOW ? 255u - duty : duty);
 }
 
 #endif

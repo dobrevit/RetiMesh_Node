@@ -44,7 +44,7 @@
 namespace RadioCaps {
 
 struct Caps {
-  const char*  name;             // "SX1276", "SX1262", "SX1280"
+  const char*  name;             // "SX1276", "SX1262", "SX1280", "LR1110"
   float        freqMinMhz;
   float        freqMaxMhz;
   const float* bandwidthsKhz;    // ascending, terminated by a 0.0f entry
@@ -59,11 +59,13 @@ struct Caps {
 // Airtime's business, not the chip's.
 extern const float kBwSubGhz[];   // SX127x / SX126x: 7.8 .. 500 kHz
 extern const float kBwSx128x[];   // SX128x: 203.125 .. 1625 kHz, four steps only
-extern const float kBwAny[];      // both, for the state where no radio answered
+extern const float kBwLr11x0[];   // LR11x0 below 1 GHz: 62.5 .. 500 kHz, four steps
+extern const float kBwAny[];      // all of them, for the state where no radio answered
 
 extern const Caps kSX1276;
 extern const Caps kSX1262;
 extern const Caps kSX1280;
+extern const Caps kLR1110;
 extern const Caps kUnknown;       // no radio detected: permissive, nothing to protect
 
 // True when `khz` is one of the bandwidths the radio offers. Compared with a

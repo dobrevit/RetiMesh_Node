@@ -51,6 +51,8 @@
   #include "boards/t3s3_sx1280.h"
 #elif defined(BOARD_TDECK)
   #include "boards/tdeck.h"
+#elif defined(BOARD_THINKNODE_M9)
+  #include "boards/thinknode_m9.h"
 #else
   #include "boards/t3s3.h"
 #endif
@@ -403,6 +405,14 @@
 #ifndef RF_MODEM_SX1280
   #define RF_MODEM_SX1280   0
 #endif
+// Set by a board header carrying an LR1110. Declared rather than probed, for
+// the same reason the SX1280 is and one more: this part will not receive or
+// transmit at all until it is told how its antenna switch is wired, and that
+// table is a fact about the board (LR11X0_RF_SWITCH_TABLE below). A probe that
+// found the chip and stopped there would report a working radio that is deaf.
+#ifndef RF_MODEM_LR1110
+  #define RF_MODEM_LR1110   0
+#endif
 
 // Boards with a transmit/receive switch in front of the antenna name its pins;
 // RadioLib steers them. Without one the radio is wired straight through.
@@ -596,8 +606,30 @@
 #ifndef HAS_KEYPAD
   #define HAS_KEYPAD        0
 #endif
+// How the controller answers. Two protocols, and no way to tell them apart
+// safely by trying: a bare read against a register-addressed part returns
+// whatever register its pointer happens to be sitting on.
+//   BARE  — read one byte; it is the key, or zero for none.
+//   REG8  — write the key register, repeated start, read one byte.
+#define KEYPAD_KIND_BARE    1
+#define KEYPAD_KIND_REG8    2
+#ifndef KEYPAD_KIND
+  #define KEYPAD_KIND       KEYPAD_KIND_BARE
+#endif
 #ifndef KEYPAD_ADDR
   #define KEYPAD_ADDR       0x55
+#endif
+#ifndef KEYPAD_KEY_REG
+  #define KEYPAD_KEY_REG    0x01
+#endif
+// The rate the keyboard's own controller brings its slave up at, where that
+// differs from the bus it shares. On a board where the keyboard has a bus to
+// itself this is that bus's whole speed.
+#ifndef KEYPAD_HZ
+  #define KEYPAD_HZ         I2C_HZ
+#endif
+#ifndef PIN_KEYPAD_LED
+  #define PIN_KEYPAD_LED    -1
 #endif
 #ifndef PIN_KEYPAD_SDA
   #define PIN_KEYPAD_SDA    PIN_I2C_SDA
@@ -636,6 +668,12 @@
 #define BACKLIGHT_KIND_AW9364  2
 #ifndef BACKLIGHT_KIND
   #define BACKLIGHT_KIND    BACKLIGHT_KIND_PWM
+#endif
+// Whether the backlight lights when its pin is low. A board that sinks the
+// LED's return through the transistor rather than driving its gate inverts the
+// duty cycle, and nothing else about it changes.
+#ifndef BACKLIGHT_ACTIVE_LOW
+  #define BACKLIGHT_ACTIVE_LOW 0
 #endif
 
 // Which way up the board is held, in quarter turns, when nothing can tell.
@@ -693,6 +731,15 @@
 // taken by beginTransaction, and no driver here attaches a hardware select.
 #ifndef SPI_BUS_SHARED
   #define SPI_BUS_SHARED    0
+#endif
+
+// Boards that route the chip's own USB pins (GPIO 19/20 on an S3) to something
+// else. The pad has to be released or it drives the pins alongside whatever the
+// board put there — an I2C bus, in the case that brought this in. Only safe on
+// a board whose console is a bridge rather than the chip's own USB, which is
+// exactly the kind of board that needs the pins. See BoardInit.cpp.
+#ifndef HAS_USB_PAD_CONFLICT
+  #define HAS_USB_PAD_CONFLICT 0
 #endif
 // The backlight's floor, percent: below this a panel is dark while
 // believing itself on, and going dark is the sleep timer's job. The funnel

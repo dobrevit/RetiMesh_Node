@@ -138,8 +138,15 @@ void keypadCb(lv_indev_t*, lv_indev_data_t* data) {
 
   uint32_t lk;
   switch (k) {
-    case Keypad::KEY_UP:        lk = LV_KEY_UP;        break;
-    case Keypad::KEY_DOWN:      lk = LV_KEY_DOWN;      break;
+    // Up and down walk the controls rather than moving inside one. LVGL moves
+    // focus around a group on NEXT and PREV and sends the plain arrows to
+    // whatever already has it — so a device with no pointer and only arrows
+    // can reach nothing at all. On the board that has no touch layer this is
+    // the difference between a usable node and an ornament, and on the one
+    // that has both a trackball and glass it is what the ball should do
+    // anyway. Left and right stay arrows, so a text cursor still moves.
+    case Keypad::KEY_UP:        lk = LV_KEY_PREV;      break;
+    case Keypad::KEY_DOWN:      lk = LV_KEY_NEXT;      break;
     case Keypad::KEY_LEFT:      lk = LV_KEY_LEFT;      break;
     case Keypad::KEY_RIGHT:     lk = LV_KEY_RIGHT;     break;
     case Keypad::KEY_ENTER:     lk = LV_KEY_ENTER;     break;   // 0x0D here, 0x0A there
@@ -336,6 +343,13 @@ bool shellInit(TftPanel& panel) {
     lv_indev_set_type(keys, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(keys, keypadCb);
     lv_indev_set_group(keys, sKeys);
+    // Every focusable widget the shell builds from here joins this group on
+    // its own: LVGL adds a new object to the default group when its class asks
+    // to be focusable, which buttons, lists and text fields all do. That is
+    // what makes the whole shell reachable from the keys rather than only the
+    // text fields — and it is the difference between a usable node and an
+    // ornament on the one board here that has no touch layer at all.
+    lv_group_set_default(sKeys);
   }
 #endif
 
@@ -577,12 +591,6 @@ lv_obj_t* textarea(lv_obj_t* parent, const char* placeholder,
   lv_obj_set_width(ta, lv_pct(100));
   lv_obj_add_event_cb(ta, taFocusEvent, LV_EVENT_FOCUSED, (void*)(uintptr_t)numeric);
   lv_obj_add_event_cb(ta, taFocusEvent, LV_EVENT_DEFOCUSED, nullptr);
-#if HAS_KEYPAD || HAS_TRACKBALL
-  // In the keypad's group, so that touching the field is what aims the keys at
-  // it: LVGL's own click-focus moves the group's focus to whatever was tapped,
-  // and the FOCUSED event the code above relies on is the same one either way.
-  if (sKeys) lv_group_add_obj(sKeys, ta);
-#endif
   return ta;
 }
 

@@ -8,9 +8,9 @@ pio run -e t3s3 -t upload             # flash firmware (asks a running node for 
 pio run -e t3s3 -t uploadfs           # flash the web app (data/ → LittleFS)
 pio device monitor                    # console, 115200
 ```
-Eleven board environments ship: `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`,
+Twelve board environments ship: `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`,
 `esp32s3-qspi`, `tbeam`, `heltec-ws`, `heltec-wb`, `heltec-wp`, `heltec-v3`,
-`heltec-v4` and `t-deck`. CI and the release matrix build all of them — both
+`heltec-v4`, `t-deck` and `thinknode-m9`. CI and the release matrix build all of them — both
 matrices read `boards.json` rather than a list of their own, so a board added
 to the registry is built without touching a workflow. A change therefore has
 to compile everywhere, including the boards with no SD slot, where `HAS_SD 0`

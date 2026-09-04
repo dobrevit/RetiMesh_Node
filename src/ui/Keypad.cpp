@@ -77,20 +77,91 @@ uint8_t trackballRead() {
 // ---------------------------------------------------------------------------
 #if HAS_KEYPAD
 
-// One bare byte per read, no register to address first: the controller's own
-// firmware answers a read request with the key pressed since the last one, or
-// with 0x00 for none. That is the whole protocol — there is no held state to
-// poll and no release to wait for, so a missed read is a lost keystroke and
-// the reader has to be called often enough to keep up with typing.
+// Which bus the controller is on. Where its pins are the board's general I2C
+// it shares that bus; where they are not, the keyboard has a pair to itself
+// and this file owns it. Both arrangements exist on boards here, and the
+// difference is entirely in which object the transactions go through.
+#if (PIN_KEYPAD_SDA == PIN_I2C_SDA) && (PIN_KEYPAD_SCL == PIN_I2C_SCL)
+  #define KEYPAD_ON_MAIN_I2C 1
+#else
+  #define KEYPAD_ON_MAIN_I2C 0
+TwoWire sKeypadBus(1);
+#endif
+
+inline TwoWire& keypadBus() {
+#if KEYPAD_ON_MAIN_I2C
+  return I2cReg::mainBus();
+#else
+  return sKeypadBus;
+#endif
+}
+
+// One key per read either way; what differs is how it is asked for.
+//
+// BARE: the controller answers a read request with the key pressed since the
+// last one, or 0x00. There is no register to address and none to get wrong.
+//
+// REG8: the controller is a register file, so the key register is written
+// first and read back with a repeated start. A bare read against this one
+// returns whatever its pointer was left sitting on, which is why the protocol
+// is declared by the board rather than discovered.
+//
+// Neither has a held state or a release event, so a missed read is a lost
+// keystroke and the reader has to be called often enough to keep up with
+// typing. Both report "nothing" as zero; one of the two controllers also uses
+// 0xFF for a failed read, which is not a key on either.
+#if KEYPAD_KIND == KEYPAD_KIND_REG8
+// The register-file controller sends its arrow keys and its function keys
+// above ASCII, in its own numbering. Translated here rather than in the shell:
+// what a controller calls its keys is a fact about the controller, and every
+// consumer above this line should see one vocabulary whatever board it is on.
+// Codes this firmware has no meaning for are dropped rather than passed up as
+// stray characters — including the controller's own "not a key" sentinel.
+uint8_t translate(uint8_t raw) {
+  switch (raw) {
+    case 0xB4: return Keypad::KEY_LEFT;
+    case 0xB5: return Keypad::KEY_UP;
+    case 0xB6: return Keypad::KEY_DOWN;
+    case 0xB7: return Keypad::KEY_RIGHT;
+    case 0x88: return Keypad::KEY_NONE;      // the controller's invalid-key marker
+    default:   break;
+  }
+  // Everything printable, plus the three control codes this firmware acts on,
+  // is already what it looks like.
+  if (raw == Keypad::KEY_BACKSPACE || raw == Keypad::KEY_ENTER ||
+      raw == Keypad::KEY_ESC || (raw >= 0x20 && raw <= 0x7E))
+    return raw;
+  return Keypad::KEY_NONE;
+}
+#endif
+
 uint8_t keyboardRead() {
-  TwoWire& bus = I2cReg::mainBus();
+  TwoWire& bus = keypadBus();
+#if KEYPAD_KIND == KEYPAD_KIND_REG8
+  const int v = I2cReg::read(bus, (uint8_t)KEYPAD_ADDR, (uint8_t)KEYPAD_KEY_REG);
+  if (v < 0 || v == 0xFF) return Keypad::KEY_NONE;
+  return translate((uint8_t)v);
+#else
   if (bus.requestFrom((uint8_t)KEYPAD_ADDR, (uint8_t)1) != 1) return Keypad::KEY_NONE;
-  const uint8_t k = bus.read();
-  return k;
+  return bus.read();
+#endif
 }
 
 void keyboardBegin() {
-  TwoWire& bus = I2cReg::mainBus();
+#if !KEYPAD_ON_MAIN_I2C
+  if (!sKeypadBus.begin(PIN_KEYPAD_SDA, PIN_KEYPAD_SCL, KEYPAD_HZ)) {
+    log_w("keyboard: bus would not start (SDA %d, SCL %d)", PIN_KEYPAD_SDA, PIN_KEYPAD_SCL);
+    return;
+  }
+#endif
+#if PIN_KEYPAD_LED >= 0
+  // The keyboard's own backlight, driven from this chip rather than asked of
+  // the controller. Off until somebody wants it: it is the second-largest
+  // draw on the board after the panel.
+  pinMode(PIN_KEYPAD_LED, OUTPUT);
+  digitalWrite(PIN_KEYPAD_LED, LOW);
+#endif
+  TwoWire& bus = keypadBus();
   // The controller takes a moment after the rail comes up before it answers,
   // and the rail was raised at the top of setup() — long ago in the boot's
   // terms, but this is the one part on the board that is slow enough to be

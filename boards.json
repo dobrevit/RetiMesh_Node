@@ -350,5 +350,42 @@
       },
       "wifi": true
     }
+  },
+  "thinknode-m9": {
+    "name": "Elecrow ThinkNode M9",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "mcu": "ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package",
+    "radio": "Semtech LR1110 (TCXO at 3.3 V, the chip drives its own antenna switch from DIO5/DIO6)",
+    "display": "2.4\" 320x240 ST7789, no touch layer",
+    "extras": "full keyboard on its own microcontroller (I2C, register-addressed), ATGM336H GNSS, microSD, sounder, PCF8563 RTC, QMI8658 IMU, QMC6309 magnetometer, 2300 mAh cell behind an LGS4056 charger; PPP over the CH340 bridge",
+    "status": "in bring-up — on the bench the panel, the keyboard, the microSD (shared bus, 15.6 GB SDHC mounted, Reticulum store on the card), GNSS, Wi-Fi AP, mDNS and the web server all come up. The radio does not: the LR1110 is found and reports its firmware, then rejects RadioLib's unconditional DriveDiosInSleepMode command (0x012A) with a processing error, so begin() fails at -706. Its base firmware is 0x0303, which predates that command",
+    "notes": "The first board here whose radio is not a Semtech SX12xx. The LR1110 is a new family (RadioLib LR11x0) and the reason this board took the work it did: it drives its own antenna switch from its own DIO lines, and until it is told which line means what in each mode it answers over SPI, reports a firmware version, accepts a channel and transmits into a pin that goes nowhere — online by every measure this firmware has, and silent. So the radio is declared by the board rather than probed for, and the switch table lives in the board header. Its bandwidth list is four steps below 1 GHz where the SX126x has ten, so a channel carried over in NVS from another board is corrected at boot rather than failing the probe. Two more firsts: the peripheral rail is active low here (the T-Deck's is active high), and the chip's own USB pins are spent on the panel and the keyboard bus, so the USB pad is released at boot and the console is the CH340 bridge on UART0. No touch layer at all — the shell is driven from the keyboard, which is what the keypad group is for.",
+    "local_link": {
+      "usb": {
+        "native": false,
+        "otg": false,
+        "serial_jtag": false,
+        "ncm": false,
+        "cdc_acm": false,
+        "bridge": "CH340",
+        "auto_reset_dtr_rts": true
+      },
+      "uart": {
+        "network": true,
+        "ppp": true,
+        "instance": 0,
+        "rts": false,
+        "cts": false,
+        "tested_max_baud": 115200,
+        "qualification": [
+          115200,
+          230400,
+          460800,
+          921600
+        ]
+      },
+      "wifi": true
+    }
   }
 }

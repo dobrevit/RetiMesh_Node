@@ -53,6 +53,7 @@ packager and the flasher never disagree about it.
 | `heltec-ws` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
 | `heltec-wb` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
 | `tbeam` | ESP32 | CH9102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
+| `thinknode-m9` | ESP32-S3 | CH340 bridge on UART0 — the S3's own USB pins are spent on the panel and the keyboard bus, so the pad is released at boot | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
 
 The `heltec-v3` row is the one to read twice: it is an S3, so its firmware can
 put it into the ROM downloader on request, but its USB is a serial bridge, so

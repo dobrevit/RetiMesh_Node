@@ -16,6 +16,7 @@
 | `heltec-wp` | Heltec Wireless Paper | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 2.13" e-ink (250x122, E0213A367), driven | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board |
 | `heltec-v4` | Heltec V4 (TFT) | ESP32-S3: 16 MB flash, 2 MB PSRAM in package | SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end | 2.4" 240x320 ST7789 with a CHSC6X touch layer | two buttons + case power button (charger /QON), DA217 accelerometer, BQ25896-ready charging state, battery ADC, GNSS on the expansion header; expansion slots for sounder/sensors (no SD) | verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder silent — possibly not fitted |
 | `t-deck` | LilyGO T-Deck | ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package | SX1262 (TCXO at 1.8 V, DIO2 drives the RF switch), no amplifier | 2.8" 320x240 ST7789 with a GT911 touch layer | physical keyboard on its own microcontroller (I2C), trackball with a click on the BOOT pin, microSD, battery ADC, speaker and microphone (not driven); GNSS on the Plus only | in bring-up — on the bench the panel, its stepped backlight and the USB composite device come up. Boot first stalled at the card's begin(), which is what SpiBus fixed; that fix is proven on the other shared-bus board but this one has not been re-flashed since (its USB CDC needs a manual BOOT+RESET). Radio, keyboard, trackball, touch and card unverified |
+| `thinknode-m9` | Elecrow ThinkNode M9 | ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package | Semtech LR1110 (TCXO at 3.3 V, the chip drives its own antenna switch from DIO5/DIO6) | 2.4" 320x240 ST7789, no touch layer | full keyboard on its own microcontroller (I2C, register-addressed), ATGM336H GNSS, microSD, sounder, PCF8563 RTC, QMI8658 IMU, QMC6309 magnetometer, 2300 mAh cell behind an LGS4056 charger; PPP over the CH340 bridge | in bring-up — on the bench the panel, the keyboard, the microSD (shared bus, 15.6 GB SDHC mounted, Reticulum store on the card), GNSS, Wi-Fi AP, mDNS and the web server all come up. The radio does not: the LR1110 is found and reports its firmware, then rejects RadioLib's unconditional DriveDiosInSleepMode command (0x012A) with a processing error, so begin() fails at -706. Its base firmware is 0x0303, which predates that command |
 <!-- boards.json:end -->
 
 ### The Wireless Stick's memory
@@ -298,6 +299,84 @@ plain board and nothing else, so `HAS_GPS` is 0 here.
 Reserved on this part and unavailable: 26–32 (SPI flash) and **33–37 (octal PSRAM)** — an
 R8 die is octal, which is what `qio_opi` in the env says and what the chip measures as.
 19/20 are the native USB pair and carry the console.
+
+## Elecrow ThinkNode M9
+
+The `thinknode-m9` environment, and the first board here whose radio is not a Semtech
+SX12xx. Most of the rest of it is ground already covered — a shared SPI bus and a gated
+peripheral rail, both of which the T-Deck brought in — so what follows is mostly about the
+radio.
+
+**The LR1110 drives its own antenna switch, and does nothing until told how.** Every other
+radio here either connects the antenna by itself (a bare SX1262) or has the MCU steer a
+switch in front of it (the SX1280+PA, the amplified Heltec V4). This one steers its own,
+from its own DIO lines, and it needs a table saying which line means what in each mode.
+Until it has one the part answers over SPI, reports a firmware version, accepts a channel
+and transmits into a pin that goes nowhere — **online by every measure this firmware has,
+and silent**. That is the same failure the amplified V4 has, arriving by a different route,
+and it is why this radio is declared by the board (`RF_MODEM_LR1110`) rather than probed
+for: the table is board wiring, not chip behaviour. It lives in the board header as
+`LR11X0_RF_SWITCH_TABLE`, and `probeLR1110()` writes it to the chip immediately after
+`begin()`. The boot self-test transmission is the proof it took.
+
+This board wires DIO5 and DIO6 only. Note the high-frequency transmit row is identical to
+standby: the 2.4 GHz path the LR1110 could otherwise offer is not routed here, which is why
+`RadioCaps::kLR1110` describes a sub-GHz radio rather than a dual-band one. Claiming the
+range would let the validator accept a channel the board cannot radiate.
+
+**Its bandwidth list is four steps, not ten.** Below 1 GHz the LR11x0 offers 62.5, 125, 250
+and 500 kHz. The SX126x offers ten values including 41.7 and 20.8, and a node reflashed from
+one of those boards still holds the old figure in NVS. Left alone, `begin()` fails on the
+bandwidth and the log blames the wiring, so the channel is corrected once before the probe —
+the same treatment the SX1280 boards get, for a narrower reason.
+
+**The peripheral rail is active low here.** GPIO 18 gates the panel and the sensor bus, and
+Elecrow's own documentation calls it VDD_PERIPH_EN. The T-Deck's equivalent is active high,
+which is why the level is part of the board description rather than assumed by the code that
+raises it.
+
+**The chip's own USB pins are spent on other things.** GPIO 19 and 20 are the ESP32-S3's
+D−/D+, and this board uses 19 for the panel's tearing signal and 20 for the keyboard's I2C
+data. Left enabled the USB peripheral drives those pins alongside the keyboard bus, which
+then reads as stuck — a wiring fault that is not one. `BoardInit` releases the pad before
+anything else, which costs nothing because the console here is a CH340 bridge on UART0.
+
+**The keyboard is register-addressed**, unlike the T-Deck's, which answers a bare read. Here
+the key register is written first and read back with a repeated start; a bare read would
+return whatever the controller's pointer was left sitting on. It also has an I2C bus to
+itself, away from the RTC and the sensors. `KEYPAD_KIND` picks the protocol and the driver
+translates the controller's own arrow codes so that nothing above it has to know which board
+it is running on.
+
+**There is no touch layer at all** — the first colour board here without one. The shell is
+therefore driven entirely from the keys, which is what the keypad group does: every
+focusable widget the shell builds joins it automatically, so arrows move the focus and Enter
+activates. On a board with touch that is a convenience; here it is the difference between a
+usable node and an ornament.
+
+Two smaller ones: the backlight lights when its pin is **low**, and the battery divider is on
+GPIO 13, which is **ADC2** — the converter the radio and Wi-Fi stack contend for, so a
+reading can fail while they are busy. That is a missed sample rather than a wrong one.
+
+### ThinkNode M9 pin map
+| Function | GPIO |
+|---|---|
+| Peripheral rail (VDD_PERIPH_EN, **active low**) | 18 |
+| SPI SCK / MISO / MOSI (shared) | 40 / 38 / 47 |
+| LR1110 NSS / RST / BUSY / IRQ (DIO9) | 39 / 45 / 41 / 42 |
+| LR1110 antenna switch | the chip's own DIO5 / DIO6 |
+| TFT CS / DC / RST / backlight (**active low**) | 16 / 15 / 14 / 17 |
+| Keyboard (@ 0x6C) SDA / SCL / INT / backlight | 20 / 21 / 12 / 46 |
+| Sensor I2C SDA / SCL (RTC, IMU, magnetometer) | 7 / 6 |
+| GNSS RX / TX / EN / RST / PPS / standby | 2 / 3 / 11 / 5 / 4 / 10 |
+| microSD CS | 48 |
+| Battery ADC (÷2, on ADC2) | 13 |
+| Sounder | 9 |
+| Console (CH340 bridge, UART0) | 43 / 44 |
+
+Reserved and unavailable: 26–32 (SPI flash) and **33–37 (octal PSRAM)**. GPIO 45 is the
+VDD_SPI strapping pin as well as the radio's reset — never pull it up. GPIO 39–42 are the
+JTAG pins and all four are taken by the radio, so there is no on-chip debug on this board.
 
 ## T3-S3 pin map (defaults in `Config.h`)
 | Function | GPIO |

@@ -8,6 +8,10 @@
 #include <Arduino.h>
 #include "Config.h"
 
+#if HAS_USB_PAD_CONFLICT
+  #include <soc/usb_serial_jtag_reg.h>
+#endif
+
 namespace {
 
 // A chip select at rest. Driven rather than merely configured, because the
@@ -23,6 +27,20 @@ inline void idleSelect(int pin) {
 namespace BoardInit {
 
 void begin() {
+#if HAS_USB_PAD_CONFLICT
+  // Before any pin on the board is touched: release the chip's own USB pads.
+  // GPIO 19 and 20 are D-/D+, and a board that routes them to something else —
+  // here, one of them is a keyboard's I2C data line — has the USB peripheral
+  // driving those pins alongside whatever else is on them. The bus then reads
+  // as stuck, which looks like a wiring fault and is not.
+  //
+  // Safe only because such a board reaches the host through a bridge on a UART
+  // rather than through this peripheral: giving it up costs nothing that this
+  // board had.
+  REG_CLR_BIT(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
+  log_i("USB pad released — GPIO 19/20 belong to the board here");
+#endif
+
 #if HAS_BOARD_POWER
   // The rail before anything else in setup() that could want it. The level is
   // the board's to say: a high-side switch wants a high, an active-low enable
