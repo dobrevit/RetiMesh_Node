@@ -73,7 +73,7 @@ constexpr size_t MAX_ARG  = 40;
 
 enum class Cmd : uint8_t {
   Help = 0, Status, Version, Reset, Bootloader, UsbStatus, NetworkStatus, Links, Wifi, Ppp,
-  Get, Set, Auth, Messages,
+  Get, Set, Auth, Messages, I2c,
   Unknown,
 };
 
@@ -89,6 +89,7 @@ inline const CmdInfo* commands(size_t& count) {
     { Cmd::NetworkStatus, "NETWORK_STATUS", "",        "every local link: phase, address, counters" },
     { Cmd::Links,         "LINKS",          "",        "which links this board offers and which are enabled" },
     { Cmd::Messages,      "MESSAGES",       "[n]",     "the last LXMF messages, newest first (default 10, up to 50)" },
+    { Cmd::I2c,           "I2C",            "",        "scan every I2C bus now and list what answered" },
     { Cmd::Wifi,          "WIFI",           "ON|OFF",  "enable or disable Wi-Fi (saves, restarts)" },
     { Cmd::Ppp,           "PPP",            "ON|OFF",  "enable or disable PPP on this port (saves, applies live)" },
     { Cmd::Get,           "GET",            "[key]",   "read settings: all, one section (radio), or one key (radio.sf)" },

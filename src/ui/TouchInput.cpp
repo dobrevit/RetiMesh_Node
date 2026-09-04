@@ -140,12 +140,8 @@ void begin() {
   // NACK while nothing touches the glass, so its own silence proves little —
   // but a scan that finds a part at some *other* address, or a bus with
   // nothing on it at all, is exactly the wiring answer a dead layer needs.
-  char found[48] = ""; size_t n = 0;
-  for (uint8_t a = 0x08; a <= 0x77; a++) {
-    bus().beginTransmission(a);
-    if (bus().endTransmission() == 0 && n < sizeof(found) - 6)
-      n += snprintf(found + n, sizeof(found) - n, " 0x%02x", a);
-  }
+  char found[48] = "";
+  const size_t n = I2cReg::scan(bus(), found, sizeof(found));
 
 #if TOUCH_KIND == TOUCH_KIND_GT911
   // This one does answer when idle, so it can be asked who it is. The strap on
