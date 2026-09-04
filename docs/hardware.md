@@ -15,7 +15,7 @@
 | `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
 | `heltec-wp` | Heltec Wireless Paper | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 2.13" e-ink (250x122, E0213A367), driven | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board |
 | `heltec-v4` | Heltec V4 (TFT) | ESP32-S3: 16 MB flash, 2 MB PSRAM in package | SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end | 2.4" 240x320 ST7789 with a CHSC6X touch layer | two buttons + case power button (charger /QON), DA217 accelerometer, BQ25896-ready charging state, battery ADC, GNSS on the expansion header; expansion slots for sounder/sensors (no SD) | verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder silent — possibly not fitted |
-| `t-deck` | LilyGO T-Deck | ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package | SX1262 (TCXO at 1.8 V, DIO2 drives the RF switch), no amplifier | 2.8" 320x240 ST7789 with a GT911 touch layer | physical keyboard on its own microcontroller (I2C), trackball with a click on the BOOT pin, microSD, battery ADC, speaker and microphone (not driven); GNSS on the Plus only | in bring-up — on the bench the panel, its stepped backlight and the USB composite device come up; boot does not yet reach the shell and the console goes quiet past the splash. Radio, keyboard, trackball, touch and card unverified |
+| `t-deck` | LilyGO T-Deck | ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package | SX1262 (TCXO at 1.8 V, DIO2 drives the RF switch), no amplifier | 2.8" 320x240 ST7789 with a GT911 touch layer | physical keyboard on its own microcontroller (I2C), trackball with a click on the BOOT pin, microSD, battery ADC, speaker and microphone (not driven); GNSS on the Plus only | in bring-up — on the bench the panel, its stepped backlight and the USB composite device come up. Boot first stalled at the card's begin(), which is what SpiBus fixed; that fix is proven on the other shared-bus board but this one has not been re-flashed since (its USB CDC needs a manual BOOT+RESET). Radio, keyboard, trackball, touch and card unverified |
 <!-- boards.json:end -->
 
 ### The Wireless Stick's memory
@@ -237,11 +237,21 @@ CS line. What it costs is latency — a full-frame blit holds the bus for a few 
 and a packet arriving during one waits — and nothing is dropped, because receive is
 interrupt-driven into a task that reads the chip afterwards.
 
-The one thing no single driver could do for itself is the *starting* state. Each raises its
-own select in its own `begin()`, which is correct and too late: whichever runs first is
-talking on a bus where the other two selects are still floating, and a floating select is a
-device that may decide it is being addressed. `BoardInit::begin()` idles all three together
-before any of them exists.
+Two things no single driver could do for itself. The first is the *starting* state: each
+raises its own select in its own `begin()`, which is correct and too late — whichever runs
+first is talking on a bus where the other two selects are still floating, and a floating
+select is a device that may decide it is being addressed. `BoardInit::begin()` idles all
+three together before any of them exists.
+
+The second is owning the bus. Arduino's `SPIClass::begin()` guards against being called
+twice on *itself*, not against another object starting the same peripheral — so the second
+driver's `begin()` re-runs the whole bus setup underneath the first, re-registering the
+APB-change callback the core then refuses as a duplicate. That log line
+(`addApbChangeCallback(): duplicate func=...`) is the only warning, and the boot stops just
+after it. So a host is fetched rather than constructed: `SpiBus::get()` hands out one object
+per host, started by the first caller, and the panel, the radio and the card all hold a
+pointer to it. Sharing the object is what makes sharing the wires safe — the core's per-bus
+mutex only excludes drivers that agree on which bus they are on.
 
 **The backlight is not an LED on a PWM pin.** GPIO 42 drives an AW9364 one-wire dimmer whose
 brightness is a counter inside the part: holding the line high turns it on at full, and each
@@ -412,7 +422,10 @@ performs; and BOOT + RST recovers any of them.
    `python tools/board_docs.py`, which CI checks, and run
    `python tools/check_boards.py`.
 6. If the display or radio differ: `Display.*` / `LoRaRadio.*` (probe order,
-   TCXO, RF switch). Keep board specifics behind the capability flags.
+   TCXO, RF switch). Keep board specifics behind the capability flags. A driver
+   that needs SPI asks `SpiBus::get()` for the host rather than constructing an
+   `SPIClass` — on a board where two devices share wires, two objects on one
+   host re-initialise the peripheral under each other and the boot stops.
 7. Verify: boot log clean, radio detected, announce accepted by an RNS peer.
 
 ## Flashing details

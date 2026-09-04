@@ -26,6 +26,7 @@
 #include "Neighbors.h"
 #include "WifiManager.h"
 #include "Watchdog.h"
+#include "SpiBus.h"
 
 LoRaRadio loraRadio;
 TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
@@ -56,7 +57,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   _rxRing = rxRing;
   _active = s;
 
-  _spi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
+  _spi = &SpiBus::get(LORA_SPI_BUS, PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI);
 
 #if RF_MODEM_SX1280
   // A board reflashed from a sub-GHz image still holds that channel in NVS, and
@@ -262,7 +263,7 @@ bool LoRaRadio::probeSX1262(const RadioSettings& s) {
   // asked anything: the boot self-test transmits, and a probe through a dead
   // front end proves nothing but the front end (LoRaFem.h). A no-op elsewhere.
   LoRaFem::begin();
-  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, *_spi);
   SX1262* sx  = new SX1262(mod);
   int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
                             clampPower(s.txDbm, RadioCaps::kSX1262.txMinDbm,
@@ -285,7 +286,7 @@ bool LoRaRadio::probeSX1262(const RadioSettings& s) {
 }
 
 bool LoRaRadio::probeSX1280(const RadioSettings& s) {
-  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, _spi);
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, *_spi);
   SX1280* sx  = new SX1280(mod);
   #if HAS_RF_SWITCH
     // The PA sits behind a transmit/receive switch. RadioLib drives it once it
@@ -316,7 +317,7 @@ bool LoRaRadio::probeSX127x(const RadioSettings& s) {
   // SX1276 and SX1278 share silicon version 0x12 and this driver; the
   // class only differs in the accepted frequency range, and SX1276 spans
   // both sub-GHz bands.
-  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO0, PIN_LORA_RST, PIN_LORA_DIO1, _spi);
+  Module* mod = new Module(PIN_LORA_CS, PIN_LORA_DIO0, PIN_LORA_RST, PIN_LORA_DIO1, *_spi);
   SX1276* sx  = new SX1276(mod);
   int16_t state = sx->begin(s.freqMhz, s.bwKhz, s.sf, s.cr, s.syncWord,
                             clampPower(s.txDbm, RadioCaps::kSX1276.txMinDbm,

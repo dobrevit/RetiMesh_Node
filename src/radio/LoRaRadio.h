@@ -180,7 +180,9 @@ private:
   SX1280*        _sx1280 = nullptr;
   const char*    _modelName = "none";
   const RadioCaps::Caps* _caps = &RadioCaps::kUnknown;
-  SPIClass       _spi{LORA_SPI_BUS};   // bus number differs per MCU, see boards/
+  // The host's bus rather than one of this driver's own — the panel and the
+  // card may be on the same wires. See sys/SpiBus.h; set in begin().
+  SPIClass*      _spi = nullptr;
   RingbufHandle_t _txRing = nullptr;
   RingbufHandle_t _rxRing = nullptr;
   bool           _online = false;

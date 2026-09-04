@@ -24,6 +24,7 @@
 #if HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_TFT
 
 #include <new>
+#include "SpiBus.h"
 
 // The ST7789 commands this driver speaks. Names from the datasheet.
 namespace {
@@ -43,10 +44,10 @@ void TftPanel::cmd(uint8_t c) { cmd(c, nullptr, 0); }
 
 void TftPanel::cmd(uint8_t c, const uint8_t* data, size_t len) {
   digitalWrite(PIN_TFT_DC, LOW);          // command
-  _spi.write(c);
+  _spi->write(c);
   if (len) {
     digitalWrite(PIN_TFT_DC, HIGH);       // ... and its parameters
-    _spi.writeBytes(data, len);
+    _spi->writeBytes(data, len);
   }
 }
 
@@ -62,14 +63,14 @@ void TftPanel::window(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
 
 void TftPanel::blitArea(int16_t x1, int16_t y1, int16_t x2, int16_t y2, const uint8_t* px) {
   if (!_ok) return;
-  _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
   window(x1, y1, x2, y2);
   cmd(RAMWR);
   digitalWrite(PIN_TFT_DC, HIGH);
-  _spi.writeBytes(px, (size_t)(x2 - x1 + 1) * (size_t)(y2 - y1 + 1) * 2);
+  _spi->writeBytes(px, (size_t)(x2 - x1 + 1) * (size_t)(y2 - y1 + 1) * 2);
   digitalWrite(PIN_TFT_CS, HIGH);
-  _spi.endTransaction();
+  _spi->endTransaction();
   if (!_lit) { _lit = true; applyBacklight(); }
 }
 
@@ -165,11 +166,11 @@ void TftPanel::setRotation(uint8_t quarterTurns) {
   // blitArea needs no help: callers simply address the turned frame.
   static constexpr uint8_t kMad[4] = { 0x00, 0x60, 0xC0, 0xA0 };
   const uint8_t m = kMad[quarterTurns & 3];
-  _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
   cmd(MADCTL, &m, 1);
   digitalWrite(PIN_TFT_CS, HIGH);
-  _spi.endTransaction();
+  _spi->endTransaction();
 }
 
 bool TftPanel::begin() {
@@ -204,8 +205,8 @@ bool TftPanel::begin() {
   delay(120);
 #endif
 
-  _spi.begin(PIN_TFT_SCK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
-  _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  _spi = &SpiBus::get(TFT_SPI_BUS, PIN_TFT_SCK, PIN_TFT_MISO, PIN_TFT_MOSI);
+  _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
 
   cmd(SLPOUT);
@@ -221,7 +222,7 @@ bool TftPanel::begin() {
   cmd(DISPON);
 
   digitalWrite(PIN_TFT_CS, HIGH);
-  _spi.endTransaction();
+  _spi->endTransaction();
 
   _canvas->setTextWrap(false);
   _canvas->setTextColor(ink());
@@ -267,7 +268,7 @@ void TftPanel::flush(bool full) {
     return &t[0][0];
   }();
 
-  _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
   window(0, (int16_t)(y0 * 2), (int16_t)(DISPLAY_WIDTH - 1), (int16_t)(y1 * 2 + 1));
   cmd(RAMWR);
@@ -281,14 +282,14 @@ void TftPanel::flush(bool full) {
       memcpy(out, lut + (row[b] >> 4) * 16, 16);  out += 16;
       memcpy(out, lut + (row[b] & 0x0F) * 16, 16); out += 16;
     }
-    _spi.writeBytes(line, sizeof(line));            // the row, doubled across...
-    _spi.writeBytes(line, sizeof(line));            // ...and down
+    _spi->writeBytes(line, sizeof(line));            // the row, doubled across...
+    _spi->writeBytes(line, sizeof(line));            // ...and down
   }
   memcpy(_shadow + (size_t)y0 * stride, fb + (size_t)y0 * stride,
          (size_t)(y1 - y0 + 1) * stride);
 
   digitalWrite(PIN_TFT_CS, HIGH);
-  _spi.endTransaction();
+  _spi->endTransaction();
 
   // The first frame is on the glass; only now is the backlight worth its
   // current. Before this the panel shows the controller's power-on noise.
@@ -297,11 +298,11 @@ void TftPanel::flush(bool full) {
 
 void TftPanel::blank(bool on) {
   if (!_ok) return;
-  _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
   cmd(on ? DISPOFF : DISPON);
   digitalWrite(PIN_TFT_CS, HIGH);
-  _spi.endTransaction();
+  _spi->endTransaction();
   _blanked = on;
   // _lit before the relight, not after: applyBacklight() refuses to light a
   // panel that says it is unlit, and the old order left the PWM at zero on

@@ -103,7 +103,12 @@ private:
   void cmd(uint8_t c, const uint8_t* data, size_t len);
   void window(int16_t x0, int16_t y0, int16_t x1, int16_t y1);  // panel rect, ready for pixels
 
-  SPIClass    _spi{TFT_SPI_BUS};
+  // The host's bus, not one of this panel's own: on boards where the radio and
+  // the card are on these same wires, all three have to be the same object or
+  // they each re-initialise the peripheral underneath the others. See
+  // sys/SpiBus.h. Set in begin(), because that is the first moment the core is
+  // ready to start a bus.
+  SPIClass*   _spi = nullptr;
   GFXcanvas1* _canvas = nullptr;
   // What the glass last saw, so flush() streams only the band of rows that
   // changed: a ticking counter costs one band, not the whole 153 KB frame.
