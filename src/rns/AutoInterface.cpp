@@ -36,6 +36,7 @@
 #include "WifiManager.h"
 #include "Diag.h"
 #include "Lock.h"
+#include "Watchdog.h"
 
 namespace {
 
@@ -358,6 +359,7 @@ void task(void*) {
   // up later, so there is nothing to wait for beyond the sockets.
   refreshLinks();
   sEnabled = true;
+  Watchdog::watch();
 
   uint32_t lastAnnounce = 0, lastReverse = 0, lastSecond = 0;
   uint8_t buf[RNS_MTU + 64];
@@ -367,6 +369,9 @@ void task(void*) {
   for (;;) {
     Diag::guard("the autointerface task", [&] {
       for (;;) {
+        // The inner loop is the one that spins; a throw leaves it and the outer
+        // one goes back in, so this is where progress is actually reported.
+        Watchdog::feed();
         uint32_t now = millis();
         if (now - lastAnnounce >= kAnnounceMs) { lastAnnounce = now; sendDiscovery(); }
         if (now - lastReverse  >= kReverseMs)  { lastReverse  = now; sendReversePeering(); }

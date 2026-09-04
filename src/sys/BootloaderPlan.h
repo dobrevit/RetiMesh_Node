@@ -206,7 +206,8 @@ inline bool remoteEntryAllowed(bool hostFacing, bool apiEnabled, bool fromLanAll
 }
 
 enum class Target : uint8_t { App = 0, Bootloader = 1 };
-enum class Source : uint8_t { Http = 0, Console, Settings, Touch, Ui };   // Touch: the 1200-baud touch on the USB console port; Ui: the glass
+enum class Source : uint8_t { Http = 0, Console, Settings, Touch, Ui, Fault };   // Touch: the 1200-baud touch on the USB console port; Ui: the glass;
+                                                                                // Fault: the node restarting itself because something it needs did not start
 
 inline const char* targetName(Target t) { return t == Target::Bootloader ? "bootloader" : "app"; }
 inline const char* sourceName(Source s) {
@@ -216,6 +217,7 @@ inline const char* sourceName(Source s) {
     case Source::Settings: return "settings";
     case Source::Touch:    return "touch";
     case Source::Ui:       return "ui";
+    case Source::Fault:    return "fault";
   }
   return "unknown";
 }

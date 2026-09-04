@@ -17,6 +17,7 @@
 #include <time.h>
 #include "Diag.h"
 #include "Lock.h"
+#include "Watchdog.h"
 
 namespace {
 
@@ -198,12 +199,15 @@ void resetState() {
 }
 
 void task(void*) {
+  Watchdog::watch();
   // Guarded whole rather than per statement: the loop below uses continue,
   // which cannot cross a lambda. A receiver that cannot be parsed for want
   // of memory costs a fix, not the node (Diag.h).
   for (;;) {
     Diag::guard("the gps task", [&] {
       for (;;) {
+        // The inner loop is the one that spins, as in AutoInterface.
+        Watchdog::feed();
         // The lock is taken before the enabled test, not after it: setEnabled()
         // closes the UART while holding the same lock, and a reader that decided
         // to run just before that would otherwise go on to read a port that has

@@ -609,6 +609,28 @@
 #define DISPLAY_PAGE_TIMEOUT_MS 30000     // back to the status page when idle
 #define DISPLAY_SLEEP_MS    60000         // panel off after this much button inactivity
 
+// How long a subscribed task may go without reporting progress before the
+// watchdog resets the node (Watchdog.h). One timeout covers every task, so it
+// clears the slowest honest pass by a wide margin rather than being tuned to
+// catch a hang quickly: an e-paper full refresh is seconds, and a Reticulum
+// pass that writes its store and verifies a signature is seconds. Thirty is
+// far above both and far below the hours a hung node would otherwise sit
+// there. A card format is longer than any timeout worth having and is handled
+// by Watchdog::pause() instead.
+#ifndef WATCHDOG_TIMEOUT_S
+  #define WATCHDOG_TIMEOUT_S  30
+#endif
+
+// How many times a node restarts itself trying to start a task it cannot run
+// without, before it gives up and stays up degraded. Restarting is usually
+// enough — the stack that failed is a contiguous block and a fresh heap has
+// one — but a board that genuinely cannot fit it must not spend its life
+// rebooting: a node that is up and half-working can still be reached and told
+// something, and one in a boot loop cannot.
+#ifndef REQUIRED_TASK_RETRIES
+  #define REQUIRED_TASK_RETRIES  3
+#endif
+
 // ---------------------------------------------------------------------------
 // Beacons / neighbour discovery (see LoRaRadio.h). Interval in seconds,
 // 0 disables. Matches RNS's RNodeInterface `id_interval` semantics closely

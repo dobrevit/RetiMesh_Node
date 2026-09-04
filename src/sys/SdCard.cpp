@@ -23,6 +23,7 @@
 #include "Lock.h"
 #include "StoreHome.h"
 #include "Diag.h"
+#include "Watchdog.h"
 #if HAS_SD
 #include <sd_diskio.h>
 #endif
@@ -146,7 +147,9 @@ const char* SdCard::requestFormat() {
 
 void SdCard::task(void* self) {
   auto* sd = static_cast<SdCard*>(self);
+  Watchdog::watch();
   for (;;) {
+    Watchdog::feed();
     Diag::guard("the sd card task", [sd] { sd->poll(); });
     vTaskDelay(pdMS_TO_TICKS(SD_POLL_MS));
   }
@@ -312,6 +315,17 @@ bool SdCard::checkSlot() {
 // reachable through the authenticated settings API with confirmation.
 // ---------------------------------------------------------------------------
 void SdCard::doFormat() {
+  // Formatting an 8 GB card takes minutes, which is longer than any watchdog
+  // timeout worth having — a timeout wide enough to cover it would be no use
+  // against a hang. So this task steps out of supervision for the duration and
+  // steps back in after. A hang *inside* the format is therefore not caught;
+  // that is the trade, and it is why this is the only caller.
+  //
+  // Scoped rather than balanced by hand: every path out of here is a way to
+  // leave the task unsupervised for the rest of the node's life, and one of
+  // them is a throw — SD.begin() and measure() both allocate, and the caller
+  // is Diag::guard(), which catches what they throw and carries on polling.
+  Watchdog::Pause supervisionOff;
   { Sys::Lock held(_lock);
     _info.state = State::Formatting;
     strlcpy(_info.lastFormat, "in progress", sizeof(_info.lastFormat));
