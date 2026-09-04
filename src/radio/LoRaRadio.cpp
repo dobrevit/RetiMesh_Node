@@ -65,14 +65,26 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   // bandwidth list has four entries where the SX126x has ten, and a node moved
   // across from one keeps the old figure in NVS. Left alone, begin() fails on
   // the bandwidth and the log blames the wiring.
-  if (!RadioCaps::channelUsable(RadioCaps::kLR1110, _active.freqMhz, _active.bwKhz, _active.sf)) {
-    log_w("stored channel %.3f MHz / %.1f kHz / SF%u is not one an LR1110 can run — starting on "
-          "%.3f MHz / %.1f kHz / SF%u instead",
-          (double)_active.freqMhz, (double)_active.bwKhz, (unsigned)_active.sf,
-          (double)RF_FREQ_MHZ, (double)RF_BW_KHZ, (unsigned)RF_SF);
-    _active.freqMhz = RF_FREQ_MHZ;
-    _active.bwKhz   = RF_BW_KHZ;
-    _active.sf      = RF_SF;
+  // Only the field that is actually unusable, unlike the SX1280 below. There
+  // the whole channel is wrong by construction — a sub-GHz plan names nothing
+  // a 2.4 GHz part can tune — so replacing it wholesale says what happened.
+  // Here the frequency and the spreading factor usually survive the move and
+  // the bandwidth usually does not, and rewriting all three would carry an
+  // operator off the frequency they chose to fix a bandwidth they did not.
+  {
+    const RadioCaps::Caps& c = RadioCaps::kLR1110;
+    const bool badFreq = _active.freqMhz < c.freqMinMhz || _active.freqMhz > c.freqMaxMhz;
+    const bool badBw   = !RadioCaps::bandwidthSupported(c, _active.bwKhz);
+    const bool badSf   = _active.sf < c.sfMin || _active.sf > c.sfMax;
+    if (badFreq || badBw || badSf) {
+      log_w("stored channel %.3f MHz / %.1f kHz / SF%u is not one an LR1110 can run "
+            "(%s%s%s) — replacing only that, the rest stands",
+            (double)_active.freqMhz, (double)_active.bwKhz, (unsigned)_active.sf,
+            badFreq ? "frequency " : "", badBw ? "bandwidth " : "", badSf ? "spreading factor" : "");
+      if (badFreq) _active.freqMhz = RF_FREQ_MHZ;
+      if (badBw)   _active.bwKhz   = RF_BW_KHZ;
+      if (badSf)   _active.sf      = RF_SF;
+    }
   }
   if (!probeLR1110(_active)) {
     log_e("No LR1110 found on IRQ(DIO9)=%d/BUSY=%d — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY);

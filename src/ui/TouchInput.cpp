@@ -44,14 +44,18 @@ namespace {
   #define TOUCH_ON_MAIN_I2C 1
 #else
   #define TOUCH_ON_MAIN_I2C 0
-  TwoWire sOwnBus(1);
 #endif
 
 inline TwoWire& bus() {
 #if TOUCH_ON_MAIN_I2C
   return I2cReg::mainBus();
 #else
-  return sOwnBus;
+  // The core's own object for I2C 1 rather than a second TwoWire built on the
+  // same peripheral. Nothing here shares that host today, but the keyboard
+  // driver reaches for it on the boards that give it a pair of its own, and two
+  // objects calling begin() on one host is exactly what SpiBus.h exists to stop
+  // happening on SPI — the second one re-initialises the bus under the first.
+  return Wire1;
 #endif
 }
 
@@ -106,7 +110,7 @@ void begin() {
   bus();                                  // shared: up already, or up now
   sUp = true;
 #else
-  sUp = sOwnBus.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL, I2C_HZ);
+  sUp = bus().begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL, I2C_HZ);
   if (!sUp) { log_w("touch: controller bus would not start (SDA %d, SCL %d)",
                     PIN_TOUCH_SDA, PIN_TOUCH_SCL); return; }
 #endif

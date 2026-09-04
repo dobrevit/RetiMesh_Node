@@ -165,6 +165,36 @@ void keypadCb(lv_indev_t*, lv_indev_data_t* data) {
   held = lk;
   sTouchSeen = true;                     // a keypress is activity, like a tap
 }
+
+// Everything focusable under `parent`, in the order it was built. The on-glass
+// keyboard is skipped: on a board with real keys taFocusEvent never shows it,
+// and a widget in the group that is never on the glass is one more thing the
+// focus has to walk past — it was also the first focusable object the shell
+// built, so it took the group's focus and swallowed the first key of the run.
+void groupCollect(lv_obj_t* parent) {
+  const uint32_t n = lv_obj_get_child_count(parent);
+  for (uint32_t i = 0; i < n; i++) {
+    lv_obj_t* c = lv_obj_get_child(parent, i);
+    if (c != sKeyboard && lv_obj_is_group_def(c)) lv_group_add_obj(sKeys, c);
+    groupCollect(c);
+  }
+}
+
+// The group holds what is on the glass, and nothing else.
+//
+// LVGL's default group is what makes every widget the shell builds reachable
+// from the keys, and it is also one group for the whole run: the screens push()
+// keeps alive behind this one stay in it, and lv_group_focus_next skips only
+// hidden and disabled objects — never an object on a screen nobody can see. So
+// an arrow walked the focus onto the buttons of the screen underneath, where
+// Enter pressed one nothing on the glass could explain. Rebuilt from the active
+// screen every time the screen changes; newScreen() is where each subscribes.
+void regroupOnLoad(lv_event_t*) {
+  if (!sKeys) return;
+  lv_group_remove_all_objs(sKeys);
+  groupCollect(lv_screen_active());
+  groupCollect(lv_layer_top());          // modal dialogs are built up here
+}
 #endif
 
 // --- the status bar ---------------------------------------------------------
@@ -334,10 +364,12 @@ bool shellInit(TftPanel& panel) {
   lv_indev_set_read_cb(touch, touchCb);
 
 #if HAS_KEYPAD || HAS_TRACKBALL
-  // Only where keys actually answered. A board with a keyboard fitted but
-  // silent keeps the on-glass one and stays usable, rather than presenting a
-  // group nothing can move focus around.
-  if (Keypad::present()) {
+  // Where the keys answered — or where there is a trackball, whose detents come
+  // out of the same reader and need the same device. Gating the device on the
+  // keyboard alone left a board whose keyboard was fitted but silent counting
+  // ball edges into a device that was never created. Only the on-glass keyboard
+  // follows present(), because a real keyboard is the thing that replaces it.
+  if (Keypad::present() || HAS_TRACKBALL) {
     sKeys = lv_group_create();
     lv_indev_t* keys = lv_indev_create();
     lv_indev_set_type(keys, LV_INDEV_TYPE_KEYPAD);
@@ -361,6 +393,13 @@ bool shellInit(TftPanel& panel) {
   lv_keyboard_set_mode(sKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_obj_add_event_cb(sKeyboard, kbEvent, LV_EVENT_ALL, nullptr);
   lv_obj_add_flag(sKeyboard, LV_OBJ_FLAG_HIDDEN);
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // A button matrix is focusable, and this one was the first focusable widget
+  // built after the default group existed — so it joined it and, being first,
+  // took the focus. The first Enter of the run went to a keyboard nobody could
+  // see. groupCollect() keeps it out from here on; this is the boot window.
+  if (sKeys) lv_group_remove_obj(sKeyboard);
+#endif
 
   // One real frame before setup() continues: the boot splash. The display
   // task is not running yet, so this paints synchronously and holds the
@@ -531,6 +570,12 @@ lv_obj_t* newScreen(const char* title) {
   lv_obj_t* scr = lv_obj_create(nullptr);
   UiTheme::screen(scr);
   lv_obj_set_style_pad_top(scr, kBarH, 0);   // the status bar's lane
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // The keys reach this screen's widgets and no others, from the moment it is
+  // the one on the glass. Every screen the shell builds comes through here, and
+  // both loads — lv_screen_load and the animated push/back — end in this event.
+  lv_obj_add_event_cb(scr, regroupOnLoad, LV_EVENT_SCREEN_LOADED, nullptr);
+#endif
 
   lv_obj_t* col = lv_obj_create(scr);
   lv_obj_remove_style_all(col);

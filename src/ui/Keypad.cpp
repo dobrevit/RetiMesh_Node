@@ -26,15 +26,29 @@ bool sPresent = false;
 // not the movement, and a quick roll would arrive as one step or none.
 volatile uint32_t sTicks[4] = {0, 0, 0, 0};   // up, down, left, right
 
+// A spinlock rather than noInterrupts(), because the two sides are not on one
+// core: attachInterrupt() runs from setup() on the Arduino core and registers
+// the handler there, while read() is called from the display task, which
+// main.cpp pins to the other one. Masking interrupts locally excludes nothing
+// on the core the pulses arrive on, and the counter's read-modify-write below
+// then loses a detent to whichever side wrote last.
+portMUX_TYPE sTicksMux = portMUX_INITIALIZER_UNLOCKED;
+
 // The ball is geared finely enough that one detent per key would send the
 // cursor across the screen on the lightest touch. The reference firmware for
 // this board settles on three, and so does this.
 constexpr uint32_t kDetentsPerKey = 3;
 
-void IRAM_ATTR isrUp()    { sTicks[0]++; }
-void IRAM_ATTR isrDown()  { sTicks[1]++; }
-void IRAM_ATTR isrLeft()  { sTicks[2]++; }
-void IRAM_ATTR isrRight() { sTicks[3]++; }
+inline void IRAM_ATTR tick(uint8_t i) {
+  taskENTER_CRITICAL_ISR(&sTicksMux);
+  sTicks[i]++;
+  taskEXIT_CRITICAL_ISR(&sTicksMux);
+}
+
+void IRAM_ATTR isrUp()    { tick(0); }
+void IRAM_ATTR isrDown()  { tick(1); }
+void IRAM_ATTR isrLeft()  { tick(2); }
+void IRAM_ATTR isrRight() { tick(3); }
 
 void trackballBegin() {
   struct Line { int pin; void (*isr)(); };
@@ -61,11 +75,11 @@ uint8_t trackballRead() {
   static const uint8_t keys[4] = { Keypad::KEY_UP, Keypad::KEY_DOWN,
                                    Keypad::KEY_LEFT, Keypad::KEY_RIGHT };
   for (uint8_t i = 0; i < 4; i++) {
-    if (sTicks[i] < kDetentsPerKey) continue;
-    noInterrupts();
-    sTicks[i] -= kDetentsPerKey;
-    interrupts();
-    return keys[i];
+    bool took = false;
+    taskENTER_CRITICAL(&sTicksMux);
+    if (sTicks[i] >= kDetentsPerKey) { sTicks[i] -= kDetentsPerKey; took = true; }
+    taskEXIT_CRITICAL(&sTicksMux);
+    if (took) return keys[i];
   }
   return Keypad::KEY_NONE;
 }
@@ -85,14 +99,17 @@ uint8_t trackballRead() {
   #define KEYPAD_ON_MAIN_I2C 1
 #else
   #define KEYPAD_ON_MAIN_I2C 0
-TwoWire sKeypadBus(1);
 #endif
 
 inline TwoWire& keypadBus() {
 #if KEYPAD_ON_MAIN_I2C
   return I2cReg::mainBus();
 #else
-  return sKeypadBus;
+  // The core's own object for I2C 1, not a second TwoWire constructed on the
+  // same peripheral: two objects on one host is the very thing SpiBus.h exists
+  // to stop happening on SPI, and the touch layer already reaches for this
+  // controller on the boards that give it a bus of its own.
+  return Wire1;
 #endif
 }
 
@@ -149,7 +166,7 @@ uint8_t keyboardRead() {
 
 void keyboardBegin() {
 #if !KEYPAD_ON_MAIN_I2C
-  if (!sKeypadBus.begin(PIN_KEYPAD_SDA, PIN_KEYPAD_SCL, KEYPAD_HZ)) {
+  if (!keypadBus().begin(PIN_KEYPAD_SDA, PIN_KEYPAD_SCL, KEYPAD_HZ)) {
     log_w("keyboard: bus would not start (SDA %d, SCL %d)", PIN_KEYPAD_SDA, PIN_KEYPAD_SCL);
     return;
   }

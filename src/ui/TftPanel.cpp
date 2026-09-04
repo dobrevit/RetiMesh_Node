@@ -129,8 +129,15 @@ void TftPanel::backlightSet(uint8_t pct) {
   const uint8_t from = kSteps - sLevel, to = kSteps - want;
   const uint8_t pulses = (uint8_t)((kSteps + to - from) % kSteps);
   for (uint8_t i = 0; i < pulses; i++) {
+    // Both edges held. The part wants at least half a microsecond either side
+    // and treats a low longer than half a millisecond as "off", so the window
+    // is wide but it is not "whatever two digitalWrite calls happen to take" —
+    // and a step the part declines to count is one this side has no way to
+    // notice, because the counter it is tracking cannot be read back.
     digitalWrite(PIN_TFT_BL, LOW);
+    delayMicroseconds(2);
     digitalWrite(PIN_TFT_BL, HIGH);
+    delayMicroseconds(2);
   }
   sLevel = want;
 }

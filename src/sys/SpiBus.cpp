@@ -17,6 +17,7 @@ constexpr uint8_t kMaxHosts = 4;
 struct Slot {
   SPIClass* bus = nullptr;
   bool      started = false;
+  int8_t    sck = -1, miso = -1, mosi = -1;   // what the first caller started it on
 };
 
 Slot sSlots[kMaxHosts];
@@ -39,8 +40,19 @@ SPIClass& get(uint8_t host, int8_t sck, int8_t miso, int8_t mosi) {
     // No chip select: SPIClass only records it, and every driver here drives
     // its own by hand. Passing one would suggest the peripheral does it.
     s.bus->begin(sck, miso, mosi, -1);
+    s.sck = sck; s.miso = miso; s.mosi = mosi;
     s.started = true;
     log_i("SPI host %u up (SCK %d, MISO %d, MOSI %d)", (unsigned)host, sck, miso, mosi);
+  } else if (s.sck != sck || s.miso != miso || s.mosi != mosi) {
+    // Two devices on one host are on one set of wires by definition, so a
+    // second caller naming different pins is a board header that disagrees with
+    // itself. The first caller's wiring is what the peripheral is on and what
+    // this returns; saying nothing would leave the second device silent for a
+    // reason that reads exactly like a wiring fault — which is the failure this
+    // whole file exists to stop.
+    log_e("SPI host %u was started on SCK %d, MISO %d, MOSI %d and is now asked for %d, %d, %d "
+          "— check the board header; the first wiring stands",
+          (unsigned)host, s.sck, s.miso, s.mosi, sck, miso, mosi);
   }
   return *s.bus;
 }

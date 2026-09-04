@@ -259,13 +259,15 @@
 // GNSS — the Plus only
 // ---------------------------------------------------------------------------
 // The plain T-Deck has no receiver: GPIO 43/44 reach the expansion header and
-// nothing else. The T-Deck Plus fits one there, which is what the `t-deck-plus`
-// env is for; Meshtastic's variant says the same in its own words
-// (GPS_DEFAULT_NOT_PRESENT). Building GPS into the base board would report a
-// receiver that is not fitted, so it is off here and turned on by that env.
-#ifndef HAS_GPS
-  #define HAS_GPS           0
-#endif
+// nothing else, which is what Meshtastic's variant says in its own words
+// (GPS_DEFAULT_NOT_PRESENT). Building GNSS into this board would report a
+// receiver that is not fitted, so it is off.
+//
+// The Plus does fit one on those pins, and there is no env for it yet — this
+// bench has no Plus to prove one on. The pins and the baud below are what such
+// an env would need and are recorded for whoever has the hardware; nothing
+// here reads them while HAS_GPS is 0.
+#define HAS_GPS             0
 // Which pin is which is the one place a reference firmware here gets it
 // backwards: one of the three names these from the receiver's point of view,
 // so copying its header gives a dead UART. The vendor's own call settles it —
@@ -274,8 +276,6 @@
 #define PIN_GPS_RX          44               // ESP32 receives here
 #define PIN_GPS_TX          43
 // Two receivers have shipped in this slot: a Quectel L76K at 9600 on the early
-// units and a u-blox MIA-M10Q at 38400 on current ones. 38400 is the default
-// because it is what is being sold; the `t-deck-plus` env can override it.
-#ifndef GPS_BAUD
-  #define GPS_BAUD          38400
-#endif
+// units and a u-blox MIA-M10Q at 38400 on current ones. 38400 is the figure to
+// start from, being what is sold now.
+#define GPS_BAUD            38400

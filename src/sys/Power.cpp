@@ -88,13 +88,34 @@ void sample() {
   digitalWrite(PIN_BATTERY_ADC_EN, BATTERY_ADC_EN_ACTIVE);
   delay(2);                              // let the divider settle
 #endif
+  // A read that came back with nothing is not a reading of an empty cell.
+  // A divider on ADC2 — the converter the radio and the Wi-Fi stack contend
+  // for — loses arbitration now and then and the call returns zero; averaged
+  // in with seven good ones that is an eighth of the cell voltage gone, which
+  // is a percentage drop an operator can see and a "no battery" once enough of
+  // them miss. So the zeros are counted out and, if every one of them missed,
+  // the last figure stands rather than being replaced by one nobody measured.
   uint32_t acc = 0;
-  for (int i = 0; i < 8; i++) acc += analogReadMilliVolts(PIN_BATTERY_ADC);
+  uint8_t  got = 0;
+  for (int i = 0; i < 8; i++) {
+    const uint32_t mv = analogReadMilliVolts(PIN_BATTERY_ADC);
+    if (mv) { acc += mv; got++; }
+  }
 #if PIN_BATTERY_ADC_EN >= 0
   digitalWrite(PIN_BATTERY_ADC_EN, !BATTERY_ADC_EN_ACTIVE);
 #endif
   analogSetAttenuation(ADC_11db);        // the default every other reader assumes
-  sVolts = (acc / 8) / 1000.0f * BATTERY_DIVIDER_RATIO;
+  if (got) {
+    sVolts = (acc / got) / 1000.0f * BATTERY_DIVIDER_RATIO;
+  } else {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      log_w("battery: the converter on GPIO %d answered nothing — on an ADC2 pin that is "
+            "contention with the radio, not a flat cell; holding the last reading",
+            PIN_BATTERY_ADC);
+    }
+  }
   sLastSample = millis();
   if (sSampleLock) xSemaphoreGive(sSampleLock);
 }
