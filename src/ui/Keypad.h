@@ -63,6 +63,16 @@ enum : uint8_t {
   KEY_DOWN      = 0x81,
   KEY_LEFT      = 0x82,
   KEY_RIGHT     = 0x83,
+  // The shortcut keys a board prints a picture on. Named for what the case
+  // says they do rather than for what its controller numbers them, because the
+  // numbering is that controller's business and every board's is different —
+  // the driver translates, and everything above here sees these.
+  KEY_MESSAGES  = 0x90,
+  KEY_HOME      = 0x91,
+  KEY_MENU      = 0x92,
+  KEY_BACK      = 0x93,
+  KEY_GPS       = 0x94,
+  KEY_MAP       = 0x95,
 };
 
 #if HAS_KEYPAD || HAS_TRACKBALL
@@ -81,11 +91,19 @@ uint8_t read();
 // its on-glass keyboard when this is false, so the node stays usable.
 bool present();
 
+// The last few codes the controller sent, oldest first, before this driver
+// translated any of them. A board's function keys are numbered by
+// its own microcontroller and nothing published says how, so the way to find
+// out is to press them and read them back. Up to twenty-four. Returns how
+// many were written.
+size_t recentRaw(uint8_t* out, size_t max);
+
 #else
 
 inline void begin() {}
 inline uint8_t read() { return KEY_NONE; }
 inline bool present() { return false; }
+inline size_t recentRaw(uint8_t*, size_t) { return 0; }
 
 #endif
 

@@ -67,6 +67,17 @@ Point poll();
 // thing to know and the hardest to see.
 bool present();
 
+// How many touches the controller has reported since boot, and the last raw
+// point it gave. Raw on purpose: the shell turns a point to match the panel's
+// rotation, and if that turn is wrong the tap lands somewhere nobody pressed —
+// which from the outside is indistinguishable from a layer that never reported
+// at all. These two numbers separate them.
+uint32_t reports();
+// The last report's six bytes, straight off the controller.
+const uint8_t* lastRaw();
+int16_t lastX();
+int16_t lastY();
+
 } // namespace TouchInput
 
 #else
@@ -76,6 +87,10 @@ struct Point { bool down = false; int16_t x = 0; int16_t y = 0; };
 inline void begin() {}
 inline Point poll() { return Point{}; }
 inline bool present() { return false; }
+inline uint32_t reports() { return 0; }
+inline const uint8_t* lastRaw() { static const uint8_t z[6] = {0}; return z; }
+inline int16_t lastX() { return -1; }
+inline int16_t lastY() { return -1; }
 } // namespace TouchInput
 
 #endif // HAS_TOUCH

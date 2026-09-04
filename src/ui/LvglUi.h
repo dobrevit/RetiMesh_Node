@@ -67,6 +67,10 @@ uint32_t loop();
 // with gloves on.
 void stepTab(int8_t dir);
 
+// The button as "select" on a board with keys or a ball: presses the focused
+// control. False where there is no focus ring, leaving the press to stepTab.
+bool activateFocused();
+
 // Blank/unblank hooks so the panel sleep logic stays where it is.
 void onBlank(bool on);
 
@@ -111,6 +115,7 @@ namespace LvglUi {
 inline bool begin(TftPanel&) { return false; }
 inline uint32_t loop() { return 1000; }
 inline void stepTab(int8_t) {}
+inline bool activateFocused() { return false; }
 inline void onBlank(bool) {}
 inline bool touchActive() { return false; }
 enum class PanelAction : uint8_t { None, Wake, Sleep };

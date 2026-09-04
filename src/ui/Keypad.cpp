@@ -15,6 +15,25 @@ namespace {
 
 bool sPresent = false;
 
+// The last few codes the controller sent, before this file decides what any of
+// them mean. A board's function keys are whatever its own microcontroller
+// numbers them, and nothing published says which — so the way to learn them is
+// to press them and read them back, rather than to guess and map a key to the
+// wrong screen. Kept small and never cleared: a bring-up presses six buttons in
+// a row and reads them in one go — deep enough that a few stray presses
+// beforehand do not push the run of interest out of it.
+constexpr uint8_t kRawKept = 24;
+uint8_t  sRaw[kRawKept] = {0};
+uint8_t  sRawAt = 0;
+uint32_t sRawCount = 0;
+
+void recordRaw(uint8_t code) {
+  if (!code) return;
+  sRaw[sRawAt] = code;
+  sRawAt = (uint8_t)((sRawAt + 1) % kRawKept);
+  sRawCount++;
+}
+
 // ---------------------------------------------------------------------------
 // The trackball
 // ---------------------------------------------------------------------------
@@ -141,6 +160,18 @@ uint8_t translate(uint8_t raw) {
     case 0xB6: return Keypad::KEY_DOWN;
     case 0xB7: return Keypad::KEY_RIGHT;
     case 0x88: return Keypad::KEY_NONE;      // the controller's invalid-key marker
+    // The six shortcut keys along the case, in the numbering its controller
+    // actually uses. Read off the hardware rather than taken from a published
+    // map: pressing them in the order the case labels them — chats, home, menu,
+    // back, location, map — returned 81 82 83 86 84 85, which is not the order
+    // the numbers suggest and not what the one third-party map of this
+    // controller claims either.
+    case 0x81: return Keypad::KEY_MESSAGES;
+    case 0x82: return Keypad::KEY_HOME;
+    case 0x83: return Keypad::KEY_MENU;
+    case 0x84: return Keypad::KEY_GPS;
+    case 0x85: return Keypad::KEY_MAP;
+    case 0x86: return Keypad::KEY_BACK;
     default:   break;
   }
   // Everything printable, plus the three control codes this firmware acts on,
@@ -157,10 +188,13 @@ uint8_t keyboardRead() {
 #if KEYPAD_KIND == KEYPAD_KIND_REG8
   const int v = I2cReg::read(bus, (uint8_t)KEYPAD_ADDR, (uint8_t)KEYPAD_KEY_REG);
   if (v < 0 || v == 0xFF) return Keypad::KEY_NONE;
+  recordRaw((uint8_t)v);
   return translate((uint8_t)v);
 #else
   if (bus.requestFrom((uint8_t)KEYPAD_ADDR, (uint8_t)1) != 1) return Keypad::KEY_NONE;
-  return bus.read();
+  const uint8_t k = bus.read();
+  recordRaw(k);
+  return k;
 #endif
 }
 
@@ -229,6 +263,16 @@ uint8_t read() {
 }
 
 bool present() { return sPresent; }
+
+size_t recentRaw(uint8_t* out, size_t max) {
+  // Oldest first, so a bring-up that presses six buttons in order reads them
+  // back in that order.
+  const size_t have = sRawCount < kRawKept ? (size_t)sRawCount : kRawKept;
+  const size_t start = sRawCount < kRawKept ? 0 : sRawAt;
+  size_t n = 0;
+  for (size_t i = 0; i < have && n < max; i++) out[n++] = sRaw[(start + i) % kRawKept];
+  return n;
+}
 
 } // namespace Keypad
 

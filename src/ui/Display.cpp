@@ -277,6 +277,11 @@ void Display::advancePage(bool forward) {
 #if HAS_LVGL_UI
   if (sShellUp) {
     if (LvglUi::idleShowing()) { LvglUi::showIdle(false); return; }  // wake from the clock only
+    // On a board with a focus ring the press means "this one". Only forward
+    // presses: a second button, where a board has one, walks backwards and
+    // should keep doing that. Where there is no ring this answers false and
+    // the press walks the tabs, which is what it has always done.
+    if (forward && LvglUi::activateFocused()) return;
     LvglUi::stepTab(forward ? 1 : -1);           // the buttons walk the tabs
     return;
   }

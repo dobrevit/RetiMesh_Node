@@ -55,6 +55,8 @@ void stepTab(int8_t dir) {
   else Ui::back();
 }
 
+bool activateFocused() { return Ui::activateFocused(); }
+
 void onBlank(bool on) {
   if (!on) lv_obj_invalidate(lv_screen_active());
 }

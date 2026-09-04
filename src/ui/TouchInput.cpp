@@ -62,6 +62,19 @@ inline TwoWire& bus() {
 bool    sUp   = false;
 uint8_t sAddr = TOUCH_ADDR;               // the GT911 answers at one of two
 
+// What the controller has actually reported since boot, and where it last put
+// a finger. A layer that is found but never reports is a different fault from
+// one that reports coordinates the shell then maps somewhere nobody pressed,
+// and from the outside — a screen that ignores taps — the two look identical.
+// Counted here so the console can tell them apart.
+uint32_t sReports = 0;
+int16_t  sLastX = -1, sLastY = -1;
+// The report exactly as the controller sent it. Decoding it is where this
+// driver was wrong — the coordinates came back far outside a panel this size,
+// which is a byte-layout fault and not a rotation one — and the bytes are the
+// only thing that settles which field is where.
+uint8_t  sLastRaw[6] = {0};
+
 #if TOUCH_KIND == TOUCH_KIND_GT911
 // Sixteen-bit register addresses, big-endian on the wire.
 constexpr uint16_t kRegStatus  = 0x814E;  // bit 7 = report ready, bits 3:0 = points
@@ -166,6 +179,11 @@ void begin() {
 
 bool present() { return sUp; }
 
+uint32_t reports() { return sReports; }
+const uint8_t* lastRaw() { return sLastRaw; }
+int16_t lastX() { return sLastX; }
+int16_t lastY() { return sLastY; }
+
 Point poll() {
   Point p;
   if (!sUp) return p;
@@ -180,10 +198,20 @@ Point poll() {
   const uint8_t points = st & 0x0F;
   uint8_t d[6];
   if (points >= 1 && gt911Read(kRegPoint1, d, sizeof(d))) {
-    // Little-endian here, unlike the register addresses that reach them.
+    // Little-endian here, unlike the register addresses that reach them — and
+    // two bytes further in than the datasheet's register list suggests. The
+    // read comes back one byte ahead of where the track id is expected, so the
+    // coordinates sit at [2..3] and [4..5] rather than [1..2] and [3..4].
+    //
+    // Measured, not reasoned: decoded the other way a tap at the top-left
+    // corner reported 2816,1792 — numbers with no meaning on a panel this
+    // size — and the bytes behind them were 00 0b 00 07, which is 11 and 7.
     p.down = true;
-    p.x = (int16_t)(d[1] | (d[2] << 8));
-    p.y = (int16_t)(d[3] | (d[4] << 8));
+    p.x = (int16_t)(d[2] | (d[3] << 8));
+    p.y = (int16_t)(d[4] | (d[5] << 8));
+    sReports++;
+    sLastX = p.x; sLastY = p.y;
+    memcpy(sLastRaw, d, sizeof(sLastRaw));
   }
   // Cleared whether or not a point was read: the part reports nothing further
   // until this byte is zero, so an early return that skipped it would take the

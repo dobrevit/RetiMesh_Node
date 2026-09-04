@@ -598,6 +598,15 @@
 #ifndef TOUCH_KIND
   #define TOUCH_KIND        TOUCH_KIND_CHSC6X
 #endif
+// Whether the controller already reports in the frame the panel is shown in.
+// Most do not: they answer in the glass's own portrait coordinates and the
+// shell turns each point the same way it turned the picture. One board's
+// controller is configured for the mounted orientation and needs no turning at
+// all, and turning it anyway sends every tap to a different corner — which
+// looks exactly like a touch layer that is not working.
+#ifndef TOUCH_PRE_ROTATED
+  #define TOUCH_PRE_ROTATED 0
+#endif
 
 // A physical keyboard, where the board has one. Not a matrix this firmware
 // scans — on every board here it is a second microcontroller that scans it

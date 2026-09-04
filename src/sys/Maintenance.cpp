@@ -158,6 +158,33 @@ static void doStatus() {
         HAS_TOUCH  ? (TouchInput::present() ? "yes" : "absent") : "n/a",
         (HAS_KEYPAD || HAS_TRACKBALL) ? (Keypad::present() ? "yes" : "absent") : "n/a",
         (unsigned long)display.controllerId());
+#if HAS_TOUCH
+  // What the glass has actually reported, and the last raw point. A layer that
+  // never reports and one whose points the shell turns to the wrong place are
+  // the same symptom from the outside — a screen that ignores taps — and these
+  // two numbers are what tells them apart.
+  {
+    const uint8_t* r = TouchInput::lastRaw();
+    dataf("STATUS", "touch reports=%lu last=%d,%d raw=[%02x %02x %02x %02x %02x %02x]",
+          (unsigned long)TouchInput::reports(), TouchInput::lastX(), TouchInput::lastY(),
+          r[0], r[1], r[2], r[3], r[4], r[5]);
+  }
+#endif
+#if HAS_KEYPAD
+  // The raw codes the keyboard's own controller sent, oldest first. A board's
+  // function keys are numbered by that controller and nothing published says
+  // how, so this is how they are learned: press them in a known order and read
+  // the list back, rather than map a key to the wrong screen and wonder.
+  {
+    uint8_t raw[24];
+    const size_t n = Keypad::recentRaw(raw, sizeof(raw));
+    char list[24 * 3 + 1] = "";
+    size_t at = 0;
+    for (size_t i = 0; i < n && at < sizeof(list) - 5; i++)
+      at += snprintf(list + at, sizeof(list) - at, "%s%02x", i ? " " : "", raw[i]);
+    dataf("STATUS", "keys recent=[%s]", list);
+  }
+#endif
 #endif
 #if HAS_PMU || HAS_BATTERY_ADC
   // The cell as this board sees it — the same reading the panel's icon acts

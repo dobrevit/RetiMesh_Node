@@ -189,6 +189,14 @@
 #define PIN_TOUCH_RST       -1               // tied to the board reset
 #define PIN_TOUCH_INT       16
 #define TOUCH_ADDR          0x5D             // 0x14 on some panels; begin() probes both
+// This controller is configured for the way the glass is mounted and already
+// answers in the frame the shell draws in, so its points are passed through
+// untouched. Measured: a tap at the top-left corner came back as 11,7 — small
+// on both axes, which it could only be if the controller and the picture agree
+// about which corner that is. Turned to match the panel's rotation instead, the
+// same tap landed at the bottom-left, and every press missed what it was aimed
+// at while the layer itself was working perfectly.
+#define TOUCH_PRE_ROTATED   1
 
 // ---------------------------------------------------------------------------
 // Keyboard — an ESP32-C3 of its own, answering on I2C
@@ -288,7 +296,9 @@
 // where the ESP32 listens.
 #define PIN_GPS_RX          44               // ESP32 receives here
 #define PIN_GPS_TX          43
-// Two receivers have shipped in this slot: a Quectel L76K at 9600 on the early
-// units and a u-blox MIA-M10Q at 38400 on current ones. 38400 is the figure to
-// start from, being what is sold now.
-#define GPS_BAUD            38400
+// 9600, which is what LilyGO's own page for the Plus says the MIA-M10Q in it
+// is set to — and it is the vendor talking about this exact product, against a
+// third-party variant that carries 38400 for the same part. The receiver can be
+// configured either way, so the number is a fact about how it was shipped
+// rather than about the module.
+#define GPS_BAUD            9600

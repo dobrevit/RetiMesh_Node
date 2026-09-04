@@ -45,6 +45,10 @@ namespace Ui {
 
 bool shellInit(TftPanel& panel);         // lvgl, buffers, touch, bar, keyboard
 uint32_t shellLoop();                    // lv_timer_handler + the bar's second
+// A press on the board's button, where the shell has a focus ring: activate
+// whatever is focused. False when there is no ring, and then the caller falls
+// back to what a press has always meant.
+bool activateFocused();
 bool consumeTouch();                     // a finger since last asked (sticky)
 void swallowTouch();                     // ignore the current contact until it lifts
 

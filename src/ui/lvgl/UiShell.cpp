@@ -107,9 +107,11 @@ void touchCb(lv_indev_t*, lv_indev_data_t* data) {
   data->state = p.down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
   if (p.down) {
     // The glass reports portrait-native points; the UI lives in the turned
-    // frame, so the point turns the same way the MADCTL did.
+    // frame, so the point turns the same way the MADCTL did — unless the
+    // controller is already configured for the mounted orientation, in which
+    // case it agrees with the picture and turning it would move every tap.
     int16_t x = p.x, y = p.y;
-    switch (sRot) {
+    switch (TOUCH_PRE_ROTATED ? 0 : sRot) {
       case 1: x = p.y;                                  y = (int16_t)(DISPLAY_WIDTH  - 1 - p.x); break;
       case 2: x = (int16_t)(DISPLAY_WIDTH  - 1 - p.x);  y = (int16_t)(DISPLAY_HEIGHT - 1 - p.y); break;
       case 3: x = (int16_t)(DISPLAY_HEIGHT - 1 - p.y);  y = p.x;                                 break;
@@ -136,6 +138,27 @@ void keypadCb(lv_indev_t*, lv_indev_data_t* data) {
   const uint8_t k = Keypad::read();
   if (k == Keypad::KEY_NONE) { data->state = LV_INDEV_STATE_RELEASED; return; }
 
+  // The shortcut keys are screens, not characters: they go straight to the
+  // shell rather than through the focus ring, because what they mean is "show
+  // me this", not "press the thing under the cursor". Handled before the
+  // translation below, and reported as nothing pressed — LVGL has already been
+  // given a new screen by the time it looks.
+  switch (k) {
+    case Keypad::KEY_MESSAGES: Ui::openMessages();     break;
+    case Keypad::KEY_HOME:     Ui::openHome();         break;
+    case Keypad::KEY_MENU:     Ui::openSettings();     break;
+    case Keypad::KEY_BACK:     Ui::back();             break;
+    case Keypad::KEY_MAP:      Ui::openPlot();         break;
+#if HAS_GPS
+    case Keypad::KEY_GPS:      Ui::openGps();          break;
+#endif
+    default: goto notScreen;
+  }
+  sTouchSeen = true;
+  data->state = LV_INDEV_STATE_RELEASED;
+  return;
+
+notScreen:
   uint32_t lk;
   switch (k) {
     // Up and down walk the controls rather than moving inside one. LVGL moves
@@ -437,6 +460,24 @@ bool shellInit(TftPanel& panel) {
 }
 
 uint32_t shellLoop() { return lv_timer_handler(); }
+
+bool activateFocused() {
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // A press on a board that has a focus ring means "this one", not "go back".
+  // The trackball's click is the button this firmware has always had, and on
+  // the mono page stack a press turns the page because there is nothing on a
+  // page to choose. Here there is: the group holds the controls of the screen
+  // on the glass, one of them is focused, and the ball is pressed while
+  // looking at it. Sent through the group rather than as a click on the
+  // widget, so that a control which handles keys itself — a list, an editable
+  // field — gets what it expects.
+  if (sKeys && lv_group_get_focused(sKeys)) {
+    lv_group_send_data(sKeys, LV_KEY_ENTER);
+    return true;
+  }
+#endif
+  return false;
+}
 
 void setRotation(uint8_t quarterTurns) {
   const uint8_t want = quarterTurns & 3;
