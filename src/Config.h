@@ -874,6 +874,14 @@
 #ifndef PIN_GPS_RST
   #define PIN_GPS_RST       -1
 #endif
+// Which level holds the receiver in reset. Low on every module here so far —
+// the line is /RST and releasing it means driving it high, which is what the
+// driver did unconditionally. One board wires the opposite sense, and there
+// driving it high is not "released", it is "held in reset for ever": the
+// receiver is powered, the UART is open and not one sentence arrives.
+#ifndef GPS_RST_ACTIVE
+  #define GPS_RST_ACTIVE    LOW
+#endif
 #ifndef PIN_GPS_STANDBY
   #define PIN_GPS_STANDBY   -1
 #endif

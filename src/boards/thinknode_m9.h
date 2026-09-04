@@ -242,6 +242,11 @@
 #define GPS_BAUD            115200
 #define PIN_GPS_EN          11
 #define GPS_EN_ACTIVE       LOW
+// Asserted high here, which is the opposite of every other receiver this
+// firmware drives — so "released" is a low. One published source says so; the
+// bench agrees with it, having counted zero sentences from a powered receiver
+// while this line was held the other way.
 #define PIN_GPS_RST         5
+#define GPS_RST_ACTIVE      HIGH
 #define PIN_GPS_PPS         4
 #define PIN_GPS_STANDBY     10               // high forces the receiver awake
