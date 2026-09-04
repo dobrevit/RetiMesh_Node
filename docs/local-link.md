@@ -48,7 +48,7 @@ packager and the flasher never disagree about it.
 
 | Env | MCU | On the USB connector | Bootloader methods, best first | IP local links |
 |---|---|---|---|---|
-| `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi` | ESP32-S3 | the chip's own USB (D+/D− routed), driven by the OTG stack as the composite device below | `software_api` (the core's persist-restart), `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **usb0** |
+| `t3s3`, `t3s3-sx1280`, `t3s3-sx1280-pa`, `esp32s3-qspi`, `heltec-v4`, `t-deck` | ESP32-S3 | the chip's own USB (D+/D− routed), driven by the OTG stack as the composite device below | `software_api` (the core's persist-restart), `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **usb0** |
 | `heltec-v3` | ESP32-S3 | CP2102 bridge on UART0 (the S3's own USB is not on the connector) | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** (PPP client; the host runs pppd on the port) |
 | `heltec-ws` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
 | `heltec-wb` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |

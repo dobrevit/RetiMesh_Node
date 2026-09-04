@@ -141,7 +141,9 @@ private:
   void  doFormat();
   void  measure();
 
-  SPIClass          _spi{HSPI};
+  // HSPI on every board that gives the slot wires of its own; the board says
+  // otherwise where the card shares the radio's bus (Config.h, SD_SPI_BUS).
+  SPIClass          _spi{SD_SPI_BUS};
   SemaphoreHandle_t _lock = nullptr;
   Info              _info;
   volatile bool     _formatRequested = false;

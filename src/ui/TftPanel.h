@@ -108,7 +108,14 @@ private:
   // What the glass last saw, so flush() streams only the band of rows that
   // changed: a ticking counter costs one band, not the whole 153 KB frame.
   uint8_t*    _shadow = nullptr;
-  void applyBacklight();                // pct through PWM, unless blanked
+  void applyBacklight();                // the current setting, unless blanked
+  // The backlight hardware, and the only two places that touch it. Which of
+  // them a board gets is BACKLIGHT_KIND's business, not the panel's: on most
+  // boards the pin is an LED driver's gate and brightness is a duty cycle, on
+  // the T-Deck it is a one-wire dimmer whose brightness is a pulse count. The
+  // callers ask for a percentage either way.
+  void backlightBegin();
+  void backlightSet(uint8_t pct);
   bool        _ok = false;
   bool        _lit = false;             // backlight state, so blank() is idempotent
   bool        _blanked = false;

@@ -70,12 +70,14 @@
 #include "Pmu.h"
 #include "Gps.h"
 #include "Diag.h"
+#include "BoardInit.h"
 #include "LocalLink.h"
 #include "Bootloader.h"
 #include "Watchdog.h"
 #include "Buzzer.h"
 #include "Bq25896.h"
 #include "Imu.h"
+#include "I2cReg.h"
 #include <Wire.h>
 #include "Leds.h"
 #include "Maintenance.h"
@@ -179,6 +181,13 @@ void setup() {
   delay(300);                              // let the USB CDC host attach
   log_i("%s %s on %s (IDF %s)", FW_NAME, FW_VERSION, BOARD_NAME, esp_get_idf_version());
 
+  // The board itself, before any driver: the peripheral rail up on boards that
+  // gate one, and the chip selects idled on boards where three devices share a
+  // bus. Both are no-ops elsewhere. Nothing below this line — not the
+  // filesystem, not a bus, not the radio — is safe to run before it on a board
+  // that needs it, because the parts are simply not powered yet.
+  BoardInit::begin();
+
   // Before anything else that could itself fail: read why the last run ended.
   // The reset register survives the reboot but not a second one, so it is only
   // ever readable here.
@@ -243,7 +252,7 @@ void setup() {
   // switched peripheral rail, and the panel is what brings that rail up and
   // settles it (Panel.h). Powering it a second time from here left the panel
   // dark — one owner for the rail, and the probe simply comes later.
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);  // both residents are 400 kHz parts
+  I2cReg::mainBus();                       // up already if a panel or keyboard got here first
   Bq25896::begin();
   Imu::begin();
   Diag::cost("i2c case parts");

@@ -73,9 +73,83 @@ void TftPanel::blitArea(int16_t x1, int16_t y1, int16_t x2, int16_t y2, const ui
   if (!_lit) { _lit = true; applyBacklight(); }
 }
 
+// ---------------------------------------------------------------------------
+// The backlight
+// ---------------------------------------------------------------------------
+#if BACKLIGHT_KIND == BACKLIGHT_KIND_AW9364
+
+// A one-wire dimmer, not an LED on a gate. Brightness is a counter inside the
+// part: holding the line high turns it on at full, and each further low-high
+// pulse steps it down one of sixteen levels, wrapping round from the bottom
+// back to the top. Taking the line low for a few milliseconds turns it off and
+// forgets the count.
+//
+// So the part has state we cannot read, and the only way to reach a level is
+// to count pulses from the one we believe it is on — which is why the current
+// level is remembered here. It is the reason a PWM channel does not work: at
+// any useful frequency it sends thousands of steps a second and lands wherever
+// the wrap leaves it. That still lights the panel, which is how the mistake
+// survives in firmware that makes it; it is not a dimmer.
+namespace {
+constexpr uint8_t kSteps = 16;            // the part's whole range
+uint8_t sLevel = 0;                       // 0 = off, 1..16 = the counter
+}
+
+void TftPanel::backlightBegin() {
+  pinMode(PIN_TFT_BL, OUTPUT);
+  digitalWrite(PIN_TFT_BL, LOW);          // off, and the counter forgotten
+  sLevel = 0;
+}
+
+void TftPanel::backlightSet(uint8_t pct) {
+  // Sixteen levels, and never round a lit panel down to off: a caller asking
+  // for 1 % wants the dimmest light, not darkness. Only an explicit zero is
+  // off, which is what blank() asks for.
+  uint8_t want = pct == 0 ? 0 : (uint8_t)((pct * kSteps + 99) / 100);
+  if (want > kSteps) want = kSteps;
+
+  if (want == 0) {
+    digitalWrite(PIN_TFT_BL, LOW);
+    delay(3);                             // the part's own off time
+    sLevel = 0;
+    return;
+  }
+  if (sLevel == 0) {                      // from dark: on at full, then step down
+    digitalWrite(PIN_TFT_BL, HIGH);
+    delayMicroseconds(30);
+    sLevel = kSteps;
+  }
+  if (want == sLevel) return;
+  // Pulses only ever step downwards, so reaching a brighter level means going
+  // round the wrap — the modulo is that trip, and it is why this is counted
+  // rather than written.
+  const uint8_t from = kSteps - sLevel, to = kSteps - want;
+  const uint8_t pulses = (uint8_t)((kSteps + to - from) % kSteps);
+  for (uint8_t i = 0; i < pulses; i++) {
+    digitalWrite(PIN_TFT_BL, LOW);
+    digitalWrite(PIN_TFT_BL, HIGH);
+  }
+  sLevel = want;
+}
+
+#else   // BACKLIGHT_KIND_PWM
+
+void TftPanel::backlightBegin() {
+  // PWM rather than a switch: brightness is a setting now. 20 kHz keeps the
+  // dimming above anything a camera or an ear could catch.
+  ledcAttach(PIN_TFT_BL, 20000, 8);
+  ledcWrite(PIN_TFT_BL, 0);
+}
+
+void TftPanel::backlightSet(uint8_t pct) {
+  ledcWrite(PIN_TFT_BL, (uint32_t)pct * 255u / 100u);
+}
+
+#endif
+
 void TftPanel::applyBacklight() {
   if (!_lit || _blanked) return;
-  ledcWrite(PIN_TFT_BL, (uint32_t)_brightPct * 255u / 100u);
+  backlightSet(_brightPct);
 }
 
 void TftPanel::setBrightness(uint8_t pct) {
@@ -114,17 +188,21 @@ bool TftPanel::begin() {
 
   pinMode(PIN_TFT_CS, OUTPUT);  digitalWrite(PIN_TFT_CS, HIGH);
   pinMode(PIN_TFT_DC, OUTPUT);  digitalWrite(PIN_TFT_DC, HIGH);
-  // PWM rather than a switch: brightness is a setting now. 20 kHz keeps the
-  // dimming above anything a camera or an ear could catch.
-  ledcAttach(PIN_TFT_BL, 20000, 8);
-  ledcWrite(PIN_TFT_BL, 0);                                       // dark until there is a frame
+  backlightBegin();                       // dark until there is a frame
 
   // Hardware reset: low for a moment, then the controller wants 120 ms
-  // before it will take SLPOUT seriously.
+  // before it will take SLPOUT seriously. Some boards do not give the panel a
+  // reset line of its own — it is tied to the board's, so the controller comes
+  // out of reset with the MCU and there is nothing here to pulse. Those wait
+  // anyway, because the settling time is the controller's either way.
+#if PIN_TFT_RST >= 0
   pinMode(PIN_TFT_RST, OUTPUT);
   digitalWrite(PIN_TFT_RST, HIGH); delay(5);
   digitalWrite(PIN_TFT_RST, LOW);  delay(20);
   digitalWrite(PIN_TFT_RST, HIGH); delay(120);
+#else
+  delay(120);
+#endif
 
   _spi.begin(PIN_TFT_SCK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
   _spi.beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
@@ -229,7 +307,7 @@ void TftPanel::blank(bool on) {
   // panel that says it is unlit, and the old order left the PWM at zero on
   // every wake from a full blank — a black glass only a reboot recovered.
   _lit = !on;
-  if (on) ledcWrite(PIN_TFT_BL, 0); else applyBacklight();
+  if (on) backlightSet(0); else applyBacklight();
 }
 
 #endif // HAS_DISPLAY && TFT

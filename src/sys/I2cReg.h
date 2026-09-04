@@ -11,8 +11,27 @@
 #pragma once
 
 #include <Wire.h>
+#include "Config.h"
 
 namespace I2cReg {
+
+// The board's general-purpose I2C, started once however many drivers want it.
+//
+// It used to be started in setup(), inside the guard for the two parts that
+// were then its only residents — so a board with neither never started it at
+// all. That was correct while every other I2C device had a bus of its own, and
+// stopped being correct with the first board that puts its touch controller
+// and its keyboard on this one: two drivers, neither of which owns the bus,
+// both of which need it up, and each initialised at a different point in
+// setup(). Whoever asks first brings it up; everyone else gets the same bus.
+inline TwoWire& mainBus() {
+  static bool started = false;
+  if (!started) {
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, I2C_HZ);
+    started = true;
+  }
+  return Wire;
+}
 
 inline int read(TwoWire& bus, uint8_t addr, uint8_t reg) {
   bus.beginTransmission(addr);

@@ -49,6 +49,8 @@
   #include "boards/t3s3_sx1280_pa.h"
 #elif defined(BOARD_T3S3_SX1280)
   #include "boards/t3s3_sx1280.h"
+#elif defined(BOARD_TDECK)
+  #include "boards/tdeck.h"
 #else
   #include "boards/t3s3.h"
 #endif
@@ -457,6 +459,13 @@
 #ifndef PIN_SD_CS
   #define PIN_SD_CS         13
 #endif
+// Which SPI host the card sits on. HSPI on every board that gives the slot
+// wires of its own, which was every board until the T-Deck put the card, the
+// panel and the radio on one bus and left no second host to put it on. A
+// board that shares says so here; the driver reads it rather than assuming.
+#ifndef SD_SPI_BUS
+  #define SD_SPI_BUS        HSPI
+#endif
 #define SD_SPI_HZ           20000000
 #define SD_POLL_MS          3000
 #define SD_PARTIAL_PERCENT  50            // volume < 50 % of the card => "partial"
@@ -497,6 +506,21 @@
 #endif
 #ifndef PIN_OLED_SCL
   #define PIN_OLED_SCL      17
+#endif
+// The board's general-purpose I2C — the bus that carries whatever is not the
+// panel: a charger, an accelerometer, a touch controller, a keyboard. Most
+// boards here have no such bus and only the panel's, and on those the two
+// names are the same pair of wires: one bus, named twice. Boards that route a
+// second pair say so in their own header.
+//
+// Named unconditionally, and not only where something sits on it, because
+// I2cReg::mainBus() is what starts it and that has to compile everywhere —
+// including on the boards where nothing ever calls it.
+#ifndef PIN_I2C_SDA
+  #define PIN_I2C_SDA       PIN_OLED_SDA
+#endif
+#ifndef PIN_I2C_SCL
+  #define PIN_I2C_SCL       PIN_OLED_SCL
 #endif
 // Panels on a switched rail need it brought up before they are probed, and it
 // is active low on every board that has one so far.
@@ -552,9 +576,111 @@
 #ifndef PIN_BUZZER
   #define PIN_BUZZER        -1
 #endif
-// A capacitive touch layer over the panel.
+// A capacitive touch layer over the panel. Two controllers are driven, and
+// they are not alike enough to probe for: the CHSC6X holds one report and
+// answers only while a finger is down, the GT911 is register-mapped and
+// answers always. A board names which it carries.
+#define TOUCH_KIND_CHSC6X   1
+#define TOUCH_KIND_GT911    2
 #ifndef HAS_TOUCH
   #define HAS_TOUCH         0
+#endif
+#ifndef TOUCH_KIND
+  #define TOUCH_KIND        TOUCH_KIND_CHSC6X
+#endif
+
+// A physical keyboard, where the board has one. Not a matrix this firmware
+// scans — on every board here it is a second microcontroller that scans it
+// and answers on I2C, so what varies is the address and the bus, not the
+// wiring. See src/ui/Keypad.h.
+#ifndef HAS_KEYPAD
+  #define HAS_KEYPAD        0
+#endif
+#ifndef KEYPAD_ADDR
+  #define KEYPAD_ADDR       0x55
+#endif
+#ifndef PIN_KEYPAD_SDA
+  #define PIN_KEYPAD_SDA    PIN_I2C_SDA
+#endif
+#ifndef PIN_KEYPAD_SCL
+  #define PIN_KEYPAD_SCL    PIN_I2C_SCL
+#endif
+#ifndef PIN_KEYPAD_INT
+  #define PIN_KEYPAD_INT    -1
+#endif
+
+// A trackball: four direction lines, active low, one edge per detent. The
+// click is PIN_BUTTON, because on the board that has one they are the same
+// pin. Read in Keypad.cpp alongside the keyboard, since both are navigation.
+#ifndef HAS_TRACKBALL
+  #define HAS_TRACKBALL     0
+#endif
+#ifndef PIN_TRACKBALL_UP
+  #define PIN_TRACKBALL_UP    -1
+#endif
+#ifndef PIN_TRACKBALL_DOWN
+  #define PIN_TRACKBALL_DOWN  -1
+#endif
+#ifndef PIN_TRACKBALL_LEFT
+  #define PIN_TRACKBALL_LEFT  -1
+#endif
+#ifndef PIN_TRACKBALL_RIGHT
+  #define PIN_TRACKBALL_RIGHT -1
+#endif
+
+// How the panel's backlight is driven. A plain LED on a PWM channel on every
+// board so far; the T-Deck puts a one-wire dimmer chip there instead, whose
+// brightness is stepped by pulses rather than set by a duty cycle. See
+// TftPanel.cpp — the difference is entirely inside applyBacklight().
+#define BACKLIGHT_KIND_PWM     1
+#define BACKLIGHT_KIND_AW9364  2
+#ifndef BACKLIGHT_KIND
+  #define BACKLIGHT_KIND    BACKLIGHT_KIND_PWM
+#endif
+
+// Which way up the board is held, in quarter turns, when nothing can tell.
+// The colour shell turns the frame in the controller's MADCTL and a board with
+// an accelerometer keeps that up to date; a board without one has no way to
+// know and would otherwise sit at zero, which is the controller's portrait —
+// wrong on any board whose glass is mounted landscape. So the board says how
+// it is built and the shell starts there, and the accelerometer, where there
+// is one, moves it from that starting point rather than to it.
+#ifndef DISPLAY_ROTATION
+  #define DISPLAY_ROTATION  0
+#endif
+
+// The main I2C bus rate. 400 kHz everywhere the parts on the bus allow it;
+// a board whose slowest resident wants less says so, because the rate is a
+// fact about the wire rather than about any one driver on it.
+#ifndef I2C_HZ
+  #define I2C_HZ            400000
+#endif
+
+// A load switch in front of the whole peripheral rail, where the board has
+// one: the radio, the card, the panel and the buses are dead until it is
+// driven. Not a PMU — there is no chip to talk to — so it is raised in
+// setup() before anything touches a bus. See main.cpp.
+#ifndef HAS_BOARD_POWER
+  #define HAS_BOARD_POWER   0
+#endif
+#ifndef PIN_BOARD_POWER
+  #define PIN_BOARD_POWER   -1
+#endif
+#ifndef BOARD_POWER_ACTIVE
+  #define BOARD_POWER_ACTIVE HIGH
+#endif
+// How long the rail is given before anything behind it is addressed.
+#ifndef BOARD_POWER_SETTLE_MS
+  #define BOARD_POWER_SETTLE_MS 100
+#endif
+
+// Whether the transceiver, the panel and the card sit on one SPI bus. Where
+// they do, their chip selects have to be idled together before any driver
+// starts — see BoardInit.cpp for why that cannot be left to each driver's own
+// begin(). Sharing is safe otherwise: the Arduino core's per-bus mutex is
+// taken by beginTransaction, and no driver here attaches a hardware select.
+#ifndef SPI_BUS_SHARED
+  #define SPI_BUS_SHARED    0
 #endif
 // The backlight's floor, percent: below this a panel is dark while
 // believing itself on, and going dark is the sleep timer's job. The funnel

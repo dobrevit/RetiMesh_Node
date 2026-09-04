@@ -15,6 +15,7 @@
 | `heltec-v3` | Heltec WiFi LoRa 32 V3 | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 0.96" SSD1306 on the switched Vext rail | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
 | `heltec-wp` | Heltec Wireless Paper | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 2.13" e-ink (250x122, E0213A367), driven | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board |
 | `heltec-v4` | Heltec V4 (TFT) | ESP32-S3: 16 MB flash, 2 MB PSRAM in package | SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end | 2.4" 240x320 ST7789 with a CHSC6X touch layer | two buttons + case power button (charger /QON), DA217 accelerometer, BQ25896-ready charging state, battery ADC, GNSS on the expansion header; expansion slots for sounder/sensors (no SD) | verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder silent — possibly not fitted |
+| `t-deck` | LilyGO T-Deck | ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package | SX1262 (TCXO at 1.8 V, DIO2 drives the RF switch), no amplifier | 2.8" 320x240 ST7789 with a GT911 touch layer | physical keyboard on its own microcontroller (I2C), trackball with a click on the BOOT pin, microSD, battery ADC, speaker and microphone (not driven); GNSS on the Plus only | in bring-up — on the bench the panel, its stepped backlight and the USB composite device come up; boot does not yet reach the shell and the console goes quiet past the splash. Radio, keyboard, trackball, touch and card unverified |
 <!-- boards.json:end -->
 
 ### The Wireless Stick's memory
@@ -206,6 +207,88 @@ application runs and the Espressif JTAG identity in the downloader.
 7. An OTA update staged on LittleFS and installed — this is the first board that stages
    without an SD card, and the first flashed A/B from day one.
 
+## LilyGO T-Deck
+
+The `t-deck` environment. This is the first board here that is a *terminal* rather than a
+gateway: it has a keyboard, so the LVGL shell's on-glass keyboard steps aside and the text
+field takes the real keys instead.
+
+Its pin map is the best-sourced in this registry. Four independent firmwares — LilyGO's own
+reference, Meshtastic, MeshCore and the Zephyr board port — agree on every number that
+matters, against the one published source the Heltec V4 had. What follows is the part that
+sourcing did *not* settle, in the order it can bite.
+
+**Nothing on the board answers until GPIO 10 is high.** The radio, the card, the panel, the
+keyboard and the touch controller all sit behind one load switch. Probe before raising it
+and you get an empty I2C bus and a transceiver that does not reply — which reads exactly
+like a wiring fault and is not one. It is not a PMU, so `Pmu.h` has nothing to say about it;
+it is one GPIO and it has to be the first one. `BoardInit::begin()` raises it at the top of
+`setup()`, before the filesystem, before any bus, before the radio.
+
+**The panel, the radio and the card share one SPI bus.** Every other board here gives the
+panel a bus of its own precisely so the radio never waits behind a blit. This board does not
+offer the choice — all three chip selects hang off one set of wires, and the S3's GPIO matrix
+cannot let two peripherals drive one output pin. Sharing is safe rather than merely
+tolerated: `SPIClass` objects built on the same bus number resolve to the same underlying bus
+struct, whose mutex `beginTransaction` takes and `endTransaction` releases, so the radio task
+and the display task serialise in the core rather than by convention; and no driver here
+attaches a hardware chip select, so each driver's `digitalWrite` is the only thing moving a
+CS line. What it costs is latency — a full-frame blit holds the bus for a few milliseconds
+and a packet arriving during one waits — and nothing is dropped, because receive is
+interrupt-driven into a task that reads the chip afterwards.
+
+The one thing no single driver could do for itself is the *starting* state. Each raises its
+own select in its own `begin()`, which is correct and too late: whichever runs first is
+talking on a bus where the other two selects are still floating, and a floating select is a
+device that may decide it is being addressed. `BoardInit::begin()` idles all three together
+before any of them exists.
+
+**The backlight is not an LED on a PWM pin.** GPIO 42 drives an AW9364 one-wire dimmer whose
+brightness is a counter inside the part: holding the line high turns it on at full, and each
+further low-high pulse steps it down one of sixteen levels, wrapping at the bottom. Driving
+it with a PWM channel — which is what this firmware does on every other colour board, and
+what one of the two reference firmwares for this board does — sends twenty thousand step
+pulses a second and lands wherever the wrap leaves it. It lights, which is how the mistake
+survives; it is not a dimmer. `BACKLIGHT_KIND` picks the part's own protocol here.
+
+**The I2C bus runs at 100 kHz, not 400.** The keyboard's controller brings its slave up at
+100 kHz and shares the bus with the touch controller, so the slowest part on the wire sets
+the rate for all of it. `I2C_HZ` carries that.
+
+**The keyboard is a latch, not a state.** A microcontroller of its own scans the keys and
+hands over one key per read; there is no release event and nothing to debounce. A missed read
+is a lost keystroke, which is why the shell polls it as an LVGL keypad device rather than
+sampling it with the page timer. The trackball beside it pulses once per detent on four
+GPIOs and says nothing between pulses, so its edges are counted in an interrupt — a poll at
+the display's rate would see a level rather than the movement. Both arrive as one stream of
+key codes (`src/ui/Keypad.h`), because a detent is an arrow key by any sensible reading.
+
+**The trackball's click is the BOOT pin**, which is also this board's only button. That is
+why holding the ball down while pressing reset is the documented way into the ROM
+downloader — and why `PIN_BUTTON` and the click are the same number.
+
+GNSS is fitted on the T-Deck **Plus** only; GPIO 43/44 reach the expansion header on the
+plain board and nothing else, so `HAS_GPS` is 0 here.
+
+### T-Deck pin map
+| Function | GPIO |
+|---|---|
+| Peripheral rail (raise first) | 10 |
+| SPI SCK / MISO / MOSI (shared) | 40 / 38 / 41 |
+| LoRa CS / RST / BUSY / DIO1 | 9 / 17 / 13 / 45 |
+| TFT CS / DC / RST / backlight | 12 / 11 / tied / 42 |
+| Touch (GT911 @ 0x5D) SDA / SCL / INT | 18 / 8 / 16 |
+| Keyboard (@ 0x55) SDA / SCL | 18 / 8 |
+| Trackball up / down / left / right | 3 / 15 / 1 / 2 |
+| Button, and the trackball click | 0 (BOOT) |
+| microSD CS | 39 |
+| Battery ADC (÷2, always connected) | 4 |
+| GNSS RX / TX (Plus only) | 44 / 43 |
+
+Reserved on this part and unavailable: 26–32 (SPI flash) and **33–37 (octal PSRAM)** — an
+R8 die is octal, which is what `qio_opi` in the env says and what the chip measures as.
+19/20 are the native USB pair and carry the console.
+
 ## T3-S3 pin map (defaults in `Config.h`)
 | Function | GPIO |
 |---|---|
@@ -321,7 +404,13 @@ performs; and BOOT + RST recovers any of them.
    connector facts contradict its chip, or one that
    contradicts the framework's USB flags in `platformio.ini`. Drives CI,
    release packaging, the web flasher and the CLI.
-5. Workflow matrices in `.github/workflows/ci.yml` and `release.yml`.
+5. Nothing in the workflows: CI, the release matrix and the HIL run all read
+   `boards.json` and build whatever is in it. (A bench runner wants a
+   `HIL_<ENV>_PORT` repository variable to exercise the new board, but the
+   build matrices need no edit — they used to, and a board once reached the
+   registry without reaching them.) Regenerate the table above with
+   `python tools/board_docs.py`, which CI checks, and run
+   `python tools/check_boards.py`.
 6. If the display or radio differ: `Display.*` / `LoRaRadio.*` (probe order,
    TCXO, RF switch). Keep board specifics behind the capability flags.
 7. Verify: boot log clean, radio detected, announce accepted by an RNS peer.

@@ -324,5 +324,31 @@
       },
       "wifi": true
     }
+  },
+  "t-deck": {
+    "name": "LilyGO T-Deck",
+    "chip": "esp32s3",
+    "chip_family": "ESP32-S3",
+    "mcu": "ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package",
+    "radio": "SX1262 (TCXO at 1.8 V, DIO2 drives the RF switch), no amplifier",
+    "display": "2.8\" 320x240 ST7789 with a GT911 touch layer",
+    "extras": "physical keyboard on its own microcontroller (I2C), trackball with a click on the BOOT pin, microSD, battery ADC, speaker and microphone (not driven); GNSS on the Plus only",
+    "status": "in bring-up — on the bench the panel, its stepped backlight and the USB composite device come up; boot does not yet reach the shell and the console goes quiet past the splash. Radio, keyboard, trackball, touch and card unverified",
+    "notes": "The first board here that is a terminal rather than a gateway: it has keys to type a message on, so the LVGL shell's on-glass keyboard steps aside and the field takes the real ones. Three firsts, each of which cost more than the pin map. The panel, the radio and the card share one SPI bus, which is safe — the Arduino core's per-bus mutex is what beginTransaction takes, and no driver here attaches a hardware chip select — but needs every select idled before any driver starts, because the first one to talk otherwise does so beside two floating selects (src/sys/BoardInit.cpp). Nothing on the board answers until the peripheral rail on GPIO 10 is raised, and an unraised rail reads exactly like a wiring fault: empty bus, absent transceiver. And the backlight is a one-wire dimmer whose brightness is a pulse count rather than a duty cycle, so the PWM every other board uses lands on whatever level the wrap leaves — lit, but not dimmable. The pin map is the best-sourced in this registry: LilyGO's own reference firmware and the Meshtastic, MeshCore and Zephyr ports agree on every number. Native USB, same composite stack as the T3-S3s.",
+    "local_link": {
+      "usb": {
+        "native": true,
+        "otg": true,
+        "serial_jtag": true,
+        "ncm": true,
+        "cdc_acm": true,
+        "bridge": "none",
+        "auto_reset_dtr_rts": true
+      },
+      "uart": {
+        "network": false
+      },
+      "wifi": true
+    }
   }
 }

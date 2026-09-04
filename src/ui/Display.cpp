@@ -41,6 +41,7 @@ Display display;
 #include "DisplayIcons.h"
 #include "QrCode.h"
 #include "TouchInput.h"
+#include "Keypad.h"
 #include "LvglUi.h"
 #include "Bootloader.h"
 #include "Bq25896.h"
@@ -72,6 +73,7 @@ bool Display::begin() {
   // whatever the last firmware left in it otherwise, and on e-paper that
   // survives a power cut.
   TouchInput::begin();                   // input for a panel someone can now see
+  Keypad::begin();                        // ...and the keys, where the board has them
 
 #if HAS_LVGL_UI
   // The shell owns the glass from the first frame: pages, splash and the

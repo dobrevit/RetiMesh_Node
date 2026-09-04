@@ -33,6 +33,7 @@
 #include <esp_heap_caps.h>
 #include "TftPanel.h"
 #include "TouchInput.h"
+#include "Keypad.h"
 #include "Settings.h"
 #include "Power.h"
 #include "Gps.h"
@@ -116,6 +117,48 @@ void touchCb(lv_indev_t*, lv_indev_data_t* data) {
     data->point.x = x; data->point.y = y; sTouchSeen = true;
   }
 }
+
+#if HAS_KEYPAD || HAS_TRACKBALL
+// The physical keys, as an LVGL keypad device. Its group holds the text fields
+// the shell creates, so a key goes to whichever one the operator last touched —
+// which is the same field the on-glass keyboard would have been typing into.
+lv_group_t* sKeys = nullptr;
+
+void keypadCb(lv_indev_t*, lv_indev_data_t* data) {
+  // The keyboard hands over one key per read and has no concept of a release:
+  // its controller latches what was pressed and forgets it. LVGL wants a press
+  // and then a release, so each key is held for exactly one pass and let go on
+  // the next. Typing faster than the shell polls is bounded by the poll rate,
+  // not lost — the controller's own latch queues the rest.
+  static uint32_t held = 0;
+  if (held) { data->key = held; data->state = LV_INDEV_STATE_RELEASED; held = 0; return; }
+
+  const uint8_t k = Keypad::read();
+  if (k == Keypad::KEY_NONE) { data->state = LV_INDEV_STATE_RELEASED; return; }
+
+  uint32_t lk;
+  switch (k) {
+    case Keypad::KEY_UP:        lk = LV_KEY_UP;        break;
+    case Keypad::KEY_DOWN:      lk = LV_KEY_DOWN;      break;
+    case Keypad::KEY_LEFT:      lk = LV_KEY_LEFT;      break;
+    case Keypad::KEY_RIGHT:     lk = LV_KEY_RIGHT;     break;
+    case Keypad::KEY_ENTER:     lk = LV_KEY_ENTER;     break;   // 0x0D here, 0x0A there
+    case Keypad::KEY_BACKSPACE: lk = LV_KEY_BACKSPACE; break;
+    case Keypad::KEY_ESC:       lk = LV_KEY_ESC;       break;
+    default:
+      // Anything printable is itself. Anything else is a key this firmware has
+      // no meaning for — a controller's own function key — and is dropped
+      // rather than typed as a control character into a message.
+      if (k < 0x20 || k > 0x7E) { data->state = LV_INDEV_STATE_RELEASED; return; }
+      lk = k;
+      break;
+  }
+  data->key = lk;
+  data->state = LV_INDEV_STATE_PRESSED;
+  held = lk;
+  sTouchSeen = true;                     // a keypress is activity, like a tap
+}
+#endif
 
 // --- the status bar ---------------------------------------------------------
 
@@ -208,6 +251,12 @@ void taFocusEvent(lv_event_t* e) {
   lv_obj_t* ta = (lv_obj_t*)lv_event_get_target(e);
   const lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED) {
+#if HAS_KEYPAD || HAS_TRACKBALL
+    // A board with keys on it does not need half its screen given over to a
+    // picture of keys. The field is scrolled into view and left alone; the
+    // keypad device is already aimed at it, because focus is what aims it.
+    if (Keypad::present()) { lv_obj_scroll_to_view(ta, LV_ANIM_ON); return; }
+#endif
     const bool numeric = (bool)(uintptr_t)lv_event_get_user_data(e);
     lv_keyboard_set_mode(sKeyboard, numeric ? LV_KEYBOARD_MODE_NUMBER
                                             : LV_KEYBOARD_MODE_TEXT_LOWER);
@@ -259,6 +308,12 @@ bool shellInit(TftPanel& panel) {
   lv_display_set_buffers(disp, sBuf1, nullptr, sizeof(sBuf1),
                          LV_DISPLAY_RENDER_MODE_PARTIAL);
   UiTheme::init(disp);                   // before any widget exists
+  // Which way up the board is built, before any chrome is laid out: the bar
+  // and the tabs size themselves in percentages of a resolution that has to be
+  // the final one. A board with an accelerometer moves on from here; a board
+  // without one stays, and without this stayed in the controller's portrait on
+  // glass mounted landscape.
+  setRotation(DISPLAY_ROTATION);
   UiTheme::setDaylight(settings.display().daylight);
   // text_font is an inherited style, and overlays live on the top layer —
   // outside any themed screen's inheritance. Without this, their labels
@@ -270,6 +325,19 @@ bool shellInit(TftPanel& panel) {
   lv_indev_t* touch = lv_indev_create();
   lv_indev_set_type(touch, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(touch, touchCb);
+
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // Only where keys actually answered. A board with a keyboard fitted but
+  // silent keeps the on-glass one and stays usable, rather than presenting a
+  // group nothing can move focus around.
+  if (Keypad::present()) {
+    sKeys = lv_group_create();
+    lv_indev_t* keys = lv_indev_create();
+    lv_indev_set_type(keys, LV_INDEV_TYPE_KEYPAD);
+    lv_indev_set_read_cb(keys, keypadCb);
+    lv_indev_set_group(keys, sKeys);
+  }
+#endif
 
   barCreate();
 
@@ -509,6 +577,12 @@ lv_obj_t* textarea(lv_obj_t* parent, const char* placeholder,
   lv_obj_set_width(ta, lv_pct(100));
   lv_obj_add_event_cb(ta, taFocusEvent, LV_EVENT_FOCUSED, (void*)(uintptr_t)numeric);
   lv_obj_add_event_cb(ta, taFocusEvent, LV_EVENT_DEFOCUSED, nullptr);
+#if HAS_KEYPAD || HAS_TRACKBALL
+  // In the keypad's group, so that touching the field is what aims the keys at
+  // it: LVGL's own click-focus moves the group's focus to whatever was tapped,
+  // and the FOCUSED event the code above relies on is the same one either way.
+  if (sKeys) lv_group_add_obj(sKeys, ta);
+#endif
   return ta;
 }
 
