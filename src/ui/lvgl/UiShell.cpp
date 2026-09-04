@@ -127,6 +127,14 @@ void touchCb(lv_indev_t*, lv_indev_data_t* data) {
       case 2: x = (int16_t)(DISPLAY_WIDTH  - 1 - p.x);  y = (int16_t)(DISPLAY_HEIGHT - 1 - p.y); break;
       case 3: x = (int16_t)(DISPLAY_HEIGHT - 1 - p.y);  y = p.x;                                 break;
     }
+    // A mirrored axis, where the board has one. Measured against the display's
+    // own resolution rather than the panel's constants, because after a
+    // quarter turn those two are not the same pair of numbers.
+    if (TOUCH_MIRROR_X || TOUCH_MIRROR_Y) {
+      lv_display_t* d = lv_display_get_default();
+      if (TOUCH_MIRROR_X) x = (int16_t)(lv_display_get_horizontal_resolution(d) - 1 - x);
+      if (TOUCH_MIRROR_Y) y = (int16_t)(lv_display_get_vertical_resolution(d) - 1 - y);
+    }
     data->point.x = x; data->point.y = y; sTouchSeen = true;
     sSent++; sSentX = x; sSentY = y;
   }

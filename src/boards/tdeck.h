@@ -126,11 +126,9 @@
 // Inverted, like the other colour boards here — both published configurations
 // for this panel say so. Stated rather than inherited because the bench once
 // argued otherwise: the first look showed the dark design as white and yellow,
-// which reads as an inversion fault. It was not one. The panel had never been
-// reset (this board gives it no reset line) and was drawing on terms left by
-// the firmware before ours, which mangles colour and geometry together —
-// TftPanel.cpp now issues a software reset, and this is the value that belongs
-// with a controller actually starting from its defaults.
+// which reads as an inversion fault. It was not one. The panel was being
+// configured before the rail behind it had settled and was taking only part of
+// its initialisation; with the rail's half second above, this value is right.
 #define DISPLAY_INVERT      1
 
 // One bus for the panel, the radio and the card. Every other board here gives
@@ -197,6 +195,13 @@
 // same tap landed at the bottom-left, and every press missed what it was aimed
 // at while the layer itself was working perfectly.
 #define TOUCH_PRE_ROTATED   1
+// ...and counts Y from the other edge. Measured: with the focused control
+// sitting at y 192-237, a tap on it reported y 26, and 239 - 26 is 213 — inside
+// it. The x it reported was already right. A mirrored axis is why the glass
+// looked completely dead while working perfectly: every press landed at the
+// reflection of the finger, so the only thing that ever answered a tap was
+// waking the idle clock, which does not care where the tap was.
+#define TOUCH_MIRROR_Y      1
 
 // ---------------------------------------------------------------------------
 // Keyboard — an ESP32-C3 of its own, answering on I2C

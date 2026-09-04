@@ -607,6 +607,18 @@
 #ifndef TOUCH_PRE_ROTATED
   #define TOUCH_PRE_ROTATED 0
 #endif
+// Whether the controller counts a coordinate from the opposite edge to the
+// panel. A mirrored axis is not a rotation and cannot be corrected by one: it
+// puts every press at the reflection of the finger, so the top half of the
+// glass presses the bottom half's controls and the middle very nearly works.
+// It is also invisible without measuring, because the shell has no way to know
+// where the finger really was.
+#ifndef TOUCH_MIRROR_X
+  #define TOUCH_MIRROR_X    0
+#endif
+#ifndef TOUCH_MIRROR_Y
+  #define TOUCH_MIRROR_Y    0
+#endif
 
 // A physical keyboard, where the board has one. Not a matrix this firmware
 // scans — on every board here it is a second microcontroller that scans it

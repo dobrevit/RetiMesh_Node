@@ -198,17 +198,27 @@ Point poll() {
   const uint8_t points = st & 0x0F;
   uint8_t d[6];
   if (points >= 1 && gt911Read(kRegPoint1, d, sizeof(d))) {
-    // Little-endian here, unlike the register addresses that reach them — and
-    // two bytes further in than the datasheet's register list suggests. The
-    // read comes back one byte ahead of where the track id is expected, so the
-    // coordinates sit at [2..3] and [4..5] rather than [1..2] and [3..4].
+    // Y first, then X, then the contact size — not the order the register list
+    // suggests, and the read also comes back offset from where the track id is
+    // expected. Little-endian within each pair, unlike the register addresses
+    // that reach them.
     //
-    // Measured, not reasoned: decoded the other way a tap at the top-left
-    // corner reported 2816,1792 — numbers with no meaning on a panel this
-    // size — and the bytes behind them were 00 0b 00 07, which is 11 and 7.
+    // Measured across four taps at known corners, which is the only way this
+    // was ever going to be settled:
+    //
+    //   top-left      e9 00 0b 00 07 00   ->  y 233, x 11
+    //   bottom-left   1f 00 20 00 1a 00   ->  y  31, x 32
+    //   bottom-middle 17 00 82 00 28 00   ->  y  23, x 130
+    //   bottom-right  12 00 22 01 25 00   ->  y  18, x 290
+    //
+    // Y is mirrored against the panel (TOUCH_MIRROR_Y), so 233 is the top and
+    // 31 the bottom, and every one of those four then lands where the finger
+    // was. Read as [4..5] instead — which is the size of the contact patch —
+    // Y only ever ranged 7 to 40, so every press resolved to the bottom row
+    // whatever the finger did, and the X beside it was right the whole time.
     p.down = true;
+    p.y = (int16_t)(d[0] | (d[1] << 8));
     p.x = (int16_t)(d[2] | (d[3] << 8));
-    p.y = (int16_t)(d[4] | (d[5] << 8));
     sReports++;
     sLastX = p.x; sLastY = p.y;
     memcpy(sLastRaw, d, sizeof(sLastRaw));
