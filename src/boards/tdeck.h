@@ -61,6 +61,13 @@
 #define HAS_BOARD_POWER     1
 #define PIN_BOARD_POWER     10
 #define BOARD_POWER_ACTIVE  HIGH
+// Half a second, which is the vendor's own number and five times the default.
+// What is behind this rail is not just a load switch settling: the keyboard is
+// a microcontroller that has to boot, and it shares an I2C bus with the touch
+// controller. Probed while it is still coming up it can hold the bus, and then
+// *neither* part answers — which reads as two dead devices rather than one
+// impatient probe.
+#define BOARD_POWER_SETTLE_MS 500
 
 // ---------------------------------------------------------------------------
 // Radio — SX1262 on the shared SPI bus
@@ -105,6 +112,11 @@
 // out, so the shell is told where to start. One quarter turn puts the long
 // axis across the keyboard, which is the way the case is held.
 #define DISPLAY_ROTATION    1
+// This board's glass is not fitted inverted, unlike the other colour boards
+// here. Measured rather than read: with the driver's usual INVON the bench
+// showed the dark design as white and yellow with red accents — the exact
+// inverse of it — and text on near-matching backgrounds simply disappeared.
+#define DISPLAY_INVERT      0
 
 // One bus for the panel, the radio and the card. Every other board here gives
 // the panel a bus of its own precisely so the radio never waits behind a

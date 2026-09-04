@@ -210,9 +210,20 @@ void Display::displayTask(void* self) {
       static uint32_t lastWakePoll = 0;
       // 250 ms: a real tap lasts longer than that, and at 100 ms a node that
       // sleeps all day burned ten doomed bus reads a second to notice one.
-      if (settings.display().touchWake && now - lastWakePoll >= 250) {
+      if (now - lastWakePoll >= 250) {
         lastWakePoll = now;
-        if (TouchInput::poll().down) {
+        // Keys wake, and are not behind the touch setting. That setting exists
+        // because a capacitive layer answers a pocket as readily as a finger,
+        // which is not true of a key somebody has to press — and on a board
+        // with a keyboard and no touch layer at all, gating keys behind it
+        // leaves a panel that goes dark once and never comes back. Read even
+        // when the glass is dark: the key is consumed here so that waking is
+        // all it does, the same rule the swallowed tap follows.
+        const bool keyed = Keypad::read() != Keypad::KEY_NONE;
+        if (keyed) {
+          d->_lastActivityMs = now;
+          d->setBlank(false);
+        } else if (settings.display().touchWake && TouchInput::poll().down) {
           // Activity first — the bench found the wake flickering and dying:
           // without this the timer was still expired on the very next pass
           // and re-blanked the panel under the waking finger. And the tap

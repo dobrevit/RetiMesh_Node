@@ -30,6 +30,7 @@
 namespace {
 constexpr uint8_t SLPOUT  = 0x11;
 constexpr uint8_t NORON   = 0x13;
+constexpr uint8_t INVOFF  = 0x20;
 constexpr uint8_t INVON   = 0x21;
 constexpr uint8_t DISPOFF = 0x28;
 constexpr uint8_t DISPON  = 0x29;
@@ -217,7 +218,7 @@ bool TftPanel::begin() {
   cmd(MADCTL, &portrait, 1);
   // ST7789 glass on these modules is fitted inverted; without this white is
   // black and the "dark" panel glows.
-  cmd(INVON);
+  cmd(DISPLAY_INVERT ? INVON : INVOFF);
   cmd(NORON);
   cmd(DISPON);
 

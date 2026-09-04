@@ -129,10 +129,19 @@ void begin() {
   // ASCII bytes, "911" on this part — settles it.
   uint8_t id[4] = {0};
   bool found911 = false;
-  for (uint8_t attempt = 0; attempt < 2 && !found911; attempt++) {
-    sAddr = attempt == 0 ? (uint8_t)TOUCH_ADDR : kAddrAlt;
-    if (gt911Read(kRegProduct, id, sizeof(id)) && id[0] == '9' && id[1] == '1' && id[2] == '1')
-      found911 = true;
+  // Both addresses, several times over. Once was enough on a board whose touch
+  // controller had a bus to itself; here it shares one with a keyboard that is
+  // a microcontroller of its own, and a part that is still coming up answers
+  // nothing at either address. A layer given up on at boot stays given up on
+  // for the life of the run, so it is worth a few hundred milliseconds to be
+  // sure — and the loop costs nothing once the part is there.
+  for (uint8_t round = 0; round < 6 && !found911; round++) {
+    if (round) delay(50);
+    for (uint8_t attempt = 0; attempt < 2 && !found911; attempt++) {
+      sAddr = attempt == 0 ? (uint8_t)TOUCH_ADDR : kAddrAlt;
+      if (gt911Read(kRegProduct, id, sizeof(id)) && id[0] == '9' && id[1] == '1' && id[2] == '1')
+        found911 = true;
+    }
   }
   if (!found911) {
     sAddr = TOUCH_ADDR;

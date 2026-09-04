@@ -649,6 +649,18 @@
   #define DISPLAY_ROTATION  0
 #endif
 
+// Whether the panel's glass is fitted inverted. On the colour boards so far it
+// is, and the driver sent INVON unconditionally because of it — without which
+// white came out black and a "dark" panel glowed. It is a property of how the
+// glass is bonded rather than of the controller, so a board that is built the
+// other way says so: sending INVON there turns a dark theme into a light one,
+// which reads on the bench as wrong colours (white and yellow where the
+// design is near-black and blue) and as text that has vanished into a
+// background it no longer contrasts with.
+#ifndef DISPLAY_INVERT
+  #define DISPLAY_INVERT    1
+#endif
+
 // The main I2C bus rate. 400 kHz everywhere the parts on the bus allow it;
 // a board whose slowest resident wants less says so, because the rate is a
 // fact about the wire rather than about any one driver on it.
