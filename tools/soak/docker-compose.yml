@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
+#
+# The collector beside the host's Reticulum, not instead of it.
+#
+# host networking is the default here for one reason: the point is to join the
+# RNS instance this machine already runs, and on Linux that instance is
+# reachable at 127.0.0.1 only from the host's own namespace. A bridged
+# container would need the host's rnsd to be listening on a routable address,
+# which is a change to the host rather than to this.
+services:
+  soak-collector:
+    build: .
+    container_name: retimesh-soak
+    network_mode: host
+    # The host's hostname as well as its network. Reticulum's shared instance is
+    # an abstract unix socket named after the host — @rns/<hostname> — and an
+    # abstract socket lives in the network namespace, so host networking alone
+    # puts it within reach while a container's own hostname keeps it from being
+    # found. Without this the collector starts a second Reticulum instead of
+    # joining the one already running, and the two fight over a UDP port.
+    uts: host
+    restart: unless-stopped
+    volumes:
+      # Identity, LXMF state, its own Reticulum config and the readings. Keep
+      # it: the collector's address is in here and the nodes are enrolled
+      # against that address. The host's own configuration is deliberately not
+      # mounted — the collector attaches to the running instance as a client
+      # and inherits its paths, rather than re-reading and re-binding its
+      # interfaces.
+      - ./data:/data
+    command:
+      - --node
+      - "00000000000000000000000000000000"   # replace: STATUS reports lxmf_address
+      - --interval
+      - "300"
+      - --command
+      - "STACKS"
+      - --command-interval
+      - "900"
+      - --out
+      - /data/soak.jsonl
+      - --storage
+      - /data/rns
+      # Where the host instance has no route to the fleet — a bench on Wi-Fi,
+      # say — point straight at each node's Reticulum transport instead:
+      # - --peer
+      # - "10.0.0.21:4242"
