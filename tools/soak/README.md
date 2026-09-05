@@ -44,7 +44,7 @@ carrying them is a compose file that commits them.
 |---|---|
 | `SOAK_NODES` | LXMF delivery hashes, comma-separated. Each node's own comes from `STATUS`, the `lxmf_address=` line |
 | `SOAK_COMMANDS` | console lines to send as well, comma-separated — `STACKS` usually |
-| `SOAK_PEERS` | optional `host:port` Reticulum transports to dial directly, for a fleet the host instance has no route to |
+| `SOAK_PEERS` | `host:port` Reticulum transports to dial directly. Required in the standalone shape the compose file ships — without one the collector has no interfaces and reaches nothing |
 
 Command-line flags still work and win where both are given, so a one-off run can
 name a single node without editing the file the fleet lives in.
@@ -119,11 +119,29 @@ If that fork carries changes to the wire protocol, a stock `rns` in the
 container will not match it and the pin above is not enough — build the image
 against the fork instead.
 
-## Why host networking
+## How it reaches anything
 
-The collector joins the Reticulum instance this machine already runs rather than
-starting a second one — two instances on one host are two routing tables that
-disagree. On Linux that instance is reachable at 127.0.0.1 only from the host's
-own namespace, so the container shares it. A bridged container would instead
-need the host's `rnsd` listening on a routable address, which is a change to the
-host rather than to this.
+Two shapes, and the compose file ships the first.
+
+**Standalone** — its only interfaces are the `SOAK_PEERS` entries, each dialled
+straight to a node's Reticulum transport. It cannot disturb the host's
+Reticulum, and it reaches exactly the nodes listed. **With no peers it reaches
+nothing at all.** That is worth stating because the symptom is a stream of
+`no path yet; requested one`, which reads like a routing problem and is in fact
+an empty interface list.
+
+**Joined to the host's instance** — uncomment the `~/.reticulum` mount and the
+`user:` line in the compose file, and drop `SOAK_PEERS`. It then inherits every
+interface the host has, LoRa included.
+
+Joining needs the host's *configuration directory*, not just a matching
+instance name. RNS names the socket `rns/<instance_name>`, defaulting to
+`default`; point a container at a host that has set something else and it
+quietly starts its own instance instead. Match the name and it connects — and
+then every call fails with `digest sent was rejected`, because the
+shared-instance RPC is authenticated from the identity in that directory. Give
+it the directory and the join is clean.
+
+The `user:` line matters as much as the mount: the container is root by
+default, and root-owned files appearing in `~/.reticulum` will break the daemon
+that owns it.

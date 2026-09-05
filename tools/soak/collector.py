@@ -109,16 +109,27 @@ def seed_config(args):
     """Write a config if there is none, because Reticulum's own default is wrong here.
 
     Left to itself RNS writes a config with an AutoInterface in it and binds a
-    UDP port. On the machine this is meant to run on, that port already belongs
-    to the instance it is supposed to be joining, so the container dies at
-    startup with "address already in use" — which reads as a broken image
-    rather than as two Reticulum instances fighting over one socket.
+    UDP port that, on the machine this runs beside, already belongs to the
+    daemon. The container then dies with "address already in use", which reads
+    as a broken image rather than as two Reticulum instances colliding.
 
-    What it wants instead is no interfaces of its own and share_instance on, so
-    it attaches to the running instance as a client and inherits its paths. Any
-    --peer given is added as a direct TCP interface, for the case where the host
-    instance has no route to the nodes: a bench fleet on Wi-Fi is reachable that
-    way without editing the host's configuration at all.
+    What is written instead is a standalone instance whose only interfaces are
+    the --peer entries. Standalone is the accurate word and it was not always
+    the word used here: an earlier version claimed this attached to the host's
+    running instance as a client, and it never did. RNS names its shared-
+    instance socket rns/<instance_name>, defaulting to "default", and a host
+    that has set instance_name to anything else is simply not found — the
+    container starts its *own* shared instance called rns/default and sits
+    there with no interfaces at all, reaching nothing. Every "no path yet" in
+    early testing was that, misread as the host having no route to the fleet.
+
+    So --peer is not a fallback for an unusual deployment. Without a peer or a
+    mounted host configuration this container can reach nothing whatever.
+
+    To genuinely join the host's instance, give it the host's own configuration
+    directory (see the compose file): matching the instance name alone is not
+    enough, because the shared-instance RPC is authenticated from the identity
+    in that directory and a stranger's digest is rejected.
     """
     if not args.rns_config:
         return
