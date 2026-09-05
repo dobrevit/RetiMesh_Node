@@ -279,6 +279,14 @@ struct Entry {
   const char* key;
   void   (*render)(char* out, size_t len);
   Result (*assign)(const char* value, char* err, size_t errLen);
+  // Whether the value is a secret, declared rather than implied. It used to be
+  // implied — by an entry's render function happening to be renderSecret —
+  // which meant only the code that renders could know it, and every other path
+  // handling a value had no way to ask. One of those paths is the message
+  // store, which wrote "SET admin.password <it>" to flash and to the log
+  // because nothing told it not to. A fact several consumers need is a field,
+  // not a behaviour inside one of them.
+  bool secret = false;
 };
 
 // A secret is reported as whether it is set, never as itself: the console
@@ -384,7 +392,7 @@ const Entry kFields[] = {
   { "wifi.password",
     [](char* o, size_t n) { renderSecret(o, n, settings.wifi().password); },
     [](const char* v, char* e, size_t n) { WifiSettings w = settings.wifi();
-      strlcpy(w.password, v, sizeof(w.password)); return commitWifi(w, e, n); } },
+      strlcpy(w.password, v, sizeof(w.password)); return commitWifi(w, e, n); }, true },
   { "wifi.security",
     [](char* o, size_t n) { snprintf(o, n, "%s", Settings::securityName(settings.wifi().security)); },
     [](const char* v, char* e, size_t n) { WifiSettings w = settings.wifi();
@@ -414,7 +422,7 @@ const Entry kFields[] = {
   { "wifi.sta_password",
     [](char* o, size_t n) { renderSecret(o, n, settings.wifi().staPassword); },
     [](const char* v, char* e, size_t n) { WifiSettings w = settings.wifi();
-      strlcpy(w.staPassword, v, sizeof(w.staPassword)); return commitWifi(w, e, n); } },
+      strlcpy(w.staPassword, v, sizeof(w.staPassword)); return commitWifi(w, e, n); }, true },
 
   // --- links -------------------------------------------------------------
   { "links.wifi",
@@ -536,7 +544,7 @@ const Entry kFields[] = {
   // --- admin -------------------------------------------------------------
   { "admin.password",
     [](char* o, size_t n) { renderSecret(o, n, settings.admin().password); },
-    [](const char* v, char* e, size_t n) { return commitAdmin(v, e, n); } },
+    [](const char* v, char* e, size_t n) { return commitAdmin(v, e, n); }, true },
 };
 
 constexpr size_t kCount = sizeof(kFields) / sizeof(kFields[0]);
@@ -564,6 +572,57 @@ bool keyInSection(size_t i, const char* prefix) {
   if (i >= kCount) return false;
   const size_t p = strlen(prefix);
   return !strncasecmp(kFields[i].key, prefix, p) && kFields[i].key[p] == '.';
+}
+
+bool isSecret(const char* key) {
+  if (!key) return false;
+  for (size_t i = 0; i < kCount; i++)
+    // Case-insensitively, like every other lookup in this file — set() at the
+    // bottom and renderKey() at the top both use strcasecmp, and this is the
+    // key's own table. Matching exactly here would have been a bypass rather
+    // than an inconsistency: set() accepts "SET Admin.Password hunter2" and
+    // applies it, so a redaction that only recognised the lower-case spelling
+    // would let the password through to flash while the command succeeded.
+    //
+    // The same reasoning is already written three lines up about the verb. It
+    // was applied to SET and not to the key beside it.
+    if (!strcasecmp(kFields[i].key, key)) return kFields[i].secret;
+  return false;
+}
+
+size_t redactSecrets(const char* in, size_t len, char* out, size_t cap) {
+  if (!out || cap == 0) return 0;
+  if (!in || len == 0) { out[0] = '\0'; return 0; }
+
+  // Only "SET <key> <value>" hides anything, and only when the key is one. The
+  // verb is matched case-insensitively because the parser accepts it that way,
+  // and a redaction that missed "set admin.password" would be worse than none:
+  // it would look like protection while writing the password out.
+  size_t i = 0;
+  while (i < len && (in[i] == ' ' || in[i] == '\t')) i++;
+  const size_t verb = i;
+  while (i < len && in[i] != ' ' && in[i] != '\t') i++;
+  const bool isSet = (i - verb) == 3 && strncasecmp(in + verb, "SET", 3) == 0;
+  if (isSet) {
+    while (i < len && (in[i] == ' ' || in[i] == '\t')) i++;
+    const size_t keyAtIdx = i;
+    while (i < len && in[i] != ' ' && in[i] != '\t') i++;
+    const size_t keyLen = i - keyAtIdx;
+    char key[64];
+    if (keyLen && keyLen < sizeof(key)) {
+      memcpy(key, in + keyAtIdx, keyLen);
+      key[keyLen] = '\0';
+      if (isSecret(key)) {
+        const int n = snprintf(out, cap, "%.*s (withheld)",
+                               (int)(i - verb), in + verb);
+        return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
+      }
+    }
+  }
+  const size_t n = len < cap - 1 ? len : cap - 1;
+  memcpy(out, in, n);
+  out[n] = '\0';
+  return n;
 }
 
 bool sectionExists(const char* prefix) {
