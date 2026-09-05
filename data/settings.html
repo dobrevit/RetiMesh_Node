@@ -209,17 +209,23 @@
 
   <h2>Local links</h2>
   <form class="card" id="linksForm">
-    <div class="note">The ways a computer or phone reaches this node directly. Every service &mdash; this page, the API, Reticulum TCP on
-      :4242 &mdash; answers on whichever of them is up; LoRa is not one of them and never carries IP. A switch that is greyed out names
+    <div class="note">The ways a computer or phone reaches this node directly &mdash; not where Reticulum routes, which is
+      <b>Reticulum transport</b> above. Every service &mdash; this page, the API, Reticulum TCP on :4242 &mdash; answers on whichever of
+      these is up; nothing here chooses what Reticulum binds to, it simply answers wherever it can. LoRa is not one of them and never
+      carries IP. A switch that is greyed out names
       the reason: the board lacks the hardware, or this firmware build has no driver for it.</div>
     <div class="row" id="linkFields"></div>
     <div id="linksStatus" class="note"></div>
     <button type="submit">Save links</button>
     <div class="msg" id="linksMsg"></div>
-    <div class="note">Switching Wi-Fi off restarts the node without its access point. It stays reachable over USB or PPP where the board
-      has them, and always through the serial maintenance console: <code>WIFI ON</code> there turns the access point back on.
-      USB and PPP apply without a restart. With PPP on, the serial speed is the whole port's &mdash; the console and the log run at it too
-      &mdash; and the console goes quiet while a host has PPP open on the port.</div>
+    <div class="note">The two Wi-Fi links switch separately. Turning the <b>access point</b> off is the one worth doing on a battery: it
+      must beacon continuously and cannot sleep, so it draws current whether or not anyone is connected, while a <b>station</b> dozes
+      between beacons. It frees only a couple of kilobytes of memory &mdash; the radio driver is the bulk of that and the station needs it
+      too &mdash; so switch it off for the power, not for the RAM.</div>
+    <div class="note">Either Wi-Fi change restarts the node, because the radio's mode is chosen once at start-up. It stays reachable over
+      USB or PPP where the board has them, and always through the serial maintenance console: <code>WIFI ON</code> there turns both back
+      on, or <code>SET links.wifi_ap on</code> just the one. USB and PPP apply without a restart. With PPP on, the serial speed is the
+      whole port's &mdash; the console and the log run at it too &mdash; and the console goes quiet while a host has PPP open on it.</div>
   </form>
 
   <h2>Maintenance</h2>
@@ -291,6 +297,10 @@ async function api(path, body) {
   if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
   return data;
 }
+
+// The links as the page last loaded them, so a save that changes one Wi-Fi
+// switch can tell whether the other one is already off.
+let lastLinks = {};
 
 function fill(form, obj) {
   for (const el of form.elements) {
@@ -438,11 +448,15 @@ async function load() {
   // firmware learns to offer appears here without an edit. The only thing
   // this page adds is the human wording for each key.
   const LINK_LABELS = {
-    wifi: ["Wi-Fi (access point & station)", "Off — USB/PPP or the serial console only"],
-    usb:  ["USB networking (CDC-NCM)", "Off"],
-    ppp:  ["PPP over the serial bridge", "Off"],
+    wifi_ap:  ["Wi-Fi access point — this node offers its own network",
+               "Off — saves the most power of the two: an access point must beacon and cannot sleep"],
+    wifi_sta: ["Wi-Fi station — this node joins your network",
+               "Off — nothing is reachable over the LAN"],
+    usb:      ["USB networking (CDC-NCM)", "Off"],
+    ppp:      ["PPP over the serial bridge", "Off"],
   };
   const lk = cfg.links || {};
+  lastLinks = lk;                 // the submit handler compares against these
   const fields = $("linkFields"); fields.replaceChildren();
   for (const [key, l] of Object.entries(lk)) {
     const [label, offText] = LINK_LABELS[key] || [key, "Off"];
@@ -549,7 +563,15 @@ $("linksForm").addEventListener("submit", async ev => {
   const body = {};
   for (const sel of ev.target.querySelectorAll("#linkFields select"))
     if (!sel.disabled) body[sel.name] = sel.name === "ppp_baud" ? Number(sel.value) : sel.value === "1";
-  if (body.wifi === false && !confirm("Turn Wi-Fi off? The access point and this page go away until it is turned back on over USB, PPP or the serial console (WIFI ON).")) return;
+  // Both Wi-Fi links going down is the case worth stopping on, because this
+  // page is usually being read over one of them. The check used to be on a
+  // single "wifi" key; splitting the switches left it testing a key that no
+  // longer exists, so the warning silently stopped appearing — on the one
+  // action that can lock somebody out of the node they are configuring.
+  const wifiOff = k => body[k] === false || (!(k in body) && !(lastLinks[k] || {}).enabled);
+  if (("wifi_ap" in body || "wifi_sta" in body) && wifiOff("wifi_ap") && wifiOff("wifi_sta") &&
+      !confirm("Turn both Wi-Fi links off? The access point and the LAN connection go away, and this page with them, " +
+               "until Wi-Fi is turned back on over USB, PPP or the serial console (WIFI ON).")) return;
   try {
     const r = await api("/api/settings/links", body);
     setMsg("linksMsg", (r.restart ? "Saved. Restarting… " : "Saved. ") + (r.note || ""), r.restart ? "warn" : "ok");
