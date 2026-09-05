@@ -91,6 +91,14 @@ struct Tables {
   uint32_t announces;      // announce table awaiting retransmission
   uint32_t heldAnnounces;
   uint32_t rates;          // per-destination announce rate table
+  // Longest the snapshot pass has taken to read path records back off the
+  // filesystem, since boot. Reported because it is the figure that decides
+  // whether this node is near the edge the V4 went over: the walk is bounded
+  // and feeds the watchdog now, but a record costs whatever the filesystem
+  // charges, and a table big enough or a filesystem slow enough still makes a
+  // pass long. A number here in the seconds means the RNS task is spending
+  // that long not forwarding.
+  uint32_t snapWalkMaxMs;
 };
 Tables tables();
 
