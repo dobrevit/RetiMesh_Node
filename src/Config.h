@@ -598,6 +598,49 @@
 // and a DMA ring, about 5.4 KB of internal RAM, which on the board that has one
 // is a quarter of what it has spare and enough to stop the portal serving. That
 // ships off, and turning it on is a choice made knowing the trade.
+// Task stacks that were guessed generously and have now been measured.
+//
+// Both were 8 KB, which is what you write when you do not know. What the
+// console's STACKS command reports is the least each has ever had left, and on
+// two boards over a day's use they never came close — but a high-water mark is
+// "worst seen", never "worst possible", so these are cut with the margin the
+// consequence deserves rather than to the observation.
+//
+// The card's poller: 1.6 KB used of 8 KB, and the biggest thing on its stack is
+// the 512-byte sector it reads to notice a card being pulled. Its deepest path
+// is not that, though — it is a format, which runs on this task and which
+// nothing has exercised while anybody was measuring. FatFS takes its format
+// work buffer from the heap (ff_memalloc, ffconf.h) so that part is not stack,
+// but the call depth beneath it is unmeasured.
+//
+// And this stack has a history, recorded where it was raised: at 4 KB the FAT
+// layer tripped the canary on core 0 — mount probes and a rename on log
+// rotation, which are not what idles here and are exactly what a measurement
+// taken while nothing is happening will miss. The probe path has been rewritten
+// since and the figure today is 1.6 KB, but "it crashed at 4 KB once" outranks
+// "it uses 1.6 KB this week": one is a bound, the other is a sample.
+//
+// So 6 KB, not the 4 the measurement alone would allow. Half as much again as
+// the size that is known to have failed, nearly four times what has been seen,
+// and it still gives 2 KB back. Getting this wrong costs somebody a corrupted
+// card in the middle of formatting it.
+#ifndef SD_TASK_STACK
+  #define SD_TASK_STACK     6144
+#endif
+// The radio: 2.6 KB used of 8 KB. Worth knowing that the packet does not set
+// this — the transmit frame is a member of LoRaRadio, not a local, so the size
+// of a LoRa frame never lands on this stack. What lands on it is call depth:
+// RadioLib, the SPI transaction under it, and the receive path pushing into the
+// ring. That is not derivable the way a buffer is, so the margin is empirical:
+// 6 KB leaves more spare than the whole of what has ever been used.
+//
+// It is also the stack that has moved. It read 1.7 KB used this morning and
+// 2.6 KB by the evening on the same firmware, which is the argument for
+// watching STACKS over a soak rather than trusting one afternoon's figure.
+#ifndef RADIO_TASK_STACK
+  #define RADIO_TASK_STACK  6144
+#endif
+
 #ifndef SOUND_ENABLED_DEFAULT
   #if BUZZER_KIND == BUZZER_KIND_I2S
     #define SOUND_ENABLED_DEFAULT 0

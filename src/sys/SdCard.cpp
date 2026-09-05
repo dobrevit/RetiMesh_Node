@@ -83,9 +83,11 @@ void SdCard::begin() {
 // a flag checked at the top of poll() only ever stopped the poll after the one
 // that mattered.
 void SdCard::startPolling() {
-  // 8 KB: the FAT layer (mount probes, rename on log rotation) left under
-  // 1 KB of a 4 KB stack at idle and tripped the stack canary on core 0.
-  Diag::startTask(task, "sdcard", 8192, this, 1, 0);
+  // Sized in Config.h, and read the reasoning there before lowering it: this
+  // task tripped the canary on core 0 at 4 KB, when the FAT layer's mount
+  // probes and the rename on log rotation went deeper than anything an idle
+  // measurement shows.
+  Diag::startTask(task, "sdcard", SD_TASK_STACK, this, 1, 0);
 }
 
 void SdCard::reserve(bool on) {
