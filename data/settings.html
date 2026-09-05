@@ -131,8 +131,8 @@
       network edges, <b>access point</b> sends no announces to clients (they use path requests instead, which keeps phones off the
       flood), <b>roaming</b> for mobile links.</div>
     <div class="row">
-      <div><label>Transport</label>
-        <select name="enabled"><option value="1">Enabled (route for others)</option><option value="0">Disabled (bridge only)</option></select></div>
+      <div><label>Transport &mdash; route for others, not just bridge</label>
+        <input name="enabled" type="checkbox"></div>
       <div></div>
       <div><label>LoRa interface mode</label>
         <select name="lora_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
@@ -140,8 +140,8 @@
         <select name="wifi_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
       <div><label>Peer interface mode (other nodes, AutoInterface)</label>
         <select name="auto_mode"><option value="1">full</option><option value="2">gateway</option><option value="3">access_point</option><option value="4">roaming</option><option value="5">boundary</option></select></div>
-      <div><label>Zero-config peering (AutoInterface)</label>
-        <select name="auto_enabled"><option value="1">Enabled — phones and other nodes find this one automatically</option><option value="0">Disabled</option></select></div>
+      <div><label>Zero-config peering (AutoInterface) &mdash; phones and nodes find this one automatically</label>
+        <input name="auto_enabled" type="checkbox"></div>
       <div><label>AutoInterface group id (blank = reticulum)</label><input name="auto_group_id" maxlength="32" placeholder="reticulum"></div>
       <div><label>Power profile</label>
         <select name="power_profile"><option value="performance">performance (240 MHz)</option><option value="balanced">balanced (160 MHz, Wi-Fi sleep)</option><option value="battery">battery (80 MHz, Wi-Fi sleep, display 20 s)</option></select></div>
@@ -421,10 +421,10 @@ async function load() {
   $("rnsSnippet").textContent = rnsSnippet(r);
 
   fill($("wifiForm"), cfg.wifi);
-  fill($("transportForm"), { enabled: cfg.transport.enabled ? "1" : "0", lora_mode: cfg.transport.lora_mode, wifi_mode: cfg.transport.wifi_mode, auto_mode: cfg.transport.auto_mode,
+  fill($("transportForm"), { enabled: cfg.transport.enabled, lora_mode: cfg.transport.lora_mode, wifi_mode: cfg.transport.wifi_mode, auto_mode: cfg.transport.auto_mode,
     announce_cap: cfg.transport.announce_cap, announce_rate_target: cfg.transport.announce_rate_target,
     announce_rate_grace: cfg.transport.announce_rate_grace, announce_rate_penalty: cfg.transport.announce_rate_penalty,
-    auto_enabled: cfg.transport.auto_enabled ? "1" : "0", auto_group_id: cfg.transport.auto_group_id || "",
+    auto_enabled: cfg.transport.auto_enabled, auto_group_id: cfg.transport.auto_group_id || "",
     power_profile: cfg.transport.power_profile || "performance" });
   if (cfg.transport.enabled && !cfg.transport.online) setMsg("transportMsg", "Transport is enabled but did not start — check the console.", "bad");
   if (!cfg.wifi.wpa3_supported) {
@@ -527,10 +527,10 @@ $("transportForm").addEventListener("submit", async ev => {
   ev.preventDefault();
   const f = ev.target.elements;
   try {
-    const res = await api("/api/settings/transport", { enabled: f.enabled.value === "1", lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value, auto_mode: +f.auto_mode.value,
+    const res = await api("/api/settings/transport", { enabled: f.enabled.checked, lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value, auto_mode: +f.auto_mode.value,
       announce_cap: +f.announce_cap.value, announce_rate_target: +f.announce_rate_target.value,
       announce_rate_grace: +f.announce_rate_grace.value, announce_rate_penalty: +f.announce_rate_penalty.value,
-      auto_enabled: f.auto_enabled.value === "1", auto_group_id: f.auto_group_id.value, power_profile: f.power_profile.value });
+      auto_enabled: f.auto_enabled.checked, auto_group_id: f.auto_group_id.value, power_profile: f.power_profile.value });
     setMsg("transportMsg", res.restart ? "Saved. Restarting to re-register the interfaces…" : "Saved and applied.", res.restart ? "warn" : "ok");
   } catch (e) { setMsg("transportMsg", e.message, "bad"); }
 });

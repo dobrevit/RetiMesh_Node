@@ -20,6 +20,7 @@
 // function per section that validates through SettingsRules and applies the
 // section the same way its HTTP handler does.
 #include "SettingsFields.h"
+#include "RnsTransport.h"
 
 #include <Arduino.h>
 #include <stdlib.h>
@@ -291,6 +292,19 @@ Result setBothWifi(const char* v, char* err, size_t n) {
   return commitLinks(want, changed, err, n);
 }
 
+// An interface mode by its name, and by its number for anything that already
+// spells it that way. The names are RnsTransport's own — the same list the
+// portal shows and the log prints — so this cannot drift from them, and a mode
+// rendered as "1" told a reader nothing it could act on.
+bool parseMode(const char* v, uint8_t& out) {
+  for (uint8_t m = 1; m <= 5; m++)
+    if (!strcasecmp(v, RnsTransport::modeName(m))) { out = m; return true; }
+  uint32_t u = 0;
+  char err[8];
+  if (parseU32Max(v, 5, u, err, sizeof(err)) && u >= 1) { out = (uint8_t)u; return true; }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
@@ -528,17 +542,20 @@ const Entry kFields[] = {
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       TransportSettings t = settings.transport(); t.enabled = b; return commitTransport(t, e, n); } },
   { "transport.lora_mode",
-    [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().loraMode); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
-      TransportSettings t = settings.transport(); t.loraMode = (uint8_t)u; return commitTransport(t, e, n); } },
+    [](char* o, size_t n) { snprintf(o, n, "%s", RnsTransport::modeName(settings.transport().loraMode)); },
+    [](const char* v, char* e, size_t n) { uint8_t m;
+      if (!parseMode(v, m)) { snprintf(e, n, "expected full, gateway, access_point, roaming or boundary"); return Result::BadValue; }
+      TransportSettings t = settings.transport(); t.loraMode = m; return commitTransport(t, e, n); } },
   { "transport.wifi_mode",
-    [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().wifiMode); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
-      TransportSettings t = settings.transport(); t.wifiMode = (uint8_t)u; return commitTransport(t, e, n); } },
+    [](char* o, size_t n) { snprintf(o, n, "%s", RnsTransport::modeName(settings.transport().wifiMode)); },
+    [](const char* v, char* e, size_t n) { uint8_t m;
+      if (!parseMode(v, m)) { snprintf(e, n, "expected full, gateway, access_point, roaming or boundary"); return Result::BadValue; }
+      TransportSettings t = settings.transport(); t.wifiMode = m; return commitTransport(t, e, n); } },
   { "transport.auto_mode",
-    [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.transport().autoMode); },
-    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
-      TransportSettings t = settings.transport(); t.autoMode = (uint8_t)u; return commitTransport(t, e, n); } },
+    [](char* o, size_t n) { snprintf(o, n, "%s", RnsTransport::modeName(settings.transport().autoMode)); },
+    [](const char* v, char* e, size_t n) { uint8_t m;
+      if (!parseMode(v, m)) { snprintf(e, n, "expected full, gateway, access_point, roaming or boundary"); return Result::BadValue; }
+      TransportSettings t = settings.transport(); t.autoMode = m; return commitTransport(t, e, n); } },
   { "transport.auto_enabled",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.transport().autoEnabled ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
