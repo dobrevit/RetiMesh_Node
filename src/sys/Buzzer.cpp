@@ -290,7 +290,17 @@ void takeUp() {
     .callback = step, .arg = nullptr,
     .dispatch_method = ESP_TIMER_TASK, .name = "buzzer", .skip_unhandled_events = true,
   };
-  if (esp_timer_create(&args, &sTimer) != ESP_OK) sTimer = nullptr;
+  if (esp_timer_create(&args, &sTimer) != ESP_OK) {
+    // Without the timer a note starts and never ends, so start() refuses and
+    // the sounder is silent. Give the pin back and stay down rather than
+    // report a sounder that cannot make a sound: sUp is what apply() compares
+    // the setting against, so claiming success here would also mean it never
+    // tried again — a transient failure would become a permanent one.
+    sTimer = nullptr;
+    ledcDetach(PIN_BUZZER);
+    log_w("buzzer: no timer for the sounder; it stays off and will be retried");
+    return;
+  }
 #endif
   sUp = true;
 }
