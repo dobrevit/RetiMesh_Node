@@ -38,6 +38,7 @@
 #include "Telemetry.h"
 #include "NomadNet.h"
 #include "Diag.h"
+#include "Watchdog.h"
 #include "RingItem.h"
 #include "Lock.h"
 #include "Power.h"
@@ -1694,7 +1695,30 @@ static uint32_t sSnapOkMs = 0;          // last pass that actually published; th
 // Dead paths are cleaned up on a slower clock than the reading is refreshed:
 // the reading is capped and cheap, the sweep walks the whole table.
 static const uint32_t kStaleSweepMs = 60000;
+// How long one pass may spend reading path records back off the filesystem.
+//
+// Not a tuning knob — a bound this walk did not have. Every record examined is
+// one file opened, sought, read and closed, and on LittleFS that is a
+// directory lookup plus several 512-byte reads, each of which disables the
+// flash cache and stalls the other core while it runs. The sweep dereferenced
+// the whole table in one pass, so its cost grew with the table, and on a node
+// whose table had grown large enough the pass outlasted the 30-second
+// watchdog. The node then rebooted every ninety seconds for two days without
+// once saying why, because the watchdog's own report died on the way out (see
+// Watchdog.h). Nothing here is allowed to be unbounded again.
+//
+// 400 ms is picked to be obviously survivable rather than optimal: two orders
+// of magnitude inside the watchdog, and small next to the five seconds between
+// passes, so the RNS task still spends the overwhelming majority of its time
+// forwarding. What one pass does not get through, the next one does.
+static const uint32_t kWalkBudgetMs = 400;
+// Records read between watchdog feeds. The budget above ends the walk, but it
+// is only checked between records, and one record on a sick filesystem can
+// take a long time on its own — so the walk keeps reporting while it runs
+// rather than relying on finishing.
+static const size_t   kFeedEvery = 16;
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
+static uint32_t sSnapWalkMaxMs = 0;      // worst snapshot walk since boot; see Tables
 static size_t   sIfaceCount = 0;         // likewise, so a capped list still counts true
 static Tables   sTables = {};            // table sizes, for soak monitoring
 
@@ -1737,29 +1761,98 @@ static void refreshSnapshots(bool allowSweep) {
   // sitting there was dropped never rather than in five seconds. Iteration
   // order is stable, so it stopped in the same place every pass, for ever.
   //
-  // The whole table is walked when a sweep is due and the rows are capped as
+  // The whole table is examined when a sweep is due and the rows are capped as
   // before when it is not, which keeps the reading cheap at five seconds and
   // the cleanup complete at a minute.
+  //
+  // Examined across as many passes as it takes, though, not in one. Walking it
+  // in one was the fix for the entry that was never dropped, and it bought
+  // that with an unbounded pass: reading a record back is a file opened on
+  // LittleFS, so the pass cost whatever the table had grown to, and past a few
+  // hundred entries it outlasted the watchdog and took the node down with it.
+  // A sweep now spends kWalkBudgetMs per pass and remembers where it stopped,
+  // which keeps both properties — every entry is reached, and no pass is long.
   static std::vector<RNS::Bytes> stale;
   static uint32_t sSweptMs = 0;
-  const bool sweeping = allowSweep && (uint32_t)(millis() - sSweptMs) >= kStaleSweepMs;
+  // Where the last sweep ran out of budget, and so where the next one starts.
+  // Zero means no sweep is part-way through.
+  //
+  // An offset rather than a saved iterator, because the table is mutated
+  // between passes — by the removal at the end of this very function, among
+  // others — and no iterator survives that. The cost is that an entry inserted
+  // or dropped ahead of the cursor shifts everything after it by one, so that
+  // entry is examined twice or skipped once. For a cleanup sweep that is one
+  // more cycle, which is the right price for not holding an iterator across a
+  // deletion.
+  static size_t sSweepPos = 0;
   stale.clear();
-  for (auto it = pathTable.begin(); it != pathTable.end(); ++it) {
-    RNS::Persistence::NewPathTable::Entry& e = *it;
+  // A sweep begins on the minute clock, and once begun it continues on every
+  // pass until it has been all the way round. Waiting a minute between slices
+  // as well would put a full cycle on a large table hours away, which is not
+  // cleanup — and the table grows a dead entry every time a Wi-Fi client
+  // leaves, so the cycle has to close faster than the entries arrive.
+  const bool sweeping = allowSweep &&
+                        (sSweepPos != 0 || (uint32_t)(millis() - sSweptMs) >= kStaleSweepMs);
+  const uint32_t walkStartMs = millis();
+  size_t pos = 0;         // position in the table, for the sweep cursor
+  size_t reads = 0;       // records actually read back, for the feed clock
+  bool   ranOut = false;  // budget ended the walk before the table did
+  Watchdog::feed();
+  for (auto it = pathTable.begin(); it != pathTable.end(); ++it, ++pos) {
+    // Incrementing reads the in-memory index and nothing else; only the
+    // dereference below opens a file. So positions this pass has no use for
+    // are stepped over for free, and the budget is spent entirely on records
+    // that are going to be looked at.
+    const bool wantRow   = p.size() < SNAPSHOT_MAX_PATHS;
+    const bool wantSweep = sweeping && pos >= sSweepPos;
+    if (!wantRow && !sweeping) break;       // rows are full and nothing else needs the rest
+    if (!wantRow && !wantSweep) continue;   // ahead of the rows, behind the cursor
+    // The budget ends the sweep, never the rows. Rows are bounded already —
+    // there are at most SNAPSHOT_MAX_PATHS of them and the walk stops asking
+    // once they are full — so letting them finish costs a known amount. It
+    // also keeps the cursor honest: the only way to reach this line with the
+    // rows full is with wantSweep set, so pos is at or past sSweepPos and the
+    // cursor written below can only ever move forwards.
+    if (!wantRow && (uint32_t)(millis() - walkStartMs) >= kWalkBudgetMs) { ranOut = true; break; }
+    if (++reads % kFeedEvery == 0) Watchdog::feed();
+
+    RNS::Persistence::NewPathTable::Entry& e = *it;   // reads the record off the filesystem
     if (!e.value.receiving_interface()) {
       if (sweeping && stale.size() < SNAPSHOT_MAX_PATHS) stale.push_back(e.key);
       continue;
     }
-    if (p.size() >= SNAPSHOT_MAX_PATHS) continue;    // counted by the table, swept above, not rendered
+    if (!wantRow) continue;                 // swept, not rendered
     PathInfo pi = {};
     strlcpy(pi.hash, e.key.toHex().c_str(), sizeof(pi.hash));
     pi.hops = e.value._hops;
     strlcpy(pi.via, e.value.receiving_interface() ? e.value.receiving_interface().name().c_str() : "?", sizeof(pi.via));
     pi.ageS = (uint32_t)max(0.0, now - e.value._timestamp);
-    if (p.size() < SNAPSHOT_MAX_PATHS) p.push_back(pi);
-    else if (!sweeping) break;              // rows are full and nothing else needs the rest
+    p.push_back(pi);
   }
-  if (sweeping) sSweptMs = millis();
+  Watchdog::feed();
+  if (sweeping) {
+    // Reaching the end closes the cycle and puts the next one a minute out;
+    // running out of budget leaves the cursor where it stopped, which is what
+    // keeps the sweep coming back on the next pass rather than the next minute.
+    const bool started = (sSweepPos == 0);
+    sSweepPos = ranOut ? pos : 0;
+    if (!ranOut) sSweptMs = millis();
+    // Once per cycle, not once per pass: a table that needs twenty passes
+    // should say so, and then be quiet about it until the next minute. This is
+    // also the only place the node reports how big the table has become, which
+    // is the number that decides whether this bound is generous or tight.
+    else if (started)
+      log_i("path table is %u entries; sweeping %u per pass at %u ms",
+            (unsigned)pathTable.size(), (unsigned)pos, (unsigned)(millis() - walkStartMs));
+  }
+  // The high-water mark rather than the last reading, because the pass that
+  // matters is the worst one and it is not the one an operator happens to be
+  // looking at. The first pass after a boot is routinely several times the
+  // cost of the ones after it — the filesystem has read nothing yet — so a
+  // spot reading understates the exposure by exactly the amount that would
+  // have mattered.
+  const uint32_t walkMs = millis() - walkStartMs;
+  if (walkMs > sSnapWalkMaxMs) sSnapWalkMaxMs = walkMs;
   if (!stale.empty()) {
     uint16_t dropped = RNS::Transport::remove_paths(stale);
     log_i("dropped %u stored path(s) whose interface is gone", (unsigned)dropped);
@@ -1791,6 +1884,7 @@ static void refreshSnapshots(bool allowSweep) {
   t.announces     = (uint32_t)RNS::Transport::announce_table().size();
   t.heldAnnounces = (uint32_t)RNS::Transport::held_announces().size();
   t.rates         = (uint32_t)RNS::Transport::announce_rate_table().size();
+  t.snapWalkMaxMs = sSnapWalkMaxMs;
 
   // Sys::Lock, not a hand-written pair. Lock.h states the rule: this whole
   // function now runs under Diag::guard, so there is a way out of the scope

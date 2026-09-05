@@ -564,10 +564,11 @@ void loop() {
     // Reticulum's tables are the other thing that grows with traffic, and the
     // one a heap figure alone will not explain.
     RnsTransport::Tables t = RnsTransport::tables();
-    log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu",
+    log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu snap %lums",
           (unsigned long)t.paths, (unsigned long)t.links, (unsigned long)t.activeLinks,
           (unsigned long)t.pendingLinks, (unsigned long)t.destinations,
-          (unsigned long)t.announces, (unsigned long)t.heldAnnounces, (unsigned long)t.rates);
+          (unsigned long)t.announces, (unsigned long)t.heldAnnounces, (unsigned long)t.rates,
+          (unsigned long)t.snapWalkMaxMs);
     #if HAS_GPS
       // The satellite count is the number that tells you whether the antenna
       // has a view of the sky; the sentence count tells you the receiver is
