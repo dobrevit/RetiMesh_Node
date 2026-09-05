@@ -352,7 +352,7 @@ void setup() {
   #endif
 
   // ---- Task layout (see the diagram above) -------------------------------
-  Diag::startTask(LoRaRadio::radioTask, "radio", 8192, &loraRadio, 5, 1);
+  Diag::startTask(LoRaRadio::radioTask, "radio", RADIO_TASK_STACK, &loraRadio, 5, 1);
 
   // Before the panel, and deliberately. This task used to ask last, after the
   // web server and — on a GUI board — a 16 KB display stack had already taken
