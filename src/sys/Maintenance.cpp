@@ -229,6 +229,35 @@ static void doI2c(const Request& r) {
   ok("I2C");
 }
 
+// Every task's untouched stack, which is the measurement a soak test exists to
+// take. It is already in the boot log every thirty seconds and in /api/status,
+// and neither reaches the node this matters most on: a board short enough of
+// internal RAM to be worth trimming is a board whose portal has been switched
+// off to save the twenty-odd kilobytes it costs, reached over the TCP console,
+// which answers commands rather than streaming a log. Three days of soak would
+// then produce a number nobody could read.
+//
+// The figures are high-water marks — the least stack each task has ever had
+// left — so they only fall, and a reading after days of real traffic is worth
+// more than any bench session. They are still "worst seen", not "worst
+// possible": a stack cut to its observed peak is a crash waiting for a path
+// nothing has taken yet.
+static void doStacks(const Request&) {
+  Diag::TaskStack st[16];
+  const size_t n = Diag::stacks(st, sizeof(st) / sizeof(st[0]));
+  for (size_t i = 0; i < n; i++) {
+    if (!st[i].present) continue;
+    dataf("STACKS", "task=%s headroom=%lu", st[i].name, (unsigned long)st[i].headroom);
+  }
+  const char* worst = nullptr;
+  const uint32_t low = Diag::lowestHeadroom(&worst);
+  // Named separately because it is the one figure that decides anything, and
+  // because a nullptr here means no task was read at all rather than a task
+  // with nothing left — which must not look the same.
+  if (worst) dataf("STACKS", "tightest=%s headroom=%lu", worst, (unsigned long)low);
+  ok("STACKS");
+}
+
 static void doVersion() {
   dataf("VERSION", "firmware=\"%s\" version=%s board=\"%s\" idf=%s assets=%s",
         FW_NAME, FW_VERSION, BOARD_NAME, esp_get_idf_version(), ASSET_STAMP);
@@ -731,6 +760,7 @@ static void dispatch(const char* line) {
   switch (r.cmd) {
     case Cmd::Help:          doHelp(); break;
     case Cmd::I2c:           doI2c(r); break;
+    case Cmd::Stacks:        doStacks(r); break;
     case Cmd::Status:        doStatus(); break;
     case Cmd::Version:       doVersion(); break;
     case Cmd::UsbStatus:     doUsbStatus(); break;
