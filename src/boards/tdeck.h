@@ -254,7 +254,7 @@
 #define PIN_OLED_RST        -1
 #define HAS_DISPLAY_VEXT    0                // the rail is PIN_BOARD_POWER, raised in setup()
 #define HAS_BQ25896         0
-#define HAS_DA217           0
+#define HAS_IMU             0
 #define HAS_PMU             0
 
 // ---------------------------------------------------------------------------

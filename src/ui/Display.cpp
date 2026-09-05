@@ -197,7 +197,7 @@ void Display::displayTask(void* self) {
         break;
       default: break;
     }
-#if HAS_DA217
+#if HAS_IMU && DISPLAY_AUTO_ROTATE
     // The panel follows the hand: two agreeing readings a second apart turn
     // the display, so a wobble costs nothing and a real turn costs a second.
     {
@@ -207,7 +207,12 @@ void Display::displayTask(void* self) {
         lastImuMs = now;
         const Imu::Facing f = Imu::facing();
         if (f == lastF && f != Imu::Facing::Flat && f != Imu::Facing::Unknown)
-          LvglUi::setRotation((uint8_t)f);
+          // Added to where the glass starts, not used in its place. Facing says
+          // how far the board has been turned from upright; DISPLAY_ROTATION
+          // says how the panel is mounted, which is a constant the hand cannot
+          // change. Assigning the first over the second worked only because
+          // every board that had asked so far mounted its glass at zero.
+          LvglUi::setRotation((uint8_t)((DISPLAY_ROTATION + (uint8_t)f) & 3));
         lastF = f;
       }
     }

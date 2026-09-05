@@ -801,9 +801,53 @@
 #ifndef HAS_BQ25896
   #define HAS_BQ25896       0
 #endif
-// A DA217 accelerometer on the main I2C: the panel follows the hand.
-#ifndef HAS_DA217
-  #define HAS_DA217         0
+// An accelerometer on the main I2C: the panel follows the hand, and a board
+// with a magnetometer beside it can say which way it is pointing rather than
+// only which way is down. Two parts, named rather than probed for — they share
+// no register, no chip id and no address, so a probe would be two drivers'
+// worth of guessing to save a board one line.
+#define IMU_KIND_DA217      1
+#define IMU_KIND_QMI8658    2
+#ifndef HAS_IMU
+  #define HAS_IMU           0
+#endif
+#ifndef IMU_KIND
+  #define IMU_KIND          IMU_KIND_DA217
+#endif
+#ifndef IMU_ADDR
+  #define IMU_ADDR          0x6B          // the QMI8658's, SDO high; the DA217 is probed
+#endif
+// How the part is soldered down relative to the panel. A board says this, not
+// the driver: the same part turns up rotated or flipped on the next board, and
+// a sign hidden in the driver would then be wrong for one of them with nothing
+// naming which. Getting it wrong is visible rather than subtle — the panel
+// rotates the correct amount the wrong way, so tipping the board on its side
+// shows the picture upside down while the upright flips stay right.
+// Whether the panel should follow the hand at all. Separate from owning an
+// accelerometer, because they are separate facts: a handheld with a keyboard is
+// meant to be held one way round, and turning its picture when it tips is a
+// misfeature rather than a courtesy. Defaults to whether the board has the part,
+// which is what every board did before the question could be asked.
+#ifndef DISPLAY_AUTO_ROTATE
+  #define DISPLAY_AUTO_ROTATE HAS_IMU
+#endif
+#ifndef IMU_INVERT_X
+  #define IMU_INVERT_X      0
+#endif
+#ifndef IMU_INVERT_Y
+  #define IMU_INVERT_Y      0
+#endif
+#ifndef IMU_INVERT_Z
+  #define IMU_INVERT_Z      0
+#endif
+// A magnetometer, for the other half of a heading. Tilt correction wants an
+// accelerometer, so a board that names this should name HAS_IMU too — a
+// magnetometer on its own is only honest while the board is held level.
+#ifndef HAS_COMPASS
+  #define HAS_COMPASS       0
+#endif
+#ifndef COMPASS_ADDR
+  #define COMPASS_ADDR      0x7C          // the QMC6309's, inside the reserved block
 #endif
 // The LVGL shell on colour boards: set by the env, because it is a build
 // decision (the toolkit is a library dependency), not a board fact.

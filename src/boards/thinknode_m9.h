@@ -137,8 +137,8 @@
 #define DISPLAY_KIND        DISPLAY_KIND_TFT
 #define DISPLAY_WIDTH       240
 #define DISPLAY_HEIGHT      320
-// The glass is mounted landscape and there is no accelerometer to ask, so the
-// shell is told where to start. Three quarter turns rather than one: at one
+// The glass is mounted landscape, and the shell is told where to start rather
+// than asking the accelerometer: see DISPLAY_AUTO_ROTATE below. Three quarter turns rather than one: at one
 // the picture is the right shape and upside down, which is what the bench
 // showed and what the two reference firmwares disagree about between
 // themselves.
@@ -196,7 +196,26 @@
 #define PIN_OLED_RST        -1
 #define HAS_DISPLAY_VEXT    0                // the rail is PIN_BOARD_POWER, above
 #define HAS_BQ25896         0                // an LGS4056 dumb charger, nothing to talk to
-#define HAS_DA217           0
+// A QMI8658 at 0x6b and a QMC6309 at 0x7c, both read off the bus before either
+// driver was written: WHO_AM_I 0x05 and chip id 0x90, by `I2C <addr>` on the
+// console. The magnetometer is the heading and the accelerometer is what makes
+// it true when the board is not held level.
+#define HAS_IMU             1
+#define IMU_KIND            IMU_KIND_QMI8658
+#define IMU_ADDR            0x6B
+// The panel does not follow the hand here. This board is a keyboard held in
+// landscape, so turning the picture when it tips is a misfeature — and the
+// accelerometer is fitted for the compass rather than for the display.
+#define DISPLAY_AUTO_ROTATE 0
+
+// Mounting orientation, still to be settled. Inverting X was tried on the
+// reasoning that it selects between the two side rotations and nothing else;
+// on the bench it made every orientation wrong rather than fixing two, so the
+// reasoning was wrong about which axis does what here. Left at the identity
+// until the accelerometer has been read in a known pose — STATUS reports it —
+// rather than flipped again on another guess.
+#define HAS_COMPASS         1
+#define COMPASS_ADDR        0x7C
 #define HAS_PMU             0
 
 // A PCF8563 at 0x51, confirmed answering on this bus rather than taken from the
