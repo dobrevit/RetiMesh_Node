@@ -577,7 +577,16 @@ bool keyInSection(size_t i, const char* prefix) {
 bool isSecret(const char* key) {
   if (!key) return false;
   for (size_t i = 0; i < kCount; i++)
-    if (strcmp(kFields[i].key, key) == 0) return kFields[i].secret;
+    // Case-insensitively, like every other lookup in this file — set() at the
+    // bottom and renderKey() at the top both use strcasecmp, and this is the
+    // key's own table. Matching exactly here would have been a bypass rather
+    // than an inconsistency: set() accepts "SET Admin.Password hunter2" and
+    // applies it, so a redaction that only recognised the lower-case spelling
+    // would let the password through to flash while the command succeeded.
+    //
+    // The same reasoning is already written three lines up about the verb. It
+    // was applied to SET and not to the key beside it.
+    if (!strcasecmp(kFields[i].key, key)) return kFields[i].secret;
   return false;
 }
 
