@@ -30,6 +30,11 @@ namespace {
 Power::Profile sProfile = Power::Profile::Performance;
 float    sVolts = 0;
 uint32_t sLastSample = 0;
+// When a conversion last actually succeeded, as opposed to when one was last
+// attempted. The difference is the whole point: sLastSample says the sampler is
+// running, and this says it is learning anything by doing so.
+uint32_t sLastGoodMs = 0;
+bool     sStaleWarned = false;
 
 // Single-cell LiPo open-circuit voltage to a rough percentage.
 uint8_t percentFor(float v) {
@@ -107,6 +112,11 @@ void sample() {
   analogSetAttenuation(ADC_11db);        // the default every other reader assumes
   if (got) {
     sVolts = (acc / got) / 1000.0f * BATTERY_DIVIDER_RATIO;
+    sLastGoodMs = millis() ? millis() : 1;
+    if (sStaleWarned) {
+      sStaleWarned = false;
+      log_i("battery: the converter on GPIO %d is answering again", PIN_BATTERY_ADC);
+    }
   } else {
     static bool warned = false;
     if (!warned) {
@@ -201,6 +211,14 @@ size_t batteryHistory(uint8_t* out, size_t max) {
   return w;
 }
 
+bool readingStale() {
+#if HAS_BATTERY_ADC
+  return !(sLastGoodMs && (millis() - sLastGoodMs) <= BATTERY_STALE_MS);
+#else
+  return false;
+#endif
+}
+
 Battery battery() {
 #if HAS_PMU
   // The power-management chip measures the cell itself, and knows things an
@@ -220,6 +238,26 @@ Battery battery() {
   Battery b;
   b.volts   = sVolts;
   b.present = sVolts >= BATTERY_MIN_V && sVolts <= BATTERY_MAX_V;
+  // Unless the figure is too old to mean anything. Holding the last reading
+  // through a missed conversion is right; holding it for ever is not. A
+  // converter that has said nothing for minutes leaves the node with no idea
+  // what the cell is doing, and the honest answer to "what is the battery
+  // doing" is then the same one a board with no divider gives — nothing —
+  // rather than a percentage from whenever it last managed to look.
+  //
+  // This is the failure that matters, because it does not look like one: the
+  // node reports a healthy cell at a plausible voltage, indefinitely, and the
+  // single log line saying otherwise was printed once, days ago.
+  const bool fresh = sLastGoodMs && (millis() - sLastGoodMs) <= BATTERY_STALE_MS;
+  if (!fresh) {
+    if (!sStaleWarned) {
+      sStaleWarned = true;
+      log_w("battery: no conversion on GPIO %d has succeeded for %lu s — reporting no "
+            "reading rather than a stale %.3f V", PIN_BATTERY_ADC,
+            (unsigned long)(BATTERY_STALE_MS / 1000), sVolts);
+    }
+    b.present = false;
+  }
   b.percent = b.present ? percentFor(sVolts) : 0;
 #if HAS_BQ25896
   // The divider still measures the cell; the charger answers the one
