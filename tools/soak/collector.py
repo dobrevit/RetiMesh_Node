@@ -139,7 +139,6 @@ class Collector:
     def __init__(self, args):
         self.args = args
         self.out_lock = threading.Lock()
-        self.pending = {}                  # message hash -> (node, kind, sent_at)
 
         seed_config(args)
         RNS.Reticulum(args.rns_config)
@@ -201,10 +200,13 @@ class Collector:
 
         msg = LXMF.LXMessage(dest, self.local, content, title="",
                              desired_method=LXMF.LXMessage.DIRECT, fields=fields or None)
-        msg.register_delivery_callback(lambda m: None)
         msg.register_failed_callback(
             lambda m: self.record(node_hex, kind, {"error": "delivery failed"}))
-        self.pending[bytes(msg.hash)] = (node_hex, kind, time.time())
+        # The request itself, not only the answer. Silence is a result during a
+        # soak — a node that was asked and did not reply is a different fact
+        # from one that was never asked, and after three days nobody can tell
+        # them apart from a file containing only replies.
+        self.record(node_hex, kind, {"sent": True})
         self.router.handle_outbound(msg)
 
     # --- hearing back ------------------------------------------------------

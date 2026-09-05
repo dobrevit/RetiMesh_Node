@@ -58,6 +58,11 @@ Telemetry works without any of that; only the console channel needs it.
 One JSON object per line, appended. A run that is interrupted keeps what it had
 and a later run continues the same file.
 
+Requests are recorded as well as answers — `{"sent": true}` going out, then a
+`kind: "reply"` row coming back. Silence is a result during a soak: a node that
+was asked and did not answer is a different fact from one that was never asked,
+and a file containing only replies cannot tell them apart three days later.
+
 ```sh
 # how internal RAM has moved, per node
 jq -r 'select(.telemetry.ram) | [.at, .node, .telemetry.ram.free] | @tsv' data/soak.jsonl
