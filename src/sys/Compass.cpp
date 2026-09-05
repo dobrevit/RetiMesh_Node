@@ -21,6 +21,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <math.h>
+#include <Preferences.h>
 #include "I2cReg.h"
 #include "Imu.h"
 
@@ -50,6 +51,61 @@ bool sUp = false;
 // reading replaces both ends.
 float sMin[3] = {  1e9f,  1e9f,  1e9f };
 float sMax[3] = { -1e9f, -1e9f, -1e9f };
+
+// And kept across restarts, which is only right because the offset belongs to
+// the board rather than to wherever the board is. That was worth checking
+// rather than assuming: the M9 reads about 385 uT with nearly all of it
+// perpendicular to the panel, which is equally the signature of the sounder
+// magnet beside the sensor and of something flat underneath the device. Moved
+// off a laptop it had been sitting on and onto a bare desk, the reading changed
+// by less than a microtesla — so it is the board, and it travels with it.
+//
+// Had it gone the other way this would be wrong to keep: a stored calibration
+// of one desk is worse than none, because the compass would look calibrated
+// while being wrong everywhere else. Without keeping it, though, every power
+// cycle discards the offsets and the heading is useless until somebody thinks
+// to turn the device around — which is not something a user of a mesh node
+// should have to know.
+//
+// The limit of doing it this way: these extremes only ever widen. If the board
+// is later fixed inside something magnetic, the stored pair grows to span both
+// worlds and never recovers, and there is no way to clear it short of erasing
+// NVS. Worth a reset command the day a board needs one.
+//
+// Its own NVS namespace, so a key here cannot collide with a setting.
+Preferences sStore;
+bool        sStoreOpen = false;
+// Written back at most this often: NVS is flash with a finite write budget, and
+// the extremes move constantly during the turn that finds them. A minute's
+// delay costs nothing — the values are already in RAM and in use — and turns
+// thousands of writes into a handful.
+constexpr uint32_t kSaveEveryMs = 60000;
+uint32_t sLastSaveMs = 0;
+bool     sDirty = false;
+
+void loadOffsets() {
+  if (!sStoreOpen) sStoreOpen = sStore.begin("compass", false);
+  if (!sStoreOpen) return;
+  // Both ends together or neither: half a calibration is worse than none,
+  // because it centres the sphere on something no reading ever supported.
+  if (sStore.getBytesLength("min") != sizeof(sMin) ||
+      sStore.getBytesLength("max") != sizeof(sMax)) return;
+  sStore.getBytes("min", sMin, sizeof(sMin));
+  sStore.getBytes("max", sMax, sizeof(sMax));
+  log_i("compass: hard-iron offsets recalled, centre %.0f,%.0f,%.0f uT",
+        (sMin[0] + sMax[0]) * 0.5f, (sMin[1] + sMax[1]) * 0.5f,
+        (sMin[2] + sMax[2]) * 0.5f);
+}
+
+void saveOffsets() {
+  if (!sStoreOpen || !sDirty) return;
+  const uint32_t now = millis();
+  if (sLastSaveMs && now - sLastSaveMs < kSaveEveryMs) return;
+  sLastSaveMs = now ? now : 1;
+  sDirty = false;
+  sStore.putBytes("min", sMin, sizeof(sMin));
+  sStore.putBytes("max", sMax, sizeof(sMax));
+}
 
 inline TwoWire& bus() { return I2cReg::busFor(PIN_I2C_SDA, PIN_I2C_SCL, I2C_HZ); }
 
@@ -97,6 +153,7 @@ void begin() {
   delay(10);
 
   sUp = true;
+  loadOffsets();
   log_i("compass: QMC6309 at 0x%02x, continuous; heading needs the board turned "
         "around once before the hard-iron offsets mean anything", (uint8_t)COMPASS_ADDR);
 }
@@ -119,8 +176,8 @@ static Reading sample() {
     const int16_t v = (int16_t)(d[i * 2] | (d[i * 2 + 1] << 8));
     raw[i] = (float)v * kUtPerCount;
     r.magUt[i] = raw[i];
-    if (raw[i] < sMin[i]) sMin[i] = raw[i];
-    if (raw[i] > sMax[i]) sMax[i] = raw[i];
+    if (raw[i] < sMin[i]) { sMin[i] = raw[i]; sDirty = true; }
+    if (raw[i] > sMax[i]) { sMax[i] = raw[i]; sDirty = true; }
   }
   r.valid = true;
   r.fieldUt = sqrtf(raw[0]*raw[0] + raw[1]*raw[1] + raw[2]*raw[2]);
@@ -194,6 +251,7 @@ void poll() {
   const uint32_t now = millis();
   if (sLastMs && now - sLastMs < kPollMs) return;
   sample();
+  saveOffsets();
 }
 
 Reading read() {
