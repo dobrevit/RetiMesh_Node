@@ -322,7 +322,13 @@ void WifiManager::begin() {
   // full resolver timeout on every lookup instead of being refused and
   // moving on — which is the failure CaptiveDns exists to prevent. A board
   // with neither link has nothing to answer, and AsyncUDP's task goes unmade.
-  if (wifiEnabled() || HAS_USB_NCM) {
+  //
+  // The access point, not Wi-Fi in general. Those were the same question until
+  // the two links were switched apart, and they are not the same now: a
+  // station-only node has no AP_IP, so the address handed here is one it does
+  // not hold, every query is refused, and the responder answers for nothing.
+  // The USB link still wants it for the fast refusal described above.
+  if (settings.links().wifiApEnabled || HAS_USB_NCM) {
     if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
   }
   if (!webUi) {
@@ -412,8 +418,17 @@ void WifiManager::begin() {
   }
 
   Diag::cost(settings.maintenance().mdns ? "mdns" : "mdns (off)");
-  log_i("SoftAP \"%s\" (%s) up at %s (http:%d, rns:%d)", _ssid, _securityName,
-        WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
+  // What actually came up, which is no longer always an access point. Announcing
+  // a SoftAP and its address on a station-only node is a log line that sends
+  // somebody looking for a network that was never started — and the address it
+  // printed, 0.0.0.0, looks like a fault rather than an absence.
+  if (settings.links().wifiApEnabled) {
+    log_i("SoftAP \"%s\" (%s) up at %s (http:%d, rns:%d)", _ssid, _securityName,
+          WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
+  } else {
+    log_i("no access point: station only (http:%d, rns:%d on whatever the LAN gives)",
+          HTTP_PORT, RNS_TCP_PORT);
+  }
 }
 
 // What this node calls itself, worked out without starting anything. The store
