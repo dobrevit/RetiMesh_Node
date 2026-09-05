@@ -1,0 +1,4 @@
+# The collector's identity, LXMF state and readings. Not in git: the identity
+# is what the nodes are enrolled against, so committing it would publish the
+# key that authorises administration of the fleet.
+data/

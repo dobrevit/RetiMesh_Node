@@ -47,9 +47,16 @@ enrol that on each node to allow console commands (telemetry needs no enrolment)
 Enrol it on each node — over the console, or over the cable:
 
 ```
-SET rns.admins <that address>
-SET rns.admin_enabled on
+SET maintenance.rns_admins <that address>
+SET maintenance.rns_admin on
 ```
+
+Both apply live — the node logs `rns admin: on, 1 administrator(s)` and no
+restart is needed. `GET maintenance` reads them back. More than one collector
+goes in the same list, comma-separated.
+
+Each node's own address, for the `--node` arguments, comes from the same
+console: `STATUS` reports `lxmf_address=`.
 
 Telemetry works without any of that; only the console channel needs it.
 
