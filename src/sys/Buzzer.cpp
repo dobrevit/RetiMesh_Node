@@ -38,6 +38,7 @@
 
 #include <Arduino.h>
 #include <esp_timer.h>
+#include "Settings.h"
 
 #if BUZZER_KIND == BUZZER_KIND_I2S
 #include <ESP_I2S.h>
@@ -60,7 +61,12 @@ constexpr uint32_t kRateHz  = 8000;
 // A quarter of full scale. The MAX98357A on the board this was written for
 // straps its gain pin to ground, which is 12 dB, and full scale through that
 // into a small speaker is startling rather than informative.
-constexpr int16_t  kAmplitude = 8000;
+constexpr int16_t  kAmplitudeFull = 8000;
+// The amplitude actually used, from the volume setting. A quarter of full scale
+// is the ceiling rather than the level: the MAX98357A straps its gain to ground,
+// which is 12 dB, and full scale through that into a small speaker is startling
+// rather than informative.
+int16_t sAmplitude = kAmplitudeFull;
 // Square rather than sine, deliberately: it is what the piezo this stands in
 // for produces, it needs no floating point in the task that generates it, and
 // the difference is inaudible in a 120 ms beep.
@@ -91,7 +97,7 @@ void play(uint32_t hz, uint32_t ms) {
   while (left) {
     const size_t n = left < kChunk ? left : kChunk;
     for (size_t i = 0; i < n; i++) {
-      buf[i] = (halfPeriod && (phase / halfPeriod) % 2) ? kAmplitude : (int16_t)-kAmplitude;
+      buf[i] = (halfPeriod && (phase / halfPeriod) % 2) ? sAmplitude : (int16_t)-sAmplitude;
       phase++;
     }
     sI2s.write((const uint8_t*)buf, n * sizeof(int16_t));
@@ -103,10 +109,22 @@ void play(uint32_t hz, uint32_t ms) {
   sI2s.write((const uint8_t*)quiet, sizeof(quiet));
 }
 
+// Asked to stand down, and the acknowledgement. The task deletes itself rather
+// than being deleted: it can be inside an I2S write when the switch is thrown,
+// and killing a task mid-driver leaves the driver's state to chance. A sentinel
+// note reaches it only between notes, which is exactly when it is safe to go.
+volatile bool sStopping = false;
+volatile bool sStopped  = false;
+
 void audioTask(void*) {
   Note n;
   for (;;) {
     if (xQueueReceive(sQueue, &n, portMAX_DELAY) != pdTRUE) continue;
+    if (!n.hz && !n.ms) {          // the sentinel: nothing to play, time to go
+      sStopped = true;
+      vTaskDelete(nullptr);
+      return;
+    }
     play(n.hz, n.ms);
     if (n.nextHz) play(n.nextHz, n.ms);
     // Only now. Clearing it when the note was taken off the queue would open
@@ -194,7 +212,50 @@ bool start(uint32_t hz, uint32_t ms, uint32_t nextHz) {
 
 namespace Buzzer {
 
+namespace {
+
+// Volume as an amplitude, clamped. Zero is silence rather than a click: a note
+// of zero amplitude still costs the time it takes to play.
+void setVolume(uint8_t percent) {
+#if BUZZER_KIND == BUZZER_KIND_I2S
+  if (percent > 100) percent = 100;
+  sAmplitude = (int16_t)((int32_t)kAmplitudeFull * percent / 100);
+#else
+  // A piezo on a PWM channel has one loudness: the pin swings rail to rail and
+  // the element is as loud as it is. Duty cycle changes the timbre rather than
+  // the level, and driving it quieter would mean driving it wrong. The setting
+  // is accepted and ignored here rather than hidden, so a fleet can carry one
+  // configuration across boards that answer it differently.
+  (void)percent;
+#endif
+}
+
+bool sUp = false;              // the hardware is taken up
+
+void takeUp();
+void release();
+
+} // namespace
+
 void begin() {
+  setVolume(settings.sound().volume);
+  apply();
+}
+
+// Match the hardware to the setting. Idempotent, so the settings layer can call
+// it after every save without knowing whether anything changed.
+void apply() {
+  setVolume(settings.sound().volume);
+  const bool want = settings.sound().enabled;
+  if (want == sUp) return;
+  if (want) takeUp(); else release();
+}
+
+bool present() { return sUp; }
+
+namespace {
+
+void takeUp() {
 #if BUZZER_KIND == BUZZER_KIND_I2S
   sI2s.setPins(PIN_I2S_BCLK, PIN_I2S_LRCLK, PIN_I2S_DOUT);
   if (!sI2s.begin(I2S_MODE_STD, kRateHz, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
@@ -231,7 +292,53 @@ void begin() {
   };
   if (esp_timer_create(&args, &sTimer) != ESP_OK) sTimer = nullptr;
 #endif
+  sUp = true;
 }
+
+// Give the hardware back. On the speaker this is the whole reason the switch
+// exists — the task's stack and the DMA ring are the cost, and a switch that
+// only silenced them would save nothing.
+void release() {
+#if BUZZER_KIND == BUZZER_KIND_I2S
+  sReady = false;                    // refuse new notes before anything goes
+  if (sQueue) {
+    sStopping = true;
+    sStopped = false;
+    const Note bye{0, 0, 0};
+    // Room for it: a note in flight is at most a couple of hundred
+    // milliseconds, and the queue is one deep.
+    if (xQueueSend(sQueue, &bye, pdMS_TO_TICKS(500)) == pdTRUE) {
+      for (int i = 0; i < 100 && !sStopped; i++) vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!sStopped) {
+      // It did not go. Leave the queue and the driver alone rather than pull
+      // them out from under a task that is still running in them: the sounder
+      // stays up and the memory stays spent, which is the safe half of a bad
+      // pair.
+      log_w("buzzer: the audio task did not stand down; leaving the speaker up");
+      sStopping = false;
+      sReady = true;
+      return;
+    }
+    vQueueDelete(sQueue);
+    sQueue = nullptr;
+  }
+  sStopping = false;
+  sI2s.end();
+  portENTER_CRITICAL(&sBusyMux);
+  sBusy = false;                     // whatever was playing is not any more
+  portEXIT_CRITICAL(&sBusyMux);
+  log_i("buzzer: speaker released; its task and DMA are back");
+#else
+  if (sTimer) { esp_timer_stop(sTimer); esp_timer_delete(sTimer); sTimer = nullptr; }
+  ledcWriteTone(PIN_BUZZER, 0);
+  ledcDetach(PIN_BUZZER);
+  sBusy = false;
+#endif
+  sUp = false;
+}
+
+} // namespace
 
 // Near a small piezo's resonance, short enough to be polite. Worth saying:
 // the first bench V4 produced no sound at any drive or frequency while every

@@ -147,6 +147,13 @@ struct LinkSettings {
 // What the glass does, on boards that have one worth configuring. Its own
 // section because it will grow — brightness, sleep timing — and because a
 // UI behaviour is neither radio nor maintenance.
+// The sounder, which on one board is the difference between a portal that
+// serves and one that cannot allocate (Buzzer.h).
+struct SoundSettings {
+  bool    enabled = SOUND_ENABLED_DEFAULT != 0;
+  uint8_t volume  = SOUND_VOLUME_DEFAULT;      // percent; the piezo cannot act on it
+};
+
 struct DisplaySettings {
   // Whether a tap wakes a blanked panel. On by the phone convention; off for
   // a pocketed device whose every accidental touch would light the glass.
@@ -205,6 +212,7 @@ public:
   const LinkSettings& links() const { return _links; }
   const MaintenanceSettings& maintenance() const { return _maintenance; }
   const DisplaySettings& display() const { return _display; }
+  const SoundSettings& sound() const { return _sound; }
 
   bool saveRadio(const RadioSettings& r);
   bool saveLinks(const LinkSettings& l);
@@ -213,6 +221,7 @@ public:
   bool saveAdminPassword(const char* password);
   bool saveTransport(const TransportSettings& t);
   bool saveDisplay(const DisplaySettings& d);
+  bool saveSound(const SoundSettings& s);
   void factoryReset();                    // wipes the namespace, restores defaults
 
   // Valid LoRa bandwidths shared by SX126x and SX127x, in kHz.
@@ -229,6 +238,7 @@ private:
   LinkSettings      _links;
   MaintenanceSettings _maintenance;
   DisplaySettings     _display;
+  SoundSettings       _sound;
 };
 
 extern Settings settings;

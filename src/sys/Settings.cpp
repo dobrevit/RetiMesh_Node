@@ -93,6 +93,8 @@ void Settings::load() {
   if (_prefs.isKey("w_stap")) _prefs.getString("w_stap", _wifi.staPassword, sizeof(_wifi.staPassword));
 
   if (_prefs.isKey("a_pass")) _prefs.getString("a_pass", _admin.password, sizeof(_admin.password));
+  LOAD(_sound.enabled,      "snd_en",  getBool ("snd_en"));
+  LOAD(_sound.volume,       "snd_vol", getUChar("snd_vol"));
   LOAD(_display.touchWake,  "d_twake", getBool ("d_twake"));
   LOAD(_display.brightness, "d_bri",   getUChar("d_bri"));
   LOAD(_display.daylight,   "d_day",   getBool ("d_day"));
@@ -189,6 +191,14 @@ bool Settings::saveAdminPassword(const char* password) {
   strlcpy(_admin.password, password, sizeof(_admin.password));
   bool ok = _prefs.putString("a_pass", _admin.password) > 0;
   if (!ok) log_e("NVS write failed (admin)");
+  return ok;
+}
+
+bool Settings::saveSound(const SoundSettings& s) {
+  _sound = s;
+  bool ok = _prefs.putBool ("snd_en",  s.enabled) > 0
+         && _prefs.putUChar("snd_vol", s.volume)  > 0;
+  if (!ok) log_e("NVS write failed (sound)");
   return ok;
 }
 

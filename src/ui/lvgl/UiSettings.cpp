@@ -54,6 +54,8 @@ enum class Kind : uint8_t { Text, Secret, Number, Switch, Region, Words, Slider 
 
 Kind kindFor(const char* key, const char* value, bool quoted) {
   if (strcmp(key, "display.brightness") == 0)       return Kind::Slider;
+  // A level, not a figure to type: the useful gesture is "a bit louder".
+  if (strcmp(key, "sound.volume") == 0)             return Kind::Slider;
   if (strcmp(key, "radio.region") == 0)             return Kind::Region;
   if (strcmp(key, "wifi.security") == 0)            return Kind::Words;
   if (strcmp(key, "display.theme") == 0)            return Kind::Words;

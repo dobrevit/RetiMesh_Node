@@ -21,6 +21,7 @@
 // section the same way its HTTP handler does.
 #include "SettingsFields.h"
 #include "RnsTransport.h"
+#include "Buzzer.h"
 
 #include <Arduino.h>
 #include <stdlib.h>
@@ -589,6 +590,28 @@ const Entry kFields[] = {
     [](const char* v, char* e, size_t n) { Power::Profile pp;
       if (!Power::profileFromName(v, pp)) { snprintf(e, n, "power_profile must be performance|balanced|battery"); return Result::BadValue; }
       TransportSettings t = settings.transport(); t.powerProfile = (uint8_t)pp; return commitTransport(t, e, n); } },
+
+  // --- sound ---------------------------------------------------------------
+  // The switch gives the hardware back rather than merely silencing it, which
+  // is why it is worth having at runtime: on a board whose sounder is a speaker
+  // the task and its DMA are about 5.4 KB of internal RAM, and that is the
+  // difference between a portal that serves and one that cannot allocate.
+  { "sound.enabled",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.sound().enabled ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { bool b;
+      if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
+      SoundSettings s = settings.sound(); s.enabled = b;
+      if (!settings.saveSound(s)) { snprintf(e, n, "could not be saved"); return Result::NvsFailed; }
+      Buzzer::apply();                       // takes the hardware up or gives it back, now
+      return Result::Ok; } },
+  { "sound.volume",
+    [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.sound().volume); },
+    [](const char* v, char* e, size_t n) { uint32_t u;
+      if (!parseU32Max(v, 100, u, e, n)) return Result::BadValue;
+      SoundSettings s = settings.sound(); s.volume = (uint8_t)u;
+      if (!settings.saveSound(s)) { snprintf(e, n, "could not be saved"); return Result::NvsFailed; }
+      Buzzer::apply();
+      return Result::Ok; } },
 
   // --- admin -------------------------------------------------------------
   { "admin.password",
