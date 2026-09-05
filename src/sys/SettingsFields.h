@@ -73,6 +73,22 @@ const char* keyAt(size_t i);
 bool render(size_t i, char* out, size_t len);
 bool renderKey(const char* key, char* out, size_t len);
 
+// Whether this key's value is a secret — a password, and nothing else so far.
+// Asked by anything that is about to keep or print a value, not only by the
+// code that renders one.
+bool isSecret(const char* key);
+
+// A console line with any secret value taken out of it, for storing or
+// logging. Returns the length written.
+//
+// "SET admin.password hunter2" becomes "SET admin.password (withheld)". The key
+// survives because the useful thing to keep about an administrative change is
+// which setting was changed; the value is the part that must not be written to
+// flash or printed to a port. Anything that is not a SET of a secret key is
+// copied through unchanged — a command whose text is harmless stays readable,
+// because an audit trail of "(withheld)" would be no trail at all.
+size_t redactSecrets(const char* in, size_t len, char* out, size_t cap);
+
 // Whether `prefix` names a section that exists ("radio", "wifi", ...), so the
 // console can tell an empty section from a misspelt one.
 bool sectionExists(const char* prefix);

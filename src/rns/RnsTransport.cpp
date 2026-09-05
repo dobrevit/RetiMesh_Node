@@ -20,6 +20,7 @@
 //  RnsTransport.cpp — see RnsTransport.h
 // ============================================================================
 #include "RnsTransport.h"
+#include "SettingsFields.h"
 #include <microReticulum.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
@@ -701,9 +702,23 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
   const uint8_t standing = verified ? Rns::StandingVerified
                          : !sender  ? Rns::StandingNoKey
                                     : Rns::StandingMismatch;
+  // With any secret taken out of it first. A message can be an administrative
+  // command, and one of those can be "SET admin.password …" — which this used
+  // to write into the store verbatim, onto flash or a card, where it outlives
+  // the reboot and can be read back by anyone who can reach MESSAGES, the
+  // portal, or the card itself. The settings layer already refuses to print a
+  // password, for the reason its own header gives: a password that has been
+  // printed once is a password in somebody's scrollback. This path went around
+  // that decision rather than disagreeing with it.
+  //
+  // The key stays and the value goes: which setting an administrator changed is
+  // the useful thing to keep, and it is not the part that has to be kept safe.
+  char stored[Rns::kInboxTextMax + 1];
+  const size_t storedLen = SettingsFields::redactSecrets(
+      (const char*)text, Rns::utf8TrimLen(text, textLen, Rns::kInboxTextMax),
+      stored, sizeof(stored));
   if (!Rns::Inbox::note(m.sourceHash, standing,
-                        via, m.sentAt, (const char*)text,
-                        Rns::utf8TrimLen(text, textLen, Rns::kInboxTextMax), sig))
+                        via, m.sentAt, stored, storedLen, sig))
     log_d("lxmf: not stored (a repeat, or arriving faster than the store is written)");
   else
     Buzzer::message();                   // carried devices get told out loud
@@ -717,8 +732,14 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
   // clears the operator's screen or hides the lines around it — so what is
   // shown is the text with anything not printable replaced, cut on a
   // character boundary.
+  //
+  // And redacted before any of that, for the same reason it is redacted before
+  // being stored: this line goes to the serial port, which is the one place the
+  // settings layer will not print a password precisely because the log shares
+  // it. Escaping made the body safe to display; it did not make it safe to
+  // show.
   char shown[81];
-  Rns::utf8SafeCopy(text, textLen, shown, sizeof(shown));
+  Rns::utf8SafeCopy((const uint8_t*)stored, storedLen, shown, sizeof(shown));
   log_i("lxmf: %s%s message from %s over %s (%u bytes): %s",
         verified   ? "verified"
         : !sender  ? "UNVERIFIED (this node has not heard that sender announce)"
