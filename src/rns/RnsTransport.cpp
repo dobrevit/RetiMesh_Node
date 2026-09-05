@@ -768,7 +768,16 @@ static bool handleLxmfMessage(const RNS::Bytes& data, uint8_t via,
   // it without keeping a copy would have no account of what it was told to do.
   // The gate refuses everything by default and says which of its questions
   // failed (RnsAdmin.h).
-  Rns::Admin::offer(m.sourceHash, standing, m.sentAt, (const char*)text, textLen);
+  //
+  // A message with no text is not offered at all. Administration is a console
+  // line carried by a message, and a message carrying none was never trying to
+  // administer anything — its business is in its fields. A telemetry request is
+  // exactly that shape: no text, one command field. Offered anyway, the gate
+  // correctly answers "empty command", which costs the sender an error instead
+  // of the readings it asked for, spends airtime saying so, and can take the
+  // one reply slot the telemetry answer needed. Enrolling a telemetry collector
+  // as an administrator should not stop it collecting telemetry.
+  if (textLen) Rns::Admin::offer(m.sourceHash, standing, m.sentAt, (const char*)text, textLen);
 
   // And the questions that are not administration: is this node there, say
   // this back, how well did it hear me (LxmfCommands.h).

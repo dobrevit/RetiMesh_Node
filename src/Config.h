@@ -580,8 +580,27 @@
   #define PIN_BUTTON2       -1
 #endif
 // A piezo sounder on a PWM channel, where one is fitted.
+// What makes the sound. Two very different parts answer the same two events: a
+// piezo on a PWM pin, and a speaker behind an I2S amplifier. A board names
+// which it has — they share no pin, no peripheral and no way of being driven,
+// so probing would be two drivers' worth of guessing to save a board one line.
+#define BUZZER_KIND_PWM     1
+#define BUZZER_KIND_I2S     2
 #ifndef HAS_BUZZER
   #define HAS_BUZZER        0
+#endif
+#ifndef BUZZER_KIND
+  #define BUZZER_KIND       BUZZER_KIND_PWM
+#endif
+// The I2S speaker's pins, meaningless on a PWM board.
+#ifndef PIN_I2S_BCLK
+  #define PIN_I2S_BCLK      -1
+#endif
+#ifndef PIN_I2S_LRCLK
+  #define PIN_I2S_LRCLK     -1
+#endif
+#ifndef PIN_I2S_DOUT
+  #define PIN_I2S_DOUT      -1
 #endif
 #ifndef PIN_BUZZER
   #define PIN_BUZZER        -1
@@ -1012,6 +1031,15 @@
 #define BATTERY_MIN_V       3.0f            // below: no cell attached (USB bench)
 #define BATTERY_MAX_V       4.35f
 #define BATTERY_SAMPLE_MS   10000
+// How long a held reading stays believable once the converter stops answering.
+// The divider on some boards is an ADC2 pin, which loses arbitration to the
+// radio and the Wi-Fi stack now and then, so a missed sample is ordinary and
+// keeping the last figure is right. A converter that has answered nothing for
+// minutes is a different thing, and the node then has no idea what the cell is
+// doing — which is worth saying rather than covering with the last number it
+// happened to see. Comfortably longer than any contention, far shorter than a
+// cell takes to discharge.
+#define BATTERY_STALE_MS    300000          // five minutes
 #define DISPLAY_SLEEP_BATTERY_MS 20000
 
 // ---------------------------------------------------------------------------

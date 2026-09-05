@@ -229,6 +229,65 @@ static void doI2c(const Request& r) {
   ok("I2C");
 }
 
+// Every task's untouched stack, which is the measurement a soak test exists to
+// take. It is already in the boot log every thirty seconds and in /api/status,
+// and neither reaches the node this matters most on: a board short enough of
+// internal RAM to be worth trimming is a board whose portal has been switched
+// off to save the twenty-odd kilobytes it costs, reached over the TCP console,
+// which answers commands rather than streaming a log. Three days of soak would
+// then produce a number nobody could read.
+//
+// The figures are high-water marks — the least stack each task has ever had
+// left — so they only fall, and a reading after days of real traffic is worth
+// more than any bench session. They are still "worst seen", not "worst
+// possible": a stack cut to its observed peak is a crash waiting for a path
+// nothing has taken yet.
+static void doStacks(const Request&) {
+  // The tightest first, and on its own line. Everything below it can be cut
+  // off — the reply carried in an LXMF message is a couple of hundred bytes and
+  // ten tasks on a line each do not fit, which is how this was found: the soak
+  // collector got half a table and the words "reply truncated". Whatever
+  // survives, the number that decides anything survives with it.
+  const char* worst = nullptr;
+  const uint32_t low = Diag::lowestHeadroom(&worst);
+  // A nullptr means no task was read at all rather than a task with nothing
+  // left, and those must not look the same.
+  if (worst) dataf("STACKS", "tightest=%s headroom=%lu", worst, (unsigned long)low);
+
+  // Then all of them, packed onto as few lines as the buffer allows rather than
+  // one line each. "task=x headroom=y" per task is honest and three times the
+  // width of what it says; the pairs below carry the same figures and fit.
+  Diag::TaskStack st[16];
+  const size_t n = Diag::stacks(st, sizeof(st) / sizeof(st[0]));
+  char   line[160];
+  size_t at = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (!st[i].present) continue;
+    // Rendered on its own before anything is decided. Formatting straight into
+    // the line and asking afterwards whether it fitted is too late: snprintf
+    // has already written as much as it could, so the line that then goes out
+    // ends in half an entry — and the same entry is sent again, whole, on the
+    // next line. One reading, two names, neither of them right.
+    char pair[48];
+    const int len = snprintf(pair, sizeof(pair), "%s=%lu",
+                             st[i].name, (unsigned long)st[i].headroom);
+    if (len <= 0 || (size_t)len >= sizeof(pair)) continue;   // unrenderable, and not half-sent
+    if ((size_t)len >= sizeof(line)) continue;               // could not fit any line alone
+
+    // A space only between entries, so the width test is the width that will
+    // actually be used.
+    if (at && at + 1 + (size_t)len >= sizeof(line)) {
+      dataf("STACKS", "%s", line);
+      at = 0;
+    }
+    if (at) line[at++] = ' ';
+    memcpy(line + at, pair, (size_t)len + 1);                // the terminator too
+    at += (size_t)len;
+  }
+  if (at) dataf("STACKS", "%s", line);
+  ok("STACKS");
+}
+
 static void doVersion() {
   dataf("VERSION", "firmware=\"%s\" version=%s board=\"%s\" idf=%s assets=%s",
         FW_NAME, FW_VERSION, BOARD_NAME, esp_get_idf_version(), ASSET_STAMP);
@@ -381,8 +440,14 @@ static void doStatus() {
   // the cable by the number that made it go.
   {
     const Power::Battery bat = Power::battery();
+    // "stale" rather than "not-seen" where the converter has stopped answering:
+    // both report no battery, and they send an operator to opposite ends of the
+    // board. The last figure is printed beside it because it is the evidence —
+    // a plausible voltage under "stale" says the divider was working and the
+    // converter stopped, which is not the same fault as a cell nobody fitted.
     dataf("STATUS", "battery=%s volts=%.3f percent=%u%s",
-          bat.present ? "present" : "not-seen", (double)bat.volts, (unsigned)bat.percent,
+          Power::readingStale() ? "stale" : (bat.present ? "present" : "not-seen"),
+          (double)bat.volts, (unsigned)bat.percent,
           bat.chargeKnown ? (bat.charging ? " charging=yes" : " charging=no") : "");
   }
 #endif
@@ -731,6 +796,7 @@ static void dispatch(const char* line) {
   switch (r.cmd) {
     case Cmd::Help:          doHelp(); break;
     case Cmd::I2c:           doI2c(r); break;
+    case Cmd::Stacks:        doStacks(r); break;
     case Cmd::Status:        doStatus(); break;
     case Cmd::Version:       doVersion(); break;
     case Cmd::UsbStatus:     doUsbStatus(); break;
