@@ -44,6 +44,7 @@
 #include "PeerNames.h"
 #include "LxmfInbox.h"
 #include "WifiManager.h"
+#include "RnsTransport.h"
 
 namespace {
 
@@ -57,6 +58,13 @@ Kind kindFor(const char* key, const char* value, bool quoted) {
   if (strcmp(key, "wifi.security") == 0)            return Kind::Words;
   if (strcmp(key, "display.theme") == 0)            return Kind::Words;
   if (strcmp(key, "transport.power_profile") == 0)  return Kind::Words;
+  // The three interface modes. They are a fixed vocabulary, not a number, and
+  // rendering them as one made the screen ask for a digit between 1 and 5 with
+  // nothing on it to say which digit meant what — the portal has shown their
+  // names all along.
+  if (strcmp(key, "transport.lora_mode") == 0)      return Kind::Words;
+  if (strcmp(key, "transport.wifi_mode") == 0)      return Kind::Words;
+  if (strcmp(key, "transport.auto_mode") == 0)      return Kind::Words;
   // Quoted is the funnel's own convention for free text (renderStr quotes,
   // bools and numbers render bare) — so an SSID that happens to read "off"
   // or "12345678" is text, and the sniffing below never sees it.
@@ -82,6 +90,14 @@ void wordsFor(const char* key, char* out, size_t len) {
   size_t n = 0;
   if (strcmp(key, "display.theme") == 0) {
     snprintf(out, len, "night\nday");
+    return;
+  }
+  if (strncmp(key, "transport.", 10) == 0 && strstr(key, "_mode")) {
+    // From RnsTransport's own name helper, in its own order, for the same
+    // reason the lists below are: a retyped vocabulary goes stale the day the
+    // enum grows and nothing says so.
+    for (uint8_t m = 1; m <= 5; m++)
+      n += snprintf(out + n, len - n, "%s%s", m > 1 ? "\n" : "", RnsTransport::modeName(m));
     return;
   }
   if (strcmp(key, "wifi.security") == 0) {
