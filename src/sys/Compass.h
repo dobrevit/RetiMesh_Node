@@ -55,8 +55,16 @@ struct Reading {
 void begin();
 bool present();
 
-// One fresh reading. Cheap enough to call at whatever rate a caller likes; the
-// part is in continuous mode and this simply takes the latest.
+// Take a sample, whether or not anybody wants the answer. This is what makes
+// the hard-iron offsets findable: they are the middle of the extremes each axis
+// reaches, and the extremes are only reached while the board is being turned —
+// which is exactly when nobody is looking at a console. Sampling only on demand
+// meant a full turn contributed the two readings either side of it and nothing
+// in between, so the calibration could never fill in however much the board was
+// moved. Call it from the loop; it is one short transaction.
+void poll();
+
+// The most recent sample, taken now if the last one is stale.
 Reading read();
 
 } // namespace Compass
@@ -70,6 +78,7 @@ struct Reading {
 };
 inline void begin() {}
 inline bool present() { return false; }
+inline void poll() {}
 inline Reading read() { return Reading{}; }
 } // namespace Compass
 #endif // HAS_COMPASS

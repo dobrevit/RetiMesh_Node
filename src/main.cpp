@@ -256,7 +256,7 @@ void setup() {
   // up and report "radio offline" so the node can be diagnosed in place.
   g_stats.displayPresent = display.begin(); // probes I2C; clears the panel if found
   Diag::cost("display");
-#if HAS_BQ25896 || HAS_IMU
+#if HAS_BQ25896 || HAS_IMU || HAS_COMPASS
   // After the display, deliberately: the case's I2C parts sit behind the
   // switched peripheral rail, and the panel is what brings that rail up and
   // settles it (Panel.h). Powering it a second time from here left the panel
@@ -513,6 +513,11 @@ void loop() {
   // sometimes a restart (RnsAdmin.h).
   Rns::Admin::poll();
   Leds::tick(millis());
+  // The magnetometer, sampled whether or not anyone is asking. Its hard-iron
+  // offsets are found from the extremes each axis reaches, and those are only
+  // reached while the board is being turned — which is precisely when nobody is
+  // reading a console (Compass.h).
+  Compass::poll();
   // Every pass, not on the heartbeat: a crash 29 s after the last beat would
   // otherwise be recorded as having happened 29 s earlier, and a node stuck in
   // a restart loop would report every run as zero seconds — indistinguishable

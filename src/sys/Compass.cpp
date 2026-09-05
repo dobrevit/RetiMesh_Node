@@ -32,9 +32,9 @@ constexpr uint8_t kStatus   = 0x09;
 constexpr uint8_t kCtrl1    = 0x0A;
 constexpr uint8_t kCtrl2    = 0x0B;
 
-// Continuous mode, the part's fastest oversampling, 200 Hz. The rate costs
-// nothing here — this is read when something asks, not on a timer — and the
-// oversampling is what makes a single reading steady enough to be worth taking.
+// Continuous mode, the part's fastest oversampling, 200 Hz. Faster than this
+// file samples it, deliberately: the part averages internally, so what a
+// sample picks up is already settled rather than one noisy conversion.
 constexpr uint8_t kCtrl1Run = 0xD3;
 constexpr uint8_t kCtrl2Run = 0x03;
 constexpr uint8_t kSoftReset = 0x80;
@@ -75,12 +75,25 @@ void begin() {
   // — nothing here powers it down — so without this it would be configured
   // from whatever state the previous run, or the board's factory firmware, left
   // it in rather than from a known one.
-  I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, kSoftReset);
+  //
+  // Every write checked, and the part not counted as up unless all of them
+  // landed. A magnetometer left suspended still acknowledges its address and
+  // still answers a read of its output registers — with the zeros or the stale
+  // values it was holding — so an unchecked configuration failure does not
+  // produce a dead compass that reports itself dead. It produces a steady
+  // heading that never moves, which is a far worse thing to hand a navigator.
+  bool configured = I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, kSoftReset);
   delay(10);
-  I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, 0x00);
+  configured = configured && I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, 0x00);
   delay(10);
-  I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, kCtrl2Run);
-  I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Run);
+  configured = configured && I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, kCtrl2Run);
+  configured = configured && I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Run);
+  if (!configured) {
+    log_w("compass: QMC6309 answered at 0x%02x but would not take its configuration "
+          "— left off rather than reporting a heading that cannot change",
+          (uint8_t)COMPASS_ADDR);
+    return;
+  }
   delay(10);
 
   sUp = true;
@@ -88,7 +101,13 @@ void begin() {
         "around once before the hard-iron offsets mean anything", (uint8_t)COMPASS_ADDR);
 }
 
-Reading read() {
+// The last sample and when it was taken. Kept so that a caller asking for the
+// heading gets the work the poller has already done, and so that two callers in
+// the same pass do not each pay for a transaction.
+static Reading  sLast;
+static uint32_t sLastMs = 0;
+
+static Reading sample() {
   Reading r;
   if (!sUp) return r;
 
@@ -110,19 +129,26 @@ Reading read() {
   // been turned this is close to the readings themselves and the corrected
   // values are near zero, which is why calibration is reported beside the
   // heading rather than left for the caller to infer from a wrong answer.
-  float c[3];
-  float span = 0.0f;
+  float c[3], spread[3];
   for (int i = 0; i < 3; i++) {
     const float lo = sMin[i], hi = sMax[i];
     c[i] = raw[i] - (hi + lo) * 0.5f;
-    const float s = hi - lo;
-    if (s > span) span = s;
+    spread[i] = hi - lo;
   }
-  // Earth's field is 25-65 uT, so a full turn moves an axis by twice that at
-  // most. Scored against 50 uT of span, which a turn on a level surface reaches
-  // comfortably and a board sitting still never does.
-  const float scored = span / 50.0f * 100.0f;
-  r.calibration = (uint8_t)(scored > 100.0f ? 100.0f : scored);
+  // Scored on the *worse* of the two axes the heading turns on, not the best of
+  // all three. The best of three flatters: tipping the board end over end swings
+  // Z through the whole field and would report a calibrated compass while X and
+  // Y — the pair the bearing is actually computed from — had never moved. The
+  // conservative reading is the one worth printing, because the number exists to
+  // say whether to believe the heading.
+  //
+  // Earth's field is 25-65 uT, so turning an axis right around swings it by
+  // twice the local horizontal component. Fifty microtesla of spread is what a
+  // full turn on a level surface reaches here, and what a board sitting still
+  // never approaches.
+  const float weakest = spread[0] < spread[1] ? spread[0] : spread[1];
+  const float scored = weakest / 50.0f * 100.0f;
+  r.calibration = (uint8_t)(scored > 100.0f ? 100.0f : (scored < 0.0f ? 0.0f : scored));
 
   // Gravity says where level went. Without it the horizontal plane is assumed
   // to be the board's own, which is true only while it is held flat.
@@ -142,12 +168,41 @@ Reading read() {
       r.headingDeg = atan2f(-yh, xh) * 57.29577951f;
       r.levelled = true;
       // How far from flat, for a caller that wants to say "hold it level".
-      r.tiltDeg = acosf(az > 1.0f ? 1.0f : (az < -1.0f ? -1.0f : az)) * 57.29577951f;
+      // From the magnitude of the vertical component, not its signed value:
+      // which way up the board is does not change how level it is, and this
+      // part reads -1 g on Z lying face up, so the signed form called a board
+      // flat on the bench 178 degrees tilted.
+      const float vertical = az < 0.0f ? -az : az;
+      r.tiltDeg = acosf(vertical > 1.0f ? 1.0f : vertical) * 57.29577951f;
     }
   }
   if (!r.levelled) r.headingDeg = atan2f(-c[1], c[0]) * 57.29577951f;
   if (r.headingDeg < 0.0f) r.headingDeg += 360.0f;
+  sLast = r;
+  sLastMs = millis() ? millis() : 1;
   return r;
+}
+
+// Often enough that a board turned by hand cannot slip between samples — a
+// comfortable turn takes a second or two, and twenty samples across it is
+// plenty to find the extremes — and rare enough to be nothing on a bus this
+// board barely uses.
+constexpr uint32_t kPollMs = 100;
+
+void poll() {
+  if (!sUp) return;
+  const uint32_t now = millis();
+  if (sLastMs && now - sLastMs < kPollMs) return;
+  sample();
+}
+
+Reading read() {
+  if (!sUp) return Reading{};
+  // Fresh enough is the poller's last sample; otherwise take one now, so a
+  // caller is never handed a heading from a minute ago because the loop was
+  // busy.
+  if (sLastMs && millis() - sLastMs < kPollMs) return sLast;
+  return sample();
 }
 
 } // namespace Compass

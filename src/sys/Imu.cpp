@@ -74,6 +74,19 @@ bool rawAxes(int16_t& x, int16_t& y, int16_t& z) {
   y = (int16_t)((int16_t)(raw[2] | (raw[3] << 8)) >> 4);
   z = (int16_t)((int16_t)(raw[4] | (raw[5] << 8)) >> 4);
 #endif
+  // Into the panel's frame, which is the only frame the callers think in. Both
+  // of them — the display's rotation and the compass's tilt correction — ask
+  // "which way is down relative to the screen", so the mounting has to be
+  // undone here rather than in each of them.
+#if IMU_INVERT_X
+  x = (int16_t)-x;
+#endif
+#if IMU_INVERT_Y
+  y = (int16_t)-y;
+#endif
+#if IMU_INVERT_Z
+  z = (int16_t)-z;
+#endif
   return true;
 }
 
@@ -94,10 +107,23 @@ void begin() {
   // Auto-increment first, and it is not optional: without it every register in
   // a burst read comes back as the first one, so the output block reads as six
   // copies of the X low byte. BE left clear, so a pair is low byte then high.
-  writeReg(kCtrl1, 0x40);
-  writeReg(kCtrl2, kCtrl2Value);
-  writeReg(kCtrl7, 0x01);                // accelerometer only; the gyro costs
-                                         // milliamps and answers nothing asked here
+  //
+  // Checked, all three. This part answers its address whatever state it is in,
+  // so a configuration that did not land leaves an accelerometer that reads —
+  // the same six bytes for ever, because auto-increment is the very write most
+  // worth losing. Six copies of one byte is what an unconfigured part looks
+  // like, and it is exactly what the bus scan saw before any of this existed.
+  bool configured = writeReg(kCtrl1, 0x40);
+  configured = configured && writeReg(kCtrl2, kCtrl2Value);
+  configured = configured && writeReg(kCtrl7, 0x01);   // accelerometer only; the gyro
+                                                       // costs milliamps and answers
+                                                       // nothing asked here
+  if (!configured) {
+    log_w("imu: QMI8658 answered at 0x%02x but would not take its configuration "
+          "— left off rather than reading the same six bytes for ever", sAddr);
+    sAddr = 0;
+    return;
+  }
   log_i("imu: QMI8658 at 0x%02x, accelerometer running at +/-2 g", sAddr);
 #else
   for (uint8_t addr : { (uint8_t)0x26, (uint8_t)0x27 }) {
