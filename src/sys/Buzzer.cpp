@@ -41,6 +41,7 @@
 
 #if BUZZER_KIND == BUZZER_KIND_I2S
 #include <ESP_I2S.h>
+#include "Diag.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -66,9 +67,16 @@ constexpr int16_t  kAmplitude = 8000;
 constexpr size_t   kChunk   = 256;            // samples generated at a time
 
 I2SClass      sI2s;
-TaskHandle_t  sTask  = nullptr;
 QueueHandle_t sQueue = nullptr;
 bool          sReady = false;
+// Whether a sound is on the air, which the queue cannot answer. The task takes
+// a note off the queue before playing it, so an empty queue means "playing" as
+// often as it means "idle" — and a depth that let a second note wait would
+// contradict what this file promises anyway. Held here and tested under the
+// same kind of claim the piezo uses, because start() runs on whichever task has
+// news and this is cleared on the audio task.
+volatile bool sBusy = false;
+portMUX_TYPE  sBusyMux = portMUX_INITIALIZER_UNLOCKED;
 
 struct Note { uint32_t hz; uint32_t ms; uint32_t nextHz; };
 
@@ -101,16 +109,38 @@ void audioTask(void*) {
     if (xQueueReceive(sQueue, &n, portMAX_DELAY) != pdTRUE) continue;
     play(n.hz, n.ms);
     if (n.nextHz) play(n.nextHz, n.ms);
+    // Only now. Clearing it when the note was taken off the queue would open
+    // the door for the length of the sound, which is precisely the window in
+    // which a second one arrives.
+    portENTER_CRITICAL(&sBusyMux);
+    sBusy = false;
+    portEXIT_CRITICAL(&sBusyMux);
   }
 }
 
-// Posted and forgotten. A full queue means a sound is already playing, and the
-// news a second one would carry is the news already in the air — the same rule
-// the piezo follows by refusing while busy.
+// Started if the sounder is idle, refused otherwise: one at a time and none
+// queued, which is what Buzzer.h promises and what the piezo does. The news a
+// second sound would carry is the news already in the air.
+//
+// The claim is made before the note is posted rather than after, because the
+// task can finish a short note and clear it between the two — and a start()
+// that then posted would leave a note on the queue with nothing claiming to be
+// playing it.
 bool start(uint32_t hz, uint32_t ms, uint32_t nextHz) {
   if (!sReady || !sQueue) return false;
+  portENTER_CRITICAL(&sBusyMux);
+  if (sBusy) { portEXIT_CRITICAL(&sBusyMux); return false; }
+  sBusy = true;
+  portEXIT_CRITICAL(&sBusyMux);
+
   const Note n{hz, ms, nextHz};
-  return xQueueSend(sQueue, &n, 0) == pdTRUE;
+  if (xQueueSend(sQueue, &n, 0) == pdTRUE) return true;
+  // It did not go: give the claim back rather than leaving the sounder marked
+  // busy for ever over a note nobody will play.
+  portENTER_CRITICAL(&sBusyMux);
+  sBusy = false;
+  portEXIT_CRITICAL(&sBusyMux);
+  return false;
 }
 
 #else
@@ -172,15 +202,18 @@ void begin() {
           PIN_I2S_BCLK, PIN_I2S_LRCLK, PIN_I2S_DOUT);
     return;
   }
-  sQueue = xQueueCreate(2, sizeof(Note));        // one playing, one owed
+  sQueue = xQueueCreate(1, sizeof(Note));        // one at a time, and none owed
   if (!sQueue) { sI2s.end(); return; }
+  // Through Diag rather than straight to FreeRTOS: it reports a task that would
+  // not start the way every other one here is reported, and it is the list this
+  // task's stack headroom is watched from.
+  //
   // Small and low: it spends its life blocked on the queue, and what it does
   // when it wakes is fill a buffer with two alternating values.
-  if (xTaskCreatePinnedToCore(audioTask, "audio", 2560, nullptr, 1, &sTask, 0) != pdPASS) {
+  if (!Diag::startTask(audioTask, "audio", 2560, nullptr, 1, 0)) {
     vQueueDelete(sQueue);
     sQueue = nullptr;
     sI2s.end();
-    log_w("buzzer: no room for the audio task; the speaker stays quiet");
     return;
   }
   sReady = true;
