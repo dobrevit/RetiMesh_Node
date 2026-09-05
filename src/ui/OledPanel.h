@@ -46,6 +46,13 @@ public:
   void blank(bool on) override {
     _oled.ssd1306_command(on ? SSD1306_DISPLAYOFF : SSD1306_DISPLAYON);
   }
+  // SSD1306 panel current is close to linear in contrast, so this is a real
+  // power knob rather than a cosmetic one (D3, roadmap/power/01-defects.md).
+  void setBrightness(uint8_t pct) {
+    pct = pct > 100 ? 100 : pct;
+    _oled.ssd1306_command(SSD1306_SETCONTRAST);
+    _oled.ssd1306_command((uint8_t)((uint32_t)pct * 255u / 100u));
+  }
   // The panel and its charge pump come off, which is the point of the timer.
   bool blanks() const override { return true; }
   const uint8_t* frame(size_t& len) const override {

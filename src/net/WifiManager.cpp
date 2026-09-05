@@ -270,6 +270,17 @@ static const MaintField kMaintFields[] = {
 };
 
 void WifiManager::begin() {
+  // WiFi.setSleep() only reaches esp_wifi_set_ps() once the interface it
+  // names has actually started; called any earlier (Power::begin() runs
+  // before this) it just caches the request. STA_START/AP_START fire every
+  // time an interface comes up — first boot, a mode change, a reconnect — so
+  // hooking them here is what makes the profile's setting actually stick
+  // rather than leaving the driver on whatever ESP-IDF defaulted to.
+  WiFi.onEvent([](WiFiEvent_t event) {
+    if (event == ARDUINO_EVENT_WIFI_STA_START || event == ARDUINO_EVENT_WIFI_AP_START) {
+      Power::applyWifiSleep();
+    }
+  });
   if (wifiEnabled()) {
     startAccessPoint();
 
@@ -588,7 +599,12 @@ void WifiManager::tick() {
 // ---------------------------------------------------------------------------
 void WifiManager::staScanStart() {
   // Scanning wants the station interface; a node running AP-only gains it
-  // here and keeps it — the mode is where a configured station would put it.
+  // here only for the scan's duration — staScanDone() restores whatever mode
+  // it found, so one visit to the join screen no longer forfeits STA modem
+  // sleep for the rest of the boot. Saved once per visit: a rescan while the
+  // screen is still open must not overwrite the real original with the
+  // promoted mode from the first scan.
+  if (!_scanModeSaved) { _preScanMode = WiFi.getMode(); _scanModeSaved = true; }
   if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
   WiFi.scanNetworks(true /* async */);
 }
@@ -608,7 +624,13 @@ bool WifiManager::staScanResult(int i, StaScanEntry& out) {
   return out.ssid[0] != '\0';           // hidden networks scan as empty names
 }
 
-void WifiManager::staScanDone() { WiFi.scanDelete(); }
+void WifiManager::staScanDone() {
+  WiFi.scanDelete();
+  if (_scanModeSaved) {
+    if (WiFi.getMode() != _preScanMode) WiFi.mode(_preScanMode);
+    _scanModeSaved = false;
+  }
+}
 
 bool WifiManager::staJoin(const char* ssid, const char* password) {
   // What cannot be stored is not attempted: a 64-character raw PSK joins
@@ -1093,6 +1115,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     JsonObject pw = doc["power"].to<JsonObject>();
     pw["profile"] = Power::profileName(Power::profile());
     pw["cpu_mhz"] = getCpuFrequencyMhz();
+    // Read back from the driver (esp_wifi_get_ps()), not assumed from the
+    // profile: the proof a profile switch actually took effect (roadmap/
+    // power/06-plan.md round 1 acceptance).
+    pw["wifi_ps"] = Power::wifiPsName();
     pw["battery_present"] = b.present;
     // Null, not false, where the board has no way to tell. A caller can then
     // say "unknown" instead of drawing a conclusion this node never reached.

@@ -22,6 +22,7 @@
 #include "Power.h"
 #include "Pmu.h"
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <esp32-hal-cpu.h>
 #include "Settings.h"
 #include "Bq25896.h"
@@ -149,13 +150,28 @@ bool profileFromName(const char* n, Profile& out) {
 
 Profile profile() { return sProfile; }
 
+void applyWifiSleep() {
+  WiFi.setSleep(sProfile != Profile::Performance);
+}
+
+const char* wifiPsName() {
+  wifi_ps_type_t ps;
+  if (esp_wifi_get_ps(&ps) != ESP_OK) return "n/a";  // driver not started (Wi-Fi off)
+  switch (ps) {
+    case WIFI_PS_NONE:      return "none";
+    case WIFI_PS_MIN_MODEM: return "min_modem";
+    default:                return "max_modem";
+  }
+}
+
 void apply(Profile p) {
   sProfile = p;
   switch (p) {
-    case Profile::Battery:     setCpuFrequencyMhz(80);  WiFi.setSleep(true);  break;
-    case Profile::Balanced:    setCpuFrequencyMhz(160); WiFi.setSleep(true);  break;
-    default:                   setCpuFrequencyMhz(240); WiFi.setSleep(false); break;
+    case Profile::Battery:  setCpuFrequencyMhz(80);  break;
+    case Profile::Balanced: setCpuFrequencyMhz(160); break;
+    default:                setCpuFrequencyMhz(240); break;
   }
+  applyWifiSleep();
   log_i("power profile: %s (CPU %u MHz, Wi-Fi sleep %s)", profileName(p), (unsigned)getCpuFrequencyMhz(),
         p == Profile::Performance ? "off" : "on");
 }
@@ -223,16 +239,21 @@ Battery battery() {
 #if HAS_PMU
   // The power-management chip measures the cell itself, and knows things an
   // ADC divider cannot: whether a battery is actually connected, and whether
-  // it is charging.
-  Pmu::Battery p = Pmu::battery();
-  Battery b;
-  b.volts    = p.volts;
-  b.present  = p.present;
-  b.charging = p.charging;
-  b.chargeKnown = true;             // the chip is asked directly
-  b.percent  = p.present ? p.percent : 0;
-  recordHistory(b.present, b.percent);
-  return b;
+  // it is charging. Gated the same as the ADC branch below: it sits on I2C,
+  // and the mono OLED path paints twice a second — four live transactions
+  // per paint, for a number that only changes over minutes, before this.
+  static Battery sCached{};
+  if (millis() - sLastSample > BATTERY_SAMPLE_MS) {
+    sLastSample = millis();
+    Pmu::Battery p = Pmu::battery();
+    sCached.volts     = p.volts;
+    sCached.present   = p.present;
+    sCached.charging  = p.charging;
+    sCached.chargeKnown = true;       // the chip is asked directly
+    sCached.percent   = p.present ? p.percent : 0;
+    recordHistory(sCached.present, sCached.percent);
+  }
+  return sCached;
 #elif HAS_BATTERY_ADC
   if (millis() - sLastSample > BATTERY_SAMPLE_MS) sample();
   Battery b;

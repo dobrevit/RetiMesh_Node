@@ -141,6 +141,11 @@ private:
   char            _joinSsid[33] = "";
   char            _joinPass[65] = "";
   uint32_t        _joinDeadline = 0;
+  // The mode staScanStart() found before promoting to WIFI_AP_STA, restored
+  // by staScanDone() — set only while a promotion is actually in effect, so
+  // a rescan mid-visit doesn't overwrite it with the promoted mode itself.
+  bool            _scanModeSaved = false;
+  wifi_mode_t     _preScanMode = WIFI_MODE_NULL;
 };
 
 extern WifiManager wifiManager;

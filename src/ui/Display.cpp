@@ -150,13 +150,18 @@ void Display::displayTask(void* self) {
     d->pollButton2();
 #endif
     uint32_t now = millis();
-#if HAS_LVGL_UI
+#if HAS_LVGL_UI || DISPLAY_KIND == DISPLAY_KIND_OLED
     {
-      // The brightness setting reaches the glass here, once per change.
+      // The brightness setting reaches the glass here, once per change. OLED
+      // panel current is close to linear in contrast (D3,
+      // roadmap/power/01-defects.md), so this is a real knob there too, not
+      // only on the backlit TFT boards.
       static uint8_t lastB = 255;
       const uint8_t b = settings.display().brightness;
       if (b != lastB) { lastB = b; d->_panelImpl.setBrightness(b); }
     }
+#endif
+#if HAS_LVGL_UI
     if (sShellUp) {
       // The rest-and-alarm policy is the shell's own (LvglUi::restTick);
       // the panel applies the verdict and keeps the backlight to itself.

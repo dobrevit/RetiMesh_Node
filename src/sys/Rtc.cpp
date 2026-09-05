@@ -34,6 +34,7 @@ namespace {
 constexpr uint8_t kRegControl1 = 0x00;
 constexpr uint8_t kRegControl2 = 0x01;
 constexpr uint8_t kRegSeconds  = 0x02;   // bit 7 is VL
+constexpr uint8_t kRegClkout   = 0x0D;   // power-on default: 32.768 kHz output enabled
 constexpr uint8_t kVoltageLow  = 0x80;
 constexpr uint8_t kStop        = 0x20;   // control 1: the counter is halted
 
@@ -147,6 +148,9 @@ void begin() {
     log_w("rtc: the counter was halted and has been started");
   }
   I2cReg::write(bus(), RTC_ADDR, kRegControl2, 0x00);
+  // Nothing in the firmware consumes CLKOUT; left at its power-on default it
+  // is a free-running 32.768 kHz square wave on an always-powered pin (D7).
+  I2cReg::write(bus(), RTC_ADDR, kRegClkout, 0x00);
 
   time_t held = 0;
   if (read(held)) {

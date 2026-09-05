@@ -530,10 +530,15 @@ void loop() {
   // a restart loop would report every run as zero seconds — indistinguishable
   // from one that never got past setup(). One word into RTC RAM, no flash.
   Diag::tick(millis() / 1000);
-  g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-  g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   if (millis() - lastBeat >= 30000) {
     lastBeat = millis();
+    // Walking the whole heap under the allocator's lock belongs on the
+    // heartbeat's cadence, not every pass of loop() (near enough 1 kHz):
+    // get_minimum_free_size() already tracks the all-time low itself, so
+    // asking less often loses nothing, and psramFree is only ever read back
+    // from a status page that is no fresher than this anyway.
+    g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     // The battery sampler rides whoever calls battery(); with the glass
     // asleep nobody did, and the discharge history's clock silently stopped
     // on exactly the battery-first nodes it exists for. The heartbeat asks.

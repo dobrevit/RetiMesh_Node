@@ -34,6 +34,10 @@ const uint32_t SYNC_INTERVAL = 3600000;
 
 HardwareSerial   sSerial(1);
 SemaphoreHandle_t sLock = nullptr;
+// Set by the task itself before its first pass; setEnabled(true) uses it to
+// wake a task parked in the disabled branch's notify-wait immediately,
+// rather than leaving it to find out on the next timeout.
+TaskHandle_t     sTaskHandle = nullptr;
 Gps::Fix         sFix;
 char             sLine[NMEA_MAX];
 uint16_t         sLen = 0;
@@ -207,6 +211,7 @@ void resetState() {
 }
 
 void task(void*) {
+  sTaskHandle = xTaskGetCurrentTaskHandle();
   Watchdog::watch();
   // Guarded whole rather than per statement: the loop below uses continue,
   // which cannot cross a lambda. A receiver that cannot be parsed for want
@@ -221,7 +226,8 @@ void task(void*) {
         // to run just before that would otherwise go on to read a port that has
         // since been shut down.
         Sys::Lock held(sLock);
-        if (sFix.enabled) {
+        const bool on = sFix.enabled;
+        if (on) {
           // Bounded per pass so a chatty receiver cannot monopolise the task.
           // 9600 baud is under 1 KB/s, and this runs ten times a second.
           uint16_t budget = 256;
@@ -242,7 +248,15 @@ void task(void*) {
           sFix.ageMs = sFix.sentences ? millis() - sLastSentenceMs : 0;
         }
         held.release();
-        vTaskDelay(pdMS_TO_TICKS(100));
+        if (on) {
+          vTaskDelay(pdMS_TO_TICKS(100));
+        } else {
+          // Disabled: nothing to poll for, so wait to be told rather than
+          // waking 10x/s to reread a flag. setEnabled(true) gives the
+          // notification directly; the timeout is only a fallback in case a
+          // future caller flips the flag without going through it.
+          ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+        }
       }
     });
     vTaskDelay(pdMS_TO_TICKS(100));      // contained: wait, then back in
@@ -293,6 +307,7 @@ void setEnabled(bool on) {
 #endif
     sSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
     sFix.enabled = true;
+    if (sTaskHandle) xTaskNotifyGive(sTaskHandle);
     log_i("GNSS receiver on (UART1 rx %d tx %d @ %d baud)", PIN_GPS_RX, PIN_GPS_TX, GPS_BAUD);
   } else {
     sSerial.end();
