@@ -592,6 +592,25 @@
 #ifndef BUZZER_KIND
   #define BUZZER_KIND       BUZZER_KIND_PWM
 #endif
+// Whether the sounder starts switched on, which is decided by what it costs.
+// A piezo is a PWM channel and a timer — free, so it ships on and the node
+// keeps chirping as it always did. A speaker behind an I2S amplifier is a task
+// and a DMA ring, about 5.4 KB of internal RAM, which on the board that has one
+// is a quarter of what it has spare and enough to stop the portal serving. That
+// ships off, and turning it on is a choice made knowing the trade.
+#ifndef SOUND_ENABLED_DEFAULT
+  #if BUZZER_KIND == BUZZER_KIND_I2S
+    #define SOUND_ENABLED_DEFAULT 0
+  #else
+    #define SOUND_ENABLED_DEFAULT 1
+  #endif
+#endif
+// Percent. Only the speaker can act on it: a piezo is driven at the one
+// amplitude its PWM channel produces, so the setting is offered where it means
+// something and refused where it does not.
+#ifndef SOUND_VOLUME_DEFAULT
+  #define SOUND_VOLUME_DEFAULT 40
+#endif
 // The I2S speaker's pins, meaningless on a PWM board.
 #ifndef PIN_I2S_BCLK
   #define PIN_I2S_BCLK      -1

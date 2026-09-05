@@ -42,9 +42,20 @@
 
 namespace Buzzer {
 
-void begin();     // claims the pin; silent until asked
+void begin();     // claims what the board needs, if the sounder is switched on
 void boot();      // two short notes up: running
 void message();   // one note: something arrived for you
+
+// Take up or release the hardware to match the setting, without a restart.
+// That is the point of the switch on the speaker boards: the task and the DMA
+// ring are about 5.4 KB of internal RAM, a quarter of what one of these boards
+// has spare and enough to stop the portal serving — so turning the sounder off
+// has to give that back rather than merely stay quiet.
+void apply();
+
+// Whether the sounder is up and can be heard. False when the board has none,
+// when it is switched off, and when it would not start.
+bool present();
 
 } // namespace Buzzer
 
@@ -54,6 +65,8 @@ namespace Buzzer {
 inline void begin() {}
 inline void boot() {}
 inline void message() {}
+inline void apply() {}
+inline bool present() { return false; }
 } // namespace Buzzer
 
 #endif // HAS_BUZZER
