@@ -259,22 +259,30 @@ static void doStacks(const Request&) {
   // width of what it says; the pairs below carry the same figures and fit.
   Diag::TaskStack st[16];
   const size_t n = Diag::stacks(st, sizeof(st) / sizeof(st[0]));
-  char line[160];
+  char   line[160];
   size_t at = 0;
   for (size_t i = 0; i < n; i++) {
     if (!st[i].present) continue;
-    const int add = snprintf(line + at, sizeof(line) - at, "%s%s=%lu",
-                             at ? " " : "", st[i].name, (unsigned long)st[i].headroom);
-    if (add < 0) break;
-    if (at + (size_t)add >= sizeof(line) - 1) {   // this one did not fit: flush and restart
+    // Rendered on its own before anything is decided. Formatting straight into
+    // the line and asking afterwards whether it fitted is too late: snprintf
+    // has already written as much as it could, so the line that then goes out
+    // ends in half an entry — and the same entry is sent again, whole, on the
+    // next line. One reading, two names, neither of them right.
+    char pair[48];
+    const int len = snprintf(pair, sizeof(pair), "%s=%lu",
+                             st[i].name, (unsigned long)st[i].headroom);
+    if (len <= 0 || (size_t)len >= sizeof(pair)) continue;   // unrenderable, and not half-sent
+    if ((size_t)len >= sizeof(line)) continue;               // could not fit any line alone
+
+    // A space only between entries, so the width test is the width that will
+    // actually be used.
+    if (at && at + 1 + (size_t)len >= sizeof(line)) {
       dataf("STACKS", "%s", line);
       at = 0;
-      const int again = snprintf(line, sizeof(line), "%s=%lu",
-                                 st[i].name, (unsigned long)st[i].headroom);
-      at = again > 0 ? (size_t)again : 0;
-      continue;
     }
-    at += (size_t)add;
+    if (at) line[at++] = ' ';
+    memcpy(line + at, pair, (size_t)len + 1);                // the terminator too
+    at += (size_t)len;
   }
   if (at) dataf("STACKS", "%s", line);
   ok("STACKS");
