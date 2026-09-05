@@ -310,7 +310,7 @@ void barTick(lv_timer_t*) {
   }
   if (f.valid) { add(LV_SYMBOL_GPS); add(" "); }
 #endif
-  if (settings.links().wifiEnabled) { add(LV_SYMBOL_WIFI); add(" "); }
+  if (settings.links().wifiEnabled()) { add(LV_SYMBOL_WIFI); add(" "); }
   add(g_stats.radioOnline ? "LoRa " : "");
   const Power::Battery b = Power::battery();
   if (b.chargeKnown && b.charging) add(LV_SYMBOL_CHARGE);

@@ -272,6 +272,25 @@ Result setLinkSwitch(bool LinkSettings::*member, const char* v, char* err, size_
   return commitLinks(want, changed, err, n);
 }
 
+// Both Wi-Fi links at once, for the key that used to be the only one. Written
+// as a pair rather than by calling setLinkSwitch twice: each call commits, and
+// two commits mean two restarts armed for one request — and the second would
+// read a LinkSettings the first had already changed.
+Result setBothWifi(const char* v, char* err, size_t n) {
+  bool on = false;
+  if (!parseBool(v, on)) { snprintf(err, n, "expected on or off"); return Result::BadValue; }
+  LinkSettings want = settings.links();
+  want.wifiApEnabled = on;
+  want.wifiStaEnabled = on;
+  size_t fields = 0;
+  const LocalLink::Field* f = LocalLink::fields(fields);
+  bool changed[8] = {false};
+  for (size_t i = 0; i < fields && i < 8; i++)
+    changed[i] = (f[i].on == &LinkSettings::wifiApEnabled ||
+                  f[i].on == &LinkSettings::wifiStaEnabled);
+  return commitLinks(want, changed, err, n);
+}
+
 // ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
@@ -425,9 +444,22 @@ const Entry kFields[] = {
       strlcpy(w.staPassword, v, sizeof(w.staPassword)); return commitWifi(w, e, n); }, true },
 
   // --- links -------------------------------------------------------------
+  // Both at once, kept because the console command, the API and every script
+  // written against them say "links.wifi" — and because "is Wi-Fi on" is still
+  // a question worth being able to ask and answer in one word. It reads as on
+  // when either link is wanted, and writing it writes both.
   { "links.wifi",
-    [](char* o, size_t n) { snprintf(o, n, "%s", settings.links().wifiEnabled ? "on" : "off"); },
-    [](const char* v, char* e, size_t n) { return setLinkSwitch(&LinkSettings::wifiEnabled, v, e, n); } },
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.links().wifiEnabled() ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { return setBothWifi(v, e, n); } },
+  // And each on its own. The access point is the one worth turning off by
+  // itself: it must beacon and cannot sleep, so it costs current whether or not
+  // anyone is connected, while a station can doze between beacons.
+  { "links.wifi_ap",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.links().wifiApEnabled ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { return setLinkSwitch(&LinkSettings::wifiApEnabled, v, e, n); } },
+  { "links.wifi_sta",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.links().wifiStaEnabled ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { return setLinkSwitch(&LinkSettings::wifiStaEnabled, v, e, n); } },
   { "links.usb",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.links().usbEnabled ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { return setLinkSwitch(&LinkSettings::usbEnabled, v, e, n); } },

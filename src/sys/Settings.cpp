@@ -112,7 +112,17 @@ void Settings::load() {
   LOAD(_transport.sdStore,             "t_sdst",  getBool  ("t_sdst"));
   if (_prefs.isKey("t_smov")) _transport.pendingMove = (StoreHome::Move)_prefs.getUChar("t_smov");
   if (_prefs.isKey("t_agrp")) _prefs.getString("t_agrp", _transport.autoGroupId, sizeof(_transport.autoGroupId));
-  LOAD(_links.wifiEnabled,  "l_wifi", getBool("l_wifi"));
+  // The one Wi-Fi switch became two. A node that has been running carries only
+  // the old key, and reading nothing from the new ones would silently turn its
+  // Wi-Fi off at the first boot on new firmware — so the old value seeds both
+  // and is then superseded by whichever new keys exist.
+  if (_prefs.isKey("l_wifi")) {
+    const bool was = _prefs.getBool("l_wifi");
+    _links.wifiApEnabled = was;
+    _links.wifiStaEnabled = was;
+  }
+  LOAD(_links.wifiApEnabled,  "l_wifiap",  getBool("l_wifiap"));
+  LOAD(_links.wifiStaEnabled, "l_wifista", getBool("l_wifista"));
   LOAD(_links.usbEnabled,   "l_usb",  getBool("l_usb"));
   LOAD(_links.pppEnabled,   "l_ppp",  getBool("l_ppp"));
   LOAD(_links.pppBaud,      "l_pbaud", getUInt("l_pbaud"));
@@ -212,7 +222,11 @@ bool Settings::saveTransport(const TransportSettings& t) {
 
 bool Settings::saveLinks(const LinkSettings& l) {
   _links = l;
-  bool ok = _prefs.putBool("l_wifi", l.wifiEnabled) > 0
+  // The old key is written too, so a downgrade finds something sane rather than
+  // its default: on if either link is wanted.
+  bool ok = _prefs.putBool("l_wifi",    l.wifiEnabled())    > 0
+         && _prefs.putBool("l_wifiap",  l.wifiApEnabled)    > 0
+         && _prefs.putBool("l_wifista", l.wifiStaEnabled)   > 0
          && _prefs.putBool("l_usb",  l.usbEnabled)  > 0
          && _prefs.putBool("l_ppp",  l.pppEnabled)  > 0
          && _prefs.putUInt("l_pbaud", l.pppBaud)    > 0;
