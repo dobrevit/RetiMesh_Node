@@ -214,7 +214,7 @@ static void sendError(AsyncWebServerRequest* r, int code, const char* msg) {
 }
 
 // ---------------------------------------------------------------------------
-bool WifiManager::wifiEnabled() const { return settings.links().wifiEnabled; }
+bool WifiManager::wifiEnabled() const { return settings.links().wifiEnabled(); }
 
 // The bootloader plan and state, written once. Three handlers used to spell
 // this out separately and had already drifted: the same fact was api_enabled
@@ -461,21 +461,30 @@ void WifiManager::startAccessPoint() {
   bool secured = w.security != ApSecurity::Open && strlen(w.password) >= 8;
   const char* pass = secured ? w.password : nullptr;
 
+  // The radio's mode follows the two switches rather than the one. A station
+  // without an access point is now a shape this can be in — it is the shape a
+  // carried node wants, since the access point must beacon and cannot sleep —
+  // and asking for WIFI_AP_STA there would put the beacon back on the air.
+  const bool wantAp  = settings.links().wifiApEnabled;
+  const bool wantSta = settings.links().wifiStaEnabled && stationConfigured();
+
   WiFi.persistent(false);
-  WiFi.mode(stationConfigured() ? WIFI_AP_STA : WIFI_AP);
+  WiFi.mode(wantAp ? (wantSta ? WIFI_AP_STA : WIFI_AP) : WIFI_STA);
   // IPv6 link-local on both links, asked for before they start: core 3
   // creates the address when the interface comes up and only then, so a
   // request made afterwards — which is when AutoInterface used to make it —
   // waits for a start that has already happened. AutoInterface reads the
   // addresses; the links are brought up here, so they are enabled here.
-  WiFi.softAPenableIPv6();
+  if (wantAp) {
+    WiFi.softAPenableIPv6();
+    WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
+    WiFi.softAP(_ssid, pass, w.channel, w.hidden ? 1 : 0, w.maxStations);
+  }
   WiFi.enableIPv6();
-  WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
-  WiFi.softAP(_ssid, pass, w.channel, w.hidden ? 1 : 0, w.maxStations);
 
   // Station mode: join the configured LAN too. The AP and the STA share
   // one radio, so the AP follows the LAN's channel once connected.
-  if (stationConfigured()) {
+  if (wantSta) {
     WiFi.setAutoReconnect(true);
     WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
     log_i("station: joining \"%s\"", w.staSsid);

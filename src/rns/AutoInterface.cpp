@@ -418,7 +418,7 @@ void begin(RingbufHandle_t inRing) {
   // The multicast group lives on the Wi-Fi netifs, which do not exist with
   // Wi-Fi off. The lock above is created regardless, because the readers
   // below run whether or not peering does.
-  if (!settings.links().wifiEnabled) { log_i("AutoInterface: Wi-Fi is off, nothing to peer on"); return; }
+  if (!settings.links().wifiEnabled()) { log_i("AutoInterface: Wi-Fi is off, nothing to peer on"); return; }
   // 8 KB: the reverse-peering pass copies the peer table onto the stack so it
   // can send without holding the lock, and that table is three times the size
   // it was.

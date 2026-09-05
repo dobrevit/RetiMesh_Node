@@ -491,7 +491,7 @@ void setup() {
   // a first announce — is measured against a timeout meant for steady running.
   Watchdog::watch();
 
-  if (settings.links().wifiEnabled)
+  if (settings.links().wifiEnabled())
     log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",
           wifiManager.ssid(), AP_IP.toString().c_str(), RNS_TCP_PORT);
   else

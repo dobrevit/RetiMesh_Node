@@ -76,7 +76,7 @@ void tick(uint32_t nowMs) {
   if (Bootloader::pending()) status = (nowMs / 250) & 1;
   // Wi-Fi: lit while it is switched on and no link is ready — Wi-Fi off by
   // choice has nothing to say. Traffic from TCP clients flickers it.
-  bool wifi = settings.links().wifiEnabled && !wifiReady();
+  bool wifi = settings.links().wifiEnabled() && !wifiReady();
   if (sWifi.flicker(g_stats.tcpRxPackets, nowMs)) wifi = !wifi;
   // LoRa: lit while the radio is offline; every packet either way flickers it.
   bool lora = !g_stats.radioOnline;

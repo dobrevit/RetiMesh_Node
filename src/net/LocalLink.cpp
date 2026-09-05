@@ -80,9 +80,14 @@ uint32_t hostOrder(const IPAddress& a) { return ipv4(a[0], a[1], a[2], a[3]); }
 // ---------------------------------------------------------------------------
 const Field* fields(size_t& n) {
   static const Field kFields[] = {
-    { "wifi", Type::WifiAp,  &LinkSettings::wifiEnabled },
-    { "usb",  Type::UsbNcm,  &LinkSettings::usbEnabled  },
-    { "ppp",  Type::PppUart, &LinkSettings::pppEnabled  },
+    // Two Wi-Fi rows now, one per link, because the two are switched apart.
+    // The old single "wifi" key is still understood by the settings table,
+    // where it writes both — but here each link maps to its own switch, or the
+    // API would report the station's state for the access point.
+    { "wifi_ap",  Type::WifiAp,  &LinkSettings::wifiApEnabled  },
+    { "wifi_sta", Type::WifiSta, &LinkSettings::wifiStaEnabled },
+    { "usb",      Type::UsbNcm,  &LinkSettings::usbEnabled     },
+    { "ppp",      Type::PppUart, &LinkSettings::pppEnabled     },
   };
   n = sizeof(kFields) / sizeof(kFields[0]);
   return kFields;
@@ -155,7 +160,11 @@ Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Sourc
   }
   if (lockedOut(next, settings.maintenance().consoleEnabled, settings.maintenance().webUi))
     return Apply::RefusedLockedOut;
-  const bool wifiChanged = next.wifiEnabled != settings.links().wifiEnabled;
+  // Either link changing needs the restart, not only the pair as a whole: the
+  // radio's mode is chosen once at bring-up, so turning the access point off
+  // while the station stays on is still a change the running radio cannot make.
+  const bool wifiChanged = next.wifiApEnabled  != settings.links().wifiApEnabled ||
+                           next.wifiStaEnabled != settings.links().wifiStaEnabled;
   bool same = next.pppBaud == settings.links().pppBaud;
   for (size_t i = 0; i < n; i++) if (next.*(f[i].on) != settings.links().*(f[i].on)) same = false;
   if (same) return Apply::Unchanged;
@@ -210,13 +219,13 @@ uint32_t MachineLink::netmask() const {
 // ---------------------------------------------------------------------------
 // Wi-Fi adapters
 // ---------------------------------------------------------------------------
-bool      WifiApLink::wanted() const  { return settings.links().wifiEnabled; }
+bool      WifiApLink::wanted() const  { return settings.links().wifiApEnabled; }
 bool      WifiApLink::carrier() const { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
 IPAddress WifiApLink::ip() const      { return WiFi.softAPIP(); }
 IPAddress WifiApLink::mask() const    { return WiFi.softAPSubnetMask(); }
 uint8_t   WifiApLink::clients() const { return WiFi.softAPgetStationNum(); }
 
-bool      WifiStaLink::wanted() const  { return settings.links().wifiEnabled && wifiManager.stationConfigured(); }
+bool      WifiStaLink::wanted() const  { return settings.links().wifiStaEnabled && wifiManager.stationConfigured(); }
 bool      WifiStaLink::carrier() const { return wifiManager.stationConnected(); }
 IPAddress WifiStaLink::ip() const      { return WiFi.localIP(); }
 IPAddress WifiStaLink::mask() const    { return WiFi.subnetMask(); }

@@ -118,7 +118,18 @@ struct AdminSettings {
 // every board: the node then answers only on USB or PPP where it has them,
 // and on the maintenance console everywhere (WIFI ON turns it back on).
 struct LinkSettings {
-  bool wifiEnabled = WIFI_ENABLED_DEFAULT != 0;   // headless boards ship it off
+  // The two Wi-Fi links, switched apart. They were one flag, which is fine for
+  // memory — the radio driver and its buffers are the bulk of the cost and both
+  // links share them — and wrong for power: an access point must beacon and
+  // cannot sleep, while a station can. On a carried device that is a permanent
+  // draw for something usually nobody is connected to, and there was no way to
+  // turn it off without also losing the LAN.
+  bool wifiApEnabled  = WIFI_ENABLED_DEFAULT != 0;   // headless boards ship it off
+  bool wifiStaEnabled = WIFI_ENABLED_DEFAULT != 0;
+  // Whether the radio is needed at all. Asked by everything that only wants to
+  // know if Wi-Fi is up in any form — which is most callers, so it stays a
+  // question they can ask rather than one each of them has to compose.
+  bool wifiEnabled() const { return wifiApEnabled || wifiStaEnabled; }
   bool usbEnabled  = true;              // USB networking, where the board and build carry it
   bool pppEnabled  = false;             // PPP over the bridge UART, likewise
   // The serial port's speed while PPP is on — console and log included,

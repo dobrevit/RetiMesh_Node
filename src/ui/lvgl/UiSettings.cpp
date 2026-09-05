@@ -362,7 +362,7 @@ void staStatusTick(lv_timer_t*) {
   if (!sStaStatus || !lv_obj_is_valid(sStaStatus)) return;
   const char* ssid = settings.wifi().staSsid;
   char line[96];
-  if (!settings.links().wifiEnabled) {
+  if (!settings.links().wifiEnabled()) {
     // The truth outranks the saved network: with the adapter off nothing is
     // looking for anything — a "searching" line here once claimed a hunt the
     // driver was never even started for.
@@ -397,7 +397,7 @@ void wifiExtras(lv_obj_t* body) {
   lv_obj_align(sStaStatus, LV_ALIGN_LEFT_MID, 0, 0);
   lv_obj_t* master = lv_switch_create(head);
   lv_obj_align(master, LV_ALIGN_RIGHT_MID, 0, 0);
-  if (settings.links().wifiEnabled) lv_obj_add_state(master, LV_STATE_CHECKED);
+  if (settings.links().wifiEnabled()) lv_obj_add_state(master, LV_STATE_CHECKED);
   lv_obj_add_event_cb(master, [](lv_event_t* e) {
     lv_obj_t* sw = (lv_obj_t*)lv_event_get_target(e);
     const bool want = lv_obj_has_state(sw, LV_STATE_CHECKED);
@@ -446,7 +446,7 @@ void wifiExtras(lv_obj_t* body) {
   lv_obj_add_event_cb(scan, [](lv_event_t*) { Ui::openWifiJoin(); }, LV_EVENT_CLICKED, nullptr);
   // Locked, not hidden, while the adapter is off — the master switch's
   // restart rebuilds this page, so build-time state is the truth.
-  if (!settings.links().wifiEnabled) lv_obj_add_state(scan, LV_STATE_DISABLED);
+  if (!settings.links().wifiEnabled()) lv_obj_add_state(scan, LV_STATE_DISABLED);
 
   if (wifiManager.stationConfigured()) {
     lv_obj_t* forget = lv_button_create(body);
@@ -454,7 +454,7 @@ void wifiExtras(lv_obj_t* body) {
     lv_obj_t* fl = lv_label_create(forget);
     lv_label_set_text(fl, LV_SYMBOL_CLOSE "  Disconnect & forget");
     lv_obj_center(fl);
-    if (!settings.links().wifiEnabled) lv_obj_add_state(forget, LV_STATE_DISABLED);
+    if (!settings.links().wifiEnabled()) lv_obj_add_state(forget, LV_STATE_DISABLED);
     lv_obj_add_event_cb(forget, [](lv_event_t* ev) {
       wifiManager.staForget();
       Ui::toast("Network forgotten");
@@ -645,7 +645,7 @@ void openCategory(lv_event_t* e) {
     // The transport's WiFi usage depends on the adapter: with the adapter
     // off the control locks rather than pretending, and says where the key
     // to it lives.
-    if (strcmp(r.key, "transport.wifi_mode") == 0 && !settings.links().wifiEnabled) {
+    if (strcmp(r.key, "transport.wifi_mode") == 0 && !settings.links().wifiEnabled()) {
       lv_obj_add_state(r.control, LV_STATE_DISABLED);
       lv_obj_t* why = lv_label_create(rowBox);
       lv_label_set_text(why, "locked — the WiFi adapter is off (Settings > wifi)");
