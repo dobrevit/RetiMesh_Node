@@ -243,18 +243,40 @@ static void doI2c(const Request& r) {
 // possible": a stack cut to its observed peak is a crash waiting for a path
 // nothing has taken yet.
 static void doStacks(const Request&) {
-  Diag::TaskStack st[16];
-  const size_t n = Diag::stacks(st, sizeof(st) / sizeof(st[0]));
-  for (size_t i = 0; i < n; i++) {
-    if (!st[i].present) continue;
-    dataf("STACKS", "task=%s headroom=%lu", st[i].name, (unsigned long)st[i].headroom);
-  }
+  // The tightest first, and on its own line. Everything below it can be cut
+  // off — the reply carried in an LXMF message is a couple of hundred bytes and
+  // ten tasks on a line each do not fit, which is how this was found: the soak
+  // collector got half a table and the words "reply truncated". Whatever
+  // survives, the number that decides anything survives with it.
   const char* worst = nullptr;
   const uint32_t low = Diag::lowestHeadroom(&worst);
-  // Named separately because it is the one figure that decides anything, and
-  // because a nullptr here means no task was read at all rather than a task
-  // with nothing left — which must not look the same.
+  // A nullptr means no task was read at all rather than a task with nothing
+  // left, and those must not look the same.
   if (worst) dataf("STACKS", "tightest=%s headroom=%lu", worst, (unsigned long)low);
+
+  // Then all of them, packed onto as few lines as the buffer allows rather than
+  // one line each. "task=x headroom=y" per task is honest and three times the
+  // width of what it says; the pairs below carry the same figures and fit.
+  Diag::TaskStack st[16];
+  const size_t n = Diag::stacks(st, sizeof(st) / sizeof(st[0]));
+  char line[160];
+  size_t at = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (!st[i].present) continue;
+    const int add = snprintf(line + at, sizeof(line) - at, "%s%s=%lu",
+                             at ? " " : "", st[i].name, (unsigned long)st[i].headroom);
+    if (add < 0) break;
+    if (at + (size_t)add >= sizeof(line) - 1) {   // this one did not fit: flush and restart
+      dataf("STACKS", "%s", line);
+      at = 0;
+      const int again = snprintf(line, sizeof(line), "%s=%lu",
+                                 st[i].name, (unsigned long)st[i].headroom);
+      at = again > 0 ? (size_t)again : 0;
+      continue;
+    }
+    at += (size_t)add;
+  }
+  if (at) dataf("STACKS", "%s", line);
   ok("STACKS");
 }
 
