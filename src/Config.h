@@ -580,8 +580,27 @@
   #define PIN_BUTTON2       -1
 #endif
 // A piezo sounder on a PWM channel, where one is fitted.
+// What makes the sound. Two very different parts answer the same two events: a
+// piezo on a PWM pin, and a speaker behind an I2S amplifier. A board names
+// which it has — they share no pin, no peripheral and no way of being driven,
+// so probing would be two drivers' worth of guessing to save a board one line.
+#define BUZZER_KIND_PWM     1
+#define BUZZER_KIND_I2S     2
 #ifndef HAS_BUZZER
   #define HAS_BUZZER        0
+#endif
+#ifndef BUZZER_KIND
+  #define BUZZER_KIND       BUZZER_KIND_PWM
+#endif
+// The I2S speaker's pins, meaningless on a PWM board.
+#ifndef PIN_I2S_BCLK
+  #define PIN_I2S_BCLK      -1
+#endif
+#ifndef PIN_I2S_LRCLK
+  #define PIN_I2S_LRCLK     -1
+#endif
+#ifndef PIN_I2S_DOUT
+  #define PIN_I2S_DOUT      -1
 #endif
 #ifndef PIN_BUZZER
   #define PIN_BUZZER        -1
