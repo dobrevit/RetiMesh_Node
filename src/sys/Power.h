@@ -61,6 +61,13 @@ struct Battery {
   uint8_t percent;                  // rough LiPo curve; 0 when absent
 };
 Battery battery();
+
+// Whether the last reading is too old to believe. battery() reports present =
+// false in that case, which is the honest answer and the one every caller
+// already renders — but it is the same answer as "no cell is fitted", and
+// during a bring-up those want telling apart. False on a board with no divider
+// to go stale.
+bool readingStale();
 uint32_t displaySleepMs();          // profile-dependent
 
 // The last eight hours of charge, one percent-point per five minutes,

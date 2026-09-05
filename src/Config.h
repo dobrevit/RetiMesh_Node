@@ -1012,6 +1012,15 @@
 #define BATTERY_MIN_V       3.0f            // below: no cell attached (USB bench)
 #define BATTERY_MAX_V       4.35f
 #define BATTERY_SAMPLE_MS   10000
+// How long a held reading stays believable once the converter stops answering.
+// The divider on some boards is an ADC2 pin, which loses arbitration to the
+// radio and the Wi-Fi stack now and then, so a missed sample is ordinary and
+// keeping the last figure is right. A converter that has answered nothing for
+// minutes is a different thing, and the node then has no idea what the cell is
+// doing — which is worth saying rather than covering with the last number it
+// happened to see. Comfortably longer than any contention, far shorter than a
+// cell takes to discharge.
+#define BATTERY_STALE_MS    300000          // five minutes
 #define DISPLAY_SLEEP_BATTERY_MS 20000
 
 // ---------------------------------------------------------------------------

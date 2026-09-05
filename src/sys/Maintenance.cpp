@@ -381,8 +381,14 @@ static void doStatus() {
   // the cable by the number that made it go.
   {
     const Power::Battery bat = Power::battery();
+    // "stale" rather than "not-seen" where the converter has stopped answering:
+    // both report no battery, and they send an operator to opposite ends of the
+    // board. The last figure is printed beside it because it is the evidence —
+    // a plausible voltage under "stale" says the divider was working and the
+    // converter stopped, which is not the same fault as a cell nobody fitted.
     dataf("STATUS", "battery=%s volts=%.3f percent=%u%s",
-          bat.present ? "present" : "not-seen", (double)bat.volts, (unsigned)bat.percent,
+          Power::readingStale() ? "stale" : (bat.present ? "present" : "not-seen"),
+          (double)bat.volts, (unsigned)bat.percent,
           bat.chargeKnown ? (bat.charging ? " charging=yes" : " charging=no") : "");
   }
 #endif
