@@ -31,7 +31,9 @@ services:
       - ./data:/data
     command:
       - --node
-      - "0e202b2f65e925da0a82abda88181eb9"   # replace: STATUS reports lxmf_address
+      - "0e202b2f65e925da0a82abda88181eb9"   # ThinkNode M9
+      - --node
+      - "5e633f2f81f367493a3339896e7cedbd"   # LilyGO T-Deck
       - --interval
       - "300"
       - --command
