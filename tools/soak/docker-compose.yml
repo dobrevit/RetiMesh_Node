@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
+#
+# The collector, in one of two shapes. Pick deliberately: they differ in what
+# the collector can reach and in what it can disturb.
+#
+# As written it is a **standalone** Reticulum instance whose only interfaces are
+# the SOAK_PEERS entries — each one a node's own Reticulum transport, dialled
+# directly. It cannot touch the host's Reticulum state, and it can reach exactly
+# the nodes named. With no peers it reaches nothing at all, which is worth
+# saying plainly because the failure looks like a routing problem rather than an
+# empty interface list.
+#
+# To **join the host's instance** instead, and inherit every interface it has
+# including LoRa, uncomment the mount and the user line below and drop
+# SOAK_PEERS. That needs the host's own configuration directory, not merely a
+# matching instance name: the shared-instance RPC is authenticated from the
+# identity in that directory, and without it the connection is made and then
+# every call is refused with "digest sent was rejected". The user line matters
+# as much — the container runs as root by default, and root-owned files
+# appearing in ~/.reticulum will break the daemon that owns it.
+#
+# Which nodes to watch, and how to reach them, are not in this file. Those are
+# a deployment's facts rather than the source that describes one, and a compose
+# file carrying them is a compose file that commits them — which has already
+# happened here once. They live in .env, which git ignores; .env.example says
+# what goes in it.
+services:
+  soak-collector:
+    build: .
+    container_name: retimesh-soak
+    # The host's network, so a peer on the LAN is reachable and so a shared
+    # instance's socket — abstract, and therefore in the network namespace —
+    # is within reach if the mount below is enabled.
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Uncomment both of these together to join the host's Reticulum rather than
+    # run standalone.
+    # user: "1000:1000"                      # the uid that owns ~/.reticulum
+    volumes:
+      # Identity, LXMF state, its own Reticulum config and the readings. Keep
+      # it: the collector's address is in here and the nodes are enrolled
+      # against that address.
+      - ./data:/data
+      # - ${HOME}/.reticulum:/root/.reticulum
+    command:
+      - --interval
+      - "300"
+      - --command-interval
+      - "900"
+      - --out
+      - /data/soak.jsonl
+      - --storage
+      - /data/rns
