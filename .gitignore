@@ -38,3 +38,6 @@ keys/
 # trust. It has done, three times.
 tools/soak/data/
 tools/soak/__pycache__/
+# And the deployment's own facts: which nodes exist and how to reach them. The
+# example beside it is committed; the filled-in copy is not.
+tools/soak/.env

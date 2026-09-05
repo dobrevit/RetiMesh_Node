@@ -93,6 +93,18 @@ def decode_telemetry(doc):
     return out
 
 
+def env_list(name):
+    """A comma-separated environment variable as a list, blanks discarded.
+
+    Node addresses are the fleet's, not the repository's. Passing them as
+    arguments in a compose file means they are committed with it — which is how
+    a set of real device addresses ended up in this repository once already.
+    An .env file the compose reads and git ignores keeps the deployment's own
+    facts out of the deployment's source.
+    """
+    return [part.strip() for part in os.environ.get(name, "").split(",") if part.strip()]
+
+
 def seed_config(args):
     """Write a config if there is none, because Reticulum's own default is wrong here.
 
@@ -267,12 +279,14 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--node", action="append", default=[], metavar="HEX",
-                   help="an LXMF delivery hash to poll; repeat for each node")
+                   help="an LXMF delivery hash to poll; repeat for each node. "
+                        "Defaults to SOAK_NODES, comma-separated")
     p.add_argument("--interval", type=float, default=300.0,
                    help="seconds between telemetry rounds (default 300)")
     p.add_argument("--command", action="append", default=[], metavar="LINE",
                    help="a console line to send as well, e.g. STACKS; repeatable. "
-                        "Needs this collector enrolled as an administrator")
+                        "Defaults to SOAK_COMMANDS, comma-separated. Needs this "
+                        "collector enrolled as an administrator")
     p.add_argument("--command-interval", type=float, default=900.0,
                    help="seconds between console rounds (default 900)")
     p.add_argument("--stagger", type=float, default=5.0,
@@ -285,13 +299,20 @@ def main():
     p.add_argument("--peer", action="append", default=[], metavar="HOST[:PORT]",
                    help="connect straight to a node\'s Reticulum TCP transport "
                         "(default port 4242). Use where the host instance has no "
-                        "route to the fleet; repeatable")
+                        "route to the fleet; repeatable. Defaults to SOAK_PEERS, "
+                        "comma-separated")
     p.add_argument("--name", default="soak collector", help="LXMF display name")
     p.add_argument("--verbose", action="store_true", help="echo every row as it lands")
     args = p.parse_args()
 
+    # Flags win where both are given, so a one-off run can name a single node
+    # without editing the file the fleet lives in.
+    args.node = args.node or env_list("SOAK_NODES")
+    args.command = args.command or env_list("SOAK_COMMANDS")
+    args.peer = args.peer or env_list("SOAK_PEERS")
+
     if not args.node:
-        p.error("give at least one --node")
+        p.error("give at least one --node, or set SOAK_NODES to a comma-separated list")
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     Collector(args).run()
 

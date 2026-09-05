@@ -32,10 +32,22 @@ prints its address at startup; that is what to enrol.
 
 ```sh
 cd tools/soak
-mkdir -p data
-# put each node's LXMF delivery hash in docker-compose.yml, then:
+cp .env.example .env      # then fill it in; git ignores .env
 docker compose up --build
 ```
+
+`.env` is where the deployment's own facts go — which nodes exist and how to
+reach them. They are not in the compose file on purpose: a compose file
+carrying them is a compose file that commits them.
+
+| variable | |
+|---|---|
+| `SOAK_NODES` | LXMF delivery hashes, comma-separated. Each node's own comes from `STATUS`, the `lxmf_address=` line |
+| `SOAK_COMMANDS` | console lines to send as well, comma-separated — `STACKS` usually |
+| `SOAK_PEERS` | optional `host:port` Reticulum transports to dial directly, for a fleet the host instance has no route to |
+
+Command-line flags still work and win where both are given, so a one-off run can
+name a single node without editing the file the fleet lives in.
 
 First start prints the address to enrol:
 

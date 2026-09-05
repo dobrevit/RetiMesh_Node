@@ -8,6 +8,12 @@
 # reachable at 127.0.0.1 only from the host's own namespace. A bridged
 # container would need the host's rnsd to be listening on a routable address,
 # which is a change to the host rather than to this.
+#
+# Which nodes to watch, and how to reach them, are not in this file. Those are
+# a deployment's facts rather than the source that describes one, and a compose
+# file carrying them is a compose file that commits them — which has already
+# happened here once. They live in .env, which git ignores; .env.example says
+# what goes in it.
 services:
   soak-collector:
     build: .
@@ -21,6 +27,8 @@ services:
     # joining the one already running, and the two fight over a UDP port.
     uts: host
     restart: unless-stopped
+    env_file:
+      - .env
     volumes:
       # Identity, LXMF state, its own Reticulum config and the readings. Keep
       # it: the collector's address is in here and the nodes are enrolled
@@ -30,21 +38,11 @@ services:
       # interfaces.
       - ./data:/data
     command:
-      - --node
-      - "0e202b2f65e925da0a82abda88181eb9"   # ThinkNode M9
-      - --node
-      - "5e633f2f81f367493a3339896e7cedbd"   # LilyGO T-Deck
       - --interval
       - "300"
-      - --command
-      - "STACKS"
       - --command-interval
       - "900"
       - --out
       - /data/soak.jsonl
       - --storage
       - /data/rns
-      # Where the host instance has no route to the fleet — a bench on Wi-Fi,
-      # say — point straight at each node's Reticulum transport instead:
-      - --peer
-      - "192.168.101.133:4241"
