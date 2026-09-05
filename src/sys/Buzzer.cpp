@@ -19,10 +19,18 @@
 // ============================================================================
 //  Buzzer.cpp — see Buzzer.h
 //
-//  Timing without blocking: each call starts the first note and arms an
-//  esp_timer for what happens next — the second note, or silence. The timer
-//  callback runs on the esp_timer task, where ledcWriteTone is a register
-//  write and safe. A caller never waits.
+//  Two parts answer the same two events, and neither may make a caller wait —
+//  message() is called from the RNS task, which is carrying packets.
+//
+//  The piezo is a PWM pin: a call starts the first note and arms an esp_timer
+//  for what happens next, and the timer callback does a register write on the
+//  esp_timer task. Nothing waits anywhere.
+//
+//  The speaker cannot be driven that way. An I2S amplifier wants a stream of
+//  samples for as long as the note lasts, so the note is played by a task of
+//  its own and a caller posts to it and returns. That task is the whole cost of
+//  the difference — a stack and a sample buffer, on a board whose internal RAM
+//  is the scarce kind — which is why it exists only where a board asks for it.
 // ============================================================================
 #include "Buzzer.h"
 
@@ -31,8 +39,114 @@
 #include <Arduino.h>
 #include <esp_timer.h>
 
+#if BUZZER_KIND == BUZZER_KIND_I2S
+#include <ESP_I2S.h>
+#include "Diag.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#endif
+
 namespace {
 
+#if BUZZER_KIND == BUZZER_KIND_I2S
+// ---------------------------------------------------------------------------
+// A speaker behind an I2S amplifier
+// ---------------------------------------------------------------------------
+// Eight kilohertz, mono, sixteen bits. A beep needs no more, and the rate sets
+// the size of everything below it: the buffer, the DMA behind it, and the time
+// a caller could ever be made to wait.
+constexpr uint32_t kRateHz  = 8000;
+// A quarter of full scale. The MAX98357A on the board this was written for
+// straps its gain pin to ground, which is 12 dB, and full scale through that
+// into a small speaker is startling rather than informative.
+constexpr int16_t  kAmplitude = 8000;
+// Square rather than sine, deliberately: it is what the piezo this stands in
+// for produces, it needs no floating point in the task that generates it, and
+// the difference is inaudible in a 120 ms beep.
+constexpr size_t   kChunk   = 256;            // samples generated at a time
+
+I2SClass      sI2s;
+QueueHandle_t sQueue = nullptr;
+bool          sReady = false;
+// Whether a sound is on the air, which the queue cannot answer. The task takes
+// a note off the queue before playing it, so an empty queue means "playing" as
+// often as it means "idle" — and a depth that let a second note wait would
+// contradict what this file promises anyway. Held here and tested under the
+// same kind of claim the piezo uses, because start() runs on whichever task has
+// news and this is cleared on the audio task.
+volatile bool sBusy = false;
+portMUX_TYPE  sBusyMux = portMUX_INITIALIZER_UNLOCKED;
+
+struct Note { uint32_t hz; uint32_t ms; uint32_t nextHz; };
+
+// One note into the amplifier, generated a chunk at a time so that the buffer
+// stays small whatever the note's length.
+void play(uint32_t hz, uint32_t ms) {
+  if (!hz || !ms) return;
+  int16_t buf[kChunk];
+  const uint32_t halfPeriod = kRateHz / (hz * 2);        // samples per half cycle
+  uint32_t phase = 0;
+  size_t   left  = (size_t)((uint64_t)kRateHz * ms / 1000);
+  while (left) {
+    const size_t n = left < kChunk ? left : kChunk;
+    for (size_t i = 0; i < n; i++) {
+      buf[i] = (halfPeriod && (phase / halfPeriod) % 2) ? kAmplitude : (int16_t)-kAmplitude;
+      phase++;
+    }
+    sI2s.write((const uint8_t*)buf, n * sizeof(int16_t));
+    left -= n;
+  }
+  // A note ends on silence rather than on whatever sample it reached: leaving
+  // the last level in the amplifier is a step the speaker reproduces as a click.
+  int16_t quiet[32] = {0};
+  sI2s.write((const uint8_t*)quiet, sizeof(quiet));
+}
+
+void audioTask(void*) {
+  Note n;
+  for (;;) {
+    if (xQueueReceive(sQueue, &n, portMAX_DELAY) != pdTRUE) continue;
+    play(n.hz, n.ms);
+    if (n.nextHz) play(n.nextHz, n.ms);
+    // Only now. Clearing it when the note was taken off the queue would open
+    // the door for the length of the sound, which is precisely the window in
+    // which a second one arrives.
+    portENTER_CRITICAL(&sBusyMux);
+    sBusy = false;
+    portEXIT_CRITICAL(&sBusyMux);
+  }
+}
+
+// Started if the sounder is idle, refused otherwise: one at a time and none
+// queued, which is what Buzzer.h promises and what the piezo does. The news a
+// second sound would carry is the news already in the air.
+//
+// The claim is made before the note is posted rather than after, because the
+// task can finish a short note and clear it between the two — and a start()
+// that then posted would leave a note on the queue with nothing claiming to be
+// playing it.
+bool start(uint32_t hz, uint32_t ms, uint32_t nextHz) {
+  if (!sReady || !sQueue) return false;
+  portENTER_CRITICAL(&sBusyMux);
+  if (sBusy) { portEXIT_CRITICAL(&sBusyMux); return false; }
+  sBusy = true;
+  portEXIT_CRITICAL(&sBusyMux);
+
+  const Note n{hz, ms, nextHz};
+  if (xQueueSend(sQueue, &n, 0) == pdTRUE) return true;
+  // It did not go: give the claim back rather than leaving the sounder marked
+  // busy for ever over a note nobody will play.
+  portENTER_CRITICAL(&sBusyMux);
+  sBusy = false;
+  portEXIT_CRITICAL(&sBusyMux);
+  return false;
+}
+
+#else
+// ---------------------------------------------------------------------------
+// A piezo on a PWM pin
+// ---------------------------------------------------------------------------
 esp_timer_handle_t sTimer  = nullptr;
 volatile bool      sBusy   = false;   // a note is on the air
 volatile uint32_t  sNextHz = 0;       // and this one is owed after it (0: none)
@@ -74,12 +188,38 @@ bool start(uint32_t hz, uint32_t ms, uint32_t nextHz) {
   esp_timer_start_once(sTimer, sLenUs);
   return true;
 }
+#endif // BUZZER_KIND
 
 } // namespace
 
 namespace Buzzer {
 
 void begin() {
+#if BUZZER_KIND == BUZZER_KIND_I2S
+  sI2s.setPins(PIN_I2S_BCLK, PIN_I2S_LRCLK, PIN_I2S_DOUT);
+  if (!sI2s.begin(I2S_MODE_STD, kRateHz, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
+    log_w("buzzer: I2S would not start on BCLK %d, LRCLK %d, DOUT %d",
+          PIN_I2S_BCLK, PIN_I2S_LRCLK, PIN_I2S_DOUT);
+    return;
+  }
+  sQueue = xQueueCreate(1, sizeof(Note));        // one at a time, and none owed
+  if (!sQueue) { sI2s.end(); return; }
+  // Through Diag rather than straight to FreeRTOS: it reports a task that would
+  // not start the way every other one here is reported, and it is the list this
+  // task's stack headroom is watched from.
+  //
+  // Small and low: it spends its life blocked on the queue, and what it does
+  // when it wakes is fill a buffer with two alternating values.
+  if (!Diag::startTask(audioTask, "audio", 2560, nullptr, 1, 0)) {
+    vQueueDelete(sQueue);
+    sQueue = nullptr;
+    sI2s.end();
+    return;
+  }
+  sReady = true;
+  log_i("buzzer: I2S speaker on BCLK %d, LRCLK %d, DOUT %d",
+        PIN_I2S_BCLK, PIN_I2S_LRCLK, PIN_I2S_DOUT);
+#else
   if (!ledcAttach(PIN_BUZZER, 2000, 10)) {       // any tone re-tunes from here
     log_w("buzzer: pin %d would not take a PWM channel", PIN_BUZZER);
     return;
@@ -90,6 +230,7 @@ void begin() {
     .dispatch_method = ESP_TIMER_TASK, .name = "buzzer", .skip_unhandled_events = true,
   };
   if (esp_timer_create(&args, &sTimer) != ESP_OK) sTimer = nullptr;
+#endif
 }
 
 // Near a small piezo's resonance, short enough to be polite. Worth saying:

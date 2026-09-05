@@ -235,7 +235,20 @@
 #define PIN_BUTTON          0                // BOOT, and the trackball's click
 #define HAS_BUTTON2         0
 #define PIN_STATUS_LED      -1
-#define HAS_BUZZER          0                // a speaker, not a sounder — not driven here
+// A speaker rather than a piezo: a MAX98357A on I2S, confirmed from LilyGO's
+// schematic — the wiki lists only the ES7210 microphone and omits the amplifier
+// entirely. Its gain pin is strapped to ground and it has no control bus, so
+// there is nothing to configure: samples on these three pins are the whole
+// interface. Costs a task and a buffer, which the piezo boards do not pay.
+//
+// The ES7210 beside it is a microphone ADC and is not driven. Worth knowing
+// before anyone reaches for it: enabling that part spends GPIO 0, which is this
+// board's trackball click.
+#define HAS_BUZZER          1
+#define BUZZER_KIND         BUZZER_KIND_I2S
+#define PIN_I2S_BCLK        7
+#define PIN_I2S_LRCLK       5
+#define PIN_I2S_DOUT        6
 
 // ---------------------------------------------------------------------------
 // The general-purpose I2C bus, and what is on it

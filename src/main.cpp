@@ -478,6 +478,13 @@ void setup() {
   // benched: two notes up means the node is running before the panel says so.
   Buzzer::begin();
   Buzzer::boot();
+  // Billed like every other subsystem, because on one board this is not free:
+  // a speaker behind an I2S amplifier needs a task and a DMA ring where a piezo
+  // needs a PWM channel, and it is measured at about 5.4 KB of internal RAM on
+  // the T-Deck — a quarter of what that board has left. A cost that size should
+  // appear in the same list as everything else rather than be discovered later
+  // by whoever is short of a stack (Diag.h).
+  Diag::cost("sounder");
 
   // setup() runs on loopTask, so this subscribes the task that loop() below
   // feeds. Last, so nothing during start-up — a card mount, a store migration,

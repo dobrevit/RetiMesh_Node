@@ -57,6 +57,7 @@ static const char* const kTasks[] = {
   "gps",          // NMEA parsing
   "async_tcp",    // ESPAsyncWebServer
   "ppp-uart",     // the bridge UART reader (PppUart.h)
+  "audio",        // the I2S speaker's note player (Buzzer.cpp)
 };
 
 const char* resetReasonName(uint8_t reason) {
