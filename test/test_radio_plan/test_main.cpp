@@ -282,6 +282,33 @@ static void test_a_node_name_becomes_a_legal_dns_label() {
   TEST_ASSERT_EQUAL_UINT(5, strlen(small));
 }
 
+// Duty-cycled receive is a feature bit, not a tuning bound, and it is the one
+// entry in the table that is per-driver rather than per-datasheet: RadioLib
+// declares startReceiveDutyCycleAuto on SX126x and LR11x0 only. Getting it wrong
+// on either side is a live fault — claimed where it does not exist arms a mode
+// the driver has no method for; denied where it does costs the saving silently.
+static void test_only_the_sx1262_claims_a_duty_cycled_receive() {
+  TEST_ASSERT_TRUE_MESSAGE(RadioCaps::kSX1262.rxDutyCycle,
+                           "the SX1262 is the chip this feature exists for");
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::kSX1276.rxDutyCycle,
+                            "the SX127x driver has no duty-cycled receive at all");
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::kSX1280.rxDutyCycle,
+                            "the SX128x driver has no duty-cycled receive at all");
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::kLR1110.rxDutyCycle,
+                            "the LR1110 firmware this project pins around cannot drive DIO in sleep");
+}
+
+// The no-radio descriptor is permissive everywhere else — it widens bounds so an
+// operator can configure their way out of a failed probe — and must not be here.
+// A permissive bound only allows; a permissive feature bit gets acted on.
+static void test_an_unidentified_radio_is_never_assumed_able_to_sleep() {
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::kUnknown.rxDutyCycle,
+                            "an unidentified chip must not be assumed to have the mode");
+  // ...while the rest of that entry stays as permissive as it was.
+  TEST_ASSERT_TRUE(RadioCaps::bandwidthSupported(RadioCaps::kUnknown, 203.125f));
+  TEST_ASSERT_TRUE(RadioCaps::bandwidthSupported(RadioCaps::kUnknown, 7.8f));
+}
+
 static void test_bandwidth_list_renders_for_an_error_message() {
   char buf[96];
   RadioCaps::bandwidthList(RadioCaps::kSX1280, buf, sizeof(buf));
@@ -310,6 +337,8 @@ int main() {
   RUN_TEST(test_the_region_decides_the_budget_not_the_frequency);
   RUN_TEST(test_the_stored_region_wins_and_the_frequency_is_only_a_fallback);
   RUN_TEST(test_a_node_name_becomes_a_legal_dns_label);
+  RUN_TEST(test_only_the_sx1262_claims_a_duty_cycled_receive);
+  RUN_TEST(test_an_unidentified_radio_is_never_assumed_able_to_sleep);
   RUN_TEST(test_bandwidth_list_renders_for_an_error_message);
   return UNITY_END();
 }

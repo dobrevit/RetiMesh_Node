@@ -197,6 +197,14 @@ void LoRaRadio::irqSelfTest() {
   }
 }
 
+// The TCXO ramp RadioLib programs into an SX126x, which decides how long a
+// receive sleep has to be before the driver will take it. Nothing here passes a
+// delay to setTCXO(), so a board that names a voltage gets the driver's own
+// default; a board that names none never has setTCXO() called at all and the
+// delay stays at zero. Compile-time because it is a fact about the board.
+static constexpr uint32_t kTcxoDelayUs =
+    (RF_TCXO_VOLTAGE > 0.0f) ? Airtime::RX_DC_TCXO_DELAY_US : 0;
+
 // Airtime maths follows the channel: symbol time drives both the duty-cycle
 // accounting and the CSMA slot length. RadioLib leaves CRC and the explicit
 // header on, which is what RNode-compatible framing expects.
@@ -206,6 +214,18 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   ap.preambleSyms = s.preamble; ap.crcOn = true; ap.implicitHeader = false;
   _airtime.configure(ap);
   g_stats.csmaSlotMs = (uint16_t)_airtime.slotMs();
+
+  // What duty-cycled receive would do on this channel. Three things have to
+  // agree — the operator asked for it, the fitted chip has the mode, and the
+  // sleep the channel yields is long enough for the driver to bother — and at
+  // the shipped SF8/125 kHz default the third does not hold. Reported rather
+  // than the setting, so the node never claims a saving it is not making.
+  // Recomputed here because this runs on every apply, which is the only time
+  // any of the three can change. The arithmetic is Airtime's; this is a caller.
+  const uint32_t rxDcSleepUs = Airtime::rxDutyCycleSleepUs(s.sf, s.bwKhz, s.preamble);
+  g_stats.rxDutyCycleSleepUs = rxDcSleepUs;
+  g_stats.rxDutyCycleEngages = s.rxDutyCycle && _caps->rxDutyCycle &&
+                               Airtime::rxDutyCycleEngages(rxDcSleepUs, kTcxoDelayUs);
 
   // What the channel is governed by depends on the band it sits in, and the
   // three regimes constrain different things — see Airtime::Regime.

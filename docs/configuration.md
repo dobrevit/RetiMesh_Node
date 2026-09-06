@@ -18,8 +18,52 @@ per PlatformIO environment.
 | Announce interval | 600 s | 0 = off; the node's own `lxmf.delivery` and `nomadnetwork.node` announces |
 | Beacon interval | 0 (off) | RetiMesh quick-probe beacons; 10–3600 s |
 | Callsign | (SSID) | printable, ≤ 32 chars; used in announces/beacons |
+| Duty-cycled receive | off | SX1262 only, and inert at the default channel — see below |
 
 The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
+
+### Duty-cycled receive (`radio.rx_duty_cycle`)
+
+Normally the transceiver listens continuously: on an SX1262 that is a constant
+~5 mA floor, paid 24 hours a day whether or not anything is on the air. With
+this setting on, the chip sleeps between preamble samples instead. The node's
+fixed 18-symbol preamble is what makes that safe — the receiver wakes often
+enough to catch any conforming sender, and every RNode-lineage firmware shares
+the same preamble floor.
+
+Three caveats, all of which the node will tell you about:
+
+- **It ships off.** A transport node's one job is to be listening, so sleeping
+  the receiver is opted into per node rather than assumed.
+- **SX1262 only.** The SX1276/78 and SX1280 drivers have no such mode, and the
+  LR1110 on the ThinkNode M9 ships firmware that cannot drive its interrupt
+  lines while asleep. The setting is still accepted on those boards — the chip
+  is detected at runtime, so refusing it would break provisioning a mixed fleet
+  from one export — and they stay in continuous receive.
+- **At the default channel it does nothing.** The receiver must be awake for 8
+  symbols at each end of the preamble, leaving `18 − 16 = 2` symbols to sleep
+  through, and the driver will not sleep for less than its wake-up transition
+  (the 5 ms TCXO ramp plus ~1 ms, so 6016 µs). At **SF8/125 kHz a symbol is
+  2048 µs**, giving a 4096 µs sleep — under the threshold, so the receiver
+  stays on. It engages from a symbol time of about 3 ms: **SF9 or higher at
+  125 kHz**, or a lower spreading factor at a narrower bandwidth (SF7 at
+  31.25 kHz and SF8 at 62.5 kHz both qualify).
+
+`STATUS` on the console reports all of it on one line, computed rather than
+echoed:
+
+```
+STATUS radio rx_duty_cycle=on supported=yes sleep_us=4096 engages=no
+```
+
+`GET /api/settings` carries the same three answers as `radio.rx_duty_cycle`,
+`radio.caps.rx_duty_cycle_supported` and `radio.rx_duty_cycle_engages`, and the
+settings page hides the switch entirely on a board whose chip lacks the mode.
+
+In this release the setting is stored and reported but not yet acted on: the
+radio task still arms a continuous receive on every board. `engages` therefore
+says what turning it on *would* do, which is the figure to check before the
+behaviour lands.
 
 ## Wi-Fi access point (most rows restart; the marked ones apply live)
 | Setting | Default | Notes |

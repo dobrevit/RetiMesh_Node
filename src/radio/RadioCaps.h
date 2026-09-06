@@ -35,6 +35,14 @@
 //  device at 868 MHz and a dwell-time-limited one at 915 MHz. Airtime::Regime
 //  owns that, keyed on frequency. What is actually legal where the node is
 //  standing remains the operator's to know.
+//
+//  Mostly these are tuning limits — the span of what the chip may be asked
+//  for — but not entirely: rxDutyCycle is a feature bit, "does this driver
+//  offer a duty-cycled receive at all". It sits here for the same reason the
+//  spans do. The transceiver is detected at runtime (a T3-S3 or a T-Beam
+//  answers as either an SX1276 or an SX1262 depending on the module fitted),
+//  so no `#if` can decide it, and every surface that needs the answer —
+//  validator, API, portal, console — has to get the same one.
 // ============================================================================
 
 #pragma once
@@ -50,6 +58,11 @@ struct Caps {
   const float* bandwidthsKhz;    // ascending, terminated by a 0.0f entry
   uint8_t      sfMin, sfMax;
   int8_t       txMinDbm, txMaxDbm;
+  // Can the receiver be told to sleep between preamble samples instead of
+  // listening continuously? A driver feature, not a tuning limit — whether it
+  // then does anything at the configured channel is Airtime's question
+  // (Airtime::rxDutyCycleEngages).
+  bool         rxDutyCycle;
 };
 
 // The three radios this firmware drives. Frequency spans are the datasheet

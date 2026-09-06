@@ -158,6 +158,96 @@ void test_short_term_util_uses_recent_bins_only() {
   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, a.shortTermUtil(twoBinsLater));
 }
 
+// --- duty-cycled receive ----------------------------------------------------
+// These pin the arithmetic RadioLib 7.7.1 does behind
+// SX126x::startReceiveDutyCycleAuto, because the driver applies it silently:
+// it returns success either way and simply arms a continuous receive when the
+// sleep comes out too short. Without a test the difference between "the
+// receiver is sleeping" and "the receiver is not" is invisible from here.
+
+// The constants themselves, so a driver update that retunes any of them lands
+// as a failing test rather than as a node that quietly stopped sleeping.
+void test_the_driver_constants_are_the_ones_we_mirror() {
+  TEST_ASSERT_EQUAL_UINT16(8,  Airtime::RX_DC_MIN_SYMBOLS_SF7);
+  TEST_ASSERT_EQUAL_UINT16(12, Airtime::RX_DC_MIN_SYMBOLS_SF6);
+  TEST_ASSERT_EQUAL_UINT32(1016, Airtime::RX_DC_TRANSITION_US);
+  TEST_ASSERT_EQUAL_UINT32(5000, Airtime::RX_DC_TCXO_DELAY_US);
+  // SF7 and up take the 8-symbol window; only SF5/SF6, which this firmware
+  // never runs, take 12.
+  TEST_ASSERT_EQUAL_UINT16(8,  Airtime::rxDutyCycleMinSymbols(7));
+  TEST_ASSERT_EQUAL_UINT16(8,  Airtime::rxDutyCycleMinSymbols(12));
+  TEST_ASSERT_EQUAL_UINT16(12, Airtime::rxDutyCycleMinSymbols(6));
+  // With a TCXO the driver will not sleep for under 6016 us. Written out so
+  // the threshold every case below is measured against is visible once.
+  TEST_ASSERT_EQUAL_UINT32(6016,
+                           Airtime::RX_DC_TCXO_DELAY_US + Airtime::RX_DC_TRANSITION_US);
+}
+
+// The shipped default channel. This is the case that matters most, because it
+// is the one every node is in until someone changes it: the sleep is 4096 us
+// against a 6016 us threshold, so the feature does nothing at all.
+void test_the_default_channel_does_not_duty_cycle_at_all() {
+  const uint32_t sleepUs = Airtime::rxDutyCycleSleepUs(8, 125.0f, 18);
+  TEST_ASSERT_EQUAL_UINT32(4096, sleepUs);            // 2 symbols of 2048 us
+  TEST_ASSERT_FALSE_MESSAGE(Airtime::rxDutyCycleEngages(sleepUs),
+                            "SF8/125 kHz must fall back to a continuous receive");
+}
+
+// One spreading factor up doubles the symbol and clears the threshold.
+void test_one_spreading_factor_higher_engages() {
+  const uint32_t sleepUs = Airtime::rxDutyCycleSleepUs(9, 125.0f, 18);
+  TEST_ASSERT_EQUAL_UINT32(8192, sleepUs);            // 2 symbols of 4096 us
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(sleepUs));
+  // ...and everything slower than it does too.
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(Airtime::rxDutyCycleSleepUs(12, 125.0f, 18)));
+}
+
+// It is the symbol time that decides, not the spreading factor: a narrow
+// channel gets there at the lowest factor this firmware allows.
+void test_a_narrow_channel_engages_at_a_low_spreading_factor() {
+  const uint32_t sleepUs = Airtime::rxDutyCycleSleepUs(7, 31.25f, 18);
+  TEST_ASSERT_EQUAL_UINT32(8192, sleepUs);            // 2 symbols of 4096 us
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(sleepUs));
+  // The crossover sits at a 3008 us symbol, i.e. a 6016 us sleep over two
+  // symbols. SF8 at 62.5 kHz is over it; SF8 at 125 kHz is under.
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(Airtime::rxDutyCycleSleepUs(8, 62.5f, 18)));
+  TEST_ASSERT_FALSE(Airtime::rxDutyCycleEngages(Airtime::rxDutyCycleSleepUs(8, 125.0f, 18)));
+}
+
+// A preamble no longer than the two sampling windows leaves nothing to sleep
+// through, and the subtraction must floor rather than wrap: 8 - 16 in unsigned
+// arithmetic is a sleep of several minutes.
+void test_a_short_preamble_leaves_no_room_to_sleep() {
+  TEST_ASSERT_EQUAL_UINT32(0, Airtime::rxDutyCycleSleepUs(12, 125.0f, 16));  // exactly 2*8
+  TEST_ASSERT_EQUAL_UINT32(0, Airtime::rxDutyCycleSleepUs(12, 125.0f, 8));   // under it
+  TEST_ASSERT_EQUAL_UINT32(0, Airtime::rxDutyCycleSleepUs(12, 125.0f, 0));
+  TEST_ASSERT_FALSE(Airtime::rxDutyCycleEngages(0));
+  // One symbol over the floor is a real, if short, sleep.
+  TEST_ASSERT_EQUAL_UINT32(32768, Airtime::rxDutyCycleSleepUs(12, 125.0f, 17));
+}
+
+// A board with no TCXO leaves the driver's delay at zero, which drops the
+// threshold to the 1016 us transition alone — the default channel would then
+// engage. The caller passes the delay in for exactly this reason.
+void test_the_tcxo_ramp_is_part_of_the_threshold() {
+  const uint32_t sleepUs = Airtime::rxDutyCycleSleepUs(8, 125.0f, 18);   // 4096
+  TEST_ASSERT_FALSE(Airtime::rxDutyCycleEngages(sleepUs));               // 6016 us threshold
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(sleepUs, 0));             // 1016 us threshold
+  // Exactly at the threshold counts as engaging, as the driver's own
+  // comparison does (it falls back only when strictly shorter).
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(6016));
+  TEST_ASSERT_FALSE(Airtime::rxDutyCycleEngages(6015));
+}
+
+// An explicit minSymbols overrides the per-SF default, and a bandwidth that
+// could not have come from a validated setting answers rather than dividing.
+void test_min_symbols_and_a_nonsense_bandwidth() {
+  // 18 - 2*4 = 10 symbols of 2048 us at the default channel.
+  TEST_ASSERT_EQUAL_UINT32(20480, Airtime::rxDutyCycleSleepUs(8, 125.0f, 18, 4));
+  TEST_ASSERT_EQUAL_UINT32(0, Airtime::rxDutyCycleSleepUs(8, 0.0f, 18));
+  TEST_ASSERT_EQUAL_UINT32(0, Airtime::rxDutyCycleSleepUs(8, -125.0f, 18));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_time_on_air_matches_datasheet);
@@ -171,5 +261,12 @@ int main() {
   RUN_TEST(test_bins_expire_rather_than_accumulate);
   RUN_TEST(test_contention_window_widens_with_channel_use);
   RUN_TEST(test_short_term_util_uses_recent_bins_only);
+  RUN_TEST(test_the_driver_constants_are_the_ones_we_mirror);
+  RUN_TEST(test_the_default_channel_does_not_duty_cycle_at_all);
+  RUN_TEST(test_one_spreading_factor_higher_engages);
+  RUN_TEST(test_a_narrow_channel_engages_at_a_low_spreading_factor);
+  RUN_TEST(test_a_short_preamble_leaves_no_room_to_sleep);
+  RUN_TEST(test_the_tcxo_ramp_is_part_of_the_threshold);
+  RUN_TEST(test_min_symbols_and_a_nonsense_bandwidth);
   return UNITY_END();
 }

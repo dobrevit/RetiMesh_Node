@@ -35,6 +35,7 @@
 #include "Keypad.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
+#include "LoRaRadio.h"
 
 #include "Config.h"
 #include "Settings.h"
@@ -309,6 +310,18 @@ static void doStatus() {
         (unsigned long)h.largestDramBlock);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
+  // Duty-cycled receive, read back rather than echoed. The switch being on
+  // proves nothing: the mode exists only on an SX1262, and even there RadioLib
+  // silently arms a continuous receive whenever the sleep the channel yields is
+  // shorter than the chip's wake-up transition — which at the default
+  // SF8/125 kHz it always is. engages= is the computed answer (Airtime.h),
+  // sleep_us= the figure it was computed from, so a channel that is close to
+  // the threshold can be seen to be close.
+  dataf("STATUS", "radio rx_duty_cycle=%s supported=%s sleep_us=%lu engages=%s",
+        settings.radio().rxDutyCycle ? "on" : "off",
+        loraRadio.caps().rxDutyCycle ? "yes" : "no",
+        (unsigned long)g_stats.rxDutyCycleSleepUs,
+        g_stats.rxDutyCycleEngages ? "yes" : "no");
   // wifi_ps and wifi_tx_dbm are read back from the driver itself
   // (esp_wifi_get_ps() / esp_wifi_get_max_tx_power()), not assumed from the
   // profile or the setting: the proof a change actually took effect, not

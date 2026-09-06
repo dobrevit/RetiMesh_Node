@@ -73,6 +73,10 @@
       <div><label>Beacon interval (s, 0 = off)</label><input name="beacon_interval" type="number" min="0" max="3600" required></div>
       <div><label>Callsign / beacon name (blank = SSID)</label><input name="callsign" maxlength="32" pattern="[\x21-\x7E]*"></div>
       <div><label>Duty cycle cap (%, 0 = follow the band)</label><input name="duty_cycle_pct" type="number" min="0" max="100" required></div>
+      <!-- Hidden on a transceiver without the mode, the way the GNSS rows are
+           hidden on a board without a receiver: a switch that cannot be
+           honoured is worse than no switch. -->
+      <div id="rxDcField" hidden><label>Duty-cycled receive <span id="rxDcHint" class="hint"></span></label><input name="rx_duty_cycle" type="checkbox"></div>
       <div id="gpsField" hidden><label>GNSS receiver</label>
         <select name="gps_enabled"><option value="1">On — position and clock</option><option value="0">Off — saves power</option></select></div>
       <div id="gpsShareField" hidden><label>Publish position</label>
@@ -91,6 +95,12 @@
       node checks that per packet and warns at boot when the longest frame does not fit. At <b>2.4 GHz</b> neither applies; power and
       listen-before-talk govern, and the node already does the latter. In both, this field is a budget of your own choosing rather than one
       being followed, and the local rules remain yours to know. When a budget is spent, packets wait in the queue instead of being dropped.<br>
+      <b>Duty-cycled receive.</b> Off by default. With it on, an SX1262 sleeps between preamble samples instead of listening
+      continuously &mdash; the node's 18-symbol preamble is what makes that safe, so no conforming sender is missed. It is worth
+      something only when a symbol is long: the driver refuses to sleep for less than about 3 ms per cycle, which needs a symbol time
+      of roughly 3 ms or more (SF9 and up at 125 kHz, or a lower spreading factor at a narrower bandwidth). At the default SF8/125 kHz
+      it does nothing at all and the receiver stays on &mdash; the hint beside the switch says which case this node is in. The row is
+      absent entirely on a transceiver without the mode.<br>
       <b>GNSS.</b> The receiver gives the node a real clock, which it has no other way to get: without one its idea of time restarts at zero
       on every reboot. Its health (fix, satellites, UTC) is public on the status API; the coordinates are not, unless you publish them
       &mdash; the status page is reachable by anyone who can join this access point.<br>
@@ -389,6 +399,14 @@ function applyRadioCaps(r) {
   for (let n = c.sf_min; n <= c.sf_max; n++) sfs.push(n);
   opts(f.sf, sfs);
 
+  // The chip decides whether the row exists at all; the channel decides what it
+  // is worth, and the node has already worked that out (rx_duty_cycle_engages)
+  // rather than the page re-deriving the driver's threshold here.
+  $("rxDcField").hidden = !c.rx_duty_cycle_supported;
+  $("rxDcHint").textContent = r.rx_duty_cycle_engages
+    ? "receiver sleeps " + Math.round((r.rx_duty_cycle_sleep_us || 0) / 100) / 10 + " ms per cycle"
+    : "no effect at this spreading factor and bandwidth — the receiver stays on";
+
   f.tx_dbm.min = c.tx_min_dbm;
   f.tx_dbm.max = r.tx_dbm_max;
   $("pmax").textContent = c.tx_min_dbm + " to " + r.tx_dbm_max
@@ -530,6 +548,7 @@ $("radioForm").addEventListener("submit", async ev => {
     tx_dbm: +f.tx_dbm.value, sync_word: parseInt(f.sync_word.value, 16), preamble: +f.preamble.value,
     beacon_interval: +f.beacon_interval.value, announce_interval: +f.announce_interval.value, callsign: f.callsign.value,
     duty_cycle_pct: +f.duty_cycle_pct.value };
+  if (f.rx_duty_cycle) body.rx_duty_cycle = f.rx_duty_cycle.checked;
   if (f.gps_enabled) body.gps_enabled = f.gps_enabled.value === "1";
   if (f.gps_share_position) body.gps_share_position = f.gps_share_position.value === "1";
   try {

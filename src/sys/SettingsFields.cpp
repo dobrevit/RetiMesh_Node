@@ -407,6 +407,14 @@ const Entry kFields[] = {
       // overlong value is already a truncated one that passes.
       if (!SettingsRules::validateCallsign(v, e, n)) return Result::BadValue;
       strlcpy(r.callsign, v, sizeof(r.callsign)); return commitRadio(r, e, n); } },
+  // Applies live like the rest of the radio block: commitRadio hands the whole
+  // struct to requestReconfigure and the radio task takes it on its next pass.
+  // The radio block has no restart split to classify a new field in — unlike
+  // Wi-Fi's (SettingsRules::wifiChangeNeedsRestart).
+  { "radio.rx_duty_cycle",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.radio().rxDutyCycle ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
+      RadioSettings r = settings.radio(); r.rxDutyCycle = b; return commitRadio(r, e, n); } },
   { "radio.gps_enabled",
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.radio().gpsEnabled ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }

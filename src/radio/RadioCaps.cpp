@@ -56,17 +56,22 @@ const float kBwAny[] = {
   406.25f, 500.0f, 812.5f, 1625.0f, 0.0f
 };
 
+// The last field is duty-cycled receive. RadioLib 7.7.1 declares
+// startReceiveDutyCycle{,Auto} on SX126x and LR11x0 only (SX126x.h:329,349) —
+// the SX127x and SX128x drivers have no such method at all, so it is not a
+// question of whether the silicon could, it is a mode this firmware has no way
+// to ask them for.
 const Caps kSX1276 = {
-  "SX1276", 137.0f, 1020.0f, kBwSubGhz, 7, 12, 2, 17
+  "SX1276", 137.0f, 1020.0f, kBwSubGhz, 7, 12, 2, 17, false
 };
 const Caps kSX1262 = {
-  "SX1262", 150.0f, 960.0f,  kBwSubGhz, 7, 12, 2, 22
+  "SX1262", 150.0f, 960.0f,  kBwSubGhz, 7, 12, 2, 22, true
 };
 // -18 to +12.5 dBm on the datasheet; RadioLib takes whole dBm and accepts 13
 // as its top step. A board carrying an external PA raises the ceiling; see
 // RF_TX_DBM_MAX in the board header.
 const Caps kSX1280 = {
-  "SX1280", 2400.0f, 2500.0f, kBwSx128x, 7, 12, -18, 13
+  "SX1280", 2400.0f, 2500.0f, kBwSx128x, 7, 12, -18, 13, false
 };
 // Two amplifiers in one package, and RadioLib picks between them by the figure
 // asked for: at or below 14 dBm the low-power PA (down to -17), above it the
@@ -78,14 +83,25 @@ const Caps kSX1280 = {
 // one board here that carries this chip the RF switch table's high-frequency
 // transmit mode is identical to its standby — the path is not wired. Claiming
 // the range would let the validator accept a channel the board cannot radiate.
+// Duty-cycled receive is false despite the LR11x0 driver offering it. The one
+// board here carrying this part ships base firmware 0x0303, which predates
+// DriveDiosInSleepMode — the command that keeps the DIO lines driven while the
+// part sleeps — and the RadioLib pin this project uses gets the radio up
+// precisely by skipping it. Without it a sleeping receiver has no way to
+// announce a wake-up. platformio.ini's note on that pin says the same; claiming
+// the capability here would arm a mode that silently deafens the node.
 const Caps kLR1110 = {
-  "LR1110", 150.0f, 960.0f, kBwLr11x0, 7, 12, -17, 22
+  "LR1110", 150.0f, 960.0f, kBwLr11x0, 7, 12, -17, 22, false
 };
 // No radio answered. Nothing can be transmitted, so the validator has nothing
 // to protect and stays out of the way rather than rejecting a setting the
 // operator is entering ahead of fixing the wiring.
+//
+// Duty-cycled receive is the one field that does not follow that. A permissive
+// bound only allows a value; a permissive feature bit gets acted on, and "we do
+// not know what this is" must never read as "it can sleep its receiver".
 const Caps kUnknown = {
-  "none", 100.0f, 2600.0f, kBwAny, 7, 12, -18, 22
+  "none", 100.0f, 2600.0f, kBwAny, 7, 12, -18, 22, false
 };
 
 bool channelUsable(const Caps& c, float freqMhz, float bwKhz, uint8_t sf) {

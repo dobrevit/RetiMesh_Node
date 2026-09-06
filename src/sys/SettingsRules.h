@@ -158,6 +158,13 @@ inline bool validateRadio(const RadioSettings& r, const RadioCaps::Caps& caps,
     snprintf(err, errLen, "duty cycle must be 0 (off) or 1-100 %%");
     return false;
   }
+  // rxDutyCycle has no rule, and its absence is deliberate. A bool has no
+  // bounds to check, and turning it on for a chip without the mode is not an
+  // error: the transceiver is detected at runtime, so an operator provisioning
+  // a fleet from one export would otherwise have the file refused by whichever
+  // nodes happen to carry an SX1276. The node falls back to continuous RX and
+  // says so — caps.rx_duty_cycle_supported on the API, and the engagement
+  // read-back beside it — rather than refusing the setting.
   return true;
 }
 

@@ -450,6 +450,16 @@
 #ifndef RF_PREAMBLE_SYMS
   #define RF_PREAMBLE_SYMS  18              // RNode's LORA_PREAMBLE_SYMBOLS_MIN
 #endif
+// Duty-cycled receive: let the transceiver sleep between preamble samples
+// instead of listening continuously. Off by default and deliberately so — a
+// transport node's one job is to be listening, and the saving is worth having
+// only where the channel makes the sleep long enough to be real. It is an
+// SX1262-only mode (RadioCaps::Caps::rxDutyCycle) and at the shipped
+// SF8/125 kHz channel it does not engage at all; docs/configuration.md gives
+// the rule for when it does.
+#ifndef RF_RX_DUTY_CYCLE
+  #define RF_RX_DUTY_CYCLE  0
+#endif
 // 0x12 is the classic SX127x "private network" sync word; RadioLib
 // translates it to the equivalent SX126x two-byte value (0x1424).
 #ifndef RF_SYNCWORD
@@ -1258,6 +1268,13 @@ struct NodeStats {
   volatile uint16_t dutyLimitBp   = 0;      // enforced allowance in basis points, 100 = 1 %
   volatile uint16_t csmaSlotMs    = 0;
   volatile uint8_t  csmaBand      = 1;      // contention window band, 1..4
+  // Duty-cycled receive as it would actually behave, not as the switch reads.
+  // The driver falls back to a continuous receive without saying so whenever
+  // the computed sleep is too short to be worth the wake-up, so the setting
+  // alone answers nothing (Airtime.h). Written by the radio task whenever the
+  // channel is applied.
+  volatile uint32_t rxDutyCycleSleepUs = 0;    // per cycle; 0 = the receiver never sleeps
+  volatile bool     rxDutyCycleEngages = false;// setting, chip and channel all agree
   // Where receptions go when they do not become a packet. One counter for all
   // of them told us a node was losing 94 % of its receptions but not why, and
   // the causes have nothing to do with each other: a full ring means the

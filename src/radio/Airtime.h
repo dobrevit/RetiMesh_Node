@@ -200,6 +200,47 @@ public:
   // Seconds until the hourly figure falls back under the limit, 0 when free.
   uint32_t retryAfterS(uint32_t nowMs, uint16_t limitBp);
 
+  // ---- Duty-cycled receive ------------------------------------------------
+  // Whether telling an SX1262 to sleep between preamble samples would actually
+  // save anything on this channel. The driver decides that silently — the
+  // sleep is a function of the preamble and the symbol time, and when it comes
+  // out shorter than the chip's own wake-up transition RadioLib abandons the
+  // whole idea and arms a plain continuous receive instead, returning success
+  // either way. A node that reported the setting rather than this answer would
+  // claim a saving it is not making, which is the whole reason this lives here
+  // and not inside the radio: it is pure arithmetic, it is host-testable, and
+  // one caller cannot disagree with another about it.
+  //
+  // The three constants mirror RadioLib 7.7.1 —
+  // PhysicalLayer::calculateRxDutyCycle and SX126x::startReceiveDutyCycleAuto,
+  // plus SX126x::setTCXO's default. They are named so that a driver update
+  // that retunes any of them shows up as a diff here and a failing test rather
+  // than as a node that quietly stopped sleeping.
+
+  // Symbols of preamble the receiver must catch to latch onto it (SX1262
+  // datasheet 6.1.1.1): 8 for SF7-12, 12 for SF5-6. This firmware's floor is
+  // SF7 on every chip (RadioCaps), so 8 is the figure in play.
+  static const uint16_t RX_DC_MIN_SYMBOLS_SF7 = 8;
+  static const uint16_t RX_DC_MIN_SYMBOLS_SF6 = 12;
+  // Shutdown and startup around each wake, added to the TCXO ramp. Below that
+  // total the driver does not sleep at all.
+  static const uint32_t RX_DC_TRANSITION_US   = 1016;
+  // RadioLib's setTCXO() default ramp. Nothing in this firmware passes a delay,
+  // so every board that names a TCXO voltage gets this one; a board with none
+  // leaves the driver's delay at zero, which is why callers pass it in.
+  static const uint32_t RX_DC_TCXO_DELAY_US   = 5000;
+
+  // 0 selects the driver's own default for the spreading factor.
+  static uint16_t rxDutyCycleMinSymbols(uint8_t sf);
+  // Microseconds the receiver would spend asleep in each cycle. 0 means it
+  // would never sleep: a preamble no longer than the two sampling windows
+  // leaves nothing between them.
+  static uint32_t rxDutyCycleSleepUs(uint8_t sf, float bwKhz, uint16_t preambleSyms,
+                                     uint16_t minSymbols = 0);
+  // ...and whether that sleep is long enough to be worth the driver's while.
+  static bool rxDutyCycleEngages(uint32_t sleepUs,
+                                 uint32_t tcxoDelayUs = RX_DC_TCXO_DELAY_US);
+
   uint32_t slotMs() const;
   uint32_t difsMs() const { return 2 * slotMs(); }
   uint8_t  cwBand(float shortTerm) const;     // 1..CW_BANDS

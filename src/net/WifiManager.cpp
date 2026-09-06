@@ -2275,6 +2275,10 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
     // An amplifier does not change what the chip may be driven at, but it does
     // change what leaves the antenna, and the operator has to account for it.
     cp["pa_fitted"]    = LoRaRadio::hasPa();
+    // Whether this chip has a duty-cycled receive at all, so the page can hide
+    // a switch that could not be honoured rather than offering one that does
+    // nothing. Read-only: it is the transceiver's answer, not a setting.
+    cp["rx_duty_cycle_supported"] = c.rxDutyCycle;
 #if HAS_LORA_FEM
     // Which front end the boot detection found, and roughly what it adds at
     // the configured drive — the two numbers an operator needs to work out
@@ -2335,6 +2339,14 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   radio["announce_interval"] = rs.announceInterval;
   radio["callsign"]  = rs.callsign;              // "" = SSID
   radio["duty_cycle_pct"] = rs.dutyCyclePct;     // manual cap; 0 = follow the band
+  radio["rx_duty_cycle"] = rs.rxDutyCycle;       // sleep the receiver between preamble samples
+  // ...and what that setting is actually worth here. RadioLib falls back to a
+  // continuous receive without reporting it whenever the sleep the channel
+  // yields is shorter than the chip's wake-up transition, so the switch alone
+  // says nothing: rx_duty_cycle_engages is the computed truth (Airtime.h) and
+  // rx_duty_cycle_sleep_us the figure behind it.
+  radio["rx_duty_cycle_engages"]  = g_stats.rxDutyCycleEngages;
+  radio["rx_duty_cycle_sleep_us"] = g_stats.rxDutyCycleSleepUs;
   radio["gps_enabled"] = rs.gpsEnabled;
   radio["gps_share_position"] = rs.gpsSharePosition;
   radio["has_gps"] = HAS_GPS ? true : false;
@@ -2613,6 +2625,7 @@ void WifiManager::handleRadioPost(AsyncWebServerRequest* request, const char* bo
   if (!jsonNarrow(request, in["beacon_interval"], r.beaconInterval, "beacon_interval")) return;
   if (!jsonNarrow(request, in["announce_interval"], r.announceInterval, "announce_interval")) return;
   if (!jsonNarrow(request, in["duty_cycle_pct"], r.dutyCyclePct, "duty_cycle_pct")) return;
+  if (in["rx_duty_cycle"].is<bool>()) r.rxDutyCycle  = in["rx_duty_cycle"];
   if (in["gps_enabled"].is<bool>())   r.gpsEnabled   = in["gps_enabled"];
   if (in["gps_share_position"].is<bool>()) r.gpsSharePosition = in["gps_share_position"];
   char msg0[160];
@@ -2800,6 +2813,7 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   r["sync_word"] = rs.syncWord; r["preamble"] = rs.preamble; r["announce_interval"] = rs.announceInterval;
   r["beacon_interval"] = rs.beaconInterval; r["callsign"] = rs.callsign;
   r["duty_cycle_pct"] = rs.dutyCyclePct; r["region"] = rs.region;
+  r["rx_duty_cycle"] = rs.rxDutyCycle;
   JsonObject w = doc["wifi"].to<JsonObject>();
   w["ssid"] = ws.ssid; w["security"] = Settings::securityName(ws.security); w["password"] = ws.password;
   w["channel"] = ws.channel; w["max_stations"] = ws.maxStations; w["hidden"] = ws.hidden;
@@ -2865,6 +2879,10 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     if (!jsonNarrow(request, r["announce_interval"], rs.announceInterval, "announce_interval")) return;
     if (!jsonNarrow(request, r["beacon_interval"], rs.beaconInterval, "beacon_interval")) return;
     if (r["callsign"].is<const char*>()) strlcpy(rs.callsign, r["callsign"], sizeof(rs.callsign));
+    // Carried across whatever chip the receiving node has: the mode is refused
+    // by nothing and simply does not engage where it cannot (SettingsRules.h),
+    // so one export provisions a mixed fleet without being edited per board.
+    rs.rxDutyCycle = r["rx_duty_cycle"] | rs.rxDutyCycle;
     // Present but unknown is an error, as it is on the POST path. Absent means
     // a config exported before regions existed, and that is what the frequency
     // is for. Starting from the node's own region would have made a legacy
