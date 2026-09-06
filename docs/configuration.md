@@ -67,7 +67,7 @@ RM STATUS radio rx_duty_cycle=on supported=yes sleep_us=4096 engages=no armed=no
 ...and one on a channel that suits it, actually making the saving:
 
 ```
-RM STATUS radio rx_duty_cycle=on supported=yes sleep_us=32768 engages=yes armed=yes
+RM STATUS radio rx_duty_cycle=on supported=yes sleep_us=16384 engages=yes armed=yes
 ```
 
 `engages` says the conditions for the saving are met. `armed` says the receiver
@@ -85,7 +85,7 @@ The node also says which of the four situations it is in once per settings
 apply, and at boot, at `info` level:
 
 ```
-duty-cycled receive: arming it — the receiver sleeps 32768 us per cycle at SF10/125.0 kHz, preamble 18 symbols
+duty-cycled receive: arming it — the receiver sleeps 16384 us per cycle at SF10/125.0 kHz, preamble 18 symbols
 duty-cycled receive: on, but not on this channel — the 4096 us sleep at SF8/125.0 kHz is not one the driver will take, so the receiver stays on continuously
 duty-cycled receive: on, but the SX1276 has no such mode — the receiver stays on continuously
 duty-cycled receive: off — the receiver listens continuously

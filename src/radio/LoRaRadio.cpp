@@ -24,6 +24,7 @@
 #include "LoRaFem.h"
 #include "RadioParkPolicy.h"
 #include "RadioSelfTestPolicy.h"
+#include "RadioWarnPolicy.h"
 #include <esp_app_desc.h>
 #include <esp_random.h>
 #include <Preferences.h>
@@ -87,6 +88,12 @@ static const uint32_t kIdleWaitMs = 100;
 // the only unbounded-looking wait on the path between two feeds.
 static_assert(kIdleWaitMs < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
               "the idle park must fit between two watchdog feeds");
+
+// Loud enough to be noticed, bounded enough to be safe to emit from the task
+// that is trying to transmit: at most one line a minute from each kind of
+// failure, after the first, which always goes out at once. The rule itself is
+// RadioWarn::due() — pure, and pinned by test/test_radio_warn.
+static const uint32_t kWarnIntervalMs = 60000;
 
 // ---------------------------------------------------------------------------
 // ISR: the radio's IRQ line (DIO1 on SX126x, DIO0 on SX127x) rises on
@@ -731,6 +738,15 @@ void LoRaRadio::enterSleep() {
   _sleepRequest = false;
   portEXIT_CRITICAL(&_mux);
 
+  // Wake it before telling it to sleep. SX126x::sleep() clocks SET_SLEEP out
+  // with the BUSY wait skipped, so on a part already in RTC sleep — where a
+  // duty-cycled receive leaves it for most of every cycle — the NSS falling
+  // edge carrying the command is the same edge that wakes the part, and the
+  // command races the wake. That is the drop RadioLib added the separate
+  // wake-NOP to standby() to avoid, and losing it here would leave the chip
+  // sitting in STDBY_RC, drawing, through a restart window the node had just
+  // logged as asleep. One extra command, on a path that runs once per restart.
+  _radio->standby();
   const int16_t state = _radio->sleep();
   // Whatever was armed is not running any more, and the restart's 250 ms window
   // is long enough for STATUS to be asked. Published where it stops being true,
@@ -973,8 +989,8 @@ void LoRaRadio::taskLoop() {
 //
 // The warning is rate-limited because this runs per packet and per CAD probe,
 // and a chip that refuses once refuses every time — fifty lines per deferral
-// otherwise (the reasoning under warnDue() is M3's, for the same shape of
-// fault). It does not get a published counter, unlike the CAD failures: the
+// otherwise (the reasoning in RadioWarnPolicy.h is M3's, for the same shape
+// of fault). It does not get a published counter, unlike the CAD failures: the
 // fault already has a published level in rxDutyCycleArmed, which stands false
 // beside an rxDutyCycleEngages of true for as long as the refusals last, and
 // that is strictly more legible than a number that only ever goes up.
@@ -991,7 +1007,7 @@ void LoRaRadio::armReceive() {
     accepted = (state == RADIOLIB_ERR_NONE);
     if (!accepted) {
       _rxArmErrors++;
-      if (warnDue(_rxArmWarnAtMs, _rxArmErrors))
+      if (RadioWarn::due(_rxArmWarnAtMs, _rxArmErrors, millis(), kWarnIntervalMs))
         log_e("duty-cycled receive refused by the driver (code %d) — arming a continuous "
               "receive instead (%lu so far). The node still hears everything; what is lost "
               "is the saving, and rx_duty_cycle_armed says so.",
@@ -1374,38 +1390,6 @@ static_assert(Airtime::CAD_TIMEOUT_MAX_MS < CSMA_MAX_WAIT_MS,
 static_assert(Airtime::CAD_TIMEOUT_MAX_MS < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
               "one CAD probe must fit between two watchdog feeds");
 
-// How often a repeating radio failure may reach the log. See warnDue().
-static const uint32_t kWarnIntervalMs = 60000;
-
-// Loud enough to be noticed, bounded enough to be safe to emit from the task
-// that is trying to transmit.
-//
-// The failures this paces are never one-offs: a chip that has stopped answering
-// fails every CAD probe, and one deferral is about fifty of them
-// (CSMA_MAX_WAIT_MS over a deadline plus CSMA_CAD_RETRY_MS), so a line per
-// probe would be fifty blocking console writes for every packet sent. A driver
-// that refuses the duty-cycled receive refuses it on every re-arm, which is at
-// least once per packet. The first failure of each kind is reported the moment
-// it happens and after that at most one line a minute from each, every one
-// carrying its running total so the rate is readable from the log alone.
-//
-// Each caller brings its own stamp and its own count, which is the whole reason
-// this takes a reference rather than owning one: a CAD storm must not be able
-// to suppress the arm warning, or the other way round.
-//
-// A rate-limited line is not the record of the fault, only the notice of it.
-// For carrier sense that record is cad_timeouts and cad_arm_errors on the
-// STATUS line and in /api/status; for the duty-cycled receive it is
-// rx_duty_cycle_armed, which stands false for as long as the refusals last. A
-// fault this quiet has to be visible whether or not anyone was watching the log
-// at the time.
-bool LoRaRadio::warnDue(uint32_t& lastMs, uint32_t count) {
-  const uint32_t now = millis();
-  if (count > 1 && now - lastMs < kWarnIntervalMs) return false;
-  lastMs = now;
-  return true;
-}
-
 // One channel-activity-detection probe, without spinning for it.
 //
 // The blocking scanChannel() this replaces polled the interrupt GPIO with
@@ -1472,6 +1456,30 @@ bool LoRaRadio::warnDue(uint32_t& lastMs, uint32_t count) {
 // cancels a duty-cycled receive outright; re-arming it here is what keeps the
 // saving from being switched off for good by the first packet this node sends.
 bool LoRaRadio::mediumFree() {
+  // Wake the part before asking it anything. With a duty-cycled receive armed
+  // the chip is in RTC sleep for most of every cycle, and asleep it holds BUSY
+  // high — but RadioLib waits on BUSY *before* it pulls NSS low
+  // (Module::SPItransferStream), so the wait can never produce the falling edge
+  // that would end it. Every plain read below would block this task for
+  // min(the sleep period, the driver's 1 s SPI timeout) inside RadioLib's
+  // `while(digitalRead(BUSY)) yield()` — at priority 5, with the rns task on
+  // the same core behind it. Worse on a channel whose sleep outlasts that
+  // timeout: startChannelScan() begins with a getPacketType() of its own, that
+  // read would time out to 0xFF, and the scan would be refused with
+  // ERR_WRONG_MODEM — a counted "the driver would not arm CAD" that was really
+  // this node's own duty cycle.
+  //
+  // standby() is the driver's own wake and the only call here that performs
+  // one: it sends a bare NOP first, purely to pull NSS low and end the sleep,
+  // precisely because the BUSY-gated SET_STANDBY behind it cannot get through
+  // otherwise (SX126x::standby(mode, wakeup)). Taking it here costs one SPI
+  // transaction and loses nothing — it does not clear the interrupt status, so
+  // the pending-RxDone check below still sees the flag and the frame is still
+  // in the chip's buffer — and startChannelScan() was going to issue the same
+  // standby() microseconds later anyway, so the window in which the receiver is
+  // out of receive only gets shorter.
+  _radio->standby();
+
   const uint32_t rxDone = rxDoneFlag();
   if (rxDone && (_radio->getIrqFlags() & rxDone)) handleRadioIrq();
   flushIrq();                            // ...and only then flush
@@ -1483,7 +1491,7 @@ bool LoRaRadio::mediumFree() {
     // is the driver's own and names a specific failure, so it is carried into
     // the log rather than discarded: this path used to return in silence.
     g_stats.loraCadArmErrors++;
-    if (warnDue(_cadWarnAtMs, g_stats.loraCadArmErrors))
+    if (RadioWarn::due(_cadWarnAtMs, g_stats.loraCadArmErrors, millis(), kWarnIntervalMs))
       log_w("CAD could not be armed, code %d — treating the channel as busy (%lu so far)",
             (int)armed, (unsigned long)g_stats.loraCadArmErrors);
     armReceive();
@@ -1535,7 +1543,7 @@ bool LoRaRadio::mediumFree() {
     // counts.
     if (!abandoned) {
       g_stats.loraCadTimeouts++;
-      if (warnDue(_cadWarnAtMs, g_stats.loraCadTimeouts))
+      if (RadioWarn::due(_cadWarnAtMs, g_stats.loraCadTimeouts, millis(), kWarnIntervalMs))
         log_w("CAD did not report within %u ms — treating the channel as busy (%lu so far)",
               (unsigned)_airtime.cadTimeoutMs(), (unsigned long)g_stats.loraCadTimeouts);
     }

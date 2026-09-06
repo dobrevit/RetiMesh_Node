@@ -191,11 +191,12 @@ private:
   // reporting the saving. What it arms is RadioRxArm's decision; whether the
   // driver took it is what g_stats.rxDutyCycleArmed then says.
   void armReceive();
-  // Rate-limits a warning that can repeat once per packet, against the caller's
-  // own last-warned stamp and running count. One implementation, because the
-  // CAD failures M3 added and the arm failures below need the identical rule
-  // and must not be able to suppress each other.
-  bool warnDue(uint32_t& lastMs, uint32_t count);
+  // Warnings that can repeat once per packet are rate-limited by
+  // RadioWarn::due() (RadioWarnPolicy.h), against the caller's own last-warned
+  // stamp below and its running count. One implementation, because the CAD
+  // failures M3 added and the arm failures need the identical rule and must not
+  // be able to suppress each other; a header rather than a member because the
+  // rule is pure once the clock is passed in, and so host-testable.
   void refreshAirtimeStats();            // publish channel use into g_stats
   bool sendFrame(const uint8_t* frame, size_t len);
 
