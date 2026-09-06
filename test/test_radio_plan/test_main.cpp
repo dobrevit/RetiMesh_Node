@@ -284,7 +284,8 @@ static void test_a_node_name_becomes_a_legal_dns_label() {
 
 // Duty-cycled receive is a feature bit, not a tuning bound, and it is the one
 // entry in the table that is per-driver rather than per-datasheet: RadioLib
-// declares startReceiveDutyCycleAuto on SX126x and LR11x0 only. Getting it wrong
+// declares startReceiveDutyCycleAuto on SX126x, LR11x0 and LR2021 — on none of
+// the SX127x or SX128x parts this firmware drives. Getting it wrong
 // on either side is a live fault — claimed where it does not exist arms a mode
 // the driver has no method for; denied where it does costs the saving silently.
 static void test_only_the_sx1262_claims_a_duty_cycled_receive() {

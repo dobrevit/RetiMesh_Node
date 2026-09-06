@@ -316,12 +316,16 @@ static void doStatus() {
   // shorter than the chip's wake-up transition — which at the default
   // SF8/125 kHz it always is. engages= is the computed answer (Airtime.h),
   // sleep_us= the figure it was computed from, so a channel that is close to
-  // the threshold can be seen to be close.
-  dataf("STATUS", "radio rx_duty_cycle=%s supported=%s sleep_us=%lu engages=%s",
+  // the threshold can be seen to be close. armed= is the separate question of
+  // whether the receiver is running the mode right now, and is no in this
+  // release whatever the other four say — an operator reading engages=yes needs
+  // to see that on the same line, not in a release note.
+  dataf("STATUS", "radio rx_duty_cycle=%s supported=%s sleep_us=%lu engages=%s armed=%s",
         settings.radio().rxDutyCycle ? "on" : "off",
         loraRadio.caps().rxDutyCycle ? "yes" : "no",
         (unsigned long)g_stats.rxDutyCycleSleepUs,
-        g_stats.rxDutyCycleEngages ? "yes" : "no");
+        g_stats.rxDutyCycleEngages ? "yes" : "no",
+        g_stats.rxDutyCycleArmed ? "yes" : "no");
   // wifi_ps and wifi_tx_dbm are read back from the driver itself
   // (esp_wifi_get_ps() / esp_wifi_get_max_tx_power()), not assumed from the
   // profile or the setting: the proof a change actually took effect, not

@@ -74,29 +74,43 @@ between preamble samples instead of listening continuously. The node's fixed
 catch any conforming sender, and every RNode-lineage firmware shares the same
 preamble floor.
 
-Three separate things decide whether it does anything, and the API reports
-each of them — plus the figure the verdict was computed from:
+Three separate things decide whether it does anything, and the API reports each
+of them — plus the figure the verdict was computed from, and whether the mode is
+running right now:
 
 | Field | Where | Means |
 |---|---|---|
 | `radio.rx_duty_cycle` | settings | what the operator asked for |
 | `radio.caps.rx_duty_cycle_supported` | capabilities | whether the fitted chip has the mode — SX1262 only |
-| `radio.rx_duty_cycle_engages` | read-back | whether it would actually sleep on the configured channel |
+| `radio.rx_duty_cycle_would_engage` | read-back | whether this chip on this channel *could* sleep, ignoring the switch |
+| `radio.rx_duty_cycle_engages` | read-back | the same, narrowed by the switch: all three agree |
 | `radio.rx_duty_cycle_sleep_us` | read-back | how long per cycle, in microseconds; `0` = never |
+| `radio.rx_duty_cycle_armed` | read-back | whether the receiver is running the mode *right now* — the field that says the saving is actually being made |
 
-Only the third is worth acting on. The driver falls back to a continuous
-receive, reporting success, whenever the sleep the channel yields is shorter
-than the chip's own wake-up transition — about 6 ms with the TCXO ramp these
-boards use. The sleep is `(preamble − 16) × symbol_time`, which with an
-18-symbol preamble is two symbols: **at the shipped SF8/125 kHz channel it is
-4096 µs against a 6016 µs threshold, so it does not engage and the receiver
-stays on.** It engages from a symbol time of roughly 3 ms — SF9 and above at
-125 kHz, or a lower spreading factor at a narrower bandwidth.
+`_engages` is the one worth acting on; `_would_engage` is what tells a UI *why*
+it is false. They differ only in the switch, so a node with the setting off and
+a channel that suits it reports `would_engage: true, engages: false` — "nobody
+asked", not "this channel cannot".
+
+The driver falls back to a continuous receive, reporting success, whenever the
+sleep the channel yields is shorter than the chip's own wake-up transition —
+about 6 ms with the TCXO ramp these boards use. The sleep is
+`(preamble − 16) × symbol_time`, which with an 18-symbol preamble is two
+symbols: **at the shipped SF8/125 kHz channel it is 4096 µs against a 6016 µs
+threshold, so it does not engage and the receiver stays on.** It engages from a
+symbol time of roughly 3 ms — SF9 and above at 125 kHz, or a lower spreading
+factor at a narrower bandwidth. There is a ceiling as well as a floor: the sleep
+period reaches the chip as a 24-bit count of 15.625 µs ticks, so a channel slow
+enough to overflow it (SF12 at 7.8 kHz needs only a 516-symbol preamble) reports
+`engages: false` too — there the driver would arm nothing at all rather than
+falling back, so the node must not ask it.
 
 The setting is accepted on every board, including the ones that cannot honour
 it, so a single export provisions a mixed fleet; the capability flag is what a
-UI should hide the control on. As of this release nothing in the radio task arms
-the mode — these fields report what arming it would do.
+UI should hide the control on. `_engages` says the conditions are met;
+`_armed` says the receiver is in the mode, and a node can honestly report
+`engages: true, armed: false`. Read `_armed` rather than a release note when
+what you need to know is whether the saving is being made.
 
 ## `GET /api/status` (public)
 ```json

@@ -1275,6 +1275,18 @@ struct NodeStats {
   // channel is applied.
   volatile uint32_t rxDutyCycleSleepUs = 0;    // per cycle; 0 = the receiver never sleeps
   volatile bool     rxDutyCycleEngages = false;// setting, chip and channel all agree
+  // The same question with the switch left out: would this chip on this channel
+  // sleep, if it were asked to? Published beside the one above because their
+  // false branches mean different things and a surface that has only the first
+  // cannot tell them apart — every node ships with the setting off, so a hint
+  // built on rxDutyCycleEngages alone would tell an SX1262 at SF10/125 kHz that
+  // the channel was hopeless when in fact the switch is the only thing missing.
+  volatile bool     rxDutyCycleWouldEngage = false;
+  // ...and whether the mode is actually running, which is neither of the above.
+  // Published as a fact rather than left to a sentence in docs/ because a
+  // release that reports a saving it is not making is exactly the failure this
+  // whole block exists to prevent, and prose is not something the API can echo.
+  volatile bool     rxDutyCycleArmed   = false;
   // Where receptions go when they do not become a packet. One counter for all
   // of them told us a node was losing 94 % of its receptions but not why, and
   // the causes have nothing to do with each other: a full ring means the

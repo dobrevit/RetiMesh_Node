@@ -172,6 +172,13 @@ void test_the_driver_constants_are_the_ones_we_mirror() {
   TEST_ASSERT_EQUAL_UINT16(12, Airtime::RX_DC_MIN_SYMBOLS_SF6);
   TEST_ASSERT_EQUAL_UINT32(1016, Airtime::RX_DC_TRANSITION_US);
   TEST_ASSERT_EQUAL_UINT32(5000, Airtime::RX_DC_TCXO_DELAY_US);
+  // 1016 is what the driver compares against; 1000 is what it then subtracts.
+  // Two literals in RadioLib, two constants here — if they are ever collapsed
+  // into one the boundary moves by 16 us in whichever direction the fold went.
+  TEST_ASSERT_EQUAL_UINT32(1000, Airtime::RX_DC_COMPENSATION_US);
+  TEST_ASSERT_NOT_EQUAL_UINT32(Airtime::RX_DC_TRANSITION_US, Airtime::RX_DC_COMPENSATION_US);
+  // SetRxDutyCycle carries the period in three bytes.
+  TEST_ASSERT_EQUAL_UINT32(0x00FFFFFFUL, Airtime::RX_DC_PERIOD_RAW_MAX);
   // SF7 and up take the 8-symbol window; only SF5/SF6, which this firmware
   // never runs, take 12.
   TEST_ASSERT_EQUAL_UINT16(8,  Airtime::rxDutyCycleMinSymbols(7));
@@ -248,6 +255,49 @@ void test_min_symbols_and_a_nonsense_bandwidth() {
   TEST_ASSERT_EQUAL_UINT32(0, Airtime::rxDutyCycleSleepUs(8, -125.0f, 18));
 }
 
+// The symbol time is a truncating integer divide in the driver, not a rounded
+// one, and every case above happens to divide exactly — so none of them can
+// tell the two apart. 41.7 kHz does not: 1 280 000 / 417 is 3069.54, which the
+// driver truncates to 3069, and a rounding implementation would report a 6140 us
+// sleep where the chip is actually given 6138.
+void test_the_symbol_time_truncates_rather_than_rounds() {
+  TEST_ASSERT_EQUAL_UINT32(6138, Airtime::rxDutyCycleSleepUs(7, 41.7f, 18));
+  // Comfortably over the 6016 us threshold either way, so the difference is
+  // only ever visible as the reported figure — which is what STATUS prints.
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(Airtime::rxDutyCycleSleepUs(7, 41.7f, 18)));
+}
+
+// The threshold has a ceiling as well as a floor, and the two failures are not
+// alike. Under the floor RadioLib arms a plain continuous receive and the node
+// hears normally. Over the ceiling the sleep period no longer fits the 24 bits
+// SetRxDutyCycle carries, so startReceiveDutyCycle() returns
+// RADIOLIB_ERR_INVALID_SLEEP_PERIOD *before* it stages a mode — arming nothing
+// at all and leaving the chip in standby, deaf. Only mirroring the first gate
+// would have told a caller to go ahead and do exactly that.
+//
+// It is reachable from settings this firmware accepts: 7.8 kHz is in the
+// SX1262's bandwidth list, SF12 is inside its range, and the validator takes a
+// preamble up to 1000. At SF12/7.8 kHz a symbol is 525 128 us, so the boundary
+// falls between a 515- and a 516-symbol preamble.
+void test_a_sleep_too_long_for_the_chip_is_not_engagement() {
+  const uint32_t justUnder = Airtime::rxDutyCycleSleepUs(12, 7.8f, 515);
+  const uint32_t justOver  = Airtime::rxDutyCycleSleepUs(12, 7.8f, 516);
+  TEST_ASSERT_EQUAL_UINT32(262038872, justUnder);      // 499 symbols
+  TEST_ASSERT_EQUAL_UINT32(262564000, justOver);       // 500 symbols
+  TEST_ASSERT_TRUE_MESSAGE(Airtime::rxDutyCycleEngages(justUnder),
+                           "the last preamble that still fits 24 bits must engage");
+  TEST_ASSERT_FALSE_MESSAGE(Airtime::rxDutyCycleEngages(justOver),
+                            "a sleep the driver would refuse must never read as engaged");
+  // A wider channel moves the boundary but not the rule: at 10.4 kHz the
+  // symbol is shorter, so it takes more preamble to overflow — 682, not 516.
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(Airtime::rxDutyCycleSleepUs(12, 10.4f, 681)));
+  TEST_ASSERT_FALSE(Airtime::rxDutyCycleEngages(Airtime::rxDutyCycleSleepUs(12, 10.4f, 682)));
+  // The ceiling is the chip's, not the TCXO's: dropping the ramp to zero shifts
+  // the floor by 5 ms and leaves the boundary where it was.
+  TEST_ASSERT_TRUE(Airtime::rxDutyCycleEngages(justUnder, 0));
+  TEST_ASSERT_FALSE(Airtime::rxDutyCycleEngages(justOver, 0));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_time_on_air_matches_datasheet);
@@ -268,5 +318,7 @@ int main() {
   RUN_TEST(test_a_short_preamble_leaves_no_room_to_sleep);
   RUN_TEST(test_the_tcxo_ramp_is_part_of_the_threshold);
   RUN_TEST(test_min_symbols_and_a_nonsense_bandwidth);
+  RUN_TEST(test_the_symbol_time_truncates_rather_than_rounds);
+  RUN_TEST(test_a_sleep_too_long_for_the_chip_is_not_engagement);
   return UNITY_END();
 }

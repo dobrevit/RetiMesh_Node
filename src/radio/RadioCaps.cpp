@@ -57,10 +57,10 @@ const float kBwAny[] = {
 };
 
 // The last field is duty-cycled receive. RadioLib 7.7.1 declares
-// startReceiveDutyCycle{,Auto} on SX126x and LR11x0 only (SX126x.h:329,349) —
-// the SX127x and SX128x drivers have no such method at all, so it is not a
-// question of whether the silicon could, it is a mode this firmware has no way
-// to ask them for.
+// startReceiveDutyCycle{,Auto} on SX126x (SX126x.h:329,349), LR11x0
+// (LR11x0.h:248) and LR2021 (LR2021.h:350) — none of SX127x or SX128x, whose
+// drivers have no such method at all, so it is not a question of whether the
+// silicon could, it is a mode this firmware has no way to ask them for.
 const Caps kSX1276 = {
   "SX1276", 137.0f, 1020.0f, kBwSubGhz, 7, 12, 2, 17, false
 };

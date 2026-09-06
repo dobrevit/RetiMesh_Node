@@ -211,11 +211,11 @@ public:
   // and not inside the radio: it is pure arithmetic, it is host-testable, and
   // one caller cannot disagree with another about it.
   //
-  // The three constants mirror RadioLib 7.7.1 —
-  // PhysicalLayer::calculateRxDutyCycle and SX126x::startReceiveDutyCycleAuto,
-  // plus SX126x::setTCXO's default. They are named so that a driver update
-  // that retunes any of them shows up as a diff here and a failing test rather
-  // than as a node that quietly stopped sleeping.
+  // The constants mirror RadioLib 7.7.1 — PhysicalLayer::calculateRxDutyCycle,
+  // SX126x::startReceiveDutyCycleAuto and SX126x::startReceiveDutyCycle, plus
+  // SX126x::setTCXO's default. They are named so that a driver update that
+  // retunes any of them shows up as a diff here and a failing test rather than
+  // as a node that quietly stopped sleeping.
 
   // Symbols of preamble the receiver must catch to latch onto it (SX1262
   // datasheet 6.1.1.1): 8 for SF7-12, 12 for SF5-6. This firmware's floor is
@@ -225,6 +225,18 @@ public:
   // Shutdown and startup around each wake, added to the TCXO ramp. Below that
   // total the driver does not sleep at all.
   static const uint32_t RX_DC_TRANSITION_US   = 1016;
+  // ...and the amount the driver then *deducts* from the sleep before it
+  // programs the chip (SX126x.cpp:479-480). Deliberately not the same number as
+  // the 1016 above: the driver writes them as two separate literals, 1016 in
+  // the threshold it compares against and 1000 in the subtraction it performs,
+  // and folding them into one constant here would misreport the boundary in
+  // whichever direction the fold went. Both are mirrored, both are named.
+  static const uint32_t RX_DC_COMPENSATION_US = 1000;
+  // The sleep period reaches the chip as a 24-bit count of 15.625 us ticks
+  // (SetRxDutyCycle takes three bytes), so the driver rejects anything that
+  // does not fit. Held as the raw ceiling rather than a microsecond figure
+  // because the truncating divide by 125/8 is what decides the boundary.
+  static const uint32_t RX_DC_PERIOD_RAW_MAX  = 0x00FFFFFFUL;
   // RadioLib's setTCXO() default ramp. Nothing in this firmware passes a delay,
   // so every board that names a TCXO voltage gets this one; a board with none
   // leaves the driver's delay at zero, which is why callers pass it in.
@@ -237,7 +249,25 @@ public:
   // leaves nothing between them.
   static uint32_t rxDutyCycleSleepUs(uint8_t sf, float bwKhz, uint16_t preambleSyms,
                                      uint16_t minSymbols = 0);
-  // ...and whether that sleep is long enough to be worth the driver's while.
+  // ...and whether the driver will actually take that sleep. True means one
+  // thing only, and it is the thing a caller may act on: startReceiveDutyCycle-
+  // Auto() will arm a duty-cycled receive with it. False covers two outcomes
+  // that look nothing alike on the bench and must not be told apart here,
+  // because in both of them the honest answer for a caller is "do not ask the
+  // driver for this mode":
+  //
+  //   * too short — the sleep is under the wake-up transition, so the driver
+  //     quietly arms a plain continuous receive and the node hears normally;
+  //   * too long — the period will not fit the 24 bits the chip's SetRxDutyCycle
+  //     command has, so the driver returns RADIOLIB_ERR_INVALID_SLEEP_PERIOD.
+  //     That return is *before* the stageMode() call, so it arms nothing at
+  //     all: not duty-cycled receive, not continuous receive. The chip is left
+  //     in standby and the node is deaf until something else re-arms it.
+  //
+  // The second is reachable from settings this firmware already accepts — SF12
+  // at 7.8 kHz has a 525 ms symbol, so a 516-symbol preamble is enough, and the
+  // validator allows up to 1000 — which is why this predicate mirrors the
+  // driver's whole acceptance condition rather than only its first gate.
   static bool rxDutyCycleEngages(uint32_t sleepUs,
                                  uint32_t tcxoDelayUs = RX_DC_TCXO_DELAY_US);
 

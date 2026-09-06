@@ -97,10 +97,11 @@
       being followed, and the local rules remain yours to know. When a budget is spent, packets wait in the queue instead of being dropped.<br>
       <b>Duty-cycled receive.</b> Off by default. With it on, an SX1262 sleeps between preamble samples instead of listening
       continuously &mdash; the node's 18-symbol preamble is what makes that safe, so no conforming sender is missed. It is worth
-      something only when a symbol is long: the driver refuses to sleep for less than about 3 ms per cycle, which needs a symbol time
-      of roughly 3 ms or more (SF9 and up at 125 kHz, or a lower spreading factor at a narrower bandwidth). At the default SF8/125 kHz
-      it does nothing at all and the receiver stays on &mdash; the hint beside the switch says which case this node is in. The row is
-      absent entirely on a transceiver without the mode.<br>
+      something only when a symbol is long: the driver refuses to sleep for less than about 6 ms per cycle, which &mdash; with the two
+      sleep symbols an 18-symbol preamble leaves &mdash; needs a symbol time of roughly 3 ms or more (SF9 and up at 125 kHz, or a lower
+      spreading factor at a narrower bandwidth). At the default SF8/125 kHz it does nothing at all and the receiver stays on &mdash; the
+      hint beside the switch says which case this node is in, and whether the mode is armed. The row is absent entirely on a
+      transceiver without the mode.<br>
       <b>GNSS.</b> The receiver gives the node a real clock, which it has no other way to get: without one its idea of time restarts at zero
       on every reboot. Its health (fix, satellites, UTC) is public on the status API; the coordinates are not, unless you publish them
       &mdash; the status page is reachable by anyone who can join this access point.<br>
@@ -400,12 +401,22 @@ function applyRadioCaps(r) {
   opts(f.sf, sfs);
 
   // The chip decides whether the row exists at all; the channel decides what it
-  // is worth, and the node has already worked that out (rx_duty_cycle_engages)
-  // rather than the page re-deriving the driver's threshold here.
+  // is worth. Every answer below is read from the node — the page re-derives
+  // none of the driver's arithmetic. Four states, because the earlier two-state
+  // hint blamed the channel for a false that the switch usually caused: with
+  // the setting shipping off, an SX1262 at SF10/125 kHz was told the mode had
+  // "no effect at this spreading factor and bandwidth", which is the one
+  // configuration where turning it on works.
+  const rxDcMs = Math.round((r.rx_duty_cycle_sleep_us || 0) / 100) / 10;
   $("rxDcField").hidden = !c.rx_duty_cycle_supported;
-  $("rxDcHint").textContent = r.rx_duty_cycle_engages
-    ? "receiver sleeps " + Math.round((r.rx_duty_cycle_sleep_us || 0) / 100) / 10 + " ms per cycle"
-    : "no effect at this spreading factor and bandwidth — the receiver stays on";
+  $("rxDcHint").textContent =
+    !c.rx_duty_cycle_supported ? "not supported by this radio"
+    : !r.rx_duty_cycle_would_engage
+      ? "no effect at this spreading factor and bandwidth — the receiver stays on"
+    : r.rx_duty_cycle_armed ? "receiver sleeps " + rxDcMs + " ms per cycle"
+    : r.rx_duty_cycle_engages
+      ? "would sleep " + rxDcMs + " ms per cycle (not armed in this release)"
+    : "off — would sleep " + rxDcMs + " ms per cycle here";
 
   f.tx_dbm.min = c.tx_min_dbm;
   f.tx_dbm.max = r.tx_dbm_max;

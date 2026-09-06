@@ -283,7 +283,30 @@ uint32_t Airtime::retryAfterS(uint32_t nowMs, uint16_t limitBp) {
 }
 
 /*static*/ bool Airtime::rxDutyCycleEngages(uint32_t sleepUs, uint32_t tcxoDelayUs) {
-  return sleepUs >= tcxoDelayUs + RX_DC_TRANSITION_US;
+  // Gate one, SX126x::startReceiveDutyCycleAuto (SX126x.cpp:528): a sleep
+  // shorter than the wake-up transition is not worth taking, and the driver
+  // arms a plain continuous receive instead. Benign — the node still hears.
+  if (sleepUs < tcxoDelayUs + RX_DC_TRANSITION_US) return false;
+
+  // Gate two, SX126x::startReceiveDutyCycle (SX126x.cpp:477-494), which the
+  // first one then calls. It deducts the transition (1000 us here, not the 1016
+  // it compared against), divides by 15.625 us, and refuses a period that is
+  // zero or wider than the 24 bits SetRxDutyCycle carries. That refusal returns
+  // before stageMode(), so nothing is armed at all and the chip stays in
+  // standby — the failure mode this gate exists to keep a caller away from.
+  // uint32_t throughout, exactly as the driver has it: the widest sleep any
+  // accepted setting can produce (SF12 at 7.8 kHz, 1000-symbol preamble) is
+  // 516.7 s, whose times-eight still fits a 32-bit word, so mirroring the
+  // driver's type costs nothing and reproducing its arithmetic is the point.
+  //
+  // The rx-period gate sitting beside it is deliberately not mirrored, because
+  // it cannot bite. The wake period is the larger of (17 * symbol + 1000) / 2
+  // and 9 * symbol, so it is bounded by the symbol time rather than by the
+  // preamble: at that same worst case it is 4.7 s — raw 302 473, fifty times
+  // under the ceiling — and never zero, being at least one symbol long.
+  const uint32_t period = sleepUs - (tcxoDelayUs + RX_DC_COMPENSATION_US);
+  const uint32_t raw = (period * 8) / 125;
+  return raw != 0 && raw <= RX_DC_PERIOD_RAW_MAX;
 }
 
 uint32_t Airtime::slotMs() const {

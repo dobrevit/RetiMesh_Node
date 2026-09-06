@@ -2344,9 +2344,14 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   // continuous receive without reporting it whenever the sleep the channel
   // yields is shorter than the chip's wake-up transition, so the switch alone
   // says nothing: rx_duty_cycle_engages is the computed truth (Airtime.h) and
-  // rx_duty_cycle_sleep_us the figure behind it.
-  radio["rx_duty_cycle_engages"]  = g_stats.rxDutyCycleEngages;
-  radio["rx_duty_cycle_sleep_us"] = g_stats.rxDutyCycleSleepUs;
+  // rx_duty_cycle_sleep_us the figure behind it. _would_engage is the same
+  // computation with the switch left out, so a client can tell "this channel
+  // cannot" from "nobody asked" — and _armed is whether the receiver is running
+  // the mode at all, which is false in this release however the rest read.
+  radio["rx_duty_cycle_engages"]       = g_stats.rxDutyCycleEngages;
+  radio["rx_duty_cycle_would_engage"]  = g_stats.rxDutyCycleWouldEngage;
+  radio["rx_duty_cycle_armed"]         = g_stats.rxDutyCycleArmed;
+  radio["rx_duty_cycle_sleep_us"]      = g_stats.rxDutyCycleSleepUs;
   radio["gps_enabled"] = rs.gpsEnabled;
   radio["gps_share_position"] = rs.gpsSharePosition;
   radio["has_gps"] = HAS_GPS ? true : false;

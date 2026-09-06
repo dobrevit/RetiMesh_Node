@@ -222,10 +222,23 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   // than the setting, so the node never claims a saving it is not making.
   // Recomputed here because this runs on every apply, which is the only time
   // any of the three can change. The arithmetic is Airtime's; this is a caller.
+  //
+  // Two answers rather than one, derived from the same expression so they can
+  // never disagree: what the chip and channel could do, and that narrowed by
+  // what the operator asked for. A surface with only the second cannot say why
+  // it is false, and with the setting shipping off that is every node.
   const uint32_t rxDcSleepUs = Airtime::rxDutyCycleSleepUs(s.sf, s.bwKhz, s.preamble);
-  g_stats.rxDutyCycleSleepUs = rxDcSleepUs;
-  g_stats.rxDutyCycleEngages = s.rxDutyCycle && _caps->rxDutyCycle &&
+  const bool rxDcWouldEngage = _caps->rxDutyCycle &&
                                Airtime::rxDutyCycleEngages(rxDcSleepUs, kTcxoDelayUs);
+  g_stats.rxDutyCycleSleepUs     = rxDcSleepUs;
+  g_stats.rxDutyCycleWouldEngage = rxDcWouldEngage;
+  g_stats.rxDutyCycleEngages     = s.rxDutyCycle && rxDcWouldEngage;
+  // Armed-ness is a separate fact from all of the above, and in this milestone
+  // it is simply false: nothing here calls startReceiveDutyCycleAuto(), every
+  // path arms a plain startReceive(). The later milestone that arms the mode
+  // sets this where it arms it, and flips a published value rather than editing
+  // a caveat out of the documentation.
+  g_stats.rxDutyCycleArmed = false;
 
   // What the channel is governed by depends on the band it sits in, and the
   // three regimes constrain different things — see Airtime::Regime.

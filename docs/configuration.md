@@ -47,23 +47,31 @@ Three caveats, all of which the node will tell you about:
   2048 µs**, giving a 4096 µs sleep — under the threshold, so the receiver
   stays on. It engages from a symbol time of about 3 ms: **SF9 or higher at
   125 kHz**, or a lower spreading factor at a narrower bandwidth (SF7 at
-  31.25 kHz and SF8 at 62.5 kHz both qualify).
+  31.25 kHz and SF8 at 62.5 kHz both qualify). There is a ceiling too: the
+  sleep reaches the chip as a 24-bit count of 15.625 µs ticks, so a channel
+  slow enough to overflow it — SF12 at 7.8 kHz with a preamble of 516 or more —
+  also reports `engages=no`, and there the driver would refuse outright rather
+  than fall back, so the node does not ask it.
 
 `STATUS` on the console reports all of it on one line, computed rather than
 echoed:
 
 ```
-STATUS radio rx_duty_cycle=on supported=yes sleep_us=4096 engages=no
+RM STATUS radio rx_duty_cycle=on supported=yes sleep_us=4096 engages=no armed=no
 ```
 
-`GET /api/settings` carries the same three answers as `radio.rx_duty_cycle`,
-`radio.caps.rx_duty_cycle_supported` and `radio.rx_duty_cycle_engages`, and the
-settings page hides the switch entirely on a board whose chip lacks the mode.
+`engages` says the conditions for the saving are met. `armed` is the narrower
+question of whether the receiver is running the mode right now, and it is the
+one to read if what you want to know is whether the saving is actually being
+made — a node can honestly report `engages=yes armed=no`. Ask your own node
+rather than a release note: the line is the answer.
 
-In this release the setting is stored and reported but not yet acted on: the
-radio task still arms a continuous receive on every board. `engages` therefore
-says what turning it on *would* do, which is the figure to check before the
-behaviour lands.
+`GET /api/settings` carries the same answers as `radio.rx_duty_cycle`,
+`radio.caps.rx_duty_cycle_supported`, `radio.rx_duty_cycle_engages` and
+`radio.rx_duty_cycle_armed`, plus `radio.rx_duty_cycle_would_engage` — the
+engagement question with the switch left out, which is what lets the settings
+page say "off, but it would sleep here" instead of blaming the channel. The
+page hides the switch entirely on a board whose chip lacks the mode.
 
 ## Wi-Fi access point (most rows restart; the marked ones apply live)
 | Setting | Default | Notes |
@@ -163,6 +171,7 @@ rather than failing the whole import.
 | Flag | Default | Purpose |
 |---|---|---|
 | `RF_FREQ_MHZ`, `RF_BW_KHZ`, `RF_SF`, `RF_CR`, `RF_TX_DBM`, `RF_SYNCWORD`, `RF_PREAMBLE_SYMS` | see above | radio defaults |
+| `RF_RX_DUTY_CYCLE` | 0 (off) | default for the duty-cycled receive switch above |
 | `RF_TCXO_VOLTAGE` | 1.8 | SX1262 TCXO; 0 for crystal modules |
 | `RF_DIO2_AS_SWITCH` | true | SX1262 RF switch on DIO2 |
 | `PIN_LORA_*`, `PIN_OLED_*`, `PIN_BUTTON` | T3-S3 map | wiring |
