@@ -514,6 +514,10 @@ void WifiManager::applyStaListenInterval() {
   if (err != ESP_OK)
     log_w("station: listen interval %u not applied (err 0x%x) — the driver dozes at its default",
           (unsigned)want, err);
+  else
+    // The bench watches for this: a rewrite from the STA_CONNECTED hook
+    // means something rebuilt the config after staConnect()'s clean write.
+    log_i("station: listen interval %u -> %u written", (unsigned)have, (unsigned)want);
 }
 
 // One station connect for every site that starts a join — the boot's, the
@@ -530,9 +534,19 @@ void WifiManager::applyStaListenInterval() {
 // path would have made. The core's auto-reconnect and WiFi.reconnect()
 // re-use the stored config without rebuilding it (STA.cpp), so what is
 // written here is what every later association runs.
+//
+// The halves are called on WiFi.STA directly because WiFi.begin()'s
+// wl_status_t cannot gate this: on success it returns the sticky
+// STA.status(), which the event handler parks at WL_CONNECT_FAILED after
+// any AUTH_FAIL and which begin/connect/disconnect never reset (core
+// WiFiSTA.cpp, STA.cpp) — so after one wrong-password association, every
+// later configure of the station, including one carrying the corrected
+// password, would read as a failure and never reach the connect. The
+// booleans are the real results of the same two calls WiFi.begin() makes.
 void WifiManager::staConnect(const char* ssid, const char* password) {
-  if (WiFi.begin(ssid, (password && password[0]) ? password : nullptr, 0, nullptr,
-                 /*connect=*/false) == WL_CONNECT_FAILED) {
+  if (!WiFi.STA.begin(/*tryConnect=*/false) ||
+      !WiFi.STA.connect(ssid, (password && password[0]) ? password : nullptr,
+                        0, nullptr, /*tryConnect=*/false)) {
     log_w("station: could not configure \"%s\"", ssid);
     return;                              // the core did not take the config; nothing to connect
   }
