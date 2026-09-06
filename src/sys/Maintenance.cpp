@@ -320,15 +320,15 @@ static void doStatus() {
         (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets,
         (unsigned long)g_stats.loraCadTimeouts, (unsigned long)g_stats.loraCadArmErrors);
   // Duty-cycled receive, read back rather than echoed. The switch being on
-  // proves nothing: the mode exists only on an SX1262, and even there RadioLib
-  // silently arms a continuous receive whenever the sleep the channel yields is
-  // shorter than the chip's wake-up transition — which at the default
-  // SF8/125 kHz it always is. engages= is the computed answer (Airtime.h),
-  // sleep_us= the figure it was computed from, so a channel that is close to
-  // the threshold can be seen to be close. armed= is the separate question of
-  // whether the receiver is running the mode right now, and is no in this
-  // release whatever the other four say — an operator reading engages=yes needs
-  // to see that on the same line, not in a release note.
+  // proves nothing: the mode exists only on an SX1262, and even there the sleep
+  // the channel yields has to clear the chip's wake-up transition — which at
+  // the default SF8/125 kHz it does not. engages= is the computed answer
+  // (Airtime.h), sleep_us= the figure it was computed from, so a channel that is
+  // close to the threshold can be seen to be close. armed= is the separate and
+  // narrower question of whether the receiver is in the mode right now: it is
+  // what the driver accepted, not what the other four predict, so engages=yes
+  // armed=no is a driver that refused the call and it belongs on the same line
+  // as the prediction rather than in a log nobody was reading at the time.
   dataf("STATUS", "radio rx_duty_cycle=%s supported=%s sleep_us=%lu engages=%s armed=%s",
         settings.radio().rxDutyCycle ? "on" : "off",
         loraRadio.caps().rxDutyCycle ? "yes" : "no",

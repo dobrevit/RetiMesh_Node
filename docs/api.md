@@ -107,10 +107,21 @@ falling back, so the node must not ask it.
 
 The setting is accepted on every board, including the ones that cannot honour
 it, so a single export provisions a mixed fleet; the capability flag is what a
-UI should hide the control on. `_engages` says the conditions are met;
-`_armed` says the receiver is in the mode, and a node can honestly report
-`engages: true, armed: false`. Read `_armed` rather than a release note when
-what you need to know is whether the saving is being made.
+UI should hide the control on.
+
+`_engages` says the conditions are met and `_armed` says the receiver is in the
+mode — and the two are answers to different questions, not a prediction and its
+echo. `_armed` is taken from what the transceiver's driver accepted when the
+receiver was last armed, so it is the field to read when what you need to know
+is whether the saving is being made. The node re-arms its receiver after every
+reception, every transmission and every carrier-sense probe, and each of those
+re-arms decides afresh; `_armed` is the outcome of the most recent one.
+
+`engages: true, armed: false` is not a normal state: it means the driver refused
+a call the channel said it should take. The node falls back to a continuous
+receive immediately — it still hears everything — and logs the driver's error
+code at `error` level with a running count. `engages: false, armed: false` is
+the ordinary reading on the shipped channel and needs no action.
 
 ## `GET /api/status` (public)
 ```json

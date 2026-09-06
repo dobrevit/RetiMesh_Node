@@ -75,6 +75,7 @@
 #include "Config.h"
 #include "Airtime.h"
 #include "RadioCaps.h"
+#include "RadioRxArmPolicy.h"
 #include "Settings.h"
 
 // ---------------------------------------------------------------------------
@@ -181,7 +182,20 @@ private:
   void flushIrq();                       // drop a stale interrupt notification
   void csmaWait();                       // DIFS + contention window before TX
   bool mediumFree();                     // one CAD probe
-  bool cadWarnDue(uint32_t count);       // rate-limits the CAD failure warning
+  // The one place the receiver is put back into receive. Every path that leaves
+  // the chip out of it — a reception, a transmission, a CAD probe, a settings
+  // apply, the boot self-test — comes through here, because the duty-cycled
+  // mode is armed per call and not a state the chip keeps: a single site left
+  // calling startReceive() directly would drop the node back to a continuous
+  // receive the first time a packet arrived, silently, with every surface still
+  // reporting the saving. What it arms is RadioRxArm's decision; whether the
+  // driver took it is what g_stats.rxDutyCycleArmed then says.
+  void armReceive();
+  // Rate-limits a warning that can repeat once per packet, against the caller's
+  // own last-warned stamp and running count. One implementation, because the
+  // CAD failures M3 added and the arm failures below need the identical rule
+  // and must not be able to suppress each other.
+  bool warnDue(uint32_t& lastMs, uint32_t count);
   void refreshAirtimeStats();            // publish channel use into g_stats
   bool sendFrame(const uint8_t* frame, size_t len);
 
@@ -259,6 +273,20 @@ private:
   Airtime  _airtime;                     // time on air, duty cycle, CSMA sizing
   uint32_t _statsAtMs = 0;               // last publish into g_stats
   uint32_t _cadWarnAtMs = 0;             // last CAD failure that reached the log
+
+  // How the receiver is armed, decided once per settings apply rather than at
+  // each of the eleven sites that re-arm it (RadioRxArmPolicy.h). Written by
+  // configureAirtime(), read by armReceive(); both are radio-task context,
+  // except at boot where begin() runs them on the setup task before the radio
+  // task exists.
+  RadioRxArm::Plan _rxArmPlan = RadioRxArm::Plan::Continuous;
+  // Duty-cycle arms the driver refused, and when one of them last reached the
+  // log. Not published, unlike the CAD counters beside them: the fault they
+  // report already has a published *level* in g_stats.rxDutyCycleArmed, which
+  // reads false against an rxDutyCycleEngages of true for exactly as long as
+  // the refusals last. A counter buys nothing a standing flag does not.
+  uint32_t _rxArmErrors  = 0;
+  uint32_t _rxArmWarnAtMs = 0;
 
   uint32_t _lastTxMs  = 0;               // any transmission (packet or beacon)
   uint32_t _helloAtMs = 0;               // boot probe due time (0 = done)
