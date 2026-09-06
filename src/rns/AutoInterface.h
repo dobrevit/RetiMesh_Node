@@ -25,6 +25,8 @@
 //  29716. token = sha256(group_id + peer_link_local_address_as_text). A
 //  receiver recomputes it for the sender's address; on a match the sender
 //  is a peer for 22 s, and RNS packets flow as UDP unicast to port 42671.
+//  This node announces at that rate only while somebody could hear it, and
+//  backs off when the neighbourhood is empty — AutoIfPolicy.h is the rule.
 //
 //  The same token also goes out unicast to every known peer every 5.2 s, on
 //  port 29717 — RNS's reverse peering. It is what keeps peerings alive on a
@@ -60,7 +62,16 @@ struct Peer {
 
 constexpr uint32_t AUTO_ID_BASE = 0x80000000UL;   // ids above this are AutoInterface peers
 
+// Whether AutoInterface will run this boot: compiled in and switched on.
+// transport.auto_enabled is restart-applied, so the answer is stable for the
+// life of the process, and everything that exists only for this interface
+// asks it here — begin() itself, and WifiManager's two IPv6 enables (this
+// interface is the firmware's only consumer of link-local IPv6).
+bool wanted();
+
 void begin(RingbufHandle_t inRing);   // starts the discovery/data task (core 0)
+void end();                           // stops it: peers disconnected, sockets closed;
+                                      // begin() may follow. For Wi-Fi teardown to call.
 size_t peers(Peer* out, size_t max);
 size_t peerCount();
 const char* localAddress();           // our link-local on the first joined link, "" until one is

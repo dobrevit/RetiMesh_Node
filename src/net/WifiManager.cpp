@@ -583,13 +583,17 @@ void WifiManager::startAccessPoint() {
   // creates the address when the interface comes up and only then, so a
   // request made afterwards — which is when AutoInterface used to make it —
   // waits for a start that has already happened. AutoInterface reads the
-  // addresses; the links are brought up here, so they are enabled here.
+  // addresses; the links are brought up here, so they are enabled here. And
+  // only for it: AutoInterface is this firmware's one consumer of link-local
+  // IPv6, so with peering off the links stay IPv4-only rather than paying
+  // DAD, MLD reports and router solicitations on both for nothing.
+  const bool wantIPv6 = AutoInterface::wanted();
   if (wantAp) {
-    WiFi.softAPenableIPv6();
+    if (wantIPv6) WiFi.softAPenableIPv6();
     WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
     WiFi.softAP(_ssid, pass, w.channel, w.hidden ? 1 : 0, w.maxStations);
   }
-  WiFi.enableIPv6();
+  if (wantIPv6) WiFi.enableIPv6();
 
   _securityName = secured ? "wpa2" : "open";
 

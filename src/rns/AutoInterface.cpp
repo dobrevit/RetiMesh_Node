@@ -28,8 +28,10 @@
 #include <esp_netif.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#include <atomic>
 #include <freertos/semphr.h>
 #include <freertos/ringbuf.h>
+#include "AutoIfPolicy.h"
 #include "RnsAnnounce.h"
 #include "RnsTransport.h"
 #include "Settings.h"
@@ -45,13 +47,17 @@ char kGroupAddr[48]      = "";                 // derived from the group id at s
 const uint16_t kDiscPort = 29716;
 const uint16_t kUniPort  = 29716 + 1;          // RNS: discovery_port + 1
 const uint16_t kDataPort = 42671;
-const uint32_t kAnnounceMs = 1600;
+// The discovery cadence lives in AutoIfPolicy.h: 1.6 s while anyone can hear
+// it, backed off when nobody can. Reverse peering needs no such policy — it
+// unicasts to known peers only, so with an empty table it sends nothing.
 const uint32_t kReverseMs  = 5200;             // RNS: announce_interval * 3.25
 const uint32_t kPeerTimeoutMs = 22000;
 const uint32_t kSelectMs = 200;
 
 int  sDisc = -1, sUni = -1, sData = -1;
 bool sEnabled = false;
+std::atomic<bool> sStop{false};                // end() asks; the task obliges
+std::atomic<bool> sTaskAlive{false};           // the task clears this as it goes
 SemaphoreHandle_t sLock;
 RingbufHandle_t sInRing = nullptr;
 AutoInterface::Peer sPeers[AUTOIF_MAX_PEERS];
@@ -352,16 +358,52 @@ bool drain(int fd, uint8_t* buf, size_t cap, Handler handler) {
   return true;                                       // more waiting
 }
 
+// The task's own exit, on end()'s request. Runs on the task so that nothing
+// here ever races the select loop: by the time end() returns, this has
+// finished. Transport is told first — with the table empty, sendTo() on the
+// RNS task resolves no peer and so never reaches a socket being closed below.
+void endTask() {
+  uint32_t live[AUTOIF_MAX_PEERS]; size_t n = 0;
+  Sys::Lock held(sLock);
+  for (auto& p : sPeers) if (p.addr[0]) { live[n++] = p.id; p.addr[0] = '\0'; }
+  held.release();                         // the calls below must not hold it
+  for (size_t i = 0; i < n; i++) RnsTransport::clientDisconnected(live[i]);
+  sEnabled = false;
+  int d = sDisc, u = sUni, dat = sData;
+  sDisc = sUni = sData = -1;              // readers see "closed" before the fds go
+  if (d   >= 0) close(d);                 // closing sDisc drops the group memberships
+  if (u   >= 0) close(u);
+  if (dat >= 0) close(dat);
+  // A netif cycle — which is what end() exists for — hands out fresh
+  // ifindexes and link-locals, so everything remembered about the links is
+  // stale. Dropped here so a later begin() joins from nothing.
+  for (Link& l : sLinks) { l.joined = false; l.ifindex = 0; l.local[0] = '\0'; }
+  log_i("AutoInterface: stopped; %u peer%s disconnected", (unsigned)n, n == 1 ? "" : "s");
+  // Off the watchdog before the task goes: nothing in IDF clears a
+  // subscription when its task is deleted, and an entry that can never be
+  // fed again panics the node one timeout later (Watchdog.h).
+  Watchdog::unwatch();
+  sTaskAlive = false;                     // last: end() is waiting on it
+  vTaskDelete(nullptr);
+}
+
 void task(void*) {
   deriveGroupAddress();
-  if (!openSockets()) { vTaskDelete(nullptr); return; }
+  if (!openSockets()) { sTaskAlive = false; vTaskDelete(nullptr); return; }
   // Peering can start on whichever link comes up first and pick the other one
   // up later, so there is nothing to wait for beyond the sockets.
   refreshLinks();
   sEnabled = true;
   Watchdog::watch();
 
-  uint32_t lastAnnounce = 0, lastReverse = 0, lastSecond = 0;
+  uint32_t lastReverse = 0, lastSecond = 0;
+  AutoIfPolicy policy;
+  // Presence as of the last one-second slot below. Reading it every pass
+  // would buy nothing but lock and driver traffic; a second of staleness is
+  // well inside "peers within seconds". The zeros before the first slot cost
+  // nothing either: the policy's first ask sends regardless.
+  bool apStation = false, staAssociated = false;
+  size_t livePeers = 0;
   uint8_t buf[RNS_MTU + 64];
   // Guarded whole rather than per statement: the loop below uses continue,
   // which cannot cross a lambda. A throw leaves the inner loop, is
@@ -372,11 +414,17 @@ void task(void*) {
         // The inner loop is the one that spins; a throw leaves it and the outer
         // one goes back in, so this is where progress is actually reported.
         Watchdog::feed();
+        if (sStop) endTask();             // does not return
         uint32_t now = millis();
-        if (now - lastAnnounce >= kAnnounceMs) { lastAnnounce = now; sendDiscovery(); }
-        if (now - lastReverse  >= kReverseMs)  { lastReverse  = now; sendReversePeering(); }
-        if (now - lastSecond   >= 1000)        { lastSecond   = now; expirePeers(); refreshLinks(); }
-  
+        if (now - lastSecond >= 1000) {
+          lastSecond = now; expirePeers(); refreshLinks();
+          apStation     = WiFi.softAPgetStationNum() > 0;
+          staAssociated = wifiManager.stationConnected();
+          livePeers     = AutoInterface::peerCount();
+        }
+        if (policy.discoveryDue(now, apStation, staAssociated, livePeers)) sendDiscovery();
+        if (now - lastReverse >= kReverseMs) { lastReverse = now; sendReversePeering(); }
+
         fd_set rd;
         FD_ZERO(&rd);
         FD_SET(sDisc, &rd); FD_SET(sUni, &rd); FD_SET(sData, &rd);
@@ -409,20 +457,46 @@ void task(void*) {
 
 namespace AutoInterface {
 
+bool wanted() {
+  return HAS_AUTOINTERFACE && settings.transport().autoEnabled;
+}
+
 void begin(RingbufHandle_t inRing) {
-  sLock = xSemaphoreCreateMutex();
+  if (sTaskAlive) return;                        // already peering; nothing to redo
+  // The lock is created once and lives for ever — the heartbeat and the API
+  // read the peer table through it whether or not peering runs, and end()
+  // deliberately leaves it standing for them.
+  if (!sLock) sLock = xSemaphoreCreateMutex();
   sInRing = inRing;
+  Sys::Lock held(sLock);
   memset(sPeers, 0, sizeof(sPeers));
+  held.release();
   strlcpy(kGroupId, settings.transport().autoGroupId[0] ? settings.transport().autoGroupId : AUTOIF_GROUP_ID, sizeof(kGroupId));
-  if (!settings.transport().autoEnabled) { log_i("AutoInterface disabled in settings"); return; }
+  if (!wanted()) { log_i("AutoInterface disabled in settings"); return; }
   // The multicast group lives on the Wi-Fi netifs, which do not exist with
   // Wi-Fi off. The lock above is created regardless, because the readers
   // below run whether or not peering does.
   if (!settings.links().wifiEnabled()) { log_i("AutoInterface: Wi-Fi is off, nothing to peer on"); return; }
+  sStop = false;
+  sTaskAlive = true;                             // before the task can run and clear it
   // 8 KB: the reverse-peering pass copies the peer table onto the stack so it
   // can send without holding the lock, and that table is three times the size
   // it was.
-  Diag::startTask(task, "autoif", 8192, nullptr, 2, 0);
+  if (!Diag::startTask(task, "autoif", 8192, nullptr, 2, 0)) sTaskAlive = false;
+}
+
+void end() {
+  // No caller yet: this exists for the Wi-Fi teardown work, which must not
+  // cycle the netifs while the discovery group is still joined on them. Kept
+  // synchronous for exactly that caller: when this returns, the task has
+  // disconnected its peers, closed its sockets and gone.
+  if (!sTaskAlive) return;
+  sStop = true;
+  // The task notices within one select() pass and confirms by clearing the
+  // aliveness flag on its way out (endTask). Bounded, so a wedged task hangs
+  // the watchdog's timeout rather than this caller.
+  for (int i = 0; i < 200 && sTaskAlive; i++) vTaskDelay(pdMS_TO_TICKS(10));
+  if (sTaskAlive) log_w("AutoInterface: the task did not stop inside 2 s");
 }
 
 bool enabled() { return sEnabled; }
