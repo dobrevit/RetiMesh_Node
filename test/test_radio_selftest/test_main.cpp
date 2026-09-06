@@ -113,18 +113,61 @@ static void test_the_image_mark_is_stable_and_distinguishing() {
                                   "the whole digest is the identity, not a prefix of it");
 }
 
-// NO_MARK is the "nothing stored" reading, so no image may ever produce it —
-// including the degenerate inputs a caller could hand in by mistake.
+// NO_MARK is the "nothing stored" reading, so no image that can be identified
+// may ever produce it.
 static void test_no_image_can_mint_the_empty_marker() {
   for (uint8_t seed = 0; seed < 60; seed++)
     TEST_ASSERT_NOT_EQUAL_MESSAGE(RadioSelfTest::NO_MARK, markOf(Digest(seed)),
                                   "a real image must never look like an empty slot");
-  // Nothing to hash — a zero length, an all-zero digest, or no pointer at all —
-  // is still not an empty slot.
+}
+
+// ...and bytes that identify nothing must produce exactly that reading.
+//
+// This is the toolchain failure, not a caller's slip. The digest reaches
+// bootSelfTest() from the application descriptor's app_elf_sha256, a field
+// esptool patches into the binary after the link; the Arduino build path
+// relies on it auto-detecting the section rather than being told where it is.
+// A platform or esptool that stopped patching leaves 32 zero bytes there — on
+// every image, identically. Hashed like any other input, those 32 bytes give
+// one constant, every image ever built would carry it, and the first board to
+// pass would record it: from then on every image on that node skips a check it
+// had never run, on a node that might never receive a packet. Answered as
+// NO_MARK, the marker is absent, the test runs every boot, and the firmware is
+// back to what it did before the marker existed.
+static void test_an_image_that_carries_no_identity_is_never_proven() {
   const uint8_t zeros[32] = { 0 };
-  TEST_ASSERT_NOT_EQUAL(RadioSelfTest::NO_MARK, RadioSelfTest::buildMark(zeros, sizeof(zeros)));
-  TEST_ASSERT_NOT_EQUAL(RadioSelfTest::NO_MARK, RadioSelfTest::buildMark(zeros, 0));
-  TEST_ASSERT_NOT_EQUAL(RadioSelfTest::NO_MARK, RadioSelfTest::buildMark(nullptr, 32));
+  const uint8_t real[4]   = { 1, 2, 3, 4 };
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(RadioSelfTest::NO_MARK,
+                                   RadioSelfTest::buildMark(zeros, sizeof(zeros)),
+                                   "an unpatched descriptor identifies no image");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(RadioSelfTest::NO_MARK,
+                                   RadioSelfTest::buildMark(real, 0),
+                                   "no bytes, no identity");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(RadioSelfTest::NO_MARK,
+                                   RadioSelfTest::buildMark(nullptr, 32),
+                                   "no descriptor, no identity");
+
+  // ...and the rest of the contract then falls out of the two functions that
+  // already read NO_MARK, which is why bootSelfTest() needs no branch of its
+  // own: such an image is never skipped, and its pass is never written down.
+  const uint32_t blank = RadioSelfTest::buildMark(zeros, sizeof(zeros));
+  TEST_ASSERT_FALSE_MESSAGE(RadioSelfTest::proven(blank, blank),
+                            "an image that cannot be identified is never proven");
+  TEST_ASSERT_FALSE_MESSAGE(RadioSelfTest::proven(RadioSelfTest::markAfter(true, blank), blank),
+                            "...not even by its own pass");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(RadioSelfTest::NO_MARK,
+                                   RadioSelfTest::markAfter(true, blank),
+                                   "and nothing is stored for it, so no other image inherits it");
+
+  // One non-zero byte anywhere is an identity again: the rule is "nothing to
+  // go on", not "mostly zeros".
+  for (size_t i = 0; i < sizeof(zeros); i++) {
+    uint8_t one[32] = { 0 };
+    one[i] = 0x01;
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(RadioSelfTest::NO_MARK,
+                                  RadioSelfTest::buildMark(one, sizeof(one)),
+                                  "a digest with any content identifies an image");
+  }
 }
 
 void setUp() {}
@@ -139,5 +182,6 @@ int main() {
   RUN_TEST(test_a_failed_self_test_is_never_remembered);
   RUN_TEST(test_the_image_mark_is_stable_and_distinguishing);
   RUN_TEST(test_no_image_can_mint_the_empty_marker);
+  RUN_TEST(test_an_image_that_carries_no_identity_is_never_proven);
   return UNITY_END();
 }

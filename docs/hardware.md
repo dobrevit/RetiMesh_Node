@@ -508,8 +508,20 @@ recorded**: a board with a wrong interrupt pin keeps saying so, every boot,
 until it is fixed.
 
 The marker lives in its own NVS namespace, so neither a settings reset nor
-clearing the diagnostics history touches it. To force one more run without
-changing the wiring, flash any rebuilt image.
+clearing the diagnostics history touches it.
+
+**"Rebuild it" is not a way to force one more run.** The identity is the image,
+so re-running the build only asks the question again if the image that comes out
+is a different one, and on an unchanged tree it is not: `pio run` finds nothing
+to do, relinks nothing and leaves the previous `firmware.bin` in place, byte for
+byte. Touching a file does not change that either — PlatformIO decides what is
+stale from file contents, not timestamps. What does produce a new image is any
+edit that reaches the binary, and that includes the version stamp: a local build
+takes `FW_VERSION` from `git describe --always --dirty`, so building with an
+uncommitted change in the tree is already a different image from the same commit
+built clean. Failing all that, erase the flash (`--erase-all`, see
+[getting-started.md](getting-started.md)) — the marker goes with the rest of NVS
+and the next boot starts from nothing.
 
 ## Host connectivity and flashing
 What each board puts on its USB connector, which bootloader-entry methods it

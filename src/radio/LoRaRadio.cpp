@@ -236,6 +236,17 @@ void LoRaRadio::bootSelfTest() {
   const esp_app_desc_t* desc = esp_app_get_description();
   const uint32_t image = RadioSelfTest::buildMark(desc->app_elf_sha256,
                                                   sizeof(desc->app_elf_sha256));
+  // The field is filled in after the link, by esptool, and this build path
+  // leaves it to find the descriptor on its own rather than being told where it
+  // is. A toolchain that stopped patching leaves 32 zero bytes there — on every
+  // image alike — so the policy answers NO_MARK and the two calls below fall
+  // back to running the test every boot (RadioSelfTestPolicy.h). That is the
+  // safe direction and it is also invisible, so it is said out loud: a node
+  // paying a transmission per boot for ever deserves a reason in its log.
+  if (image == RadioSelfTest::NO_MARK)
+    log_w("radio self-test: this image carries no ELF hash in its application descriptor, so it "
+          "cannot be told apart from any other — running the test every boot. The build's "
+          "elf2image step is not stamping the descriptor.");
 
   Preferences p;
   const bool store = p.begin(RADIO_NVS_NAMESPACE, false);
@@ -963,15 +974,23 @@ void LoRaRadio::deliverPacket(size_t len) {
 // ---------------------------------------------------------------------------
 // TX path
 // ---------------------------------------------------------------------------
-// Returns whether the packet was actually put on the air. The one false is a
-// restart: Bootloader::quiesce() gives the radio 250 ms to sleep and then goes
-// regardless, and this call can hold the task far longer than that — csmaWait()
-// alone is bounded at CSMA_MAX_WAIT_MS, and two fragments are two 8 s waits on
-// top of it. A restart that arrives mid-transmit therefore used to end with the
-// node in the ROM downloader, where nothing runs and nothing will restart it,
-// with the transceiver still in continuous receive and the V4's LNA rail up
-// behind it — indefinitely. Dropping the packet is the right trade: the node is
+// Returns false when the packet was abandoned rather than worked through. The
+// case that matters is a restart: Bootloader::quiesce() gives the radio 250 ms
+// to sleep and then goes regardless, and this call can hold the task far longer
+// than that — csmaWait() alone is bounded at CSMA_MAX_WAIT_MS, and two
+// fragments are two 8 s waits on top of it. A restart that arrives mid-transmit
+// therefore used to end with the node in the ROM downloader, where nothing runs
+// and nothing will restart it, with the transceiver still in continuous receive
+// and the V4's LNA rail up behind it — indefinitely. Dropping the packet is the right trade: the node is
 // going down either way, and the sender re-sends.
+//
+// A true is therefore weaker than "every byte reached the air": a sendFrame()
+// that fails mid-packet breaks out of the fragment loop and still returns true,
+// because everything after that point — the counter, the idle-beacon clock,
+// re-arming receive — is what the caller needs either way and the frame that
+// failed has already been logged by sendFrame() itself. Nothing reads this
+// return to decide whether to re-send; the one caller reads it to know whether
+// a restart cut in.
 bool LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
   if (len == 0 || len > sizeof(_rxBuf)) return false;
 
@@ -994,6 +1013,13 @@ bool LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
     if (_sleepRequest) {
       log_w("restarting: abandoning a transmission with %u of %u bytes sent",
             (unsigned)offset, (unsigned)len);
+      // _lastTxMs is deliberately left where it was, even though a fragment may
+      // have gone out above and been charged to the airtime record. Nothing
+      // reads it again on this path: the only reader is the idle-beacon clock
+      // in taskLoop(), and what follows this is enterSleep() and esp_restart()
+      // — there is no wake. Should a sleep ever gain one, this needs the stamp,
+      // or the node comes back believing it has been silent for however long
+      // the restart took and beacons immediately.
       return false;
     }
     size_t chunk = min((size_t)LORA_FRAG_PAYLOAD, len - offset);
@@ -1073,10 +1099,12 @@ bool LoRaRadio::mediumFree() {
 // selected by recent channel use, which spreads nodes out as the channel
 // fills instead of having them all pile in after the same fixed backoff.
 //
-// Every wait in here also watches for a restart. This function is bounded at
-// CSMA_MAX_WAIT_MS and the restart's own wait for the radio is 250 ms, so a
-// deferral that ran its full length would be twenty times the budget it is
-// being held against; the caller checks the same flag and drops the packet.
+// Every wait in here also watches for a restart — the flag between waits rather
+// than during one, so the worst case is a single wait of one slot or one retry
+// interval, tens of milliseconds. This function is bounded at CSMA_MAX_WAIT_MS
+// and the restart's own wait for the radio is 250 ms, so a deferral that ran
+// its full length would be twenty times the budget it is being held against;
+// the caller checks the same flag and drops the packet.
 void LoRaRadio::csmaWait() {
   const uint32_t slot = _airtime.slotMs();
   const uint32_t difs = _airtime.difsMs();
@@ -1094,6 +1122,13 @@ void LoRaRadio::csmaWait() {
     Watchdog::feed();
     if (!mediumFree()) {                 // someone is transmitting: start over
       waited = 0;
+      // Checked before the pause, like the two waits below check before theirs.
+      // A busy channel spends nearly all of its deferral right here, and this
+      // used to be the one wait in the function that a restart could not cut
+      // short: the loop test above only comes round again after the full retry
+      // interval, and a probe on a slow channel takes longer than the interval
+      // does.
+      if (_sleepRequest) break;
       if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CSMA_CAD_RETRY_MS)) > 0) handleRadioIrq();
       continue;
     }

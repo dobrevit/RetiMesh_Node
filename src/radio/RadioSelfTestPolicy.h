@@ -42,6 +42,12 @@
 //  host test rather than a bench session with a programmable supply: the
 //  caller reads the marker out of NVS, hands in whatever bytes identify the
 //  running image, asks here, and writes back what it is told to.
+//
+//  One rule runs through all three functions: an image that cannot be told
+//  apart from another image is never proven. Bytes that identify nothing are
+//  not folded into some marker of their own — they are the absent marker — so
+//  a build that stopped carrying its identity costs one transmission a boot
+//  rather than skipping the check on every board it is ever flashed to.
 // ============================================================================
 #pragma once
 
@@ -50,8 +56,10 @@
 
 namespace RadioSelfTest {
 
-// Nothing stored. An image whose hash would land here is folded away from it,
-// so "no marker" and "a marker" can never be read as each other.
+// Nothing stored, and — the other half of the same idea — nothing identifiable
+// to store. An image whose hash would land here is folded away from it, so "no
+// marker" and "a marker" can never be read as each other; and an image that
+// cannot say which image it is answers NO_MARK too, so it is never proven.
 static const uint32_t NO_MARK = 0;
 
 // The running image, as four bytes: FNV-1a over the bytes that identify it.
@@ -75,18 +83,34 @@ static const uint32_t NO_MARK = 0;
 // Four bytes rather than the digest itself so the marker is one fixed-width
 // NVS entry and the comparison allocates nothing on a board that has none to
 // spare. Two images collide once in 2^32; two versions collided by design.
+//
+// Bytes that carry no identity — no pointer, no length, or nothing but zeros —
+// are NO_MARK rather than a hash of them. That is not tidiness: the digest
+// reaches the caller from a field a build tool has to fill in, and a field
+// nobody filled in is 32 zero bytes on every image ever built. Hashed, those
+// give one constant, every image would share it, and the first board to pass
+// would silence the check for all of them — on images that had never once
+// driven the interrupt line. Answered as NO_MARK instead, proven() is false and
+// markAfter() stores nothing, so an unidentifiable image runs the test every
+// boot: the cost is one transmission, which is what the firmware did before any
+// of this existed.
 inline uint32_t buildMark(const void* bytes, size_t len) {
   const uint8_t* p = (const uint8_t*)bytes;
+  if (p == nullptr || len == 0) return NO_MARK;
   uint32_t h = 2166136261UL;                   // FNV-1a offset basis
-  for (size_t i = 0; p != nullptr && i < len; i++) {
+  bool identified = false;
+  for (size_t i = 0; i < len; i++) {
+    identified = identified || (p[i] != 0);
     h ^= (uint32_t)p[i];
     h *= 16777619UL;                           // FNV-1a prime
   }
+  if (!identified) return NO_MARK;             // every image's "identity"
   return h == NO_MARK ? 1UL : h;
 }
 
 // Skip the self-test? Only when this exact image has already passed it. An
-// absent marker and a marker from another image are the same answer: run.
+// absent marker, a marker from another image, and an image that cannot say
+// which image it is are all the same answer: run.
 inline bool proven(uint32_t stored, uint32_t image) {
   return stored != NO_MARK && stored == image;
 }
