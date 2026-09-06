@@ -2347,7 +2347,8 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   // rx_duty_cycle_sleep_us the figure behind it. _would_engage is the same
   // computation with the switch left out, so a client can tell "this channel
   // cannot" from "nobody asked" — and _armed is whether the receiver is running
-  // the mode at all, which is false in this release however the rest read.
+  // the mode at all, which LoRaRadio publishes where it arms it rather than
+  // being derived from any of the three above.
   radio["rx_duty_cycle_engages"]       = g_stats.rxDutyCycleEngages;
   radio["rx_duty_cycle_would_engage"]  = g_stats.rxDutyCycleWouldEngage;
   radio["rx_duty_cycle_armed"]         = g_stats.rxDutyCycleArmed;

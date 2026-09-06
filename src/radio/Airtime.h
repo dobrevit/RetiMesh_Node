@@ -236,6 +236,17 @@ public:
   // (SetRxDutyCycle takes three bytes), so the driver rejects anything that
   // does not fit. Held as the raw ceiling rather than a microsecond figure
   // because the truncating divide by 125/8 is what decides the boundary.
+  //
+  // SX126x, and only the SX126x. The tick is a property of that part, not of
+  // the idea: an LR11x0 counts its sleep in 30.517 us periods off the 32.768
+  // kHz RTC (LR11x0::startReceiveDutyCycle), so the same 24 bits reach about
+  // 512 s there against roughly 262 s here, and a slow channel this predicate
+  // calls too long is one that part would have taken. Erring in that direction
+  // is safe — the caller is told not to ask, and a receiver left continuously
+  // on hears everything — but only while the one radio RadioCaps marks
+  // rxDutyCycle is the one this arithmetic models. test_radio_plan pins that
+  // pairing, so a capability bit flipped for another part fails a host test
+  // instead of quietly running these numbers against the wrong clock.
   static const uint32_t RX_DC_PERIOD_RAW_MAX  = 0x00FFFFFFUL;
   // RadioLib's setTCXO() default ramp. Nothing in this firmware passes a delay,
   // so every board that names a TCXO voltage gets this one; a board with none
@@ -250,11 +261,30 @@ public:
   static uint32_t rxDutyCycleSleepUs(uint8_t sf, float bwKhz, uint16_t preambleSyms,
                                      uint16_t minSymbols = 0);
   // ...and whether the driver will actually take that sleep. True means one
-  // thing only, and it is the thing a caller may act on: startReceiveDutyCycle-
-  // Auto() will arm a duty-cycled receive with it. False covers two outcomes
-  // that look nothing alike on the bench and must not be told apart here,
-  // because in both of them the honest answer for a caller is "do not ask the
-  // driver for this mode":
+  // thing only, and it is the thing a caller may act on: the call
+  //
+  //     startReceiveDutyCycleAuto(<the preamble this node is configured for>, 0)
+  //
+  // will arm a duty-cycled receive with it. Both arguments are part of that
+  // claim, because PhysicalLayer::calculateRxDutyCycle reads both and this
+  // predicate mirrors only one shape of the call:
+  //
+  //   * the first is the *sender's* preamble, and it is what the sleep is
+  //     computed from. Zero makes the driver fall back to the configured
+  //     preamble, which is the same figure that reached rxDutyCycleSleepUs()
+  //     here; passing the configured preamble is the same thing said out
+  //     loud. Anything longer than the configured preamble is refused with
+  //     RADIOLIB_ERR_INVALID_PREAMBLE_LENGTH before any of this arithmetic
+  //     runs, and a true here says nothing whatever about that call.
+  //   * the second is a minSymbols override. Zero selects the driver's own
+  //     default for the spreading factor, which is what rxDutyCycleMinSymbols()
+  //     mirrors; pass a figure there and the same figure has to be passed to
+  //     rxDutyCycleSleepUs(), or the predicate is answering about a different
+  //     sleep than the one the chip will be given.
+  //
+  // False covers two outcomes that look nothing alike on the bench and must
+  // not be told apart here, because in both of them the honest answer for a
+  // caller is "do not ask the driver for this mode":
   //
   //   * too short — the sleep is under the wake-up transition, so the driver
   //     quietly arms a plain continuous receive and the node hears normally;

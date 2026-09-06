@@ -406,16 +406,19 @@ function applyRadioCaps(r) {
   // hint blamed the channel for a false that the switch usually caused: with
   // the setting shipping off, an SX1262 at SF10/125 kHz was told the mode had
   // "no effect at this spreading factor and bandwidth", which is the one
-  // configuration where turning it on works.
+  // configuration where turning it on works. The false branch names the
+  // channel rather than those two dials for the same kind of reason: it also
+  // covers the ceiling, which a long preamble reaches at a perfectly legal
+  // spreading factor and bandwidth.
   const rxDcMs = Math.round((r.rx_duty_cycle_sleep_us || 0) / 100) / 10;
   $("rxDcField").hidden = !c.rx_duty_cycle_supported;
   $("rxDcHint").textContent =
     !c.rx_duty_cycle_supported ? "not supported by this radio"
     : !r.rx_duty_cycle_would_engage
-      ? "no effect at this spreading factor and bandwidth — the receiver stays on"
+      ? "no effect on this channel — the receiver stays on"
     : r.rx_duty_cycle_armed ? "receiver sleeps " + rxDcMs + " ms per cycle"
     : r.rx_duty_cycle_engages
-      ? "would sleep " + rxDcMs + " ms per cycle (not armed in this release)"
+      ? "would sleep " + rxDcMs + " ms per cycle, not armed"
     : "off — would sleep " + rxDcMs + " ms per cycle here";
 
   f.tx_dbm.min = c.tx_min_dbm;

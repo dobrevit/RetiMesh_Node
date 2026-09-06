@@ -299,6 +299,37 @@ static void test_only_the_sx1262_claims_a_duty_cycled_receive() {
                             "the LR1110 firmware this project pins around cannot drive DIO in sleep");
 }
 
+// ...and the same fact from the other side, because Airtime's ceiling is not
+// chip-agnostic. RX_DC_PERIOD_RAW_MAX is 24 bits of 15.625 us ticks, which is
+// SX126x::startReceiveDutyCycle and nothing else: an LR11x0 counts 30.517 us
+// periods off its RTC and reaches roughly twice as far, so the same channel
+// gets two different verdicts. Today the divergence is in the safe direction —
+// the predicate says "do not ask" where an LR11x0 would have slept, and a
+// receiver left on hears everything — but that only holds while the single
+// radio allowed to answer yes is the one the arithmetic models. Flipping the
+// LR11x0's bit without moving the ceiling with it fails here rather than on a
+// node, which is a deaf receiver.
+static void test_the_only_duty_cycling_radio_is_the_one_the_ceiling_models() {
+  const RadioCaps::Caps* every[] = { &RadioCaps::kSX1276, &RadioCaps::kSX1262,
+                                     &RadioCaps::kSX1280, &RadioCaps::kLR1110,
+                                     &RadioCaps::kUnknown };
+  int claiming = 0;
+  for (const RadioCaps::Caps* c : every) {
+    if (!c->rxDutyCycle) continue;
+    claiming++;
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(
+        "SX1262", c->name,
+        "Airtime's sleep ceiling is the SX126x's 15.625 us tick; a radio with a "
+        "different one must not be marked rxDutyCycle until the ceiling knows about it");
+  }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, claiming,
+                                "exactly one radio here has a duty-cycled receive");
+  // The ceiling itself, so a driver update that widened the field is a diff
+  // here too rather than a silently larger sleep than the chip will take.
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0x00FFFFFFUL, Airtime::RX_DC_PERIOD_RAW_MAX,
+                                   "SetRxDutyCycle carries three bytes");
+}
+
 // The no-radio descriptor is permissive everywhere else — it widens bounds so an
 // operator can configure their way out of a failed probe — and must not be here.
 // A permissive bound only allows; a permissive feature bit gets acted on.
@@ -339,6 +370,7 @@ int main() {
   RUN_TEST(test_the_stored_region_wins_and_the_frequency_is_only_a_fallback);
   RUN_TEST(test_a_node_name_becomes_a_legal_dns_label);
   RUN_TEST(test_only_the_sx1262_claims_a_duty_cycled_receive);
+  RUN_TEST(test_the_only_duty_cycling_radio_is_the_one_the_ceiling_models);
   RUN_TEST(test_an_unidentified_radio_is_never_assumed_able_to_sleep);
   RUN_TEST(test_bandwidth_list_renders_for_an_error_message);
   return UNITY_END();

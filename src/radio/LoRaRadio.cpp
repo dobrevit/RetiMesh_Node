@@ -233,11 +233,11 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   g_stats.rxDutyCycleSleepUs     = rxDcSleepUs;
   g_stats.rxDutyCycleWouldEngage = rxDcWouldEngage;
   g_stats.rxDutyCycleEngages     = s.rxDutyCycle && rxDcWouldEngage;
-  // Armed-ness is a separate fact from all of the above, and in this milestone
-  // it is simply false: nothing here calls startReceiveDutyCycleAuto(), every
-  // path arms a plain startReceive(). The later milestone that arms the mode
-  // sets this where it arms it, and flips a published value rather than editing
-  // a caveat out of the documentation.
+  // Armed-ness is a separate fact from all of the above, and here it is simply
+  // false: nothing in this file calls startReceiveDutyCycleAuto(), every path
+  // arms a plain startReceive(). The release that arms the mode sets this where
+  // it arms it, and flips a published value rather than editing a caveat out of
+  // the documentation.
   g_stats.rxDutyCycleArmed = false;
 
   // What the channel is governed by depends on the band it sits in, and the
