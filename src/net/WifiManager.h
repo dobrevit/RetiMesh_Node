@@ -87,10 +87,10 @@ public:
     bool   secured;
   };
   enum class StaJoin : uint8_t { Idle, Trying, Joined, Failed };
-  void staScanStart();                   // async; needs the STA interface, enables it
+  void staScanStart();                   // async; the core raises the STA bit itself
   int  staScanCount();                   // -1 still scanning, else how many
   bool staScanResult(int i, StaScanEntry& out);
-  void staScanDone();                    // frees the driver's result table
+  void staScanDone();                    // frees the result table; tick() re-asserts the mode
   bool staJoin(const char* ssid, const char* password);  // false: unusable credentials
   StaJoin staJoinState();                // pure one-shot verdict; tick() does the work
   void staForget();                      // disconnect and clear the stored network
@@ -146,15 +146,20 @@ private:
   char            _joinSsid[33] = "";
   char            _joinPass[65] = "";
   uint32_t        _joinDeadline = 0;
-  // The mode staScanStart() found before promoting to WIFI_AP_STA, restored
-  // by staScanDone() — set only while a promotion is actually in effect, so
-  // a rescan mid-visit doesn't overwrite it with the promoted mode itself.
-  // staJoin() clears it, and so does the verdict in tick(): a join owns the
-  // mode from then on, and its verdict — not a scan's restore — decides the
-  // radio's final shape. A save made mid-join (a rescan during the attempt)
-  // records the join's own promoted mode, which the verdict overrules.
-  bool            _scanModeSaved = false;
-  wifi_mode_t     _preScanMode = WIFI_MODE_NULL;
+  // Every WiFi.mode() decision after boot is tick()'s, on the loop task; the
+  // display task only asks. These flags are the asking — volatile, single-slot
+  // hand-offs like _joining/_joinVerdict above:
+  //   _scanActive — a scan the glass started is still out. tick() must not
+  //   touch the mode under it: the core raised the STA bit itself inside
+  //   scanNetworks(), and stripping the bit aborts the scan in the driver.
+  //   _modeSyncReq — something ended (a scan's results freed, a join verdict,
+  //   a forget) that may have left the radio holding more than the settings
+  //   ask for; tick() re-asserts settingsWifiMode() at its next pass with
+  //   nothing in flight. Raisers put their state down before the flag and
+  //   tick() drops the flag before reading any, so a request cannot slip
+  //   through the check-then-act window the old cross-task restore had.
+  volatile bool   _scanActive  = false;
+  volatile bool   _modeSyncReq = false;
 };
 
 extern WifiManager wifiManager;
