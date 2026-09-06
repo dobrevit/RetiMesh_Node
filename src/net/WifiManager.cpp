@@ -749,6 +749,16 @@ void WifiManager::tick() {
       log_i("access point: woken — coming back up");
     }
   }
+  // A Wi-Fi save with restart-applied fields landed (cancelApConfigPatch):
+  // any patch retry still armed was built for the settings before that save,
+  // and serving it now would read the new ones — patching the next boot's
+  // security onto the running AP. Served here, ahead of the convergence, so
+  // a bring-up later in this same pass may re-arm afresh; that retry is
+  // current by construction.
+  if (_apPatchCancelReq) {
+    _apPatchCancelReq = false;
+    _apPatchRetries = 0;
+  }
   // The verdict, at a 1 s cadence — softAPgetStationNum() is a driver call,
   // and the policy needs no finer clock than the minutes it counts in. With
   // the feature off the policy answers "never" from its first line and the
@@ -945,6 +955,10 @@ void WifiManager::tick() {
 //     console OK) leaves before its link does — the same reasoning as
 //     Bootloader::reboot's folded delay. A wake or a switch flip during the
 //     grace simply changes what the next pass computes, and the stage drops.
+//     The grace also outlasts the idle gate's cadence (the invariant lives
+//     with the two constants: Config.h and the gate in WifiManager.h), so a
+//     station that associates during it is seen by at least one policy ask,
+//     which lifts the suppression and drops the stage the same way.
 //   - The AP coming up goes through startAccessPoint(), the one bring-up,
 //     so the beacon read-modify-write, WPA3, and IPv6 reapply by
 //     construction; the Wi-Fi sleep and TX-power settings reapply from the
@@ -1006,11 +1020,18 @@ void WifiManager::syncRadioShape() {
       }
     }
   }
-  // Only rejoined where this path ended it: a task that never started (the
-  // switch was off at boot, or a start that failed) is begin()'s own boot
-  // story, and retrying it from every convergence pass would not be.
-  if (_autoIfEnded && want != WIFI_MODE_NULL && AutoInterface::wanted()) {
+  // Only rejoined where a stop was deliberate: this path's own end() above
+  // (_autoIfEnded), or the task ending itself because rebuildDiscovery lost
+  // its socket (stoppedUnexpectedly() — no end() bracketed that stop, so
+  // nothing else would ever restart it). A task that never started (the
+  // switch was off at boot, or a start that failed) stays begin()'s own boot
+  // story. Both restarts run only on convergence passes and are one-shot —
+  // each flag drops at its begin() — so there is no retry storm.
+  const bool selfStopped = AutoInterface::stoppedUnexpectedly();
+  if ((_autoIfEnded || selfStopped) && want != WIFI_MODE_NULL && AutoInterface::wanted()) {
     _autoIfEnded = false;
+    if (selfStopped)
+      log_i("AutoInterface: restarting — the task had stopped itself after losing its discovery socket");
     AutoInterface::begin();
   }
 }

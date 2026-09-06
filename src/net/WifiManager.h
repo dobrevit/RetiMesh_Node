@@ -111,6 +111,15 @@ public:
   // (SettingsFields::commitWifi); safe to call with no station up (it does
   // nothing then).
   void applyStaListenInterval();
+  // A Wi-Fi save just landed whose restart-applied fields — security among
+  // them — the running AP must NOT follow until the reboot. tick() drops any
+  // pending AP config patch retry: applyApConfigPatch re-reads
+  // settings.wifi() on every attempt, so a retry armed before the save would
+  // patch the next boot's security onto the AP the operator was told keeps
+  // its shape. Raise-only, any task (SettingsFields::commitWifi calls it
+  // from the console and AsyncTCP tasks); tick() serves it on the loop task
+  // like the flags below.
+  void cancelApConfigPatch() { _apPatchCancelReq = true; }
 
   // --- joining a network from the glass -----------------------------------
   // The GUI's scanner drives these. A live join, deliberately: the AP's
@@ -242,7 +251,17 @@ private:
   //   read on the loop task only.
   volatile bool   _apWakeReq   = false;
   ApIdlePolicy    _apIdle;               // fed by tick() at the gate's cadence
-  SampleGate      _apIdleGate{1000};     // the 1 s station-count poll
+  // The 1 s station-count poll. Invariant: AP_STOP_GRACE_MS must exceed this
+  // cadence, so at least one policy ask lands inside every teardown grace —
+  // that ask is what re-reads the station count, lifts the suppression for a
+  // station that associated during the grace, and drops the staged teardown
+  // before it lands (syncRadioShape arms the stage AT a gate ask, so a
+  // shorter grace expires before the next ask in a healthy loop).
+  static constexpr uint32_t kApIdleGateMs = 1000;
+  static_assert(AP_STOP_GRACE_MS > kApIdleGateMs,
+                "the AP teardown grace must outlast the idle-gate cadence, or a station "
+                "associating during the grace cannot cancel the teardown");
+  SampleGate      _apIdleGate{kApIdleGateMs};
   volatile bool   _apSuppressed = false; // the policy's verdict, mirrored for settingsWifiMode
   bool            _apDownStaged = false; // a teardown is waiting out its grace
   uint32_t        _apDownDueMs  = 0;
@@ -253,6 +272,11 @@ private:
   // 100 TU/WPA2 until the next cycle. Attempts left; 0 = none armed.
   uint8_t         _apPatchRetries = 0;
   SampleGate      _apPatchGate{2000};    // one retry every 2 s while armed
+  // cancelApConfigPatch()'s ask — volatile like the request flags above:
+  // raised from whatever task the settings commit runs on, served at the top
+  // of tick() so a bring-up later in the same pass can re-arm afresh (its
+  // patch is built from the settings the save just wrote, so it is current).
+  volatile bool   _apPatchCancelReq = false;
   bool            _mdnsUp       = false; // startMdns() has run (this boot)
   bool            _autoIfEnded  = false; // we ended AutoInterface; re-begin on the way up
 };

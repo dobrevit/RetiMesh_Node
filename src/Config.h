@@ -265,8 +265,15 @@
 // console OK — leaves before the link it rides goes away. The same job
 // RESTART_ACK_DELAY_MS does for a restart's acknowledgement, folded into the
 // one teardown path (WifiManager's convergence) so no caller can shorten it.
+// Invariant (WifiManager.h holds the static_assert): the grace must exceed
+// the idle-gate cadence (_apIdleGate, 1 s), so at least one policy ask lands
+// inside every grace — that ask is what re-reads the station count and lets a
+// station that associated during the grace cancel the staged teardown. At
+// 700 ms the teardown beat the next ask in a healthy loop and cut such a
+// station off; 1200 ms still reads as instant and covers the async reply
+// many times over.
 #ifndef AP_STOP_GRACE_MS
-  #define AP_STOP_GRACE_MS 700
+  #define AP_STOP_GRACE_MS 1200
 #endif
 
 // Admin password protecting the settings API/page (HTTP Basic Auth,

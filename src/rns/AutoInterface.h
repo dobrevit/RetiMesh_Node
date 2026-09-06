@@ -92,6 +92,13 @@ size_t peerCount();
 const char* localAddress();           // our link-local on the first joined link, "" until one is
 bool enabled();
 
+// The task ended itself while still wanted — rebuildDiscovery lost the
+// discovery socket and could not rebind (AutoInterface.cpp) — so no
+// WifiManager end() bracketed the stop and nothing else would ever restart
+// it. WifiManager's convergence treats a true here exactly like its own
+// _autoIfEnded and re-begins; cleared when begin() actually starts a task.
+bool stoppedUnexpectedly();
+
 // Called from the RNS task: one RNS packet as a UDP datagram to one peer.
 bool sendTo(uint32_t peerId, const uint8_t* packet, size_t len);
 

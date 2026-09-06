@@ -185,6 +185,11 @@ Result commitWifi(WifiSettings& w, char* err, size_t n) {
   Power::applyWifiTxPower();                 // live, wherever the driver is up
   wifiManager.applyStaListenInterval();      // live; lands at the next association
   if (!SettingsRules::wifiChangeNeedsRestart(before, w)) return Result::Ok;
+  // Restart-applied fields changed, and an AP config patch retry armed before
+  // this save re-reads settings.wifi() on every attempt — left standing it
+  // would patch the next boot's security onto the running AP. Cancelled, so
+  // the AP keeps the shape the "restart" answer promises it keeps.
+  wifiManager.cancelApConfigPatch();
   return askRestart();
 }
 

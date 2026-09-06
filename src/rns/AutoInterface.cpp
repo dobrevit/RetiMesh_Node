@@ -57,6 +57,12 @@ const uint32_t kSelectMs = 200;
 int  sDisc = -1, sUni = -1, sData = -1;
 bool sEnabled = false;
 std::atomic<bool> sStop{false};                // end() asks; the task obliges
+// The task stopped itself while still wanted — rebuildDiscovery lost the
+// discovery socket and could not rebind. WifiManager's rejoin is keyed on
+// its own end() (_autoIfEnded), which never bracketed this stop, so this
+// flag keys the other restart: read through stoppedUnexpectedly(), cleared
+// when begin() actually starts a task.
+std::atomic<bool> sSelfStopped{false};
 std::atomic<bool> sTaskAlive{false};           // the task clears this as it goes
 SemaphoreHandle_t sLock;
 RingbufHandle_t sInRing = nullptr;
@@ -153,8 +159,11 @@ void rebuildDiscovery() {
   if (!bindSocket(sDisc, kDiscPort, "discovery")) {
     // No socket to select on. Ask the task to end through its own stop path
     // (endTask: peers disconnected, remaining sockets closed, watchdog
-    // unsubscribed); the next Wi-Fi transition's begin() starts clean.
+    // unsubscribed). Nothing brackets this stop the way WifiManager's own
+    // end() call does, so the self-stop is flagged: syncRadioShape reads
+    // stoppedUnexpectedly() on its next convergence pass and re-begins.
     log_e("AutoInterface: could not rebuild the discovery socket; stopping");
+    sSelfStopped = true;
     sStop = true;
     return;
   }
@@ -598,6 +607,7 @@ void begin(RingbufHandle_t inRing) {
   // below run whether or not peering does.
   if (!settings.links().wifiEnabled()) { log_i("AutoInterface: Wi-Fi is off, nothing to peer on"); return; }
   sStop = false;
+  sSelfStopped = false;                          // this start answers the self-stop
   sTaskAlive = true;                             // before the task can run and clear it
   // 8 KB: the reverse-peering pass copies the peer table onto the stack so it
   // can send without holding the lock, and that table is three times the size
@@ -642,18 +652,21 @@ void end() {
 // end() closes the socket, and closing drops all of its registrations.)
 //
 // Runs on the caller's task (the loop task) while the autoif task keeps
-// selecting on the same socket, and that is safe: lwIP serialises socket
-// operations through the tcpip thread, the fd is never closed here, and the
-// only thing that changes is a group membership — at worst the select loop
-// stops seeing that group's datagrams, which is the point. What would NOT be
-// safe is marking the link unjoined here: refreshLinks runs once a second on
-// the autoif task, and an unjoined link whose netif is still alive — which
-// it is until WiFi.mode() lands, some time after this returns — is exactly
-// what refreshLinks re-joins, re-registering the membership this call just
-// gave back on a netif about to die. So only leftEarly is set (under sLock,
-// like every sLinks write since M2), the link stays marked joined, and the
-// autoif task itself retires the mark on its next pass after the netif has
-// actually changed — knowing from leftEarly that there is nothing to leave.
+// selecting on the same socket, and that is safe: lwIP serialises the two
+// through the stack's core lock (CONFIG_LWIP_TCPIP_CORE_LOCKING=1 in the
+// pinned sdkconfig — this setsockopt runs on the calling task under that
+// lock, not as a message to the tcpip thread), the fd is never closed here,
+// and the only thing that changes is a group membership — at worst the
+// select loop stops seeing that group's datagrams, which is the point. What
+// would NOT be safe is marking the link unjoined here: refreshLinks runs
+// once a second on the autoif task, and an unjoined link whose netif is
+// still alive — which it is until WiFi.mode() lands, some time after this
+// returns — is exactly what refreshLinks re-joins, re-registering the
+// membership this call just gave back on a netif about to die. So only
+// leftEarly is set (under sLock, like every sLinks write since M2), the
+// link stays marked joined, and the autoif task itself retires the mark on
+// its next pass after the netif has actually changed — knowing from
+// leftEarly that there is nothing to leave.
 void linkDown(const char* netifKey) {
   const int fd = sDisc;              // snapshot: the fd variables read "closed"
   if (fd < 0 || !sLock) return;      //   before any fd goes (closeSockets' rule)
@@ -682,6 +695,8 @@ void linkDown(const char* netifKey) {
 }
 
 bool enabled() { return sEnabled; }
+
+bool stoppedUnexpectedly() { return sSelfStopped; }
 
 size_t peerCount() {
   size_t k = 0;
