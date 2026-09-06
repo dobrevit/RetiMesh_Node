@@ -45,10 +45,10 @@
 //
 //  Packet flow, radio side:
 //
-//    TCP -> LoRa:   radioTask blocks on the TX ring buffer. Each item is
-//                   one raw RNS packet (<= 500 bytes). It is fragmented
-//                   into RNode-framed LoRa frames and transmitted after
-//                   a CSMA clear-channel check.
+//    TCP -> LoRa:   a producer puts one raw RNS packet (<= 500 bytes) in
+//                   the TX ring and calls wake(); radioTask takes it,
+//                   fragments it into RNode-framed LoRa frames and
+//                   transmits after a CSMA clear-channel check.
 //
 //    LoRa -> TCP:   IRQ fires on RxDone -> ISR notifies radioTask ->
 //                   frame is read, reassembled (split packets), and the
@@ -159,6 +159,15 @@ public:
   void requestSleep();
   bool asleep() const;
 
+  // "There is something for you." The radio task spends an idle channel parked
+  // in a bounded wait, so anything that makes work visible to it — a packet put
+  // in the TX ring, and the two requests above, which call this themselves —
+  // says so here rather than leaving it to be found when the wait runs out.
+  // Publish the work first, then call this: the ordering is half of the
+  // interlock that makes the wake unmissable (see the .cpp). Thread-safe,
+  // returns immediately, and safe on a node whose radio never came up.
+  void wake();
+
   // FreeRTOS entry point — created pinned to core 1 from main.cpp.
   static void radioTask(void* self);
 
@@ -167,6 +176,8 @@ private:
   void handleRadioIrq();                 // RxDone path: read + reassemble
   void deliverPacket(size_t len);        // completed RNS packet -> RX ring
   bool transmitPacket(const uint8_t* data, size_t len);  // false = abandoned
+  bool waitIrq(uint32_t ms);             // block for the chip's IRQ line only
+  void flushIrq();                       // drop a stale interrupt notification
   void csmaWait();                       // DIFS + contention window before TX
   bool mediumFree();                     // one CAD probe
   bool cadWarnDue(uint32_t count);       // rate-limits the CAD failure warning
@@ -216,6 +227,12 @@ private:
   volatile bool  _reconfigure = false;
   volatile bool  _sleepRequest = false;  // set by requestSleep, cleared by the task
   volatile bool  _asleep       = false;  // ...and the task's answer
+  // Whether the task is in — or about to enter — its idle wait, and so whether
+  // a wake() would reach it. Read by producers on other tasks, written only by
+  // the radio task, and deliberately not under _mux: it is one word, and its
+  // correctness comes from the order it is written in relative to the TX ring,
+  // not from excluding anyone (see wake() in the .cpp).
+  volatile bool  _parked       = false;
   portMUX_TYPE   _mux = portMUX_INITIALIZER_UNLOCKED;
 
   // RX reassembly state (mirrors RNode's seq/read_len logic)
