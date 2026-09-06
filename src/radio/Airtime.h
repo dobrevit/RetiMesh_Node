@@ -303,6 +303,47 @@ public:
 
   uint32_t slotMs() const;
   uint32_t difsMs() const { return 2 * slotMs(); }
+
+  // ---- Channel activity detection -----------------------------------------
+  // How long to give one CAD probe before giving up on it, in milliseconds.
+  //
+  // The probe belongs to the chip: the driver puts the part into CAD for a
+  // fixed number of symbols and the part raises its interrupt line when it has
+  // finished. How many symbols is the driver's choice per part, and RadioLib
+  // 7.7.1 picks a different one for each — 4 on the SX126x, 8 on the SX128x, 2
+  // on the LR11x0, and the SX127x's own hardware-timed scan of roughly one
+  // symbol. So the bound is written against the longest of them with the same
+  // margin doubled over it: sixteen symbol times, plus a fixed allowance for
+  // the standby transition either side of the scan, the TCXO ramp, the SPI
+  // traffic that carries it and a scheduling tick or two.
+  //
+  // A deadline, not a duration. Nothing here predicts how long a probe takes;
+  // it says when a probe has stopped being a probe and become a chip that is
+  // not answering — a wedged part, or an interrupt line that is not the one the
+  // board header names. It is sized to be unreachable in ordinary operation so
+  // that reaching it means something, and the caller reads it as a busy channel
+  // because deferring on a medium nobody measured is the only safe direction.
+  //
+  // Here rather than in the radio for the reason slotMs() is here: it is
+  // arithmetic on the channel, it is the same arithmetic for every part, and a
+  // host test can pin it where a bench session could not.
+  static const uint16_t CAD_SYMBOLS     = 16;   // twice the longest driver scan
+  static const uint32_t CAD_OVERHEAD_MS = 20;   // transitions, TCXO ramp, SPI, ticks
+  // Floor: on the fastest channels the symbols vanish and the overhead is all
+  // there is, and a deadline shorter than one scheduling round-trip would fire
+  // on a healthy chip.
+  static const uint32_t CAD_TIMEOUT_MIN_MS = 25;
+  // Ceiling: the slowest channel this firmware will accept is SF12 at 7.8 kHz,
+  // where one symbol is 525 ms and sixteen of them are 8.4 s — longer than the
+  // whole CSMA deferral it would be part of, and long enough to matter to the
+  // watchdog. The real scan on that channel is the driver's 4 symbols, about
+  // 2.1 s, so this still clears the longest probe any reachable channel can
+  // produce while staying inside both of those budgets. LoRaRadio.cpp asserts
+  // the two relationships against the constants that hold them.
+  static const uint32_t CAD_TIMEOUT_MAX_MS = 4000;
+
+  uint32_t cadTimeoutMs() const;
+
   uint8_t  cwBand(float shortTerm) const;     // 1..CW_BANDS
   void     contentionWindow(float shortTerm, uint8_t& cwMin, uint8_t& cwMax) const;
 

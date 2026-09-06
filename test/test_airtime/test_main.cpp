@@ -298,10 +298,69 @@ void test_a_sleep_too_long_for_the_chip_is_not_engagement() {
   TEST_ASSERT_FALSE(Airtime::rxDutyCycleEngages(justOver, 0));
 }
 
+// The bound on one CAD probe. Not a prediction of how long a scan takes — a
+// deadline past which the chip is not answering — so what is pinned here is the
+// derivation, at both ends of the channel range the firmware accepts.
+//
+// Sixteen symbol times plus a fixed 20 ms: sixteen because the longest scan any
+// of the four drivers arms is the SX128x's 8 symbols and this leaves the same
+// margin again over it, and the 20 ms because the scan is bracketed by standby
+// transitions, a TCXO ramp of about 5 ms on the boards that have one, the SPI
+// traffic that carries the commands and a scheduling tick either side.
+void test_the_cad_deadline_follows_the_channel() {
+  // The shipped default: 2.048 ms symbols, so 32.8 + 20.
+  TEST_ASSERT_EQUAL_UINT32(53, make(8, 125.0f).cadTimeoutMs());
+  // ...and it moves with the channel the way the slot does. SF7 halves the
+  // symbol, SF12 is thirty-two times the SF7 figure.
+  TEST_ASSERT_EQUAL_UINT32(36,  make(7, 125.0f).cadTimeoutMs());
+  TEST_ASSERT_EQUAL_UINT32(544, make(12, 125.0f).cadTimeoutMs());
+  // Bandwidth is the other half of the symbol time, and it pulls the same way.
+  TEST_ASSERT_EQUAL_UINT32(1069, make(12, 62.5f).cadTimeoutMs());
+
+  // Comfortably clear of the scan it is bounding: the SX126x arms 4 symbols and
+  // the SX128x 8, so the deadline is at least twice the longest of them plus
+  // the fixed allowance, whatever the channel.
+  for (uint8_t sf = 7; sf <= 12; sf++) {
+    Airtime a = make(sf, 125.0f);
+    TEST_ASSERT_TRUE_MESSAGE((float)a.cadTimeoutMs() > 8.0f * a.symbolTimeMs(),
+                             "the deadline must not fire on a scan that is still running");
+  }
+}
+
+// Both clamps, and why each is where it is.
+void test_the_cad_deadline_is_clamped_at_both_ends() {
+  // Fast channels: the symbols all but vanish and the fixed allowance is the
+  // whole figure, which would otherwise leave a deadline shorter than one
+  // scheduling round-trip.
+  TEST_ASSERT_EQUAL_UINT32(Airtime::CAD_TIMEOUT_MIN_MS, make(5, 500.0f).cadTimeoutMs());
+  TEST_ASSERT_EQUAL_UINT32(Airtime::CAD_TIMEOUT_MIN_MS, make(7, 500.0f).cadTimeoutMs());
+
+  // The slowest channel the settings will accept: SF12 at 7.8 kHz, where one
+  // symbol is 525 ms and sixteen of them are 8.4 s — longer than the whole CSMA
+  // deferral the probe is part of. Clamped, it is still four times the 2.1 s
+  // scan the driver actually arms there.
+  Airtime slow = make(12, 7.8f);
+  TEST_ASSERT_FLOAT_WITHIN(1.0f, 525.1f, slow.symbolTimeMs());
+  TEST_ASSERT_EQUAL_UINT32(Airtime::CAD_TIMEOUT_MAX_MS, slow.cadTimeoutMs());
+  TEST_ASSERT_TRUE_MESSAGE((float)Airtime::CAD_TIMEOUT_MAX_MS > 4.0f * slow.symbolTimeMs(),
+                           "the ceiling must still clear the longest real scan");
+
+  // Monotonic in the symbol time up to the clamp, so no channel between the two
+  // ends gets a deadline shorter than a faster one's.
+  uint32_t previous = 0;
+  for (uint8_t sf = 7; sf <= 12; sf++) {
+    const uint32_t t = make(sf, 125.0f).cadTimeoutMs();
+    TEST_ASSERT_TRUE(t >= previous);
+    previous = t;
+  }
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_time_on_air_matches_datasheet);
   RUN_TEST(test_symbol_time_and_slot);
+  RUN_TEST(test_the_cad_deadline_follows_the_channel);
+  RUN_TEST(test_the_cad_deadline_is_clamped_at_both_ends);
   RUN_TEST(test_long_term_util_over_the_hour);
   RUN_TEST(test_duty_cycle_lock_and_release);
   RUN_TEST(test_budget_used_reports_fraction_of_allowance);

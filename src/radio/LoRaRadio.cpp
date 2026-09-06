@@ -1061,35 +1061,141 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
   return true;
 }
 
-// One channel-activity-detection probe. scanChannel() blocks for roughly a
-// symbol and drives the IRQ line itself; sendFrame() flushes any stray
-// notification it leaves behind.
-bool LoRaRadio::mediumFree() {
-  const int16_t cad = _radio->scanChannel();
+// Which bits mean "the channel scan finished", in the chip's own register.
+//
+// The same trap rxDoneFlag() documents, for the other event: getIrqFlags()
+// hands back the raw hardware register and the bits do not line up between
+// parts — CAD-done is bit 2 on an SX127x, bit 7 on an SX126x, bit 12 on an
+// SX128x and bit 8 on an LR11x0. Both bits of each pair are named rather than
+// only "done", because the SX127x raises detected alongside done and a mask
+// that watched for one bit of a two-bit answer would be a scan this code kept
+// waiting for after the chip had already given it.
+uint32_t LoRaRadio::cadDoneFlag() const {
+  if (_sx1276) return RADIOLIB_SX127X_CLEAR_IRQ_FLAG_CAD_DONE |
+                      RADIOLIB_SX127X_CLEAR_IRQ_FLAG_CAD_DETECTED;
+  if (_sx1262) return RADIOLIB_SX126X_IRQ_CAD_DONE | RADIOLIB_SX126X_IRQ_CAD_DETECTED;
+  if (_sx1280) return RADIOLIB_SX128X_IRQ_CAD_DONE | RADIOLIB_SX128X_IRQ_CAD_DETECTED;
+#if RF_MODEM_LR1110
+  if (_lr1110) return RADIOLIB_LR11X0_IRQ_CAD_DONE | RADIOLIB_LR11X0_IRQ_CAD_DETECTED;
+#endif
+  return 0;
+}
 
-  // scanChannel() drives the IRQ line itself, and the notification it leaves
-  // behind is indistinguishable from an incoming frame to the waits in
-  // csmaWait(). So every probe looked like traffic: the contention countdown
-  // saw its own CAD, declared the channel disturbed, reset to zero and probed
-  // again — for as long as CSMA_MAX_WAIT_MS allowed. The node was deferring to
-  // itself, backing off maximally before every transmission and burning about
-  // 1200 pointless task wake-ups doing it.
-  //
-  // Consuming the notification here is what breaks that loop. A frame that
-  // genuinely arrived during the probe still has its RxDone flag set in the
-  // chip, so it is collected rather than hidden by the flush.
-  ulTaskNotifyTake(pdTRUE, 0);
+// One relationship the deadline has to hold that Airtime cannot check on its
+// own, because it is between two files' constants: a single probe must not be
+// able to outlast the deferral it is one step of, nor the watchdog it is being
+// fed against. Compile-time, so a channel setting can never reach a state the
+// arithmetic forbids.
+static_assert(Airtime::CAD_TIMEOUT_MAX_MS < CSMA_MAX_WAIT_MS,
+              "one CAD probe must not outlast the whole CSMA deferral");
+static_assert(Airtime::CAD_TIMEOUT_MAX_MS < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
+              "one CAD probe must fit between two watchdog feeds");
+
+// One channel-activity-detection probe, without spinning for it.
+//
+// The blocking scanChannel() this replaces polled the interrupt GPIO with
+// yield() until the chip answered. This task is priority 5 on core 1, the
+// highest there, so yield() returned immediately and the poll was a hot loop at
+// 240 MHz for the whole scan — 13-18 ms per probe at SF8, and on a busy channel
+// up to eighty probes per packet, about a second of full-speed CPU spent
+// deciding not to transmit yet, with the rns task on the same core waiting for
+// it. The verdict arrives by interrupt, and this task already has an ISR for
+// that line: startChannelScan() arms the scan, the notification wakes us,
+// getChannelScanResult() reads what the chip decided, and the CPU sleeps in
+// between. No new interrupt wiring: every driver's channel-scan action is the
+// same hook as its packet-received action — DIO1 on an SX126x, SX128x or
+// LR11x0, DIO0 on an SX127x — and begin() has already set it.
+//
+// Telling one notification from another is the whole difficulty here, because
+// the ISR is shared between CAD-done, RxDone and TxDone and says only that the
+// line moved. Two things keep a stale notification from being read as a verdict:
+//
+//   * before the scan is armed, whatever the receiver is already holding is
+//     read out and the notification counter is emptied — sendFrame() empties
+//     the same counter before its own wait, for the same reason. Reading before
+//     flushing is not optional: startChannelScan() clears the chip's whole
+//     interrupt status, so a frame that had arrived but not been collected
+//     would lose its RxDone flag to the scan and its notification to the flush,
+//     and simply vanish. (The old order asked after the scan, by which time the
+//     scan had already wiped the flag it was asking about.)
+//   * a wake is not a verdict until the chip's own flags agree. Anything that
+//     arrives without a CAD-done bit set is ignored and the wait resumes on
+//     what is left of the deadline, so neither a stale notification nor a late
+//     TxDone can be mistaken for a free channel.
+//   * and in the other direction, the scan's own notification never leaves this
+//     function. The wait consumes it — ulTaskNotifyTake() with pdTRUE clears
+//     the count, so anything extra goes with it — and the line falls when
+//     startReceive() clears the flags at the bottom, which raises nothing
+//     further on a rising-edge ISR. That direction is the expensive one, and it
+//     has been paid for once already: the blocking scan drove the line itself
+//     and left a notification behind that csmaWait()'s DIFS wait and contention
+//     countdown could not tell from an incoming frame. Every probe looked like
+//     traffic, the countdown declared the channel disturbed and reset to zero,
+//     and the node deferred to itself for the whole of CSMA_MAX_WAIT_MS — about
+//     1200 pointless wake-ups before every transmission.
+//
+// The deadline is the channel's, from Airtime, and reaching it means BUSY. A
+// scan that never reported is a chip that is not answering, and no driver can
+// tell us that: SX127x::getChannelScanResult() reads "nothing detected" off a
+// scan that has not finished and calls the channel free. Deferring is the only
+// safe reading of a medium nobody measured — a node that transmitted on an
+// unconfirmed channel would be exactly the collision CSMA exists to avoid. It
+// cannot spin, either: the wait above and the caller's CSMA_CAD_RETRY_MS pause
+// between probes are both blocking waits, so a chip that never answers costs
+// two sleeps per probe rather than any CPU.
+//
+// Listening resumes on every path out of here, and that is load-bearing twice
+// over. csmaWait()'s DIFS wait and contention countdown run immediately after
+// this returns, and "any traffic during either wait restarts the whole thing"
+// only holds if the chip is actually receiving during them — otherwise a probe
+// would leave it in standby, deaf to a frame that starts a symbol later. And
+// the paths that return early for a restart leave the chip in a state
+// enterSleep() can put under, which a part left mid-scan is not.
+bool LoRaRadio::mediumFree() {
   const uint32_t rxDone = rxDoneFlag();
   if (rxDone && (_radio->getIrqFlags() & rxDone)) handleRadioIrq();
+  ulTaskNotifyTake(pdTRUE, 0);           // ...and only then flush
 
-  // Listening resumes either way. A busy channel obviously needs it, but a
-  // clear one does too: csmaWait()'s DIFS wait and contention countdown run
-  // right after this returns, and "any traffic during either wait restarts
-  // the whole thing" (csmaWait(), below) only holds if the chip is actually
-  // receiving during them — otherwise the free probe leaves it in STDBY_RC,
-  // deaf to a frame that starts a symbol later.
+  if (_radio->startChannelScan() != RADIOLIB_ERR_NONE) {
+    // Nothing was armed, so nothing is going to answer. Busy, for the same
+    // reason a timeout is busy, and the chip goes back to listening.
+    _radio->startReceive();
+    return false;
+  }
+
+  // The wait, in slices of one CSMA slot so a restart is noticed at the same
+  // granularity as everywhere else in csmaWait(). The notification ends it
+  // first in every ordinary case — a scan is a handful of symbols and a slot is
+  // twelve — so the slices cost nothing when the radio is healthy.
+  const uint32_t cadDone  = cadDoneFlag();
+  const uint32_t slice    = _airtime.slotMs();
+  const uint32_t deadline = millis() + _airtime.cadTimeoutMs();
+  bool completed = false, abandoned = false;
+  for (;;) {
+    if (_sleepRequest) { abandoned = true; break; }
+    const int32_t left = (int32_t)(deadline - millis());
+    if (left <= 0) break;
+    const uint32_t wait = ((uint32_t)left < slice) ? (uint32_t)left : slice;
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
+    // A chip with no CAD bits known to this driver cannot confirm anything, so
+    // there the notification has to stand for the verdict; all four parts this
+    // firmware detects have them.
+    if (cadDone == 0 || (_radio->getIrqFlags() & cadDone)) { completed = true; break; }
+  }
+
+  // Read the verdict before anything clears the flags it is read from.
+  const bool free = completed && _radio->getChannelScanResult() == RADIOLIB_CHANNEL_FREE;
+  if (!completed) {
+    // Cancel a scan that may still be running. startReceive() begins with a
+    // standby on every driver, so this is the same command it would issue — but
+    // cancelling is this line's job, not a side effect of the next one's.
+    _radio->standby();
+    if (!abandoned)
+      log_d("CAD did not report within %u ms — treating the channel as busy",
+            (unsigned)_airtime.cadTimeoutMs());
+  }
   _radio->startReceive();
-  return cad == RADIOLIB_CHANNEL_FREE;
+  return free;
 }
 
 // CSMA as RNode does it: wait for the medium to be free, hold it free for a

@@ -185,6 +185,7 @@ private:
   void bootSelfTest();                   // ...once per firmware image
   void enterSleep();                     // radio task context only
   uint32_t rxDoneFlag() const;           // this chip's RxDone bit, raw
+  uint32_t cadDoneFlag() const;          // ...and its channel-scan-finished bits
   // Which pin the interrupt actually arrives on: DIO1 on an SX126x, SX128x or
   // LR11x0, DIO0 on an SX127x. Two log lines name it and naming the wrong one
   // turns a useful diagnostic into a misleading one, so both ask here.

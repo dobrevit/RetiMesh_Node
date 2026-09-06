@@ -316,6 +316,13 @@ uint32_t Airtime::slotMs() const {
   return (uint32_t)(slot + 0.5f);
 }
 
+uint32_t Airtime::cadTimeoutMs() const {
+  float t = (float)CAD_SYMBOLS * symbolTimeMs() + (float)CAD_OVERHEAD_MS;
+  if (t < (float)CAD_TIMEOUT_MIN_MS) t = (float)CAD_TIMEOUT_MIN_MS;
+  if (t > (float)CAD_TIMEOUT_MAX_MS) t = (float)CAD_TIMEOUT_MAX_MS;
+  return (uint32_t)(t + 0.5f);
+}
+
 uint8_t Airtime::cwBand(float shortTerm) const {
   const int pct = (int)(shortTerm * 100.0f);
   if (pct <= (int)BAND_1_MAX_PCT) return 1;
