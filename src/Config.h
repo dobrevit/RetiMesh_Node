@@ -1320,6 +1320,15 @@ struct NodeStats {
   volatile uint32_t loraRxCrcErrors   = 0;  // readData() refused it: bad CRC or spurious IRQ
   volatile uint32_t loraRxBadLength   = 0;  // frame shorter than a header or longer than the max
   volatile uint32_t loraRxSpuriousIrq = 0;  // woken with no completed reception to collect
+  // The other half of the radio's health, on the transmit side. A carrier-sense
+  // probe that never reports is read as a busy channel — the only safe reading
+  // of a medium nobody measured — so the fault is silent by construction: the
+  // node stays online, keeps its rx/tx counts and its airtime, and simply waits
+  // the whole CSMA deferral before every packet while transmitting without ever
+  // having measured the air. These two are what that failure looks like from
+  // outside. Both are zero on a healthy node whatever the traffic.
+  volatile uint32_t loraCadTimeouts   = 0;  // scan armed, no verdict before its deadline
+  volatile uint32_t loraCadArmErrors  = 0;  // the driver refused to start the scan at all
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
 };

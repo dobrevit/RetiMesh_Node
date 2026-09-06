@@ -1855,6 +1855,11 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   radio["rx_crc_errors"]           = g_stats.loraRxCrcErrors;
   radio["rx_bad_length"]           = g_stats.loraRxBadLength;
   radio["rx_spurious_irq"]         = g_stats.loraRxSpuriousIrq;
+  // The transmit side's own pair. Nothing above them moves when the carrier
+  // sense stops working, which is why they are here rather than left to the
+  // log; see docs/api.md and docs/troubleshooting.md.
+  radio["cad_timeouts"]            = g_stats.loraCadTimeouts;
+  radio["cad_arm_errors"]          = g_stats.loraCadArmErrors;
 
   radio["beacon_interval"] = rs.beaconInterval;
   radio["callsign"]   = loraRadio.callsign();

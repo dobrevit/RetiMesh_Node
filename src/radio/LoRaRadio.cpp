@@ -977,12 +977,14 @@ void LoRaRadio::deliverPacket(size_t len) {
 // Returns false when the packet was abandoned rather than worked through. The
 // case that matters is a restart: Bootloader::quiesce() gives the radio 250 ms
 // to sleep and then goes regardless, and this call can hold the task far longer
-// than that — csmaWait() alone is bounded at CSMA_MAX_WAIT_MS, and two
-// fragments are two 8 s waits on top of it. A restart that arrives mid-transmit
-// therefore used to end with the node in the ROM downloader, where nothing runs
-// and nothing will restart it, with the transceiver still in continuous receive
-// and the V4's LNA rail up behind it — indefinitely. Dropping the packet is the right trade: the node is
-// going down either way, and the sender re-sends.
+// than that — csmaWait() alone is bounded at CSMA_MAX_WAIT_MS plus the one
+// probe that may have started just under it, about 9 s at the worst channel,
+// and two fragments are two 8 s waits on top of that. A restart that arrives
+// mid-transmit therefore used to end with the node in the ROM downloader, where
+// nothing runs and nothing will restart it, with the transceiver still in
+// continuous receive and the V4's LNA rail up behind it — indefinitely.
+// Dropping the packet is the right trade: the node is going down either way,
+// and the sender re-sends.
 //
 // A true is therefore weaker than "every byte reached the air": a sendFrame()
 // that fails mid-packet breaks out of the fragment loop and still returns true,
@@ -1070,6 +1072,19 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
 // only "done", because the SX127x raises detected alongside done and a mask
 // that watched for one bit of a two-bit answer would be a scan this code kept
 // waiting for after the chip had already given it.
+//
+// RadioLib owns this table too, and the alternative is worth naming rather than
+// leaving to be rediscovered: PhysicalLayer::getIrqMapped((1UL <<
+// RADIOLIB_IRQ_CAD_DONE) | (1UL << RADIOLIB_IRQ_CAD_DETECTED)) returns the
+// identical mask on all four parts and cannot drift on a library bump. It is
+// not used here for two reasons. It mirrors rxDoneFlag(), which is written
+// explicitly because a generic constant tested against three parts is what
+// broke reception in the first place; and it is a pure function of the part,
+// where the library's map is state — SX127x fills its irqMap inside begin(),
+// so the mask reads zero before it and beginFSK() overwrites the CAD entries
+// with RADIOLIB_IRQ_NOT_SUPPORTED. The host test pins this table against the
+// library's own map for the three parts that populate it in their constructor
+// (test/test_radio_irq_flags).
 uint32_t LoRaRadio::cadDoneFlag() const {
   if (_sx1276) return RADIOLIB_SX127X_CLEAR_IRQ_FLAG_CAD_DONE |
                       RADIOLIB_SX127X_CLEAR_IRQ_FLAG_CAD_DETECTED;
@@ -1090,6 +1105,28 @@ static_assert(Airtime::CAD_TIMEOUT_MAX_MS < CSMA_MAX_WAIT_MS,
               "one CAD probe must not outlast the whole CSMA deferral");
 static_assert(Airtime::CAD_TIMEOUT_MAX_MS < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
               "one CAD probe must fit between two watchdog feeds");
+
+// How often a CAD failure may reach the log. See cadWarnDue().
+static const uint32_t kCadWarnIntervalMs = 60000;
+
+// Loud enough to be noticed, bounded enough to be safe to emit from the task
+// that is trying to transmit.
+//
+// The failure this reports is not a one-off: a chip that has stopped answering
+// fails every probe, and one deferral is about fifty of them (CSMA_MAX_WAIT_MS
+// over a deadline plus CSMA_CAD_RETRY_MS), so a line per probe would be fifty
+// blocking console writes for every packet sent. The first failure of each kind
+// is reported the moment it happens and after that at most one line a minute
+// from either, each carrying its running total so the rate is readable from the
+// log alone. The exact figures are cad_timeouts and cad_arm_errors on the
+// STATUS line and in /api/status: a fault this quiet has to be visible whether
+// or not anyone was watching the log at the time.
+bool LoRaRadio::cadWarnDue(uint32_t count) {
+  const uint32_t now = millis();
+  if (count > 1 && now - _cadWarnAtMs < kCadWarnIntervalMs) return false;
+  _cadWarnAtMs = now;
+  return true;
+}
 
 // One channel-activity-detection probe, without spinning for it.
 //
@@ -1156,9 +1193,16 @@ bool LoRaRadio::mediumFree() {
   if (rxDone && (_radio->getIrqFlags() & rxDone)) handleRadioIrq();
   ulTaskNotifyTake(pdTRUE, 0);           // ...and only then flush
 
-  if (_radio->startChannelScan() != RADIOLIB_ERR_NONE) {
+  const int16_t armed = _radio->startChannelScan();
+  if (armed != RADIOLIB_ERR_NONE) {
     // Nothing was armed, so nothing is going to answer. Busy, for the same
-    // reason a timeout is busy, and the chip goes back to listening.
+    // reason a timeout is busy, and the chip goes back to listening. The code
+    // is the driver's own and names a specific failure, so it is carried into
+    // the log rather than discarded: this path used to return in silence.
+    g_stats.loraCadArmErrors++;
+    if (cadWarnDue(g_stats.loraCadArmErrors))
+      log_w("CAD could not be armed, code %d — treating the channel as busy (%lu so far)",
+            (int)armed, (unsigned long)g_stats.loraCadArmErrors);
     _radio->startReceive();
     return false;
   }
@@ -1176,26 +1220,44 @@ bool LoRaRadio::mediumFree() {
     const int32_t left = (int32_t)(deadline - millis());
     if (left <= 0) break;
     const uint32_t wait = ((uint32_t)left < slice) ? (uint32_t)left : slice;
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
+    const uint32_t woke = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
     // A chip with no CAD bits known to this driver cannot confirm anything, so
     // there the notification has to stand for the verdict; all four parts this
-    // firmware detects have them.
-    if (cadDone == 0 || (_radio->getIrqFlags() & cadDone)) { completed = true; break; }
+    // firmware detects have them, so the fallback is unreachable today.
+    //
+    // Unreachable is not the same as harmless, and the take's return is what
+    // makes the difference. Discarding it and accepting the fallback after the
+    // first slice accepted a slice that simply expired as a finished scan, and
+    // completed is what unlocks getChannelScanResult() — which on an SX127x
+    // reads "nothing detected" off a scan still running and calls the channel
+    // free. That is a transmission onto an unmeasured medium, the one outcome
+    // this whole function exists to prevent. handleRadioIrq() reads rxDone == 0
+    // as "cannot tell, do not gate"; the same reading here is "cannot tell, so
+    // only a wake is evidence", never the clock.
+    if (cadDone ? (_radio->getIrqFlags() & cadDone) : (woke > 0)) { completed = true; break; }
   }
 
-  // Read the verdict before anything clears the flags it is read from.
-  const bool free = completed && _radio->getChannelScanResult() == RADIOLIB_CHANNEL_FREE;
+  // Read the verdict before anything clears the flags it is read from. Named
+  // clear rather than free: a local called free shadows ::free inside a
+  // translation unit that allocates.
+  const bool clear = completed && _radio->getChannelScanResult() == RADIOLIB_CHANNEL_FREE;
   if (!completed) {
     // Cancel a scan that may still be running. startReceive() begins with a
     // standby on every driver, so this is the same command it would issue — but
     // cancelling is this line's job, not a side effect of the next one's.
     _radio->standby();
-    if (!abandoned)
-      log_d("CAD did not report within %u ms — treating the channel as busy",
-            (unsigned)_airtime.cadTimeoutMs());
+    // A restart is not a fault: the wait was cut short deliberately and nothing
+    // was measured because nothing was waited for. Only the genuine deadline
+    // counts.
+    if (!abandoned) {
+      g_stats.loraCadTimeouts++;
+      if (cadWarnDue(g_stats.loraCadTimeouts))
+        log_w("CAD did not report within %u ms — treating the channel as busy (%lu so far)",
+              (unsigned)_airtime.cadTimeoutMs(), (unsigned long)g_stats.loraCadTimeouts);
+    }
   }
   _radio->startReceive();
-  return free;
+  return clear;
 }
 
 // CSMA as RNode does it: wait for the medium to be free, hold it free for a
@@ -1208,8 +1270,13 @@ bool LoRaRadio::mediumFree() {
 // Every wait in here also watches for a restart — the flag between waits rather
 // than during one, so the worst case is a single wait of one slot or one retry
 // interval, tens of milliseconds. This function is bounded at CSMA_MAX_WAIT_MS
-// and the restart's own wait for the radio is 250 ms, so a deferral that ran
-// its full length would be twenty times the budget it is being held against;
+// plus one probe, because the loop test is at the top: a probe entered at
+// 4999 ms still gets its whole deadline, so the true ceiling is
+// CSMA_MAX_WAIT_MS + Airtime::CAD_TIMEOUT_MAX_MS, about 9 s on the slowest
+// channel the settings accept. The watchdog is unaffected either way — it is
+// fed once per pass of this loop, at most 4050 ms apart, against a 30 s
+// timeout. The restart's own wait for the radio is 250 ms, so a deferral that
+// ran its full length would be many times the budget it is being held against;
 // the caller checks the same flag and drops the packet.
 void LoRaRadio::csmaWait() {
   const uint32_t slot = _airtime.slotMs();

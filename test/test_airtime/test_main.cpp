@@ -307,6 +307,17 @@ void test_a_sleep_too_long_for_the_chip_is_not_engagement() {
 // margin again over it, and the 20 ms because the scan is bracketed by standby
 // transitions, a TCXO ramp of about 5 ms on the boards that have one, the SPI
 // traffic that carries the commands and a scheduling tick either side.
+
+// What the four drivers actually arm, in symbols (RadioLib 7.7.1) — the figures
+// Airtime.h's comment is written against, named here so the margin can be
+// asserted against them rather than against a number repeated from the header.
+static const uint16_t kDriverScanSymbolsSX126x = 4;
+static const uint16_t kDriverScanSymbolsSX128x = 8;
+static const uint16_t kDriverScanSymbolsLR11x0 = 2;
+static const uint16_t kDriverScanSymbolsSX127x = 1;   // hardware-timed, about one symbol
+static const uint16_t kLongestDriverScanSymbols = kDriverScanSymbolsSX128x;
+static const uint16_t kCadSafetyFactor = 2;           // "twice the longest driver scan"
+
 void test_the_cad_deadline_follows_the_channel() {
   // The shipped default: 2.048 ms symbols, so 32.8 + 20.
   TEST_ASSERT_EQUAL_UINT32(53, make(8, 125.0f).cadTimeoutMs());
@@ -317,13 +328,33 @@ void test_the_cad_deadline_follows_the_channel() {
   // Bandwidth is the other half of the symbol time, and it pulls the same way.
   TEST_ASSERT_EQUAL_UINT32(1069, make(12, 62.5f).cadTimeoutMs());
 
-  // Comfortably clear of the scan it is bounding: the SX126x arms 4 symbols and
-  // the SX128x 8, so the deadline is at least twice the longest of them plus
-  // the fixed allowance, whatever the channel.
+  // Comfortably clear of the scan it is bounding — and that has to be asserted
+  // on the symbol-derived part alone. Comparing the whole deadline against the
+  // longest driver scan carries almost no weight, because the fixed 20 ms is
+  // in it: at SF7/125 kHz the old form was satisfied all the way down to 7.39
+  // symbols of scan, so it passed unchanged with CAD_SYMBOLS cut from 16 to 8
+  // and only the hard-pinned figures above would have caught the regression.
+  //
+  // First the constant itself, against the drivers' own counts rather than a
+  // number copied out of the header.
+  TEST_ASSERT_TRUE(kLongestDriverScanSymbols >= kDriverScanSymbolsSX126x);
+  TEST_ASSERT_TRUE(kLongestDriverScanSymbols >= kDriverScanSymbolsLR11x0);
+  TEST_ASSERT_TRUE(kLongestDriverScanSymbols >= kDriverScanSymbolsSX127x);
+  TEST_ASSERT_TRUE_MESSAGE(
+      Airtime::CAD_SYMBOLS >= kCadSafetyFactor * kLongestDriverScanSymbols,
+      "CAD_SYMBOLS must be twice the longest scan any of the four drivers arms");
+
+  // ...then the derivation, on every unclamped channel: take the fixed
+  // allowance back off and what is left must still cover twice the longest
+  // driver scan on that channel. The right-hand side truncates where
+  // cadTimeoutMs() rounds, which can only favour the left, so the comparison is
+  // exact rather than approximate.
   for (uint8_t sf = 7; sf <= 12; sf++) {
     Airtime a = make(sf, 125.0f);
-    TEST_ASSERT_TRUE_MESSAGE((float)a.cadTimeoutMs() > 8.0f * a.symbolTimeMs(),
-                             "the deadline must not fire on a scan that is still running");
+    const uint32_t scanMs = (uint32_t)((float)(kCadSafetyFactor * kLongestDriverScanSymbols)
+                                       * a.symbolTimeMs());
+    TEST_ASSERT_TRUE_MESSAGE(a.cadTimeoutMs() >= Airtime::CAD_OVERHEAD_MS + scanMs,
+                             "the deadline must clear twice the longest driver scan");
   }
 }
 

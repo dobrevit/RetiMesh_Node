@@ -134,6 +134,7 @@ what you need to know is whether the saving is being made.
              "rssi": -68, "snr": 11.5, "rx_packets": 27, "tx_packets": 9, "rx_dropped": 0,
              "rx_dropped_ring": 0, "rx_dropped_reassembly": 0, "rx_dropped_partial": 0,
              "rx_crc_errors": 4, "rx_bad_length": 0,
+             "cad_timeouts": 0, "cad_arm_errors": 0,
              "announces_tx": 3, "announces_rx": 5, "beacons_tx": 0, "beacons_rx": 2, "apply_error": 0 },
   "peers": { "rns_tcp": 1, "wifi_sta": 1, "tcp_rx_packets": 12 },
   "wifi_enabled": true,
@@ -220,6 +221,31 @@ count a different unit from the rest. To reconstruct the whole picture:
 So a node's total received traffic is `rx_packets + beacons_rx` plus whatever
 the loss counters record, and a split packet contributes two frames to the air
 but one to those totals.
+
+The transmit side has a pair of its own, and they are the only outward sign of
+a carrier-sense probe that has stopped working. Before every packet the node
+puts the radio into channel-activity detection and waits for the chip to report
+what it heard; a probe that never reports is read as a busy channel, because
+deferring on a medium nobody measured is the only safe direction. That is safe
+but it is not free, and it is invisible everywhere else: `online` stays true,
+`rx_packets` and `tx_packets` keep climbing and the airtime figures look
+normal, while every packet waits the full deferral before it goes out and none
+of them was ever measured against the air.
+
+- `cad_timeouts` — a scan was armed and the chip did not report a verdict
+  before its deadline (the deadline follows the channel; see *Duty-cycled
+  receive* above for how symbol time is derived). **Zero on a healthy node
+  whatever the traffic**, so any sustained rise is a fault rather than a busy
+  channel — a wedged part, or an interrupt line that is not the one the board
+  header names.
+- `cad_arm_errors` — the driver refused to start the scan at all. The RadioLib
+  error code is in the log line beside it (`CAD could not be armed, code …`).
+
+Both are on the console's `STATUS` line as `cad_timeouts=` and
+`cad_arm_errors=` beside `radio=online`, and a failure of either kind is
+logged as a warning — the first one immediately, then at most one a minute so
+a wedged chip cannot flood the console. See
+[troubleshooting.md](troubleshooting.md).
 
 `diag` is what a soak run reads off a node it has no console on.
 

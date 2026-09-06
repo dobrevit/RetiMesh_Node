@@ -169,6 +169,7 @@ private:
   bool transmitPacket(const uint8_t* data, size_t len);  // false = abandoned
   void csmaWait();                       // DIFS + contention window before TX
   bool mediumFree();                     // one CAD probe
+  bool cadWarnDue(uint32_t count);       // rate-limits the CAD failure warning
   void refreshAirtimeStats();            // publish channel use into g_stats
   bool sendFrame(const uint8_t* frame, size_t len);
 
@@ -227,6 +228,7 @@ private:
 
   Airtime  _airtime;                     // time on air, duty cycle, CSMA sizing
   uint32_t _statsAtMs = 0;               // last publish into g_stats
+  uint32_t _cadWarnAtMs = 0;             // last CAD failure that reached the log
 
   uint32_t _lastTxMs  = 0;               // any transmission (packet or beacon)
   uint32_t _helloAtMs = 0;               // boot probe due time (0 = done)

@@ -308,8 +308,17 @@ static void doStatus() {
   dataf("STATUS", "dram_free=%lu dram_min=%lu dram_largest_block=%lu",
         (unsigned long)h.freeDram, (unsigned long)h.minFreeDram,
         (unsigned long)h.largestDramBlock);
-  dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
-        g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
+  // The carrier-sense counters share this line rather than getting one of their
+  // own, because "online, with rx and tx counting up" is the exact picture a
+  // node with a dead CAD probe presents: it still receives, still transmits and
+  // still reports its airtime, and the only difference is that every packet
+  // waits the whole deferral and no packet was ever measured against the air.
+  // An operator reading radio=online needs the contradiction on the same line.
+  // Both are zero on a healthy node whatever the traffic (docs/api.md).
+  dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu cad_timeouts=%lu cad_arm_errors=%lu",
+        g_stats.radioOnline ? "online" : "offline", g_stats.radioModel,
+        (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets,
+        (unsigned long)g_stats.loraCadTimeouts, (unsigned long)g_stats.loraCadArmErrors);
   // Duty-cycled receive, read back rather than echoed. The switch being on
   // proves nothing: the mode exists only on an SX1262, and even there RadioLib
   // silently arms a continuous receive whenever the sleep the channel yields is
