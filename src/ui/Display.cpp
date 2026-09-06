@@ -325,7 +325,13 @@ void Display::longPressAction() {
 void Display::pollButton() {
   const uint32_t now = millis();
   switch (_btn.update(digitalRead(PIN_BUTTON) == LOW, now)) {
-    case PressTracker::Event::Press: _lastActivityMs = now; break;
+    // Any press wakes an idled-down access point, before the press has even
+    // resolved into short or long: someone standing at the node wanting its
+    // Wi-Fi is exactly the trigger the idle policy waits for, and whichever
+    // page or menu the press was really for should not change that. A raised
+    // flag only — WifiManager serves it on its own task — and a no-op on a
+    // node whose AP is not suppressed.
+    case PressTracker::Event::Press: _lastActivityMs = now; wifiManager.apWake(); break;
     case PressTracker::Event::Long: longPressAction(); break;
     case PressTracker::Event::Short: advancePage(true); break;
     default: break;

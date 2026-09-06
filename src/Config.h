@@ -244,6 +244,27 @@
 #ifndef WIFI_STA_LISTEN_INTERVAL
   #define WIFI_STA_LISTEN_INTERVAL 3
 #endif
+// AP idle auto-off — wifi.ap_idle_off / wifi.ap_idle_minutes' defaults. With
+// the switch on, an access point that has stood empty for the configured
+// minutes is taken down until something wakes it: the button, WIFI ON at the
+// console (even when the switch is already on), or an admin message. Off by
+// default, deliberately: the AP is usually the only management path on an
+// unattended node, and a policy bug that keeps it down is a site visit —
+// the operator opts in per node. Bounds (1-1440 min) live in SettingsRules.
+#ifndef AP_IDLE_OFF_DEFAULT
+  #define AP_IDLE_OFF_DEFAULT 0
+#endif
+#ifndef AP_IDLE_MINUTES
+  #define AP_IDLE_MINUTES 10
+#endif
+// How long a runtime access-point teardown holds off after the change that
+// asked for it, so the reply — an HTTP 200 to a browser on the AP itself, a
+// console OK — leaves before the link it rides goes away. The same job
+// RESTART_ACK_DELAY_MS does for a restart's acknowledgement, folded into the
+// one teardown path (WifiManager's convergence) so no caller can shorten it.
+#ifndef AP_STOP_GRACE_MS
+  #define AP_STOP_GRACE_MS 700
+#endif
 
 // Admin password protecting the settings API/page (HTTP Basic Auth,
 // user "admin"). Change it from the settings page; stored in NVS.

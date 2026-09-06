@@ -81,6 +81,13 @@ struct WifiSettings {
   // are the AP's beacons, not milliseconds, and the driver consults it only
   // under the battery profile's max modem sleep (Power::applyWifiSleep).
   uint8_t    staListenInterval = WIFI_STA_LISTEN_INTERVAL;
+  // AP idle auto-off (ApIdlePolicy.h): with the switch on, an access point
+  // that has stood empty for apIdleMinutes goes down until something wakes
+  // it — the button, WIFI ON at the console, an admin message. Both apply
+  // live: they arm a timer rather than reshape the radio, which is why they
+  // are deliberately absent from wifiChangeNeedsRestart.
+  bool       apIdleOff     = AP_IDLE_OFF_DEFAULT != 0;
+  uint16_t   apIdleMinutes = AP_IDLE_MINUTES;   // 1-1440 (SettingsRules)
 };
 
 // Interface modes use rnsd's vocabulary: 1 full, 2 gateway, 3 access_point,

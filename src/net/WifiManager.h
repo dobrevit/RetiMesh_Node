@@ -40,13 +40,18 @@
 //  LocalLink.h.
 //
 //  Radio changes apply live through LoRaRadio::requestReconfigure();
-//  Wi-Fi changes are saved and followed by a scheduled restart, because
-//  reconfiguring the AP drops the very connection the request came on.
+//  Wi-Fi *settings* changes are saved and followed by a scheduled restart,
+//  because reconfiguring the AP drops the very connection the request came
+//  on. The AP's *switch* (links.wifi_ap) and the idle policy are the
+//  exception: they only take the AP up or down, never reshape it, and ride
+//  tick()'s convergence with a short grace so the reply leaves first.
 // ============================================================================
 #pragma once
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include "ApIdlePolicy.h"
+#include "SampleGate.h"
 #include "CaptiveDns.h"
 #include <ESPAsyncWebServer.h>
 #include "Config.h"
@@ -75,6 +80,28 @@ public:
   // (Bootloader.h), which answers whether it will honour one.
   void tick();
   bool wifiEnabled() const;
+
+  // --- AP idle auto-off (ApIdlePolicy.h) ----------------------------------
+  // The one wake entry. Every wake source asks here — the button on the
+  // display task, the console's WIFI ON even when the settings are unchanged
+  // (and with it an admin message, which runs the same parser), the AP
+  // switch being asked on. Raise-only, safe from any task; tick() serves it
+  // on the loop task, where the policy and the driver live. A station
+  // cannot wake a suppressed AP: the AP is down and beacon-less, so there
+  // is nothing to associate to.
+  void apWake() { _apWakeReq = true; }
+  // A link switch the running radio can follow changed — links.wifi_ap,
+  // which LocalLink::applyLinks now applies live. Raise-only, any task;
+  // tick() converges, staging a short grace before any AP teardown so the
+  // reply that asked leaves first.
+  void requestModeSync() { _modeSyncReq = true; }
+  // Whether the idle policy is holding the access point down. "Down by
+  // policy" and "off by switch" must stay distinguishable on every status
+  // surface: a wake brings the first back, only the operator the second.
+  bool apIdleDown() const { return _apSuppressed; }
+  // The AP against its switch, in one word: "up", "down" (enabled, not on
+  // the air — starting, or inside the teardown grace), "idle-off", "off".
+  const char* apStateName() const;
 
   // Re-applies wifi.sta_listen_interval to the station config, by
   // read-modify-write. staConnect() calls it in the quiet gap it opens
@@ -108,6 +135,16 @@ public:
 
 private:
   void startAccessPoint();
+  // tick()'s convergence body: computes the shape the settings and the idle
+  // policy ask for, stages the grace before an AP teardown, applies the
+  // change on this task, and takes the dependent services (captive DNS,
+  // mDNS's first start, AutoInterface) up or down on the same transition.
+  void syncRadioShape();
+  void apServicesDown();          // the AP is leaving the air
+  void apServicesUp();            // the AP is back on it
+  // The mDNS responder, started once — from begin() on a Wi-Fi boot, or
+  // from the first runtime Wi-Fi up on a node that booted with it off.
+  void startMdns();
   // The one station connect. Every site that starts a join — the boot's,
   // the glass's, the fallback after a failed join — goes through here, so
   // the listen interval is written into the config exactly once, between
@@ -188,6 +225,18 @@ private:
   volatile bool   _joinReq     = false;
   volatile bool   _scanActive  = false;
   volatile bool   _modeSyncReq = false;
+  //   _apWakeReq — somebody asked for the access point (apWake()). Volatile
+  //   like the rest: raised from the display task or the AsyncTCP task,
+  //   served by tick(). Everything below it is tick()'s own state, written
+  //   and read on the loop task only.
+  volatile bool   _apWakeReq   = false;
+  ApIdlePolicy    _apIdle;               // fed by tick() at the gate's cadence
+  SampleGate      _apIdleGate{1000};     // the 1 s station-count poll
+  bool            _apSuppressed = false; // the policy's verdict, mirrored for settingsWifiMode
+  bool            _apDownStaged = false; // a teardown is waiting out its grace
+  uint32_t        _apDownDueMs  = 0;
+  bool            _mdnsUp       = false; // startMdns() has run (this boot)
+  bool            _autoIfEnded  = false; // we ended AutoInterface; re-begin on the way up
 };
 
 extern WifiManager wifiManager;

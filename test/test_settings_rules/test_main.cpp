@@ -182,6 +182,10 @@ static void test_the_wifi_restart_split_is_pinned_per_field() {
   TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "tx power applies live");
   b = a; b.staListenInterval = (uint8_t)(a.staListenInterval == 9 ? 10 : 9);
   TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "listen interval applies live");
+  b = a; b.apIdleOff = !a.apIdleOff;
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "the AP idle switch arms a timer, live");
+  b = a; b.apIdleMinutes = (uint16_t)(a.apIdleMinutes == 30 ? 31 : 30);
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "the AP idle window arms a timer, live");
 
   b = a; strlcpy(b.ssid, "another-name", sizeof(b.ssid));
   TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "ssid rebuilds the AP");
@@ -199,6 +203,34 @@ static void test_the_wifi_restart_split_is_pinned_per_field() {
   TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "station ssid rebuilds the join");
   b = a; strlcpy(b.staPassword, "another-lan-pass", sizeof(b.staPassword));
   TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "station password rebuilds the join");
+}
+
+static void test_the_ap_idle_window_counts_minutes_one_to_a_day() {
+  // 1-1440: a day is the most an idle window can mean, and zero is not
+  // "off" — wifi.ap_idle_off is. Held whether or not the switch is on, so a
+  // stored value cannot walk in the moment the feature is enabled.
+  WifiSettings w;
+  char err[160] = "";
+  w.apIdleOff = false;                       // the bound holds even switched off
+  w.apIdleMinutes = 0;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "1-1440"));
+  w.apIdleMinutes = 1;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.apIdleMinutes = 1440;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.apIdleMinutes = 1441;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "1-1440"));
+}
+
+static void test_the_ap_idle_defaults_ship_off_and_at_ten_minutes() {
+  // Default OFF is a decision, not an accident: the AP is usually the only
+  // management path on an unattended node, and the operator opts in per
+  // node. Changing either default should have to change this test.
+  WifiSettings w;
+  TEST_ASSERT_FALSE_MESSAGE(w.apIdleOff, "AP idle auto-off must ship OFF");
+  TEST_ASSERT_EQUAL_UINT16(10, w.apIdleMinutes);
 }
 
 static void test_an_ssid_is_judged_before_it_is_truncated() {
@@ -226,6 +258,8 @@ int main() {
   RUN_TEST(test_the_wifi_tx_ceiling_is_two_to_twenty_dbm);
   RUN_TEST(test_the_listen_interval_counts_beacons_one_to_sixteen);
   RUN_TEST(test_the_wifi_restart_split_is_pinned_per_field);
+  RUN_TEST(test_the_ap_idle_window_counts_minutes_one_to_a_day);
+  RUN_TEST(test_the_ap_idle_defaults_ship_off_and_at_ten_minutes);
   RUN_TEST(test_an_ssid_is_judged_before_it_is_truncated);
   return UNITY_END();
 }

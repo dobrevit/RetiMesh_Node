@@ -70,6 +70,8 @@ constexpr uint32_t AUTO_ID_BASE = 0x80000000UL;   // ids above this are AutoInte
 bool wanted();
 
 void begin(RingbufHandle_t inRing);   // starts the discovery/data task (core 0)
+void begin();                         // again, with the ring the boot begin() handed
+                                      // over — the Wi-Fi re-up transition's call
 void end();                           // stops it: peers disconnected, sockets closed;
                                       // begin() may follow. For Wi-Fi teardown to call.
 size_t peers(Peer* out, size_t max);

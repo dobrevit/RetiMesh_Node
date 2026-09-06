@@ -401,10 +401,40 @@ void WifiManager::begin() {
   // not — which is no use at all when the question is what a board with eight
   // kilobytes left can afford to decline.
   Diag::cost(kHttpDnsLabel);
+  startMdns();
+
+  Diag::cost(settings.maintenance().mdns ? "mdns" : "mdns (off)");
+  // What actually came up, which is no longer always an access point. Announcing
+  // a SoftAP and its address on a station-only node is a log line that sends
+  // somebody looking for a network that was never started — and the address it
+  // printed, 0.0.0.0, looks like a fault rather than an absence.
+  if (settings.links().wifiApEnabled) {
+    log_i("SoftAP \"%s\" (%s) up at %s (http:%d, rns:%d)", _ssid, _securityName,
+          WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
+  } else {
+    log_i("no access point: station only (http:%d, rns:%d on whatever the LAN gives)",
+          HTTP_PORT, RNS_TCP_PORT);
+  }
+}
+
+// The mDNS responder and its records, once per boot. Out of begin() because
+// begin() is no longer the only Wi-Fi bring-up: a node that boots with Wi-Fi
+// off returns before this and starts its network at runtime instead
+// (syncRadioShape), and the responder has to come up on that path too.
+// The boot-time Diag::cost lines stay in begin() — they are boot accounting.
+// Once running, the component follows the AP netif's own down/up cycles by
+// itself (apServicesDown says how); this is only ever needed once.
+void WifiManager::startMdns() {
+  _mdnsUp = true;   // the question is settled for this boot either way:
+                    // maintenance.mdns is restart-applied, and a failed start
+                    // already said so in the log
   if (!settings.maintenance().mdns) {
     log_i("mDNS: off — this node answers on its address, not by name "
           "(6 KB of byte-addressable RAM a small board can spend elsewhere)");
-  } else if (MDNS.begin(_hostname)) {
+    return;
+  }
+  const bool webUi = settings.maintenance().webUi;
+  if (MDNS.begin(_hostname)) {
     // Only the services that actually answer: a browser sent to _http._tcp on
     // a node whose portal is off gets a connection refused and no
     // explanation. Named once, and walked once, rather than the rule being
@@ -439,19 +469,6 @@ void WifiManager::begin() {
   } else {
     log_w("mDNS start failed");
   }
-
-  Diag::cost(settings.maintenance().mdns ? "mdns" : "mdns (off)");
-  // What actually came up, which is no longer always an access point. Announcing
-  // a SoftAP and its address on a station-only node is a log line that sends
-  // somebody looking for a network that was never started — and the address it
-  // printed, 0.0.0.0, looks like a fault rather than an absence.
-  if (settings.links().wifiApEnabled) {
-    log_i("SoftAP \"%s\" (%s) up at %s (http:%d, rns:%d)", _ssid, _securityName,
-          WiFi.softAPIP().toString().c_str(), HTTP_PORT, RNS_TCP_PORT);
-  } else {
-    log_i("no access point: station only (http:%d, rns:%d on whatever the LAN gives)",
-          HTTP_PORT, RNS_TCP_PORT);
-  }
 }
 
 // What this node calls itself, worked out without starting anything. The store
@@ -484,10 +501,19 @@ void WifiManager::resolveNames() {
 // without an access point is now a shape this can be in — it is the shape a
 // carried node wants, since the access point must beacon and cannot sleep —
 // and asking for WIFI_AP_STA there would put the beacon back on the air.
+//
+// The idle policy's verdict is a term inside this rule, not a second rule
+// beside it: while the policy holds the AP down (tick() mirrors its verdict
+// into _apSuppressed), the settings shape simply has no AP in it, and every
+// consumer — the convergence, the bring-up, the join-failure fallback —
+// inherits that from the one place. Suppressed with no station to keep is
+// the one shape the old rule never produced: the radio fully off.
 wifi_mode_t WifiManager::settingsWifiMode(bool& wantAp, bool& wantSta) const {
-  wantAp  = settings.links().wifiApEnabled;
+  wantAp  = settings.links().wifiApEnabled && !_apSuppressed;
   wantSta = settings.links().wifiStaEnabled && stationConfigured();
-  return wantAp ? (wantSta ? WIFI_AP_STA : WIFI_AP) : WIFI_STA;
+  if (wantAp) return wantSta ? WIFI_AP_STA : WIFI_AP;
+  if (!_apSuppressed || wantSta) return WIFI_STA;   // the shape this always was
+  return WIFI_MODE_NULL;                            // idle-off, nothing else to run
 }
 
 // The station's listen interval — how many AP beacon intervals it may doze
@@ -643,8 +669,14 @@ void WifiManager::startAccessPoint() {
   }
 
   // Station mode: join the configured LAN too. The AP and the STA share
-  // one radio, so the AP follows the LAN's channel once connected.
-  if (wantSta) {
+  // one radio, so the AP follows the LAN's channel once connected. Not when
+  // the station is already associated: this function is also the AP's
+  // runtime re-up path (tick()'s convergence — one bring-up, so the beacon
+  // patch, WPA3 and IPv6 reapply by construction), and on an AP+STA node a
+  // wake would otherwise rebuild the config and re-issue the connect under
+  // a healthy association, bouncing the LAN link to bring back the AP. At
+  // boot the station cannot be connected yet, so the boot path is unchanged.
+  if (wantSta && !stationConnected()) {
     WiFi.setAutoReconnect(true);
     staConnect(w.staSsid, w.staPassword);
     log_i("station: joining \"%s\"", w.staSsid);
@@ -653,6 +685,46 @@ void WifiManager::startAccessPoint() {
 }
 
 void WifiManager::tick() {
+  // The AP idle policy, ahead of everything: neither block touches the
+  // driver beyond a read, so they are safe wherever a pass is — including
+  // the passes below that return early while a join is still trying, which
+  // would otherwise sit on a wake for the join window's full twenty seconds.
+  //
+  // The wake first, so the pass that serves it evaluates nothing stale: the
+  // policy's clock re-arms, the suppression term drops, and the convergence
+  // below (raised here, served with nothing in flight) brings the AP back —
+  // the whole return is one tick pass plus the driver's own start-up.
+  if (_apWakeReq) {
+    _apWakeReq = false;
+    _apIdle.wake(millis());
+    if (_apSuppressed) {
+      _apSuppressed = false;
+      _modeSyncReq = true;
+      log_i("access point: woken — coming back up");
+    }
+  }
+  // The verdict, at a 1 s cadence — softAPgetStationNum() is a driver call,
+  // and the policy needs no finer clock than the minutes it counts in. With
+  // the feature off the policy answers "never" from its first line and the
+  // driver is not asked at all: a node with the switch off runs this block
+  // as two setting reads and a comparison.
+  if (_apIdleGate.due(millis())) {
+    const bool en   = settings.wifi().apIdleOff && settings.links().wifiApEnabled;
+    const bool apUp = (WiFi.getMode() & WIFI_MODE_AP) != 0;
+    const bool suppress = _apIdle.suppressed(
+        millis(), en, apUp, (en && apUp) ? WiFi.softAPgetStationNum() : 0,
+        (uint32_t)settings.wifi().apIdleMinutes * 60000u);
+    if (suppress != _apSuppressed) {
+      _apSuppressed = suppress;
+      _modeSyncReq = true;               // the transition rides the one convergence
+      if (suppress)
+        log_i("access point: empty for %u min — going down (the button, WIFI ON at the "
+              "console, or an admin message brings it back)",
+              (unsigned)settings.wifi().apIdleMinutes);
+      else
+        log_i("access point: idle-off lifted — coming back up");
+    }
+  }
   // The glass's asks are served first, on the task that owns the driver. The
   // starts live here rather than where they were asked so that no other task
   // ever calls into the driver: a display-task scanNetworks()/begin() raced
@@ -767,16 +839,14 @@ void WifiManager::tick() {
   // moments ago from the display task, and it must reach its serve whole
   // rather than have the mode settled across it. The flag drops before the
   // settings are read, so a request racing in from the display task is kept
-  // whole for the next pass rather than half-served by this one; and with
-  // Wi-Fi off in settings nothing is asserted at all, because asserting any
-  // mode would start the very driver the switch keeps down.
+  // whole for the next pass rather than half-served by this one. The body
+  // lives in syncRadioShape(): it is no longer a bare mode assertion, because
+  // the shape can now change while the node runs — the idle policy and the
+  // live links.wifi_ap switch take the AP down and up — and a transition
+  // carries services with it and stages a grace before any teardown.
   if (_modeSyncReq && !_scanActive && !_scanReq && !_joinReq) {
     _modeSyncReq = false;
-    if (wifiEnabled()) {
-      bool wantAp, wantSta;
-      const wifi_mode_t want = settingsWifiMode(wantAp, wantSta);
-      if (WiFi.getMode() != want) WiFi.mode(want);
-    }
+    syncRadioShape();
   }
   // Station watchdog: log transitions, kick a reconnect if auto-reconnect
   // gave up (e.g. the LAN was down at boot).
@@ -793,6 +863,111 @@ void WifiManager::tick() {
       WiFi.reconnect();
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// The convergence body: the one place the running radio is taken toward the
+// shape the settings and the idle policy ask for. On the loop task only.
+//
+// Transition rules, in the order they are applied:
+//   - A teardown that removes the AP waits out AP_STOP_GRACE_MS first, so
+//     the reply to whatever asked (an HTTP 200 riding the AP itself, a
+//     console OK) leaves before its link does — the same reasoning as
+//     Bootloader::reboot's folded delay. A wake or a switch flip during the
+//     grace simply changes what the next pass computes, and the stage drops.
+//   - The AP coming up goes through startAccessPoint(), the one bring-up,
+//     so the beacon read-modify-write, WPA3, and IPv6 reapply by
+//     construction; the Wi-Fi sleep and TX-power settings reapply from the
+//     AP_START/STA_START event hook begin() installs. Captive DNS and (on a
+//     node that booted with Wi-Fi off) mDNS follow on the same transition.
+//   - Dependent services ride the same pass as the driver change:
+//     AutoInterface::end() before the netifs go (its sockets hold the
+//     multicast group on them), begin() once a link is back. It keeps
+//     running when only the AP drops but a station remains — a peer on the
+//     LAN is exactly what it is for.
+// ---------------------------------------------------------------------------
+void WifiManager::syncRadioShape() {
+  bool wantAp = false, wantSta = false;
+  wifi_mode_t want = WIFI_MODE_NULL;   // Wi-Fi off in settings asserts nothing
+  if (wifiEnabled()) want = settingsWifiMode(wantAp, wantSta);
+  const wifi_mode_t have  = WiFi.getMode();   // WIFI_MODE_NULL while the driver is down
+  const bool haveAp = (have & WIFI_MODE_AP) != 0;
+  const bool dropAp = haveAp && !wantAp;
+  if (!dropAp) _apDownStaged = false;         // a wake mid-grace cancels the stage
+  if (have != want) {
+    if (dropAp) {
+      if (!_apDownStaged) {
+        _apDownStaged = true;
+        _apDownDueMs  = millis() + AP_STOP_GRACE_MS;
+      }
+      if ((int32_t)(millis() - _apDownDueMs) < 0) {
+        _modeSyncReq = true;                  // come back next pass; grace still running
+        return;
+      }
+      _apDownStaged = false;
+      apServicesDown();
+    }
+    if (want == WIFI_MODE_NULL) {
+      // Nothing left to run. AutoInterface goes first — end() exists so the
+      // netifs are never cycled under its joined discovery group — and the
+      // driver stops with the mode.
+      if (AutoInterface::enabled()) { AutoInterface::end(); _autoIfEnded = true; }
+      WiFi.mode(WIFI_MODE_NULL);
+      log_i("wifi: radio off%s", _apSuppressed ? " (access point idled down; a wake brings it back)" : "");
+    } else if (wantAp && !haveAp) {
+      startAccessPoint();
+      apServicesUp();
+      log_i("access point \"%s\" (%s) back up at %s", _ssid, _securityName,
+            WiFi.softAPIP().toString().c_str());
+    } else {
+      WiFi.mode(want);
+      if (dropAp) log_i("access point down; the radio stays up for the station");
+    }
+  }
+  // Only rejoined where this path ended it: a task that never started (the
+  // switch was off at boot, or a start that failed) is begin()'s own boot
+  // story, and retrying it from every convergence pass would not be.
+  if (_autoIfEnded && want != WIFI_MODE_NULL && AutoInterface::wanted()) {
+    _autoIfEnded = false;
+    AutoInterface::begin();
+  }
+}
+
+// What leaves the air with the access point, and what returns with it. mDNS
+// is deliberately absent from the down path: the pinned espressif/mdns
+// component (^1.9.0 via the framework's dependencies.lock) registers its own
+// WIFI_EVENT handlers at mdns_init() — the framework sdkconfig compiles the
+// predefined AP/STA netifs in (CONFIG_MDNS_PREDEF_NETIF_AP=y) — so
+// WIFI_EVENT_AP_STOP disables the AP's PCBs and WIFI_EVENT_AP_START
+// re-enables them, and enabling probes and re-announces the hostname and
+// services on that netif (mdns.h documents enable as "probe, resolve
+// conflicts and announce"). The station side is untouched either way, which
+// is exactly the behaviour wanted; restarting the responder here would
+// disturb it for nothing.
+void WifiManager::apServicesDown() {
+  // The resolver stays where the USB link exists: its lease names the node
+  // as DNS whether or not Wi-Fi runs, and an unanswerable port 53 makes an
+  // attached host wait out its resolver timeout on every lookup (begin()
+  // tells the same story at boot).
+  if (!HAS_USB_NCM) _dns.end();
+}
+
+void WifiManager::apServicesUp() {
+  // The same condition begin() binds under, re-checked because the boot may
+  // have skipped it: a node that started with Wi-Fi fully off never bound.
+  if ((settings.links().wifiApEnabled || HAS_USB_NCM) && !_dns.listening()) {
+    if (!_dns.begin(AP_IP)) log_w("captive DNS: could not bind port 53");
+  }
+  // A node that booted with Wi-Fi off returned from begin() before its mDNS
+  // block; the first runtime up is where the responder can finally start.
+  // Once started it manages the AP netif's cycles itself (above).
+  if (!_mdnsUp) startMdns();
+}
+
+const char* WifiManager::apStateName() const {
+  if (!settings.links().wifiApEnabled) return "off";
+  if (_apSuppressed) return "idle-off";
+  return (WiFi.getMode() & WIFI_MODE_AP) ? "up" : "down";
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,14 +1366,19 @@ void WifiManager::setupRoutes() {
   // OS connectivity probes — a redirect (any non-204/200 answer) is what
   // makes the client OS open its captive-portal browser. Only where there
   // is an access point to be captive on: with Wi-Fi off a host on any other
-  // link would be sent to an address that does not exist.
-  if (wifiEnabled()) {
-    for (const char* probe : { "/generate_204", "/gen_204",
-                               "/hotspot-detect.html", "/connecttest.txt",
-                               "/ncsi.txt", "/canonical.html", "/success.txt" }) {
-      _http.on(probe, HTTP_GET,
-               [](AsyncWebServerRequest* r) { r->redirect(PORTAL_URL); });
-    }
+  // link would be sent to an address that does not exist. Registered always
+  // and judged per request rather than at boot, because Wi-Fi's switch is no
+  // longer a boot-time fact: a node that boots with it off and has WIFI ON
+  // typed later gets its sign-in sheet without the restart it used to need.
+  // The judged answer with Wi-Fi off is the same 404 the boot-time gate
+  // produced (the probes fell to onNotFound below).
+  for (const char* probe : { "/generate_204", "/gen_204",
+                             "/hotspot-detect.html", "/connecttest.txt",
+                             "/ncsi.txt", "/canonical.html", "/success.txt" }) {
+    _http.on(probe, HTTP_GET, [this](AsyncWebServerRequest* r) {
+      if (wifiEnabled()) r->redirect(PORTAL_URL);
+      else               r->send(404, "text/plain", "not found");
+    });
   }
 
   // The single-page app lives in LittleFS (data/ -> `pio run -t uploadfs`).
@@ -1211,9 +1391,12 @@ void WifiManager::setupRoutes() {
   _http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html").setCacheControl(kNoCache);
 
   // Everything else (arbitrary hostnames typed by the user, probe paths
-  // not listed above) also lands on the portal — when there is one.
-  if (wifiEnabled()) _http.onNotFound([](AsyncWebServerRequest* r) { r->redirect(PORTAL_URL); });
-  else               _http.onNotFound([](AsyncWebServerRequest* r) { r->send(404, "text/plain", "not found"); });
+  // not listed above) also lands on the portal — when there is one, judged
+  // per request for the same reason as the probes above.
+  _http.onNotFound([this](AsyncWebServerRequest* r) {
+    if (wifiEnabled()) r->redirect(PORTAL_URL);
+    else               r->send(404, "text/plain", "not found");
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1505,6 +1688,11 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
       // seconds by every open tab.
       if (sn.clientKnown) o["clients"] = sn.clients;
       if (l->reason()[0]) o["reason"] = l->reason();
+      // Down by the idle policy, which "enabled" plus "down" alone cannot
+      // say: the switch is on and the AP is not on the air, and an operator
+      // reading that has to know whether to flip a switch or press a button.
+      // Absent when it does not apply, like the fields above.
+      if (sn.type == LocalLink::Type::WifiAp && _apSuppressed) o["idle_down"] = true;
     }
   }
 
@@ -1960,6 +2148,8 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   wifi["sta_has_password"] = ws.staPassword[0] != '\0';
   wifi["sta_listen_interval"] = ws.staListenInterval;
   wifi["sta_connected"] = stationConnected();
+  wifi["ap_idle_off"]     = ws.apIdleOff;
+  wifi["ap_idle_minutes"] = ws.apIdleMinutes;
 
   JsonObject tr = doc["transport"].to<JsonObject>();
   tr["enabled"]   = settings.transport().enabled;
@@ -1991,6 +2181,10 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
       o["supported"] = l->usable();
       o["enabled"]   = LocalLink::switchOn(*l, settings.links());
       if (l->reason()[0]) o["reason"] = l->reason();
+      // The links card must be able to say "on, but down by the idle
+      // policy" — a switch that reads on beside an AP nobody can see sends
+      // the operator toward the wrong control.
+      if (f[i].type == LocalLink::Type::WifiAp && _apSuppressed) o["idle_down"] = true;
       if (f[i].type == LocalLink::Type::PppUart && l->usable()) {
         // The speed, and the speeds this board may be set to — the page
         // draws its list from this answer, as it draws the switches, so
@@ -2027,12 +2221,14 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
 // ---------------------------------------------------------------------------
 // Local links and maintenance settings
 // ---------------------------------------------------------------------------
-// POST /api/settings/links {"wifi":bool,"usb":bool,"ppp":bool,"ppp_baud":int}
-// — any subset. A link the board lacks or the build cannot run is refused
-// by name rather than saved: a setting nothing acts on is a lie the page
-// would go on showing; so is a PPP speed the board is not qualified for.
-// Wi-Fi changes restart the node (the AP cannot be torn down under the
-// request that asked); the answer says so. USB and PPP apply live.
+// POST /api/settings/links {"wifi_ap":bool,"wifi_sta":bool,"usb":bool,
+// "ppp":bool,"ppp_baud":int} — any subset. A link the board lacks or the
+// build cannot run is refused by name rather than saved: a setting nothing
+// acts on is a lie the page would go on showing; so is a PPP speed the board
+// is not qualified for. The access point's switch applies live — the tick
+// convergence takes it up or down, with a grace so this very reply leaves
+// first — as do USB and PPP; the station switch still restarts (the join is
+// built at boot); the answer says which happened.
 void WifiManager::handleLinksPost(AsyncWebServerRequest* request, const char* body, size_t len) {
   JsonDocument in;
   if (deserializeJson(in, body, len) != DeserializationError::Ok) { sendError(request, 400, "bad json"); return; }
@@ -2261,6 +2457,8 @@ void WifiManager::handleWifiPost(AsyncWebServerRequest* request, const char* bod
   if (in["hidden"].is<bool>())      w.hidden      = in["hidden"];
   if (in["tx_power"].is<int>())            w.txPowerDbm        = in["tx_power"];
   if (in["sta_listen_interval"].is<int>()) w.staListenInterval = in["sta_listen_interval"];
+  if (in["ap_idle_off"].is<bool>())        w.apIdleOff         = in["ap_idle_off"];
+  if (in["ap_idle_minutes"].is<int>())     w.apIdleMinutes     = in["ap_idle_minutes"];
   if (in["sta_ssid"].is<const char*>()) {
     String s = in["sta_ssid"].as<String>(); s.trim();
     if (s.length() > 32) { sendError(request, 400, "station ssid must be at most 32 characters"); return; }
@@ -2384,6 +2582,7 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   w["ssid"] = ws.ssid; w["security"] = Settings::securityName(ws.security); w["password"] = ws.password;
   w["channel"] = ws.channel; w["max_stations"] = ws.maxStations; w["hidden"] = ws.hidden;
   w["tx_power"] = ws.txPowerDbm; w["sta_listen_interval"] = ws.staListenInterval;
+  w["ap_idle_off"] = ws.apIdleOff; w["ap_idle_minutes"] = ws.apIdleMinutes;
   w["sta_ssid"] = ws.staSsid; w["sta_password"] = ws.staPassword;
   JsonObject t = doc["transport"].to<JsonObject>();
   t["enabled"] = ts.enabled; t["lora_mode"] = ts.loraMode; t["wifi_mode"] = ts.wifiMode;
@@ -2474,6 +2673,8 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     ws.channel = w["channel"] | ws.channel; ws.maxStations = w["max_stations"] | ws.maxStations; ws.hidden = w["hidden"] | ws.hidden;
     ws.txPowerDbm = w["tx_power"] | ws.txPowerDbm;
     ws.staListenInterval = w["sta_listen_interval"] | ws.staListenInterval;
+    ws.apIdleOff = w["ap_idle_off"] | ws.apIdleOff;
+    ws.apIdleMinutes = w["ap_idle_minutes"] | ws.apIdleMinutes;
     if (ws.security != ApSecurity::Open && strlen(ws.password) < 8) ws.security = ApSecurity::Open;
     // The unusable password goes with the coercion, whichever import wrote
     // it: kept, it fails validateWifi's 8-63 rule below, turning files that

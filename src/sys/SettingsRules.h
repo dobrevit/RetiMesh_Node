@@ -237,13 +237,23 @@ inline bool validateWifi(const WifiSettings& w, char* err, size_t errLen) {
     snprintf(err, errLen, "station listen interval must be 1-16 beacon intervals");
     return false;
   }
+  // Minutes of standing empty before the AP idles down. A day is the most an
+  // idle window can mean, and zero is not "off" — wifi.ap_idle_off is. Held
+  // whether or not the switch is on, so a value stored while the feature is
+  // off cannot walk in the moment it is switched on.
+  if (w.apIdleMinutes < 1 || w.apIdleMinutes > 1440) {
+    snprintf(err, errLen, "ap idle minutes must be 1-1440");
+    return false;
+  }
   return true;
 }
 
 // Which Wi-Fi changes need the restart, decided once. The access point and
 // the station join are built at start-up from the fields compared here; the
-// two deliberately absent — txPowerDbm and staListenInterval — apply live
-// (SettingsFields::commitWifi applies them as it saves). The comparison
+// four deliberately absent — txPowerDbm and staListenInterval (applied by
+// SettingsFields::commitWifi as it saves), apIdleOff and apIdleMinutes (they
+// arm a timer the WifiManager tick reads, not a radio shape) — apply live.
+// The comparison
 // enumerates the restart fields, so a field missing from it applies without
 // a restart, silently: a new WifiSettings member must be classified here the
 // moment it exists (the struct says so beside it), and the

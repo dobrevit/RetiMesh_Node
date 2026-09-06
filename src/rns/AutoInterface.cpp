@@ -131,7 +131,32 @@ const Link* linkByIndex(int ifindex) {
 // associates minutes after boot is peered on without a restart.
 void refreshLinks() {
   for (Link& l : sLinks) {
-    if (l.joined) continue;
+    if (l.joined) {
+      // Still the interface we joined? A netif cycle while the task keeps
+      // running — the runtime AP down/up path takes the AP netif away and
+      // brings back a fresh one, with a fresh ifindex — would otherwise
+      // leave the link marked joined against an interface that no longer
+      // exists, and this loop only ever joins the not-joined: discovery on
+      // that link would be dead for the life of the task with nothing in
+      // the log to say so. Judged by the ifindex and the link-local both,
+      // because either goes first depending on how the netif went down.
+      esp_netif_t* netif = esp_netif_get_handle_from_ifkey(l.key);
+      const int nowIndex = netif ? esp_netif_get_netif_impl_index(netif) : 0;
+      char nowLocal[sizeof(l.local)];
+      if (nowIndex == l.ifindex && linkLocalOf(l.key, nowLocal, sizeof(nowLocal))) continue;
+      // Give the membership back against the old ifindex, best effort: if
+      // lwIP kept it across a stop/start it would refuse the fresh join
+      // below, and if the netif is truly gone this fails harmlessly.
+      ipv6_mreq old = {};
+      inet_pton(AF_INET6, kGroupAddr, &old.ipv6mr_multiaddr);
+      old.ipv6mr_interface = l.ifindex;
+      setsockopt(sDisc, IPPROTO_IPV6, IPV6_LEAVE_GROUP, &old, sizeof(old));
+      Sys::Lock held(sLock);
+      l.joined = false; l.ifindex = 0; l.local[0] = '\0';
+      held.release();
+      log_i("AutoInterface: %s went away; peering resumes when it returns", l.what);
+      continue;   // the netif is down or mid-change; the join below waits its turn
+    }
     char local[sizeof(l.local)];
     if (!linkLocalOf(l.key, local, sizeof(local))) continue;
     esp_netif_t* netif = esp_netif_get_handle_from_ifkey(l.key);
@@ -517,11 +542,19 @@ void begin(RingbufHandle_t inRing) {
   if (!Diag::startTask(task, "autoif", 8192, nullptr, 2, 0)) sTaskAlive = false;
 }
 
+// The Wi-Fi re-up transition's begin: the ring cannot change after boot, so
+// the one the boot begin() stored serves every later start. Without a boot
+// begin() there is nothing to restart and nowhere for datagrams to go.
+void begin() {
+  if (!sInRing) { log_w("AutoInterface: never begun with a ring; nothing to restart"); return; }
+  begin(sInRing);
+}
+
 void end() {
-  // No caller yet: this exists for the Wi-Fi teardown work, which must not
-  // cycle the netifs while the discovery group is still joined on them. Kept
-  // synchronous for exactly that caller: when this returns, the task has
-  // disconnected its peers, closed its sockets and gone.
+  // The caller is the Wi-Fi teardown (WifiManager::syncRadioShape), which
+  // must not cycle the netifs while the discovery group is still joined on
+  // them. Kept synchronous for exactly that caller: when this returns, the
+  // task has disconnected its peers, closed its sockets and gone.
   if (!sTaskAlive) return;
   sStop = true;
   // The task notices within one select() pass — the drains check sStop per
