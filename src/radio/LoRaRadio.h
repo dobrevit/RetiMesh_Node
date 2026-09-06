@@ -145,6 +145,20 @@ public:
   // immediately. Result is visible in g_stats.radioApplyError.
   void requestReconfigure(const RadioSettings& s);
 
+  // Put the transceiver to sleep, and any amplified front end down with it,
+  // before the node restarts. Asked rather than done, for the same reason
+  // requestReconfigure() is: the radio task is the only code that touches the
+  // chip (see the task-body note in the .cpp), and the restart runs on
+  // whichever task asked for it. requestSleep() returns at once; asleep()
+  // says when the task has finished the job. Bootloader::quiesce() is the
+  // caller, and it waits for a bounded time rather than for this to be true —
+  // a restart that can be held up by a transmission in flight is a restart
+  // that does not happen.
+  //
+  // There is no matching wake: what follows this is esp_restart().
+  void requestSleep();
+  bool asleep() const;
+
   // FreeRTOS entry point — created pinned to core 1 from main.cpp.
   static void radioTask(void* self);
 
@@ -167,8 +181,14 @@ private:
   bool probeSX127x(const RadioSettings& s);
   bool probeSX1280(const RadioSettings& s);
   bool probeLR1110(const RadioSettings& s);
-  void irqSelfTest();                    // proves the IRQ line, see the .cpp
+  bool irqSelfTest();                    // proves the IRQ line, see the .cpp
+  void bootSelfTest();                   // ...once per firmware build
+  void enterSleep();                     // radio task context only
   uint32_t rxDoneFlag() const;           // this chip's RxDone bit, raw
+  // Which pin the interrupt actually arrives on: DIO1 on an SX126x, SX128x or
+  // LR11x0, DIO0 on an SX127x. Two log lines name it and naming the wrong one
+  // turns a useful diagnostic into a misleading one, so both ask here.
+  int irqPin() const { return _sx1276 ? PIN_LORA_DIO0 : PIN_LORA_DIO1; }
   bool applySettings(const RadioSettings& s);   // radio task context only
   void configureAirtime(const RadioSettings& s);  // symbol time -> duty cycle + CSMA
   void logActive() const;
@@ -192,6 +212,8 @@ private:
   RadioSettings  _active;                // what the chip is running now
   RadioSettings  _pending;               // handed over by requestReconfigure
   volatile bool  _reconfigure = false;
+  volatile bool  _sleepRequest = false;  // set by requestSleep, cleared by the task
+  volatile bool  _asleep       = false;  // ...and the task's answer
   portMUX_TYPE   _mux = portMUX_INITIALIZER_UNLOCKED;
 
   // RX reassembly state (mirrors RNode's seq/read_len logic)

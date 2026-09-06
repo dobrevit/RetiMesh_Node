@@ -57,6 +57,7 @@
 #endif
 #include "Config.h"
 #include "Diag.h"
+#include "LoRaRadio.h"
 #include "Settings.h"
 #include "PppUart.h"
 
@@ -171,6 +172,13 @@ Refusal request(Target target, Source source, uint32_t delayMs, const char** why
 bool    pending()  { return sSeq.pending(); }
 Pending snapshot() { return sSeq.snapshot(); }
 
+// How long the restart will wait for the radio task to answer requestSleep().
+// Small on purpose: the transceiver draws a few milliamps for the fraction of
+// a second between here and the reset, and a restart that can be held up by a
+// transmission in flight is a restart that does not happen. Whichever way the
+// wait ends, the node restarts.
+static const uint32_t kRadioSleepWaitMs = 250;
+
 static void quiesce() {
   // From here on RetiTransportServer refuses connections and the settings
   // handlers refuse writes (they check pending()). What is in flight is left
@@ -180,6 +188,10 @@ static void quiesce() {
   // happens on this pass and the previous run's length is how the next boot
   // tells a deliberate restart from a crash loop.
   Diag::tick(millis() / 1000);
+  // Asked first and waited for last, because it crosses to another task: the
+  // radio task is the only code that touches the transceiver, and this runs on
+  // whoever called tick(). Everything below is time the radio gets for free.
+  loraRadio.requestSleep();
   #if HAS_PPP
     // A host with PPP open on the port is told the link is ending, so its
     // pppd exits now and frees the port for esptool, rather than after its
@@ -187,6 +199,16 @@ static void quiesce() {
     // have come over that very link; its reply left during the delay.
     PppUart::shutdown(1500);
   #endif
+  // ...and collected here: the chip asleep, and on a board with an amplified
+  // front end that rail down with it. Bounded, and the timeout is not an
+  // error worth holding the restart for — say so and go.
+  {
+    const uint32_t started = millis();
+    while (!loraRadio.asleep() && millis() - started < kRadioSleepWaitMs) delay(5);
+    if (!loraRadio.asleep())
+      log_w("the radio did not reach sleep in %lu ms; restarting with it awake",
+            (unsigned long)kRadioSleepWaitMs);
+  }
   Serial.flush();
   // NVS writes are transactional and the Reticulum store checkpoints itself;
   // LittleFS is not unmounted here on purpose. The transport task may be in a

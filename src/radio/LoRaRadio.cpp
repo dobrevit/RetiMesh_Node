@@ -22,7 +22,9 @@
 #include "Diag.h"
 #include "LoRaRadio.h"
 #include "LoRaFem.h"
+#include "RadioSelfTestPolicy.h"
 #include <esp_random.h>
+#include <Preferences.h>
 #include "Neighbors.h"
 #include "WifiManager.h"
 #include "Watchdog.h"
@@ -133,7 +135,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   configureAirtime(_active);                     // the probes bypass applySettings()
   logActive();
   #if RADIO_SELFTEST_ON_BOOT
-    irqSelfTest();
+    bootSelfTest();
   #endif
   return true;
 }
@@ -151,7 +153,10 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
 // sendFrame() waits on it with an 8 s timeout, so a working line answers in
 // tens of milliseconds and a wrong one takes the full timeout. One short
 // frame, once, and the log says which.
-void LoRaRadio::irqSelfTest() {
+//
+// Returns whether the line answered. Only a true is worth remembering, which
+// is bootSelfTest()'s business; this function's is the chip and the pin.
+bool LoRaRadio::irqSelfTest() {
   // The ISR notifies s_taskHandle, and radioTask has not started yet — begin()
   // runs from setup(). Without this the interrupt fires into a null handle and
   // the test reports a dead line on perfectly good wiring, which is precisely
@@ -172,7 +177,7 @@ void LoRaRadio::irqSelfTest() {
     s_taskHandle = previous;
     LoRaFem::rx();
     _radio->startReceive();
-    return;
+    return false;                                // nothing was proved
   }
   const uint32_t got = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(3000));
   const uint32_t took = millis() - started;
@@ -181,21 +186,65 @@ void LoRaRadio::irqSelfTest() {
   LoRaFem::rx();
   _radio->startReceive();
 
-  // Which pin is the interrupt depends on the family: DIO1 on an SX126x or
-  // SX128x, DIO0 on an SX127x. Naming the wrong one turns a useful diagnostic
-  // into a misleading one.
-  const int irqPin = _sx1276 ? PIN_LORA_DIO0 : PIN_LORA_DIO1;
   if (got) {
     log_i("radio self-test: TxDone interrupt arrived in %lu ms — the IRQ line on GPIO %d is live",
-          (unsigned long)took, irqPin);
+          (unsigned long)took, irqPin());
   } else {
     // Worth being blunt. Everything else about this node will look healthy.
     log_e("radio self-test: NO TxDone interrupt after %lu ms. The chip transmits but nothing "
           "is watching its IRQ, so this node will never receive a packet. GPIO %d is not the "
           "interrupt pin on this board — check the board header against the schematic.",
-          (unsigned long)took, irqPin);
+          (unsigned long)took, irqPin());
   }
+  return got != 0;
 }
+
+#if RADIO_SELFTEST_ON_BOOT
+// ...and once per firmware build rather than once per boot.
+//
+// The airtime is worth paying to answer a question, and worthless to answer it
+// again: the pin map the test proves belongs to the image, so an image that has
+// already answered on this node has nothing left to find out. The case this
+// exists for is a solar node brown-out looping at dawn, spending a transmission
+// on every cycle out of the supply that could not hold the last boot up — and
+// no boot-reason check can help there, because a brown-out is not a clean boot
+// and the RTC domain that would carry the state does not survive the rail
+// dropping. So the verdict goes to NVS, keyed to the build (RadioSelfTestPolicy.h).
+//
+// Its own namespace: this is not a setting, so a settings reset must not clear
+// it, and it is not restart history either. Flashing any different image is
+// what asks the question again — which is also exactly when the answer can
+// have changed.
+void LoRaRadio::bootSelfTest() {
+  const uint32_t build = RadioSelfTest::buildMark(FW_VERSION);
+
+  Preferences p;
+  const bool store = p.begin(RADIO_NVS_NAMESPACE, false);
+  // Guarded like every other read in this firmware: Preferences logs an error
+  // for a key that is not there, and on a fresh node it never is.
+  const uint32_t stored = (store && p.isKey(RADIO_SELFTEST_NVS_KEY))
+                            ? p.getUInt(RADIO_SELFTEST_NVS_KEY, RadioSelfTest::NO_MARK)
+                            : RadioSelfTest::NO_MARK;
+
+  if (RadioSelfTest::proven(stored, build)) {
+    // The one line that says which path was taken. The run path says so
+    // itself, in more detail, from irqSelfTest().
+    log_i("radio self-test: skipped — this firmware already proved "
+          "the IRQ line on GPIO %d", irqPin());
+    if (store) p.end();
+    return;
+  }
+
+  const uint32_t mark = RadioSelfTest::markAfter(irqSelfTest(), build);
+  if (store) {
+    if (mark != RadioSelfTest::NO_MARK)        p.putUInt(RADIO_SELFTEST_NVS_KEY, mark);
+    else if (stored != RadioSelfTest::NO_MARK) p.remove(RADIO_SELFTEST_NVS_KEY);
+    p.end();
+  }
+  // A namespace that would not open costs one transmission per boot and
+  // nothing else: the test runs, as it did before any of this existed.
+}
+#endif
 
 // The TCXO ramp RadioLib programs into an SX126x, which decides how long a
 // receive sleep has to be before the driver will take it. Nothing here passes a
@@ -470,6 +519,41 @@ void LoRaRadio::requestReconfigure(const RadioSettings& s) {
   portEXIT_CRITICAL(&_mux);
 }
 
+// ---------------------------------------------------------------------------
+// Shutdown: the last thing the radio task does before the node restarts
+// ---------------------------------------------------------------------------
+void LoRaRadio::requestSleep() {
+  portENTER_CRITICAL(&_mux);
+  _sleepRequest = true;
+  portEXIT_CRITICAL(&_mux);
+}
+
+bool LoRaRadio::asleep() const {
+  // A radio that never came up has nothing to put to sleep — and its task
+  // deleted itself at the top of taskLoop(), so nobody is left to answer the
+  // request. Saying "asleep" here is what stops the caller spending its whole
+  // bound waiting for a chip that is not there.
+  return _asleep || !_online;
+}
+
+// Radio task context only. Nothing wakes the chip again: the caller is the
+// restart's quiesce step and what follows it is esp_restart().
+void LoRaRadio::enterSleep() {
+  portENTER_CRITICAL(&_mux);
+  _sleepRequest = false;
+  portEXIT_CRITICAL(&_mux);
+
+  const int16_t state = _radio->sleep();
+  // The front end goes after the chip, not before: an amplifier whose rail is
+  // pulled while the transceiver is still driving its antenna pin is the one
+  // ordering that could stress the part.
+  LoRaFem::off();
+  _asleep = true;
+
+  if (state == RADIOLIB_ERR_NONE) log_i("radio asleep for the restart");
+  else log_w("radio would not sleep for the restart (code %d); restarting anyway", state);
+}
+
 // Called from the radio task only. Leaves the chip in standby; the caller
 // re-arms receive. On failure the previous settings are restored.
 bool LoRaRadio::applySettings(const RadioSettings& s) {
@@ -548,7 +632,15 @@ void LoRaRadio::taskLoop() {
     // the node rebooted itself thirty seconds later on a quiet channel. Found
     // on the bench, which is the only place it is cheap to find.
     Watchdog::feed();
-    // (0) Settings changed from the web UI? Apply between packets.
+
+    // (0) A restart is being prepared? Sleep the chip, stand the front end
+    //     down, and then stay out of the way: keep feeding the watchdog, but
+    //     touch nothing. There is no path back — quiesce() asks for this and
+    //     esp_restart() follows it.
+    if (_sleepRequest) enterSleep();
+    if (_asleep) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+
+    // (1) Settings changed from the web UI? Apply between packets.
     if (_reconfigure) {
       RadioSettings s;
       portENTER_CRITICAL(&_mux);
@@ -567,16 +659,16 @@ void LoRaRadio::taskLoop() {
       _radio->startReceive();
     }
 
-    // (1) Service the radio: block up to 10 ms for an IRQ notification.
+    // (2) Service the radio: block up to 10 ms for an IRQ notification.
     //     This doubles as the poll interval for the TX ring below.
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0) {
       handleRadioIrq();
     }
 
-    // (1a) Channel-use figures, and the duty-cycle verdict they feed.
+    // (2a) Channel-use figures, and the duty-cycle verdict they feed.
     refreshAirtimeStats();
 
-    // (1b) Beacons: boot hello, pending reply, periodic id when idle.
+    // (2b) Beacons: boot hello, pending reply, periodic id when idle.
     //      At most one beacon per loop pass, and the idle check reads the
     //      clock fresh — a transmission above would otherwise make the
     //      stale `now` minus _lastTxMs wrap and fire immediately.
@@ -587,7 +679,7 @@ void LoRaRadio::taskLoop() {
       else if ((int32_t)(now - _lastTxMs) >= (int32_t)_active.beaconInterval * 1000) sendBeacon('I');
     }
 
-    // (2) TCP -> LoRa: pull one complete RNS packet from the ring buffer
+    // (3) TCP -> LoRa: pull one complete RNS packet from the ring buffer
     //     (queued there by RetiTransportServer's HDLC deframer) and
     //     transmit it. Non-blocking take; RX keeps priority.
     //     While the hourly transmit budget is spent, leave packets in the
@@ -638,12 +730,22 @@ void LoRaRadio::handleRadioIrq() {
   // out of the chip, until the RX ring overflowed. On a channel measured at
   // 0.67 % occupancy the node was reporting several packets a second and
   // discarding 93 % of them; none of that traffic existed.
+  //
+  // Every path out of here re-arms receive, and that is the acknowledgement
+  // too. Each driver clears the chip's whole interrupt status inside
+  // startReceive(), in the RX branch of its stageMode(), before it puts the
+  // part back into receive: SX126x and SX128x call clearIrqStatus(), SX127x
+  // writes RADIOLIB_SX127X_FLAGS_ALL, LR11x0 clears RADIOLIB_LR11X0_IRQ_ALL.
+  // So an explicit clear on each path — which this handler used to make — was
+  // a second SPI write of the same register a few microseconds ahead of the
+  // driver's own. Named here rather than left to be rediscovered, because a
+  // driver that stopped doing it is one lost acknowledgement away from a
+  // receiver that never fires again.
   const uint32_t rxDone = rxDoneFlag();
   const uint32_t irq = _radio->getIrqFlags();
   if (rxDone && (irq & rxDone) == 0) {
     g_stats.loraRxSpuriousIrq++;
-    _radio->clearIrqFlags(0xFFFFFFFF);           // everything; nothing here is ours
-    _radio->startReceive();
+    _radio->startReceive();                      // ...and the flags with it
     return;
   }
 
@@ -655,7 +757,6 @@ void LoRaRadio::handleRadioIrq() {
   // framing ever grows.
   if (len <= LORA_HEADER_LEN || len > LORA_FRAME_MAX) {
     g_stats.loraRxBadLength++;
-    _radio->clearIrqFlags(0xFFFFFFFF);
     _radio->startReceive();
     return;
   }
@@ -666,7 +767,6 @@ void LoRaRadio::handleRadioIrq() {
     // interference — which looks nothing like a node whose consumer is slow,
     // and used to be indistinguishable from it.
     g_stats.loraRxCrcErrors++;
-    _radio->clearIrqFlags(0xFFFFFFFF);
     _radio->startReceive();
     return;
   }
@@ -727,9 +827,8 @@ void LoRaRadio::handleRadioIrq() {
     else                                   deliverPacket(_rxLen);
   }
 
-  // The reception is collected; drop its flags so re-entering receive mode
-  // cannot present the same packet again.
-  _radio->clearIrqFlags(0xFFFFFFFF);
+  // The reception is collected; re-entering receive mode drops its flags, so
+  // it cannot be presented again.
   _radio->startReceive();
 }
 
