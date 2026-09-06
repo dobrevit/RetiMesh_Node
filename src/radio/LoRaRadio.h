@@ -71,6 +71,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/ringbuf.h>
+#include <atomic>
 #include "Config.h"
 #include "Airtime.h"
 #include "RadioCaps.h"
@@ -229,10 +230,22 @@ private:
   volatile bool  _asleep       = false;  // ...and the task's answer
   // Whether the task is in — or about to enter — its idle wait, and so whether
   // a wake() would reach it. Read by producers on other tasks, written only by
-  // the radio task, and deliberately not under _mux: it is one word, and its
-  // correctness comes from the order it is written in relative to the TX ring,
-  // not from excluding anyone (see wake() in the .cpp).
-  volatile bool  _parked       = false;
+  // the radio task, and deliberately not under _mux: nobody is being excluded.
+  // What makes it correct is the order it is written in relative to the work a
+  // producer hands over — published before the ring and the two flags are read,
+  // read by the producer after its own hand-over (see wake() in the .cpp).
+  //
+  // std::atomic rather than volatile, because that order is the whole of the
+  // interlock and volatile does not carry it: it orders volatile accesses
+  // against each other and gives no compiler barrier against the ring read next
+  // to it and no hardware fence at all. Today the pairing would survive that on
+  // three unstated accidents — the ringbuffer calls take a portMUX spinlock,
+  // xTaskNotifyWait's own critical section stands in for the fence, and the
+  // producer runs on this core at a lower priority so it cannot preempt — and
+  // the first of those to go is moving the RNS task to core 0, which would
+  // invalidate the ordering silently and cost a 100 ms park per hand-over. A
+  // seq_cst bool is one word and one fence on a path that runs once a pass.
+  std::atomic<bool> _parked{false};
   portMUX_TYPE   _mux = portMUX_INITIALIZER_UNLOCKED;
 
   // RX reassembly state (mirrors RNode's seq/read_len logic)
@@ -251,7 +264,14 @@ private:
   uint32_t _helloAtMs = 0;               // boot probe due time (0 = done)
   uint32_t _replyAtMs = 0;               // pending reply to someone's hello
 
-  static TaskHandle_t s_taskHandle;      // notification target for the ISR
+  // Notification target for the ISR — and now for wake() too, so it is read
+  // from three contexts and written from two: the radio task publishes it, and
+  // irqSelfTest() borrows it for the setup task for the length of one probe.
+  // Volatile and not atomic, unlike _parked: this word carries no ordering
+  // relative to anything else — every value it ever holds is a task that can
+  // take the notification, or null — and one of its readers is an ISR, where a
+  // plain aligned load is the one thing certain not to reach out of IRAM.
+  static volatile TaskHandle_t s_taskHandle;
 };
 
 extern LoRaRadio loraRadio;

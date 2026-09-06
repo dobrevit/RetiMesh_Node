@@ -296,13 +296,27 @@ def summarise(path):
         # node. Reported per sample rather than first-to-last for the same
         # reason: a fault that stopped when the node last restarted still
         # happened.
-        for key in ("cad_timeouts", "cad_arm_errors"):
-            vals = [num(r.get(key)) for r in up if num(r.get(key)) is not None]
+        #
+        # The two say different things and send you to different places, which
+        # is why they get a sentence each: a timeout is a probe that was armed
+        # and never reported — usually the interrupt line — while an arm error
+        # is the driver refusing to start one, and RadioLib has already said why
+        # in the log. Both are read as a busy channel, so the symptom on the air
+        # is identical and the thing to check is not (docs/troubleshooting.md).
+        cad_meaning = {
+            "cad_timeouts":
+                "the carrier-sense probe is not being answered, so every packet this node "
+                "sends waits out the whole CSMA deferral — check the DIO the scan uses",
+            "cad_arm_errors":
+                "the driver would not arm carrier sense at all, which is a RadioLib refusal "
+                "rather than wiring — the log carries the code; a wedged part looks like this",
+        }
+        for key, meaning in cad_meaning.items():
+            vals = [v for v in (num(r.get(key)) for r in up) if v is not None]
             if not vals or max(vals) == 0:
                 continue
             print(f"   ⚠ {key}: {vals[0]:.0f} -> {vals[-1]:.0f} (peak {max(vals):.0f}) — "
-                  "carrier sense is not being answered, so every packet this node sends "
-                  "waits out the whole CSMA deferral (docs/troubleshooting.md)")
+                  f"{meaning} (docs/troubleshooting.md)")
 
 
 def main():

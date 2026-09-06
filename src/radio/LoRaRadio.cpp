@@ -22,6 +22,7 @@
 #include "Diag.h"
 #include "LoRaRadio.h"
 #include "LoRaFem.h"
+#include "RadioParkPolicy.h"
 #include "RadioSelfTestPolicy.h"
 #include <esp_app_desc.h>
 #include <esp_random.h>
@@ -32,7 +33,7 @@
 #include "SpiBus.h"
 
 LoRaRadio loraRadio;
-TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
+volatile TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
 
 // Both bounds come from the caller. The floor used to be a hardcoded 2 dBm,
 // which quietly rewrote anything lower — so an SX1280 asked for -10 dBm, a
@@ -67,14 +68,19 @@ static int8_t clampPower(int8_t dbm, int8_t minDbm, int8_t maxDbm) {
 static const uint32_t kWakeIrq  = 1u << 0;   // the transceiver raised its line
 static const uint32_t kWakeWork = 1u << 1;   // a producer queued something
 
+// Every wait in this file reads one of these and clears it without disturbing
+// the other, so they must not share a bit. Cheap to keep true, and the failure
+// would be a producer's wake serviced as an interrupt.
+static_assert((kWakeIrq & kWakeWork) == 0, "the two wake reasons need separate bits");
+
 // How long the task parks when there is nothing to do. It is a fallback, not a
 // poll: an arriving frame wakes it through the ISR and queued work wakes it
 // through wake(), so this bound is only what covers the things nobody signals
 // — the beacon clock, the airtime figures, and the watchdog feed at the top of
-// the pass. Widened from 10 ms in round 3: at 10 ms the task woke a hundred
-// times a second on an idle channel to find nothing, which is the cost this
-// removes. Do not shorten it back "to reduce latency" — the two things that
-// have latency are woken, not polled.
+// the pass. Widened from 10 ms: at 10 ms the task woke a hundred times a
+// second on an idle channel to find nothing, which is the cost this removes.
+// Do not shorten it back "to reduce latency" — the two things that have
+// latency are woken, not polled.
 static const uint32_t kIdleWaitMs = 100;
 
 // The pass has to feed the watchdog more often than it fires, and the park is
@@ -89,20 +95,40 @@ static_assert(kIdleWaitMs < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
 // ---------------------------------------------------------------------------
 void IRAM_ATTR LoRaRadio::onRadioIrq() {
   BaseType_t higherPrioWoken = pdFALSE;
-  if (s_taskHandle) xTaskNotifyFromISR(s_taskHandle, kWakeIrq, eSetBits, &higherPrioWoken);
+  // Read once. The handle is volatile because it changes under this function —
+  // irqSelfTest() borrows it for the setup task — and two reads of it could be
+  // two different values, the second of them null.
+  TaskHandle_t h = s_taskHandle;
+  if (h) xTaskNotifyFromISR(h, kWakeIrq, eSetBits, &higherPrioWoken);
   portYIELD_FROM_ISR(higherPrioWoken);
 }
 
 // Wait for the chip's IRQ line, and say whether that is what ended the wait.
 //
-// A wake for queued work is not what any caller of this is waiting for, so it
-// is left in the notification value for the park in taskLoop() to collect — a
-// packet queued while this task was busy is still serviced the moment it comes
-// back round. Only the interrupt bit is consumed here.
+// The loop is the point. xTaskNotifyWait() unblocks on the notification's
+// pending *state*, not on the bits in its value, so a producer's kWakeWork
+// arriving here ends the wait in no time at all — and every caller of this is
+// counting time: csmaWait() credits a contention slot per call, mediumFree()
+// spends the CAD deadline in slices, and the retry pause between probes is a
+// deliberate airtime interval. Returning early would hand all three a wait
+// that never happened. So a wake that is not ours resumes on what is left of
+// the deadline, and only the clock or the interrupt bit ends this.
+//
+// Nothing is lost by consuming that wake. The producer published its work
+// before it called wake(), and the park in taskLoop() looks at the TX ring and
+// the two request flags itself before it decides to block — so the work is
+// found on the way round, whether or not a notification survived to be
+// collected. (It does not: the wait above takes the pending state with it and
+// leaves only the value bit, which nothing blocks on.)
 bool LoRaRadio::waitIrq(uint32_t ms) {
-  uint32_t bits = 0;
-  if (xTaskNotifyWait(0, kWakeIrq, &bits, pdMS_TO_TICKS(ms)) != pdPASS) return false;
-  return (bits & kWakeIrq) != 0;
+  const uint32_t deadline = millis() + ms;
+  for (;;) {
+    const int32_t left = (int32_t)(deadline - millis());
+    if (left <= 0) return false;
+    uint32_t bits = 0;
+    if (xTaskNotifyWait(0, kWakeIrq, &bits, pdMS_TO_TICKS((uint32_t)left)) != pdPASS) return false;
+    if (bits & kWakeIrq) return true;    // anything else is not what we waited for
+  }
 }
 
 // Drop an interrupt notification left over from an operation that has finished,
@@ -121,15 +147,21 @@ void LoRaRadio::flushIrq() {
 // the caller's half of the contract — publish the work first, then call this —
 // because the two halves interlock:
 //
-//   * the task sets _parked before it looks at the TX ring, and only parks if
-//     the ring is empty. So a producer that finds _parked set is talking to a
-//     task that is either in the wait or about to enter it, and the wake is
-//     seen either way: a notification that arrives first is already pending
-//     when the wait starts and returns from it immediately.
+//   * the task publishes _parked before it looks at any of the three things a
+//     producer can hand it — the TX ring, _sleepRequest, _reconfigure — and
+//     parks for the full interval only when all three are empty. So a producer
+//     that finds _parked set is talking to a task that is either in the wait or
+//     about to enter it, and the wake is seen either way: a notification that
+//     arrives first is already pending when the wait starts and returns from it
+//     immediately.
 //   * a producer that finds it clear is talking to a task that has not yet
-//     reached that point in its pass, and every path to it passes the sleep
-//     and reconfigure checks and the ring. It will find the work on this pass
-//     without being told.
+//     published it, and so has not yet read any of the three. It will find the
+//     work on the way into the park, without being told.
+//
+// Both halves of that need the two sides to read each other in opposite orders
+// — publish, then check — which is why _parked is written before those reads
+// and not after, and why it is an atomic rather than a plain flag (LoRaRadio.h
+// says what that buys).
 //
 // Not sent while the task is busy, and that is the point rather than an
 // economy: the waits inside csmaWait() count out a contention window in slots,
@@ -818,25 +850,32 @@ void LoRaRadio::taskLoop() {
     //     is found — it is the clock for the things nobody signals, the beacon
     //     schedule and the airtime figures below and the watchdog feed above.
     //
-    //     _parked is set before the ring is looked at and cleared after the
-    //     wait, which is the task's half of wake()'s interlock: a producer that
-    //     sees it set gets a wake through, and one that sees it clear is
-    //     talking to a task that has not reached the ring yet. So an item that
-    //     arrives in the gap is either found by the ring check here or woken
-    //     for, never left to wait out the timeout.
+    //     _parked is published before any of that is looked at and cleared
+    //     after the wait, which is the task's half of wake()'s interlock: a
+    //     producer that sees it set gets a wake through, and one that sees it
+    //     clear is talking to a task that has not read its flag or its ring
+    //     yet. That has to cover all three producers, not just the ring — a
+    //     sleep or a reconfigure read at the top of the pass instead would have
+    //     no such pairing, and a restart asked for a microsecond later would
+    //     wait out the whole park, out of a budget of 250 ms.
     //
-    //     The ring is only asked about when this pass could act on the answer.
-    //     While the transmit budget is spent the packets stay in it by design,
-    //     and a park that skipped itself for a ring nothing is going to drain
+    //     How long the wait may be is RadioPark::waitMs()'s decision, tested on
+    //     the host. The ring is only asked about when this pass could act on
+    //     the answer: while the transmit budget is spent the packets stay in it
+    //     by design, and the rule keeps the full park there for the same reason
+    //     — a park that skipped itself for a ring nothing is going to drain
     //     would spin this task at priority 5 for the rest of the hour.
     _parked = true;
+    const bool dutyLocked = g_stats.dutyLocked;
     UBaseType_t queued = 0;
-    if (!g_stats.dutyLocked)
+    if (!dutyLocked)
       vRingbufferGetInfo(_txRing, nullptr, nullptr, nullptr, nullptr, &queued);
+    const bool flagsPending = _sleepRequest || _reconfigure;
+    const uint32_t parkMs = RadioPark::waitMs(dutyLocked, (size_t)queued, flagsPending,
+                                              kIdleWaitMs);
     uint32_t bits = 0;
     const bool notified = xTaskNotifyWait(0, kWakeIrq | kWakeWork, &bits,
-                                          queued ? (TickType_t)0
-                                                 : pdMS_TO_TICKS(kIdleWaitMs)) == pdPASS;
+                                          pdMS_TO_TICKS(parkMs)) == pdPASS;
     _parked = false;
     if (notified && (bits & kWakeIrq)) handleRadioIrq();
 
