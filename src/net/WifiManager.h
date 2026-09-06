@@ -99,6 +99,11 @@ public:
 
 private:
   void startAccessPoint();
+  // The radio shape the settings ask for — the AP and STA switches, and
+  // whether a station is even configured, combined exactly once.
+  // startAccessPoint() brings the node up in this shape and tick()'s
+  // join-failure path falls back to it, so the rule must not exist twice.
+  wifi_mode_t settingsWifiMode(bool& wantAp, bool& wantSta) const;
   void setupRoutes();
   bool authed(AsyncWebServerRequest* request);
 
@@ -144,6 +149,8 @@ private:
   // The mode staScanStart() found before promoting to WIFI_AP_STA, restored
   // by staScanDone() — set only while a promotion is actually in effect, so
   // a rescan mid-visit doesn't overwrite it with the promoted mode itself.
+  // staJoin() clears it: a join owns the mode from then on, and its verdict
+  // in tick() — not a scan's restore — decides the radio's final shape.
   bool            _scanModeSaved = false;
   wifi_mode_t     _preScanMode = WIFI_MODE_NULL;
 };

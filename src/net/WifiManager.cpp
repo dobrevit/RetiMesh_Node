@@ -468,6 +468,16 @@ void WifiManager::resolveNames() {
   deriveHostname();
 }
 
+// The radio's mode follows the two switches rather than the one. A station
+// without an access point is now a shape this can be in — it is the shape a
+// carried node wants, since the access point must beacon and cannot sleep —
+// and asking for WIFI_AP_STA there would put the beacon back on the air.
+wifi_mode_t WifiManager::settingsWifiMode(bool& wantAp, bool& wantSta) const {
+  wantAp  = settings.links().wifiApEnabled;
+  wantSta = settings.links().wifiStaEnabled && stationConfigured();
+  return wantAp ? (wantSta ? WIFI_AP_STA : WIFI_AP) : WIFI_STA;
+}
+
 void WifiManager::startAccessPoint() {
   const WifiSettings& w = settings.wifi();
   resolveNames();
@@ -487,15 +497,11 @@ void WifiManager::startAccessPoint() {
   bool secured = w.security != ApSecurity::Open && strlen(w.password) >= 8;
   const char* pass = secured ? w.password : nullptr;
 
-  // The radio's mode follows the two switches rather than the one. A station
-  // without an access point is now a shape this can be in — it is the shape a
-  // carried node wants, since the access point must beacon and cannot sleep —
-  // and asking for WIFI_AP_STA there would put the beacon back on the air.
-  const bool wantAp  = settings.links().wifiApEnabled;
-  const bool wantSta = settings.links().wifiStaEnabled && stationConfigured();
+  bool wantAp, wantSta;
+  const wifi_mode_t mode = settingsWifiMode(wantAp, wantSta);
 
   WiFi.persistent(false);
-  WiFi.mode(wantAp ? (wantSta ? WIFI_AP_STA : WIFI_AP) : WIFI_STA);
+  WiFi.mode(mode);
   // IPv6 link-local on both links, asked for before they start: core 3
   // creates the address when the interface comes up and only then, so a
   // request made afterwards — which is when AutoInterface used to make it —
@@ -569,6 +575,16 @@ void WifiManager::tick() {
       if (w.staSsid[0]) {
         WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
         _staRetryAt = millis() + 30000;
+      } else {
+        // Nothing stored to fall back to, so the join's WiFi.begin() is the
+        // only thing keeping the station interface up — and a disconnect
+        // alone leaves it up. Put the radio back in the shape the settings
+        // ask for (the same rule startAccessPoint() brings the node up
+        // with), or an AP-only node keeps AP+STA for the rest of the boot,
+        // which is exactly the promotion D2 was about.
+        bool wantAp, wantSta;
+        const wifi_mode_t want = settingsWifiMode(wantAp, wantSta);
+        if (WiFi.getMode() != want) WiFi.mode(want);
       }
       _joining = false;
       _joinVerdict = 2;
@@ -627,7 +643,12 @@ bool WifiManager::staScanResult(int i, StaScanEntry& out) {
 void WifiManager::staScanDone() {
   WiFi.scanDelete();
   if (_scanModeSaved) {
-    if (WiFi.getMode() != _preScanMode) WiFi.mode(_preScanMode);
+    // Not while a join is in flight: restoring the pre-scan shape would stop
+    // the station interface the join has just brought up, and the attempt
+    // would die at its deadline blamed on the network. staJoin() clears the
+    // saved mode for the ordinary order of events; this guards a scan whose
+    // results arrive after a join has already started.
+    if (!_joining && WiFi.getMode() != _preScanMode) WiFi.mode(_preScanMode);
     _scanModeSaved = false;
   }
 }
@@ -640,6 +661,12 @@ bool WifiManager::staJoin(const char* ssid, const char* password) {
   if (password && strlen(password) > 63) return false;
   strlcpy(_joinSsid, ssid, sizeof(_joinSsid));
   strlcpy(_joinPass, password ? password : "", sizeof(_joinPass));
+  // The join owns the radio's mode from here: the scan promotion must not be
+  // rolled back under a live attempt (a hidden-network join can start while a
+  // scan is still out). The verdict in tick() settles the final shape —
+  // success keeps the station, and a failure with nothing stored re-asserts
+  // the settings-derived mode.
+  _scanModeSaved = false;
   _joinDeadline = millis() + 20000;      // WPA against a present AP settles well inside this
   _joining = true;
   WiFi.disconnect();                     // whatever the station was doing before

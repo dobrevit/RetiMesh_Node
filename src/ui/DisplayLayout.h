@@ -187,4 +187,13 @@ inline uint8_t rowY(uint8_t row) {
   return (uint8_t)(l.rowY0 + r * l.rowPitch);
 }
 
+// The brightness setting (a percentage, floored by the settings funnel) to
+// the 8-bit level the hardware takes: the SSD1306's contrast register and a
+// backlight PWM channel's duty are both 0..255. Clamp and scale lived once
+// per panel before they were worked out here; the T-Deck's pulse-counted
+// dimmer is the exception — sixteen steps, its own mapping in TftPanel.cpp.
+constexpr uint8_t brightnessLevel(uint8_t pct) {
+  return (uint8_t)((uint32_t)(pct > 100 ? 100 : pct) * 255u / 100u);
+}
+
 } // namespace DisplayLayout

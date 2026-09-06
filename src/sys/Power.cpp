@@ -26,14 +26,19 @@
 #include <esp32-hal-cpu.h>
 #include "Settings.h"
 #include "Bq25896.h"
+#include "SampleGate.h"
+#include "WifiManager.h"
 
 namespace {
 Power::Profile sProfile = Power::Profile::Performance;
 float    sVolts = 0;
-uint32_t sLastSample = 0;
+// One cadence for whichever battery reader this board has (SampleGate.h):
+// the first ask samples, every later one within BATTERY_SAMPLE_MS answers
+// from the cache.
+SampleGate sSampleGate(BATTERY_SAMPLE_MS);
 // When a conversion last actually succeeded, as opposed to when one was last
-// attempted. The difference is the whole point: sLastSample says the sampler is
-// running, and this says it is learning anything by doing so.
+// attempted. The difference is the whole point: the gate above says the
+// sampler is running, and this says it is learning anything by doing so.
 uint32_t sLastGoodMs = 0;
 bool     sStaleWarned = false;
 
@@ -127,7 +132,6 @@ void sample() {
             PIN_BATTERY_ADC);
     }
   }
-  sLastSample = millis();
   if (sSampleLock) xSemaphoreGive(sSampleLock);
 }
 #endif
@@ -151,12 +155,31 @@ bool profileFromName(const char* n, Profile& out) {
 Profile profile() { return sProfile; }
 
 void applyWifiSleep() {
-  WiFi.setSleep(sProfile != Profile::Performance);
+  const wifi_ps_type_t want =
+      sProfile == Profile::Performance ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM;
+  // WiFi.setSleep() only reaches esp_wifi_set_ps() while the STA interface is
+  // started — otherwise it just caches the request, and only STA_START ever
+  // applies the cache (WiFiGeneric.cpp). An AP-only node, the default shape,
+  // never starts STA, so the cache is where the profile's choice would end.
+  // The driver is therefore told directly as well; the Arduino call still
+  // runs first, so the core's cache — and its own re-apply on a later
+  // STA_START — agrees with what was set here.
+  WiFi.setSleep(want);
+  // Before the driver exists this fails, and that is fine: the
+  // STA_START/AP_START hook (WifiManager::begin) runs this again the moment
+  // an interface comes up.
+  (void)esp_wifi_set_ps(want);
 }
 
 const char* wifiPsName() {
+  // esp_wifi_get_ps() answers whether or not the driver is up — the IDF
+  // header documents it returning only ESP_OK — so a node with Wi-Fi off
+  // would otherwise report the driver's default (min_modem) as if a radio it
+  // is not running were saving power. Whether Wi-Fi runs at all is
+  // WifiManager's rule; ask it rather than re-deriving it here.
+  if (!wifiManager.wifiEnabled()) return "n/a";
   wifi_ps_type_t ps;
-  if (esp_wifi_get_ps(&ps) != ESP_OK) return "n/a";  // driver not started (Wi-Fi off)
+  if (esp_wifi_get_ps(&ps) != ESP_OK) return "n/a";
   switch (ps) {
     case WIFI_PS_NONE:      return "none";
     case WIFI_PS_MIN_MODEM: return "min_modem";
@@ -192,6 +215,9 @@ void begin() {
   adcSetup();
 #endif
   sample();
+  // Primed, not left untouched: the reading above is fresh, so the gate holds
+  // its full interval from here instead of sampling again on the first ask.
+  sSampleGate.prime(millis());
 #endif
   apply((Profile)settings.transport().powerProfile);
 }
@@ -242,9 +268,11 @@ Battery battery() {
   // it is charging. Gated the same as the ADC branch below: it sits on I2C,
   // and the mono OLED path paints twice a second — four live transactions
   // per paint, for a number that only changes over minutes, before this.
+  // The gate's first ask samples (SampleGate.h): nothing primes this branch,
+  // and answering from the zero-initialised cache for the first ten seconds
+  // made every PMU board report "no battery" everywhere right after boot.
   static Battery sCached{};
-  if (millis() - sLastSample > BATTERY_SAMPLE_MS) {
-    sLastSample = millis();
+  if (sSampleGate.due(millis())) {
     Pmu::Battery p = Pmu::battery();
     sCached.volts     = p.volts;
     sCached.present   = p.present;
@@ -255,7 +283,7 @@ Battery battery() {
   }
   return sCached;
 #elif HAS_BATTERY_ADC
-  if (millis() - sLastSample > BATTERY_SAMPLE_MS) sample();
+  if (sSampleGate.due(millis())) sample();
   Battery b;
   b.volts   = sVolts;
   b.present = sVolts >= BATTERY_MIN_V && sVolts <= BATTERY_MAX_V;

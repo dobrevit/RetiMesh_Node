@@ -64,7 +64,7 @@ past the checks on the way in.
   "firmware": "RetiMesh Node", "version": "v0.0.3", "board": "LilyGO T3-S3",
   "ssid": "retimesh-8249CC", "hostname": "retimesh-8249cc", "security": "open", "display": true,
   "station": { "configured": true, "ssid": "home", "connected": true, "ip": "192.168.1.42", "rssi": -61 },
-  "power": { "profile": "performance", "cpu_mhz": 240, "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
+  "power": { "profile": "performance", "cpu_mhz": 240, "wifi_ps": "none", "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
   "identity": "69dd5082…", "destination": "8836929b…",
   "uptime_s": 1234, "heap_free": 180000, "heap_min_free": 178000, "psram_free": 2000000,
   "diag": { "boot": { "count": 12, "reason": 3, "reason_name": "panic or unhandled exception",
@@ -231,9 +231,13 @@ it in the page header and in the browser tab. `GET /api/settings` carries it
 too, so the page that changes a node's settings can name the node it is about
 to change.
 
-`power` reports the profile, CPU clock and the cell:
-`{"profile":"performance","cpu_mhz":240,"battery_present":true,
+`power` reports the profile, CPU clock, Wi-Fi power save and the cell:
+`{"profile":"performance","cpu_mhz":240,"wifi_ps":"none","battery_present":true,
 "battery_charging":true,"battery_v":3.53,"battery_pct":10,"pmu":"AXP2101"}`.
+`wifi_ps` (`none`, `min_modem`, `max_modem`) is read back from the Wi-Fi
+driver rather than assumed from the profile — the proof a profile switch
+actually took. It reflects the profile once a Wi-Fi interface has started,
+and reads `n/a` when Wi-Fi is switched off.
 The board's make and model used to sit here too; it is `board` at the top of
 the document now, beside the firmware that runs on it. `battery_charging` and a trustworthy
 `battery_present` need a power-management chip; boards reading an ADC divider

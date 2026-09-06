@@ -171,7 +171,7 @@ because the console shares its port with the log.
 |---|---|
 | `HELP` | one `RM HELP cmd=… help="…"` line per command |
 | `VERSION` | firmware, version, board, IDF, asset stamp |
-| `STATUS` | uptime, boot count, reset reason, heap, radio, transport, whether a restart is pending — and when one is, its target, who asked (`restart_source`) and `restart_in_ms` |
+| `STATUS` | uptime, boot count, reset reason, heap, radio, transport, a `power profile=… cpu_mhz=… wifi_ps=…` line (`wifi_ps` read back from the Wi-Fi driver — `n/a` with Wi-Fi off), whether a restart is pending — and when one is, its target, who asked (`restart_source`) and `restart_in_ms` |
 | `USB_STATUS` | how the host is attached, the bootloader methods this board offers |
 | `NETWORK_STATUS` | one line per local link |
 | `LINKS` | per link: hardware / firmware / enabled, and the reason when it cannot run; for ppp0 the speed and the addresses it asks for (`baud=`, `asks=`, `peer=`) |

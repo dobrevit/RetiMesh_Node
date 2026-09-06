@@ -162,7 +162,10 @@ async function refreshStatus() {
         s.station && s.station.configured && !s.station.connected ? "offline" : ""),
       card("LoRa RX / TX", s.radio.rx_packets + " / " + s.radio.tx_packets),
       card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB"),
-      card("Power", (s.power ? s.power.profile + " · " + s.power.cpu_mhz + " MHz" : "") +
+      // wifi_ps is what the Wi-Fi driver is actually doing about modem sleep,
+      // read back rather than assumed — the visible proof a profile switch
+      // took ("n/a" with Wi-Fi off).
+      card("Power", (s.power ? s.power.profile + " · " + s.power.cpu_mhz + " MHz · wifi ps " + s.power.wifi_ps : "") +
         (s.power && s.power.battery_present
            ? " · battery " + s.power.battery_pct + "% (" + s.power.battery_v.toFixed(2) + " V)" +
              // null means the board has no charge-status line to read, which is
