@@ -21,7 +21,7 @@ per PlatformIO environment.
 
 The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 
-## Wi-Fi access point (saves and restarts)
+## Wi-Fi access point (most rows restart; the marked ones apply live)
 | Setting | Default | Notes |
 |---|---|---|
 | SSID | `retimesh-XXXXXX` (MAC-derived) | custom ≤ 32 chars |
