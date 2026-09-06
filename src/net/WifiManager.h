@@ -121,10 +121,12 @@ public:
   void applyStaListenInterval();
   // A Wi-Fi save just landed whose restart-applied fields — security among
   // them — the running AP must NOT follow until the reboot. tick() drops any
-  // pending AP config patch retry: applyApConfigPatch re-reads
-  // settings.wifi() on every attempt, so a retry armed before the save would
-  // patch the next boot's security onto the AP the operator was told keeps
-  // its shape. Raise-only, any task (SettingsFields::commitWifi calls it
+  // pending AP config patch retry. Belt and braces: applyApConfigPatch
+  // applies the snapshot startAccessPoint() froze when it armed the retry,
+  // never settings.wifi() (the _apPatch members below say why), so a retry
+  // left standing could not patch the new security on anyway — but it was
+  // armed for an AP whose bring-up predates the save, so dropping it loses
+  // nothing. Raise-only, any task (SettingsFields::commitWifi calls it
   // from the console and AsyncTCP tasks); tick() serves it on the loop task
   // like the flags below.
   void cancelApConfigPatch() { _apPatchCancelReq = true; }
@@ -154,8 +156,10 @@ private:
   void startAccessPoint();
   // tick()'s convergence body: computes the shape the settings and the idle
   // policy ask for, stages the grace before an AP teardown, applies the
-  // change on this task, and takes the dependent services (captive DNS,
-  // mDNS's first start, AutoInterface) up or down on the same transition.
+  // change on this task, and carries the dependent services with it —
+  // AutoInterface bracketing the netif changes, captive DNS and mDNS's
+  // first start reconciled to the AP's observed state at the end of every
+  // pass (the reconcile's comment says why observed, never intended).
   void syncRadioShape();
   // The idle policy asked with inputs read this instant — station count
   // included — and its verdict mirrored into _apSuppressed (raising the
@@ -164,8 +168,10 @@ private:
   // teardown comes due — the gate bounds how often the driver is polled,
   // never the final word, so the teardown's last word is a fresh one.
   void askApIdlePolicy();
-  void apServicesDown();          // the AP is leaving the air
-  void apServicesUp();            // the AP is back on it
+  // What the AP's observed state carries with it. Both idempotent — that is
+  // what lets syncRadioShape reconcile them unconditionally every pass.
+  void apServicesDown();          // the AP is off the air
+  void apServicesUp();            // the AP is on it
   // The mDNS responder, started once — from begin() on a Wi-Fi boot, or
   // from the first runtime Wi-Fi up on a node that booted with it off.
   void startMdns();

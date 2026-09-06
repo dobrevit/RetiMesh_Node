@@ -222,6 +222,14 @@ inline bool validateTransport(const TransportSettings& t, char* err, size_t errL
     snprintf(err, errLen, "announce cap must be 1-100 %%");
     return false;
   }
+  // The profile travels as a number only in an exported file — the POST path
+  // takes the name through Power::profileFromName, which can only produce
+  // 0-2 — so this bound exists for the import, which reads back the number
+  // the export wrote. The names are Power.h's Profile values, in order.
+  if (t.powerProfile > 2) {
+    snprintf(err, errLen, "power_profile must be 0-2 (performance|balanced|battery)");
+    return false;
+  }
   return validateGroupId(t.autoGroupId, err, errLen);
 }
 

@@ -185,10 +185,12 @@ Result commitWifi(WifiSettings& w, char* err, size_t n) {
   Power::applyWifiTxPower();                 // live, wherever the driver is up
   wifiManager.applyStaListenInterval();      // live; lands at the next association
   if (!SettingsRules::wifiChangeNeedsRestart(before, w)) return Result::Ok;
-  // Restart-applied fields changed, and an AP config patch retry armed before
-  // this save re-reads settings.wifi() on every attempt — left standing it
-  // would patch the next boot's security onto the running AP. Cancelled, so
-  // the AP keeps the shape the "restart" answer promises it keeps.
+  // Restart-applied fields changed. A pending AP config patch retry applies
+  // the inputs startAccessPoint() froze when it armed it, never this save
+  // (the _apPatch members in WifiManager.h) — the snapshot is what keeps the
+  // running AP on the shape the "restart" answer promises. The cancel is
+  // belt and braces over that snapshot: the retries were armed for an AP
+  // whose bring-up predates this save, so nothing is lost by dropping them.
   wifiManager.cancelApConfigPatch();
   return askRestart();
 }

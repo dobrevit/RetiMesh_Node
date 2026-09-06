@@ -989,7 +989,9 @@ void WifiManager::tick() {
 //     so the beacon read-modify-write, WPA3, and IPv6 reapply by
 //     construction; the Wi-Fi sleep and TX-power settings reapply from the
 //     AP_START/STA_START event hook begin() installs. Captive DNS and (on a
-//     node that booted with Wi-Fi off) mDNS follow on the same transition.
+//     node that booted with Wi-Fi off) mDNS follow the AP's OBSERVED state,
+//     reconciled once at the end of every pass (the body's last statement
+//     says why observed, never intended).
 //   - Dependent services ride the same pass as the driver change:
 //     AutoInterface::end() before the netifs go (its sockets hold the
 //     multicast group on them), begin() once a link is back. It keeps
@@ -1029,8 +1031,7 @@ void WifiManager::syncRadioShape() {
         settingsWifiMode(nowAp, nowSta);
         if (nowAp) return;                    // the arrival lifted the latch; the ask
       }                                       //   raised the sync, and the next pass
-      apServicesDown();                       //   converges on the AP it kept
-    }
+    }                                         //   converges on the AP it kept
     if (want == WIFI_MODE_NULL) {
       // Nothing left to run. AutoInterface goes first — end() exists so the
       // netifs are never cycled under its joined discovery group — and the
@@ -1067,8 +1068,7 @@ void WifiManager::syncRadioShape() {
       if ((have & WIFI_MODE_STA) && !(want & WIFI_MODE_STA))
         AutoInterface::linkDown("WIFI_STA_DEF");
       if (wantAp && !haveAp) {
-        startAccessPoint();
-        apServicesUp();
+        startAccessPoint();                   // services follow at the reconcile below
         log_i("access point \"%s\" (%s) back up at %s", _ssid, _securityName,
               WiFi.softAPIP().toString().c_str());
       } else {
@@ -1092,6 +1092,29 @@ void WifiManager::syncRadioShape() {
       log_i("AutoInterface: restarting — the task had stopped itself after losing its discovery socket");
     AutoInterface::begin();
   }
+  // The AP's services follow its OBSERVED state — the mode bit the radio
+  // actually runs — reconciled once here, at the end of every pass that runs
+  // to completion. They used to move on intent instead: down at the moment a
+  // teardown committed, up only inside the wantAp && !haveAp bring-up branch.
+  // The end()-retry leg above returns between those two, and when a station
+  // arrival or a wake then kept the AP, no later pass changed the mode — so
+  // the AP beaconed on with port 53 closed and nothing in the log until the
+  // next real AP cycle. Keyed on the observation, a kept AP gets its resolver
+  // back on the very next pass, whatever kept it. Both calls are idempotent
+  // (_dns.end() on a closed socket is nothing; up re-binds only behind
+  // !_dns.listening() and !_mdnsUp), so the steady state costs a mode read
+  // and a flag check. And no down-before-teardown ordering is lost by having
+  // no early down: unlike AutoInterface's discovery sockets, the resolver
+  // binds the ANY address and holds no membership on the AP netif
+  // (CaptiveDns::begin), so a netif cycling under it neither strands nor
+  // breaks anything — the resolver simply follows the radio down here, a few
+  // statements after the mode lands, and stays answering for the clients of
+  // an AP that is still on the air. The early returns above skip this, and
+  // may: each of them leaves mode and services both untouched, and each
+  // guarantees a follow-up pass (_modeSyncReq, or the ask's own raise), so
+  // services match apUp() at every pass exit.
+  if (apUp()) apServicesUp();
+  else        apServicesDown();
 }
 
 // The idle policy asked with inputs read this instant, its verdict mirrored
@@ -2926,8 +2949,12 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     storeHomeIgnored = t["sd_store"].is<bool>() && (bool)t["sd_store"] != ts.sdStore;
     if (!jsonNarrow(request, t["power_profile"], ts.powerProfile, "power_profile")) return;
     if (t["auto_group_id"].is<const char*>()) strlcpy(ts.autoGroupId, t["auto_group_id"], sizeof(ts.autoGroupId));
-    if (ts.loraMode < 1 || ts.loraMode > 5 || ts.wifiMode < 1 || ts.wifiMode > 5
-        || ts.autoMode < 1 || ts.autoMode > 5 || ts.announceCap < 1 || ts.announceCap > 100) { sendError(request, 400, "transport section invalid"); return; }
+    // The shared rule, not a local copy of its bounds: the inline check that
+    // sat here knew the modes and the cap and silently waved auto_group_id
+    // and power_profile through — the drift SettingsRules exists to prevent
+    // (the wifi section above tells the same story).
+    char tmsg[160];
+    if (!SettingsRules::validateTransport(ts, tmsg, sizeof(tmsg))) { sendError(request, 400, tmsg); return; }
     settings.saveTransport(ts);
   }
   {

@@ -156,8 +156,16 @@ void rebuildDiscovery() {
   sDisc = -1;
   if (d >= 0) close(d);
   for (Link& l : sLinks) { l.joined = false; l.ifindex = 0; l.local[0] = '\0'; l.leftEarly = false; }
+  // The rebind publishes into sDisc under the same hold. bindSocket writes
+  // the fd more than once on its way (the fresh socket, then closed-and--1
+  // if the bind fails), and linkDown on the loop task snapshots sDisc under
+  // its own hold — released here mid-rebuild, it could judge one of those
+  // transients open and leave against an fd this call is about to close.
+  // Safe to hold across: socket/setsockopt/bind/fcntl each take lwIP's core
+  // lock briefly, the same sLock -> lwIP order linkDown documents.
+  const bool bound = bindSocket(sDisc, kDiscPort, "discovery");
   held.release();
-  if (!bindSocket(sDisc, kDiscPort, "discovery")) {
+  if (!bound) {
     // No socket to select on. Ask the task to end through its own stop path
     // (endTask: peers disconnected, remaining sockets closed, watchdog
     // unsubscribed). Nothing brackets this stop the way WifiManager's own
@@ -712,7 +720,15 @@ void linkDown(const char* netifKey) {
 
 bool enabled() { return sEnabled; }
 
-bool stoppedUnexpectedly() { return sSelfStopped; }
+// Both terms, not the flag alone: between rebuildDiscovery raising the flag
+// and endTask clearing the aliveness — normally one select() pass, but for
+// ever if the task wedges on its way out — the flag alone had WifiManager's
+// tick raise a convergence on every pass, and each one could only log that
+// begin() cannot restart over a living task (its sTaskAlive guard). Requiring
+// the task actually gone makes the signal fire exactly when a restart can
+// act on it. sSelfStopped itself is NOT cleared while the task lives — that
+// would lose the restart when the task does finally go.
+bool stoppedUnexpectedly() { return sSelfStopped && !sTaskAlive; }
 
 size_t peerCount() {
   size_t k = 0;

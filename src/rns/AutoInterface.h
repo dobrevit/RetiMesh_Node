@@ -99,12 +99,13 @@ const char* localAddress();           // our link-local on the first joined link
 bool enabled();
 
 // The task ended itself while still wanted — rebuildDiscovery lost the
-// discovery socket and could not rebind (AutoInterface.cpp) — so no
-// WifiManager end() bracketed the stop. WifiManager's tick reads this to
-// raise the convergence whose need-based restart re-begins the task (its
-// restart no longer needs the flag — it starts whatever is wanted and not
-// running — but a self-stop happens with the radio's shape already settled,
-// so nothing else would ever run that convergence); cleared when begin()
+// discovery socket and could not rebind (AutoInterface.cpp) — AND is
+// actually gone (the definition says why both terms). No WifiManager end()
+// bracketed the stop, so WifiManager's tick reads this to raise the
+// convergence whose need-based restart re-begins the task (its restart no
+// longer needs the flag — it starts whatever is wanted and not running —
+// but a self-stop happens with the radio's shape already settled, so
+// nothing else would ever run that convergence); cleared when begin()
 // actually starts a task.
 bool stoppedUnexpectedly();
 
