@@ -190,7 +190,7 @@ rather than failing the whole import.
 | `PMU_VBUS_LIMIT_MA` | 500 | how much the node draws from USB |
 | `HAS_GPS`, `PIN_GPS_*`, `GPS_BAUD` | board | u-blox receiver |
 | `HAS_PA`, `HAS_RF_SWITCH`, `PIN_RF_RXEN`, `PIN_RF_TXEN` | 0 | external power amplifier and its RF switch |
-| `RADIO_SELFTEST_ON_BOOT` | 0 | transmit one frame at boot and time the interrupt — proves the DIO wiring rather than assuming it |
+| `RADIO_SELFTEST_ON_BOOT` | 0 | transmit one frame and time the interrupt — proves the DIO wiring rather than assuming it. Once per firmware image, not once per boot: the verdict is kept in NVS against the running binary, so a brown-out loop does not re-pay the airtime |
 | `DIAG_*` | see `Config.h` | boot counter namespace and diagnostics reporting |
 | `ASSET_STAMP` | build hash | set by `tools/asset_stamp.py`; compared at boot against `/assets.json` so a firmware-only update says so |
 | `DISPLAY_SLEEP_MS`, `DISPLAY_PAGE_TIMEOUT_MS` | 60000 / 30000 | |

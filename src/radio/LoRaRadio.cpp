@@ -23,6 +23,7 @@
 #include "LoRaRadio.h"
 #include "LoRaFem.h"
 #include "RadioSelfTestPolicy.h"
+#include <esp_app_desc.h>
 #include <esp_random.h>
 #include <Preferences.h>
 #include "Neighbors.h"
@@ -90,6 +91,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   }
   if (!probeLR1110(_active)) {
     log_e("No LR1110 found on IRQ(DIO9)=%d/BUSY=%d — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY);
+    LoRaFem::off();                              // begin() never fails with the front end up
     return false;
   }
 #elif RF_MODEM_SX1280
@@ -115,6 +117,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   // board header says which.
   if (!probeSX1280(_active)) {
     log_e("No SX1280 found on DIO1=%d/BUSY=%d — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY);
+    LoRaFem::off();                              // begin() never fails with the front end up
     return false;
   }
 #else
@@ -125,6 +128,15 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   if (!probeSX127x(s) && !probeSX1262(s)) {
     log_e("No LoRa transceiver found (tried SX127x on DIO0=%d and SX1262 on "
           "DIO1=%d/BUSY=%d) — check wiring", PIN_LORA_DIO0, PIN_LORA_DIO1, PIN_LORA_BUSY);
+    // begin() never returns false with the front end up. probeSX1262() powers
+    // it before asking the chip anything — the self-test transmits, and a probe
+    // through a dead front end proves nothing — and a probe that then fails
+    // leaves _online false, so the radio task deletes itself at the top of
+    // taskLoop() and nothing ever reaches enterSleep()'s LoRaFem::off(). The
+    // rail would stay up with the LNA in the path for as long as the node runs,
+    // on the one board where that amplifier is the larger idle draw. A no-op
+    // where there is no front end, and before begin() has run (LoRaFem.h).
+    LoRaFem::off();
     return false;
   }
 #endif
@@ -200,7 +212,7 @@ bool LoRaRadio::irqSelfTest() {
 }
 
 #if RADIO_SELFTEST_ON_BOOT
-// ...and once per firmware build rather than once per boot.
+// ...and once per firmware image rather than once per boot.
 //
 // The airtime is worth paying to answer a question, and worthless to answer it
 // again: the pin map the test proves belongs to the image, so an image that has
@@ -209,14 +221,21 @@ bool LoRaRadio::irqSelfTest() {
 // on every cycle out of the supply that could not hold the last boot up — and
 // no boot-reason check can help there, because a brown-out is not a clean boot
 // and the RTC domain that would carry the state does not survive the rail
-// dropping. So the verdict goes to NVS, keyed to the build (RadioSelfTestPolicy.h).
+// dropping. So the verdict goes to NVS, keyed to the image (RadioSelfTestPolicy.h).
 //
 // Its own namespace: this is not a setting, so a settings reset must not clear
 // it, and it is not restart history either. Flashing any different image is
 // what asks the question again — which is also exactly when the answer can
 // have changed.
 void LoRaRadio::bootSelfTest() {
-  const uint32_t build = RadioSelfTest::buildMark(FW_VERSION);
+  // What identifies the image is the image, not what it calls itself: the
+  // application descriptor carries the SHA-256 of the ELF it was built from,
+  // and esptool patches it into the binary at elf2image time, so it differs
+  // between two builds that share a version string. FW_VERSION does not —
+  // see RadioSelfTestPolicy.h for why that difference is the whole point.
+  const esp_app_desc_t* desc = esp_app_get_description();
+  const uint32_t image = RadioSelfTest::buildMark(desc->app_elf_sha256,
+                                                  sizeof(desc->app_elf_sha256));
 
   Preferences p;
   const bool store = p.begin(RADIO_NVS_NAMESPACE, false);
@@ -226,16 +245,16 @@ void LoRaRadio::bootSelfTest() {
                             ? p.getUInt(RADIO_SELFTEST_NVS_KEY, RadioSelfTest::NO_MARK)
                             : RadioSelfTest::NO_MARK;
 
-  if (RadioSelfTest::proven(stored, build)) {
+  if (RadioSelfTest::proven(stored, image)) {
     // The one line that says which path was taken. The run path says so
     // itself, in more detail, from irqSelfTest().
-    log_i("radio self-test: skipped — this firmware already proved "
+    log_i("radio self-test: skipped — this exact image already proved "
           "the IRQ line on GPIO %d", irqPin());
     if (store) p.end();
     return;
   }
 
-  const uint32_t mark = RadioSelfTest::markAfter(irqSelfTest(), build);
+  const uint32_t mark = RadioSelfTest::markAfter(irqSelfTest(), image);
   if (store) {
     if (mark != RadioSelfTest::NO_MARK)        p.putUInt(RADIO_SELFTEST_NVS_KEY, mark);
     else if (stored != RadioSelfTest::NO_MARK) p.remove(RADIO_SELFTEST_NVS_KEY);
@@ -548,7 +567,11 @@ void LoRaRadio::enterSleep() {
   // pulled while the transceiver is still driving its antenna pin is the one
   // ordering that could stress the part.
   LoRaFem::off();
+  // Under the lock like every other write to the pair: quiesce() polls asleep()
+  // from another task and this flag is what ends its wait.
+  portENTER_CRITICAL(&_mux);
   _asleep = true;
+  portEXIT_CRITICAL(&_mux);
 
   if (state == RADIOLIB_ERR_NONE) log_i("radio asleep for the restart");
   else log_w("radio would not sleep for the restart (code %d); restarting anyway", state);
@@ -622,9 +645,16 @@ void LoRaRadio::taskLoop() {
   // seconds, for ever.
   if (!_online) { Watchdog::unwatch(); vTaskDelete(nullptr); return; }
 
-  _radio->startReceive();
-  _lastTxMs  = millis();
-  _helloAtMs = millis() + BEACON_HELLO_DELAY_MS;
+  // Not before the sleep check below, and not unconditionally: radioTask() puts
+  // this function back on its feet after a Diag::guard() catch, so a throw on a
+  // node that had already gone to sleep for a restart would re-enter here and
+  // re-arm continuous receive — on the V4 with the LNA rail up behind it — for
+  // however long the ROM downloader is left sitting there.
+  if (!_asleep) {
+    _radio->startReceive();
+    _lastTxMs  = millis();
+    _helloAtMs = millis() + BEACON_HELLO_DELAY_MS;
+  }
 
   for (;;) {
     // Reported here rather than in radioTask's wrapper around this call: this
@@ -900,7 +930,10 @@ void LoRaRadio::sendBeacon(char type) {
   int n = snprintf(text, BEACON_MAX_LEN + 1, "RM1 %c %s %s", type, callsign(), FW_VERSION);
   if (n <= 0) return;
   if ((size_t)n > BEACON_MAX_LEN) n = BEACON_MAX_LEN;
-  transmitPacket(frame, RNS_BEACON_HDR_LEN + (size_t)n);
+  // An abandoned transmission counted nothing, so there is nothing to correct:
+  // the decrement below is undoing transmitPacket's own increment, and applied
+  // to a packet that never went out it would wrap the counter to 4 294 967 295.
+  if (!transmitPacket(frame, RNS_BEACON_HDR_LEN + (size_t)n)) return;
   g_stats.loraTxPackets--;               // transmitPacket counted it as data
   g_stats.beaconsTx++;
   log_i("beacon %c sent: \"%.*s\"", type, n, text);
@@ -930,10 +963,19 @@ void LoRaRadio::deliverPacket(size_t len) {
 // ---------------------------------------------------------------------------
 // TX path
 // ---------------------------------------------------------------------------
-void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
-  if (len == 0 || len > sizeof(_rxBuf)) return;
+// Returns whether the packet was actually put on the air. The one false is a
+// restart: Bootloader::quiesce() gives the radio 250 ms to sleep and then goes
+// regardless, and this call can hold the task far longer than that — csmaWait()
+// alone is bounded at CSMA_MAX_WAIT_MS, and two fragments are two 8 s waits on
+// top of it. A restart that arrives mid-transmit therefore used to end with the
+// node in the ROM downloader, where nothing runs and nothing will restart it,
+// with the transceiver still in continuous receive and the V4's LNA rail up
+// behind it — indefinitely. Dropping the packet is the right trade: the node is
+// going down either way, and the sender re-sends.
+bool LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
+  if (len == 0 || len > sizeof(_rxBuf)) return false;
 
-  csmaWait();
+  csmaWait();                            // returns early if a sleep is asked for
 
   // RNode framing: one random sequence nibble for all fragments of this
   // packet, FLAG_SPLIT set when the payload spans more than one frame.
@@ -942,6 +984,18 @@ void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
 
   size_t offset = 0;
   while (offset < len) {
+    // Between fragments, never inside one: a frame that stops mid-air is a
+    // frame every listener has to time out on, and the point of stopping here
+    // is to be quick. Nothing is left half-written — the ring item is returned
+    // by the caller either way, _txFrame is scratch, and the reassembly state
+    // this touches is the receiver's, not ours. The chip is left in standby by
+    // the last sendFrame(); enterSleep() puts it under on the next pass, which
+    // is where it was going.
+    if (_sleepRequest) {
+      log_w("restarting: abandoning a transmission with %u of %u bytes sent",
+            (unsigned)offset, (unsigned)len);
+      return false;
+    }
     size_t chunk = min((size_t)LORA_FRAG_PAYLOAD, len - offset);
     _txFrame[0] = header;
     memcpy(_txFrame + 1, data + offset, chunk);
@@ -952,6 +1006,7 @@ void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
   g_stats.loraTxPackets++;
   _lastTxMs = millis();
   _radio->startReceive();                // back to listening
+  return true;
 }
 
 bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
@@ -1017,6 +1072,11 @@ bool LoRaRadio::mediumFree() {
 // a packet defers to whoever is mid-exchange. The window is drawn from a band
 // selected by recent channel use, which spreads nodes out as the channel
 // fills instead of having them all pile in after the same fixed backoff.
+//
+// Every wait in here also watches for a restart. This function is bounded at
+// CSMA_MAX_WAIT_MS and the restart's own wait for the radio is 250 ms, so a
+// deferral that ran its full length would be twenty times the budget it is
+// being held against; the caller checks the same flag and drops the packet.
 void LoRaRadio::csmaWait() {
   const uint32_t slot = _airtime.slotMs();
   const uint32_t difs = _airtime.difsMs();
@@ -1028,7 +1088,7 @@ void LoRaRadio::csmaWait() {
   const uint32_t started = millis();
   uint32_t waited = 0;                   // contention time accumulated so far
 
-  while (millis() - started < CSMA_MAX_WAIT_MS) {
+  while (!_sleepRequest && millis() - started < CSMA_MAX_WAIT_MS) {
     // Deferring to a busy channel is progress too, and this loop can hold the
     // task for CSMA_MAX_WAIT_MS on its own before a byte is sent.
     Watchdog::feed();
@@ -1042,20 +1102,23 @@ void LoRaRadio::csmaWait() {
     // counting down. A frame arriving here means it was not really idle.
     const uint32_t difsStart = millis();
     bool disturbed = false;
-    while (millis() - difsStart < difs) {
+    while (!_sleepRequest && millis() - difsStart < difs) {
       if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(slot)) > 0) { handleRadioIrq(); disturbed = true; break; }
     }
     if (disturbed) { waited = 0; continue; }
 
     // Contention window, one slot at a time so an incoming frame can pause it.
-    while (waited < target) {
+    while (!_sleepRequest && waited < target) {
       if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(slot)) > 0) { handleRadioIrq(); disturbed = true; break; }
       waited += slot;
       if (millis() - started >= CSMA_MAX_WAIT_MS) break;
     }
     if (disturbed) { waited = 0; continue; }
-    return;                              // channel held quiet: transmit
+    return;                              // channel held quiet: transmit — or a
+                                         // restart cut the wait short, and
+                                         // transmitPacket() reads the same flag
   }
+  if (_sleepRequest) return;             // no "gave up" is owed for a restart
   // Deferred for the whole window without a clear run. Transmit anyway rather
   // than dropping the packet — the queue would only grow behind it.
   log_d("CSMA gave up deferring after %u ms", (unsigned)(millis() - started));

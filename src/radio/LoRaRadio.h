@@ -166,7 +166,7 @@ private:
   void taskLoop();
   void handleRadioIrq();                 // RxDone path: read + reassemble
   void deliverPacket(size_t len);        // completed RNS packet -> RX ring
-  void transmitPacket(const uint8_t* data, size_t len);
+  bool transmitPacket(const uint8_t* data, size_t len);  // false = abandoned
   void csmaWait();                       // DIFS + contention window before TX
   bool mediumFree();                     // one CAD probe
   void refreshAirtimeStats();            // publish channel use into g_stats
@@ -182,7 +182,7 @@ private:
   bool probeSX1280(const RadioSettings& s);
   bool probeLR1110(const RadioSettings& s);
   bool irqSelfTest();                    // proves the IRQ line, see the .cpp
-  void bootSelfTest();                   // ...once per firmware build
+  void bootSelfTest();                   // ...once per firmware image
   void enterSleep();                     // radio task context only
   uint32_t rxDoneFlag() const;           // this chip's RxDone bit, raw
   // Which pin the interrupt actually arrives on: DIO1 on an SX126x, SX128x or

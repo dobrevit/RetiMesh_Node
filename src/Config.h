@@ -505,11 +505,13 @@
 // A single timed transmission at boot, to prove the IRQ line is the one the
 // board actually uses. Off everywhere it is not needed: it costs airtime.
 //
-// Where it is on, it runs once per firmware build rather than once per boot:
-// the verdict is kept in NVS under RADIO_NVS_NAMESPACE, keyed to FW_VERSION,
-// so a node brown-out looping on a flat battery does not re-pay a transmission
-// its own image has already made. A new image proves itself again — the pin
-// map the test is about is the image's. See src/radio/RadioSelfTestPolicy.h.
+// Where it is on, it runs once per firmware image rather than once per boot:
+// the verdict is kept in NVS under RADIO_NVS_NAMESPACE, keyed to the running
+// binary itself (the ELF SHA-256 in its application descriptor, not the
+// version string it prints), so a node brown-out looping on a flat battery
+// does not re-pay a transmission its own image has already made. A new image
+// proves itself again — the pin map the test is about is the image's. See
+// src/radio/RadioSelfTestPolicy.h.
 //
 // Its own namespace, and the key belongs with it: this is not a setting (a
 // settings reset must not clear it) and it is not restart history either.

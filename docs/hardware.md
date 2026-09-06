@@ -478,15 +478,19 @@ accepts a channel whatever pin the interrupt is on, so this is the only thing
 that separates a working board from one that will never receive a packet:
 
 ```
-radio self-test: TxDone interrupt arrived in 7 ms — the IRQ line on GPIO 33 is live
+radio self-test: TxDone interrupt arrived in 7 ms — the IRQ line on GPIO 14 is live
 ```
 
-**It runs once per firmware build, not once per boot.** A pass is written to
-NVS against the running version, and later boots of that same image say so and
-skip the transmission:
+(GPIO 14 is the SX1262 interrupt on the three Heltec S3 boards; the Wireless
+Stick and Bridge print 26, the SX1280 T3-S3 variants 9 and the ThinkNode M9 42.)
+
+**It runs once per firmware image, not once per boot.** A pass is written to
+NVS against the running binary — the SHA-256 of the ELF it was built from, out
+of the application descriptor, rather than the version string it prints — and
+later boots of that same image say so and skip the transmission:
 
 ```
-radio self-test: skipped — this firmware already proved the IRQ line on GPIO 33
+radio self-test: skipped — this exact image already proved the IRQ line on GPIO 14
 ```
 
 That is a power decision rather than a tidiness one. A solar node whose battery
@@ -494,12 +498,18 @@ is flat at dawn brown-out loops, and the self-test spends a transmission on
 every cycle out of the supply that could not hold the last boot up. What the
 test proves is the board header's pin map, which belongs to the image — so
 flashing any different firmware asks the question again, which is also exactly
-when the answer can have changed. A **failure is never recorded**: a board with
-a wrong interrupt pin keeps saying so, every boot, until it is fixed.
+when the answer can have changed. That is why the marker is keyed to the binary
+and not to `FW_VERSION`: a local build takes its version from `git describe
+--always --dirty`, and every build made while the tree stays dirty carries the
+same string. Keyed to the string, the reflash after a pin-map edit would find
+the previous image's marker and announce a line it had never driven — during
+bring-up, which is the one situation this test exists for. A **failure is never
+recorded**: a board with a wrong interrupt pin keeps saying so, every boot,
+until it is fixed.
 
 The marker lives in its own NVS namespace, so neither a settings reset nor
 clearing the diagnostics history touches it. To force one more run without
-changing the wiring, flash a build with a different version string.
+changing the wiring, flash any rebuilt image.
 
 ## Host connectivity and flashing
 What each board puts on its USB connector, which bootloader-entry methods it
