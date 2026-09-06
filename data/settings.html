@@ -114,11 +114,17 @@
       <div><label>Channel</label><input name="channel" type="number" min="1" max="13" required></div>
       <div><label>Max clients</label><input name="max_stations" type="number" min="1" max="10" required></div>
       <div><label>Hidden SSID</label><input name="hidden" type="checkbox"></div>
+      <div><label>TX power (dBm, 2&ndash;20)</label><input name="tx_power" type="number" min="2" max="20" required></div>
       <div><label>Also join a Wi-Fi network (station)</label><input name="sta_ssid" maxlength="32" placeholder="home network SSID (blank = off)"></div>
       <div><label>Station password (blank = keep)</label><input name="sta_password" type="password" maxlength="63" autocomplete="new-password"></div>
+      <div><label>Station listen interval (beacons, 1&ndash;16)</label><input name="sta_listen_interval" type="number" min="1" max="16" required></div>
     </div>
     <div class="note">Station mode keeps the access point up and additionally joins your LAN: the node becomes a LoRa uplink for every
-      Reticulum client there (zero-config via AutoInterface, or TCP to its LAN address), and its own AP moves to the LAN's channel.</div>
+      Reticulum client there (zero-config via AutoInterface, or TCP to its LAN address), and its own AP moves to the LAN's channel.<br>
+      <b>TX power</b> caps the one Wi-Fi radio both links share &mdash; 14 dBm is plenty for a phone at portal range, full power for bridging a
+      LAN at range. It applies live, no restart; the driver rounds down to its own steps, and the status page shows what actually stuck.
+      The <b>listen interval</b> is how many of the LAN's beacons a dozing station may sleep through between wakes &mdash; consulted only in the
+      <i>battery</i> power profile (max modem sleep); higher saves more and answers slower. Applies live, from the next association.</div>
     <button type="submit">Save &amp; restart access point</button>
     <div class="msg" id="wifiMsg"></div>
     <div class="note" id="wifiNote"></div>
@@ -144,7 +150,7 @@
         <input name="auto_enabled" type="checkbox"></div>
       <div><label>AutoInterface group id (blank = reticulum)</label><input name="auto_group_id" maxlength="32" placeholder="reticulum"></div>
       <div><label>Power profile</label>
-        <select name="power_profile"><option value="performance">performance (240 MHz)</option><option value="balanced">balanced (160 MHz, Wi-Fi sleep)</option><option value="battery">battery (80 MHz, Wi-Fi sleep, display 20 s)</option></select></div>
+        <select name="power_profile"><option value="performance">performance (240 MHz)</option><option value="balanced">balanced (160 MHz, Wi-Fi min sleep)</option><option value="battery">battery (80 MHz, Wi-Fi max sleep, display 20 s)</option></select></div>
       <div><label>Announce cap (% of bandwidth)</label><input name="announce_cap" type="number" min="1" max="100" required></div>
       <div><label>Announce rate target (s, 0 = off)</label><input name="announce_rate_target" type="number" min="0" max="3600" required></div>
       <div><label>Rate grace (violations)</label><input name="announce_rate_grace" type="number" min="0" max="100" required></div>
@@ -527,13 +533,18 @@ $("wifiForm").addEventListener("submit", async ev => {
   const f = ev.target.elements;
   const body = { ssid: f.ssid.value, security: f.security.value, password: f.password.value,
     channel: +f.channel.value, max_stations: +f.max_stations.value, hidden: f.hidden.checked,
+    tx_power: +f.tx_power.value, sta_listen_interval: +f.sta_listen_interval.value,
     sta_ssid: f.sta_ssid.value, sta_password: f.sta_password.value };
   if (body.security !== "open" && !body.password && !cfg.wifi.has_password) {
     setMsg("wifiMsg", "Enter a password for a secured network.", "bad"); return;
   }
   try {
     const res = await api("/api/settings/wifi", body);
-    setMsg("wifiMsg", "Saved. Restarting — join \"" + res.ssid + "\" (" + res.security + ") and open http://10.42.0.1/", "warn");
+    // restart:false means only the live fields changed — the TX ceiling and
+    // the station listen interval apply without touching the access point.
+    setMsg("wifiMsg", res.restart
+      ? "Saved. Restarting — join \"" + res.ssid + "\" (" + res.security + ") and open http://10.42.0.1/"
+      : "Saved and applied.", res.restart ? "warn" : "ok");
   } catch (e) { setMsg("wifiMsg", e.message, "bad"); }
 });
 

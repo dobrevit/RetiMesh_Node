@@ -30,7 +30,16 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 | Channel | 6 | 1–13 |
 | Max clients | 8 | 1–10 |
 | Hidden SSID | no | |
+| TX power | 14 dBm | 2–20, one ceiling for the AP and the station together (the chip has one radio). **Applies live, no restart.** The driver rounds down to its own quarter-dBm steps, so the status surfaces read the ceiling back (`wifi_tx_dbm`) rather than echoing the setting. 14 dBm covers a phone at portal range; turn it up for a node genuinely bridging a LAN at range |
 | Station network / password | off | also join an existing LAN (AP+STA); the AP follows the LAN's channel; AutoInterface and mDNS work on both |
+| Station listen interval | 3 | 1–16 — how many of the LAN's beacon intervals a dozing station may sleep through between wakes. Consulted by the driver only under the battery profile's max modem sleep; higher saves more and answers slower on the maintenance path. **Applies live**, from the next association |
+
+The TX power and station listen interval rows apply live; every other row
+restarts the node, because the access point cannot be rebuilt under the
+request that changed it. The access point beacons at 400 TU (~410 ms)
+rather than the stack's default 100 — a quarter of the beacon airtime and
+current, at the price of phones taking a moment longer to list the network;
+it is a build-time default (`WIFI_AP_BEACON_TU`), not a setting.
 
 ## Reticulum transport (saves and restarts)
 | Setting | Default | Notes |
@@ -39,7 +48,7 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 | LoRa interface mode | `full` | `full`, `gateway`, `access_point`, `roaming`, `boundary` |
 | Client interface mode | `full` | one interface per client on :4242 (Sideband, `rnsd`) |
 | Peer interface mode | `full` | one interface per zero-config peer — the other nodes and hosts on the Wi-Fi links |
-| Power profile | performance | `performance` 240 MHz · `balanced` 160 MHz + Wi-Fi modem sleep · `battery` 80 MHz + Wi-Fi sleep + 20 s display timeout; applied live |
+| Power profile | performance | `performance` 240 MHz · `balanced` 160 MHz + Wi-Fi min modem sleep (wake every DTIM) · `battery` 80 MHz + Wi-Fi max modem sleep (the station wakes every *listen interval* beacons — see the Wi-Fi table) + 20 s display timeout; applied live |
 | Zero-config peering (AutoInterface) | enabled | RNS AutoInterface on the access point *and* the station link; group id blank = `reticulum` (peers must share it) |
 | Announce cap | 2 % | share of each interface's bandwidth announces may use (rnsd `announce_cap`) |
 | Announce rate target / grace / penalty | 0 / 0 / 0 | throttle destinations announcing too often (rnsd `announce_rate_*`); 0 = off |

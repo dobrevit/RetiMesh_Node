@@ -164,8 +164,11 @@ async function refreshStatus() {
       card("Free heap", (s.heap_free/1024).toFixed(0) + " KiB"),
       // wifi_ps is what the Wi-Fi driver is actually doing about modem sleep,
       // read back rather than assumed — the visible proof a profile switch
-      // took ("n/a" with Wi-Fi off).
-      card("Power", (s.power ? s.power.profile + " · " + s.power.cpu_mhz + " MHz · wifi ps " + s.power.wifi_ps : "") +
+      // took ("n/a" with Wi-Fi off). wifi_tx_dbm is the same kind of proof for
+      // the TX ceiling: the driver quantizes down to its own steps, so this
+      // can sit below the wifi.tx_power setting (null with Wi-Fi off).
+      card("Power", (s.power ? s.power.profile + " · " + s.power.cpu_mhz + " MHz · wifi ps " + s.power.wifi_ps +
+        (s.power.wifi_tx_dbm != null ? " · tx " + s.power.wifi_tx_dbm + " dBm" : "") : "") +
         (s.power && s.power.battery_present
            ? " · battery " + s.power.battery_pct + "% (" + s.power.battery_v.toFixed(2) + " V)" +
              // null means the board has no charge-status line to read, which is

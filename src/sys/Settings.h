@@ -67,9 +67,18 @@ struct WifiSettings {
   uint8_t    channel      = AP_CHANNEL;
   uint8_t    maxStations  = AP_MAX_STATIONS;
   bool       hidden       = false;
+  // One TX ceiling for the whole radio — the AP and the station share it.
+  // dBm; the driver quantizes down to its own quarter-dBm steps, so the
+  // honest figure is the read-back (Power::wifiTxPowerDbm), not this.
+  // Applies live, unlike the fields the AP is built from.
+  int8_t     txPowerDbm   = WIFI_TX_POWER_DBM;
   // Station mode: also join an existing Wi-Fi network (AP stays up).
   char       staSsid[33]     = "";      // "" = station mode off
   char       staPassword[65] = "";
+  // How many AP beacon intervals the station may doze between wakes. Units
+  // are the AP's beacons, not milliseconds, and the driver consults it only
+  // under the battery profile's max modem sleep (Power::applyWifiSleep).
+  uint8_t    staListenInterval = WIFI_STA_LISTEN_INTERVAL;
 };
 
 // Interface modes use rnsd's vocabulary: 1 full, 2 gateway, 3 access_point,

@@ -219,6 +219,31 @@
 #ifndef AP_MAX_STATIONS
   #define AP_MAX_STATIONS   8
 #endif
+// SoftAP beacon interval, in 802.11 time units (1 TU = 1.024 ms, so 400 TU is
+// about 410 ms). The Arduino core hardcodes 100 TU inside WiFi.softAP() — ten
+// beacons a second at the lowest basic rate, around the clock, usually for
+// nobody — and rebuilds that config on every call, which is why the value is
+// applied by a read-modify-write after softAP() (WifiManager::startAccessPoint)
+// and lives nowhere else. 4x less beacon airtime and current; the cost is a
+// phone taking a moment longer to see the network in a scan list. A build
+// default rather than a runtime setting, deliberately.
+#ifndef WIFI_AP_BEACON_TU
+  #define WIFI_AP_BEACON_TU 400
+#endif
+// Default Wi-Fi TX power ceiling, dBm — wifi.tx_power's default, one global
+// ceiling for the AP and the station together (the chip has one radio). 14 is
+// plenty for the AP-as-maintenance-portal case of a phone at arm's length; a
+// node genuinely bridging a LAN at range turns it up (setting bounds 2-20,
+// SettingsRules).
+#ifndef WIFI_TX_POWER_DBM
+  #define WIFI_TX_POWER_DBM 14
+#endif
+// How many AP beacon intervals a dozing station sleeps between wakes —
+// wifi.sta_listen_interval's default, which is also the driver's own default.
+// The driver consults it only under WIFI_PS_MAX_MODEM (the battery profile).
+#ifndef WIFI_STA_LISTEN_INTERVAL
+  #define WIFI_STA_LISTEN_INTERVAL 3
+#endif
 
 // Admin password protecting the settings API/page (HTTP Basic Auth,
 // user "admin"). Change it from the settings page; stored in NVS.

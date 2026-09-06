@@ -64,7 +64,7 @@ past the checks on the way in.
   "firmware": "RetiMesh Node", "version": "v0.0.3", "board": "LilyGO T3-S3",
   "ssid": "retimesh-8249CC", "hostname": "retimesh-8249cc", "security": "open", "display": true,
   "station": { "configured": true, "ssid": "home", "connected": true, "ip": "192.168.1.42", "rssi": -61 },
-  "power": { "profile": "performance", "cpu_mhz": 240, "wifi_ps": "none", "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
+  "power": { "profile": "performance", "cpu_mhz": 240, "wifi_ps": "none", "wifi_tx_dbm": 14, "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
   "identity": "69dd5082…", "destination": "8836929b…",
   "uptime_s": 1234, "heap_free": 180000, "heap_min_free": 178000, "psram_free": 2000000,
   "diag": { "boot": { "count": 12, "reason": 3, "reason_name": "panic or unhandled exception",
@@ -231,13 +231,19 @@ it in the page header and in the browser tab. `GET /api/settings` carries it
 too, so the page that changes a node's settings can name the node it is about
 to change.
 
-`power` reports the profile, CPU clock, Wi-Fi power save and the cell:
-`{"profile":"performance","cpu_mhz":240,"wifi_ps":"none","battery_present":true,
-"battery_charging":true,"battery_v":3.53,"battery_pct":10,"pmu":"AXP2101"}`.
+`power` reports the profile, CPU clock, Wi-Fi power save, Wi-Fi TX ceiling
+and the cell:
+`{"profile":"performance","cpu_mhz":240,"wifi_ps":"none","wifi_tx_dbm":14,
+"battery_present":true,"battery_charging":true,"battery_v":3.53,
+"battery_pct":10,"pmu":"AXP2101"}`.
 `wifi_ps` (`none`, `min_modem`, `max_modem`) is read back from the Wi-Fi
 driver rather than assumed from the profile — the proof a profile switch
-actually took. It reflects the profile once a Wi-Fi interface has started,
-and reads `n/a` when Wi-Fi is switched off.
+actually took (`performance` asks for none, `balanced` min, `battery` max).
+It reflects the profile once a Wi-Fi interface has started, and reads `n/a`
+when Wi-Fi is switched off. `wifi_tx_dbm` is the same kind of proof for
+`wifi.tx_power`: read back from the driver, which quantizes down to its own
+quarter-dBm steps, so it can sit below the setting (ask for 9, hold 8.5);
+`null` when Wi-Fi is switched off.
 The board's make and model used to sit here too; it is `board` at the top of
 the document now, beside the firmware that runs on it. `battery_charging` and a trustworthy
 `battery_present` need a power-management chip; boards reading an ADC divider
@@ -535,7 +541,7 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 ## Settings (auth)
 - `GET /api/settings` → `{ radio, wifi, transport, links, maintenance, bootloader, admin }` (password never returned; `has_password`, `default_password` flags). `links` is `{ wifi: {hardware, supported, enabled}, usb: {…, reason}, ppp: {…, reason, baud, bauds, node_ip, host_ip} }` — `enabled` is false for a link this build cannot run, whatever is stored; on a board that runs PPP, `baud` is the serial speed while PPP is on, `bauds` the speeds this board may be set to (the registry's ladder up to the rate the board has been tried at — the only list the settings page offers), and `node_ip`/`host_ip` the addresses the node asks its peer for (what the host's pppd is told); `maintenance` is `{ bootloader_api, bootloader_from_lan, console_enabled, console_tcp, web_ui, mdns, rns_admin, rns_admins }`; `bootloader` is what the board can do, the same object as `GET /api/system/bootloader`
 - `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct,gps_enabled,gps_share_position}` → applied live; `apply_error` in status if the chip rejected it
-- `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,sta_ssid,sta_password}` → saves, restarts (`"restart":true`); `sta_ssid` blank = station mode off
+- `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,tx_power,sta_ssid,sta_password,sta_listen_interval}` → saves; `tx_power` (2–20 dBm, one ceiling for AP and station) and `sta_listen_interval` (1–16 beacon intervals, consulted under the battery profile's max modem sleep) apply live, and a POST changing only those answers `"restart":false`; changing anything the access point or the join is built from restarts (`"restart":true`); `sta_ssid` blank = station mode off
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,auto_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text
 - `GET /api/settings/export` → downloadable JSON of all settings (no identity keys). `links` carries only the links this build can run, and `ppp_baud` where it runs PPP: a switch for a driver that does not exist here would carry a meaningless value onto a node where it means something (an import drops a `ppp_baud` the receiving board is not qualified for, likewise)

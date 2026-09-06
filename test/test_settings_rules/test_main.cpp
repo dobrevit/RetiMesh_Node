@@ -132,6 +132,43 @@ static void test_a_secured_network_needs_a_password_and_the_lengths_are_wifis() 
   TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
 }
 
+static void test_the_wifi_tx_ceiling_is_two_to_twenty_dbm() {
+  // The driver's own window in quarter-dBm is [8,84]; 2-20 dBm is the slice
+  // offered, and the refusal names it. The value is what may be asked for —
+  // the driver then quantizes down to its own steps, which the read-back
+  // reports, so the bound holds the request rather than the result.
+  WifiSettings w;
+  char err[160] = "";
+  w.txPowerDbm = 1;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "2-20"));
+  w.txPowerDbm = 2;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.txPowerDbm = 20;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.txPowerDbm = 21;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "2-20"));
+}
+
+static void test_the_listen_interval_counts_beacons_one_to_sixteen() {
+  // Units are AP beacon intervals, and zero is not "off" — the driver reads
+  // 0 as its default, which is a value that lies about itself in a settings
+  // dump. The refusal names the bound.
+  WifiSettings w;
+  char err[160] = "";
+  w.staListenInterval = 0;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "1-16"));
+  w.staListenInterval = 1;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.staListenInterval = 16;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.staListenInterval = 17;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "1-16"));
+}
+
 static void test_an_ssid_is_judged_before_it_is_truncated() {
   char err[160] = "";
   char long_one[64];
@@ -154,6 +191,8 @@ int main() {
   RUN_TEST(test_the_announce_cap_floor_is_one_not_zero);
   RUN_TEST(test_transport_modes_are_rnsds_one_to_five);
   RUN_TEST(test_a_secured_network_needs_a_password_and_the_lengths_are_wifis);
+  RUN_TEST(test_the_wifi_tx_ceiling_is_two_to_twenty_dbm);
+  RUN_TEST(test_the_listen_interval_counts_beacons_one_to_sixteen);
   RUN_TEST(test_an_ssid_is_judged_before_it_is_truncated);
   return UNITY_END();
 }

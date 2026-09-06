@@ -21,8 +21,9 @@
 //
 //  Profiles (settings, default "performance" = today's behaviour):
 //    performance  240 MHz, Wi-Fi always on, display sleeps after 60 s
-//    balanced     160 MHz, Wi-Fi modem sleep on the station link
-//    battery       80 MHz, Wi-Fi modem sleep, display sleeps after 20 s
+//    balanced     160 MHz, Wi-Fi min modem sleep (wake every DTIM)
+//    battery       80 MHz, Wi-Fi max modem sleep (wake every
+//                 wifi.sta_listen_interval beacons), display sleeps after 20 s
 //  LoRa and Transport timing are unaffected by the CPU clock at these
 //  rates; the radio task waits on interrupts either way.
 //
@@ -49,6 +50,13 @@ void apply(Profile p);              // live switch
 // changes WiFi.mode() (bringing an interface up or back) must call this
 // again afterwards; WifiManager's STA_START/AP_START hook does exactly that.
 void applyWifiSleep();
+// Re-applies the configured Wi-Fi TX ceiling (wifi.tx_power, dBm) to the
+// driver — esp_wifi_set_max_tx_power, one global ceiling for the AP and the
+// station together. Same lifecycle as applyWifiSleep(): it fails harmlessly
+// until the driver is started, so the STA_START/AP_START hook calls it again
+// the moment an interface comes up, and the settings commit calls it for a
+// live change.
+void applyWifiTxPower();
 Profile profile();
 const char* profileName(Profile p);
 bool profileFromName(const char* name, Profile& out);
@@ -60,6 +68,11 @@ bool profileFromName(const char* name, Profile& out);
 // no driver running, so the off state comes from the links settings'
 // wifiEnabled() rule (Settings.h), not from the getter.
 const char* wifiPsName();
+// The TX ceiling the driver actually holds, in dBm — read back from
+// esp_wifi_get_max_tx_power rather than echoing the setting, because the
+// driver quantizes down to its own quarter-dBm steps (ask for 9, hold 8.5).
+// NAN with Wi-Fi off or the driver not up, by wifiPsName()'s rule.
+float wifiTxPowerDbm();
 
 struct Battery {
   bool  present;                    // a cell is connected

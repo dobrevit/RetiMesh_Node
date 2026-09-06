@@ -219,6 +219,24 @@ inline bool validateWifi(const WifiSettings& w, char* err, size_t errLen) {
     snprintf(err, errLen, "max stations must be 1-10");
     return false;
   }
+  // 2-20 dBm: the driver's own legal window is 2-21 in quarter-dBm units
+  // ([8,84]), and 20 is what the PHY is configured for at the top
+  // (CONFIG_ESP_PHY_MAX_TX_POWER). The driver quantizes DOWN to its own
+  // steps, so what sticks may sit below what passed here — the read-back
+  // (Power::wifiTxPowerDbm) is the honest figure, this bound is what may be
+  // asked for.
+  if (w.txPowerDbm < 2 || w.txPowerDbm > 20) {
+    snprintf(err, errLen, "wifi tx power must be 2-20 dBm");
+    return false;
+  }
+  // Units are AP beacon intervals. 16 is the ceiling worth offering: beyond
+  // it a station misses so many DTIMs that buffered broadcast traffic —
+  // ARP included — starts expiring at the AP, and the maintenance path this
+  // trades latency on stops being a path.
+  if (w.staListenInterval < 1 || w.staListenInterval > 16) {
+    snprintf(err, errLen, "station listen interval must be 1-16 beacon intervals");
+    return false;
+  }
   return true;
 }
 

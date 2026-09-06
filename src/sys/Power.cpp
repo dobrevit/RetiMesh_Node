@@ -160,8 +160,14 @@ bool profileFromName(const char* n, Profile& out) {
 Profile profile() { return sProfile; }
 
 void applyWifiSleep() {
+  // Battery goes all the way to max modem sleep: the station dozes
+  // wifi.sta_listen_interval beacon intervals between wakes instead of waking
+  // for every DTIM, trading inbound latency on the maintenance path for the
+  // profile's whole point. Balanced keeps min modem (DTIM), performance none.
   const wifi_ps_type_t want =
-      sProfile == Profile::Performance ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM;
+      sProfile == Profile::Performance ? WIFI_PS_NONE
+    : sProfile == Profile::Battery     ? WIFI_PS_MAX_MODEM
+    :                                    WIFI_PS_MIN_MODEM;
   // WiFi.setSleep() only reaches esp_wifi_set_ps() while the STA interface is
   // started — otherwise it just caches the request, and only STA_START ever
   // applies the cache (WiFiGeneric.cpp). An AP-only node, the default shape,
@@ -174,6 +180,17 @@ void applyWifiSleep() {
   // STA_START/AP_START hook (WifiManager::begin) runs this again the moment
   // an interface comes up.
   (void)esp_wifi_set_ps(want);
+}
+
+void applyWifiTxPower() {
+  // dBm to the driver's quarter-dBm; the setting's 2-20 dBm bound
+  // (SettingsRules) keeps the product inside the legal [8,84]. The driver
+  // quantizes DOWN to its own steps ({8,20,28,34,44,52,56,60,66,72,80}
+  // quarter-dBm), so what sticks can sit up to ~1.5 dB below what was asked —
+  // wifiTxPowerDbm() below reads back the honest figure. Fails harmlessly
+  // before the driver is started (ESP_ERR_WIFI_NOT_START); the
+  // STA_START/AP_START hook (WifiManager::begin) re-applies it then.
+  (void)esp_wifi_set_max_tx_power((int8_t)(settings.wifi().txPowerDbm * 4));
 }
 
 const char* wifiPsName() {
@@ -192,6 +209,16 @@ const char* wifiPsName() {
   }
 }
 
+float wifiTxPowerDbm() {
+  // The same off-rule as wifiPsName(): the getter answers whether or not the
+  // driver runs, and a node with Wi-Fi off must not report a ceiling for a
+  // radio it is not running.
+  if (!settings.links().wifiEnabled()) return NAN;
+  int8_t quarter = 0;
+  if (esp_wifi_get_max_tx_power(&quarter) != ESP_OK) return NAN;
+  return quarter / 4.0f;
+}
+
 void apply(Profile p) {
   sProfile = p;
   switch (p) {
@@ -201,7 +228,7 @@ void apply(Profile p) {
   }
   applyWifiSleep();
   log_i("power profile: %s (CPU %u MHz, Wi-Fi sleep %s)", profileName(p), (unsigned)getCpuFrequencyMhz(),
-        p == Profile::Performance ? "off" : "on");
+        p == Profile::Performance ? "off" : p == Profile::Battery ? "max" : "min");
 }
 
 uint32_t displaySleepMs() {

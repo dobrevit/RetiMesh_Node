@@ -76,6 +76,14 @@ public:
   void tick();
   bool wifiEnabled() const;
 
+  // Re-applies wifi.sta_listen_interval to the station config, by
+  // read-modify-write — WiFi.begin() builds that config from scratch, so
+  // every begin() call site and the STA_START hook call this after it, and
+  // the settings commit calls it for a live change. Public for the commit's
+  // sake (SettingsFields::commitWifi); safe to call with no station up (it
+  // does nothing then).
+  void applyStaListenInterval();
+
   // --- joining a network from the glass -----------------------------------
   // The GUI's scanner drives these. A live join, deliberately: the AP's
   // settings apply at a restart because the AP cannot be rebuilt under the

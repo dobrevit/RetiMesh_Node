@@ -279,7 +279,14 @@ void WifiManager::begin() {
   WiFi.onEvent([](WiFiEvent_t event) {
     if (event == ARDUINO_EVENT_WIFI_STA_START || event == ARDUINO_EVENT_WIFI_AP_START) {
       Power::applyWifiSleep();
+      // Same lifecycle as the sleep setting: the TX ceiling only lands once
+      // the driver is started, and starting is exactly what these events say.
+      Power::applyWifiTxPower();
     }
+    // The listen interval rides the station's own start: STA_START fires on
+    // every station bring-up, which is every time there is a freshly-built
+    // config for the read-modify-write to patch.
+    if (event == ARDUINO_EVENT_WIFI_STA_START) wifiManager.applyStaListenInterval();
   });
   if (wifiEnabled()) {
     startAccessPoint();
@@ -478,6 +485,25 @@ wifi_mode_t WifiManager::settingsWifiMode(bool& wantAp, bool& wantSta) const {
   return wantAp ? (wantSta ? WIFI_AP_STA : WIFI_AP) : WIFI_STA;
 }
 
+// The station's listen interval — how many AP beacon intervals it may doze
+// between wakes under the battery profile's max modem sleep (the driver
+// ignores it in every other power-save mode). WiFi.begin() memsets a whole
+// wifi_config_t and connects immediately (core STA.cpp), so there is no gap
+// in which to set the field before the connect: this reads the config the
+// core just wrote, patches the one field, and writes it back — called right
+// after every begin() and again from the STA_START hook. Whether the patch
+// lands in time for the association already in flight is a bench question;
+// worst case that first association runs at the driver default of 3 and the
+// value holds from the next (re)association on.
+void WifiManager::applyStaListenInterval() {
+  wifi_config_t conf;
+  if (esp_wifi_get_config(WIFI_IF_STA, &conf) != ESP_OK) return;   // no station interface up
+  const uint8_t want = settings.wifi().staListenInterval;
+  if (conf.sta.listen_interval == want) return;                    // nothing to write
+  conf.sta.listen_interval = want;
+  (void)esp_wifi_set_config(WIFI_IF_STA, &conf);
+}
+
 void WifiManager::startAccessPoint() {
   const WifiSettings& w = settings.wifi();
   resolveNames();
@@ -519,28 +545,44 @@ void WifiManager::startAccessPoint() {
   if (wantSta) {
     WiFi.setAutoReconnect(true);
     WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
+    applyStaListenInterval();            // begin() rebuilt the config; see the helper
     log_i("station: joining \"%s\"", w.staSsid);
     _staRetryAt = millis() + 30000;
   }
   _securityName = secured ? "wpa2" : "open";
 
-  // The Arduino wrapper only knows open/WPA2. WPA3 (SAE) is set through
-  // ESP-IDF: in IDF 4.4 the AP config accepts WPA2_WPA3_PSK / WPA3_PSK as
-  // auth modes (cipher forced to CCMP, PMF implied by SAE). Mixed mode
-  // lets WPA2-only clients still join.
-  if (secured && w.security != ApSecurity::WPA2 && !WPA3_SOFTAP_SUPPORTED) {
+  const bool wantWpa3 = secured && w.security != ApSecurity::WPA2;
+  if (wantWpa3 && !WPA3_SOFTAP_SUPPORTED)
     log_w("WPA3 needs an ESP-IDF 5 core; this build runs the AP as WPA2");
-  } else if (secured && w.security != ApSecurity::WPA2) {
+  // One read-modify-write of the AP config, and it must live here, after
+  // softAP(): the Arduino core builds a fresh config with beacon_interval =
+  // 100 on EVERY softAP() call (core AP.cpp), so a beacon interval patched
+  // anywhere else is silently reverted by the next AP bring-up. The beacon
+  // slows on every shape of AP; the auth mode joins the same transaction only
+  // where WPA3 is asked for, because the Arduino wrapper knows only
+  // open/WPA2 — through ESP-IDF the AP config accepts WPA2_WPA3_PSK /
+  // WPA3_PSK (cipher forced to CCMP, PMF implied by SAE), and mixed mode
+  // lets WPA2-only clients still join.
+  if (wantAp) {
     wifi_config_t conf;
     if (esp_wifi_get_config(WIFI_IF_AP, &conf) == ESP_OK) {
-      bool wpa3only = w.security == ApSecurity::WPA3;
-      conf.ap.authmode = wpa3only ? WIFI_AUTH_WPA3_PSK : WIFI_AUTH_WPA2_WPA3_PSK;
-      conf.ap.pairwise_cipher = WIFI_CIPHER_TYPE_CCMP;
+      // 400 TU ≈ 410 ms: a 4x cut in beacon airtime and current, for phones
+      // taking a moment longer to list the network. Config.h says why this
+      // is a build default rather than a setting.
+      conf.ap.beacon_interval = WIFI_AP_BEACON_TU;
+      const bool patchWpa3 = wantWpa3 && WPA3_SOFTAP_SUPPORTED;
+      if (patchWpa3) {
+        conf.ap.authmode = (w.security == ApSecurity::WPA3) ? WIFI_AUTH_WPA3_PSK
+                                                            : WIFI_AUTH_WPA2_WPA3_PSK;
+        conf.ap.pairwise_cipher = WIFI_CIPHER_TYPE_CCMP;
+      }
       esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &conf);
       if (err == ESP_OK) {
-        _securityName = wpa3only ? "wpa3" : "wpa2wpa3";
+        if (patchWpa3)
+          _securityName = (w.security == ApSecurity::WPA3) ? "wpa3" : "wpa2wpa3";
       } else {
-        log_w("WPA3 mode rejected by the Wi-Fi driver (err 0x%x) — staying on WPA2", err);
+        log_w("AP config patch rejected by the Wi-Fi driver (err 0x%x) — beacons stay at "
+              "100 TU%s", err, patchWpa3 ? " and the AP stays on WPA2" : "");
       }
     }
   }
@@ -561,6 +603,7 @@ void WifiManager::tick() {
       _joining = true;
       WiFi.disconnect();                 // whatever the station was doing before
       WiFi.begin(_joinSsid, _joinPass[0] ? _joinPass : nullptr);
+      applyStaListenInterval();          // begin() rebuilt the config; see the helper
       log_i("station: joining \"%s\" (asked from the glass)", _joinSsid);
     } else {
       // Wi-Fi went off between the ask and this pass. Starting the join
@@ -617,6 +660,7 @@ void WifiManager::tick() {
         // re-assert below is a no-op on this path: the shape it computes
         // keeps the STA bit this begin() needs.
         WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
+        applyStaListenInterval();        // begin() rebuilt the config; see the helper
         _staRetryAt = millis() + 30000;
       }
       // Nothing to fall back to — none stored, or the switch off — is no
@@ -1248,6 +1292,14 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // profile: the proof a profile switch actually took effect, not just
     // that one was asked for.
     pw["wifi_ps"] = Power::wifiPsName();
+    // Likewise read back (esp_wifi_get_max_tx_power), not echoed from the
+    // setting: the driver quantizes down to its own steps, so this can sit
+    // below wifi.tx_power. Null with Wi-Fi off, like wifi_ps says "n/a".
+    {
+      const float txp = Power::wifiTxPowerDbm();
+      if (isnan(txp)) pw["wifi_tx_dbm"] = nullptr;
+      else            pw["wifi_tx_dbm"] = txp;
+    }
     pw["battery_present"] = b.present;
     // Null, not false, where the board has no way to tell. A caller can then
     // say "unknown" instead of drawing a conclusion this node never reached.
@@ -1839,8 +1891,12 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   wifi["channel"]    = ws.channel;
   wifi["max_stations"] = ws.maxStations;
   wifi["hidden"]     = ws.hidden;
+  // The stored setting the form edits; the ceiling the driver actually holds
+  // after quantization is the status surfaces' wifi_tx_dbm.
+  wifi["tx_power"]   = ws.txPowerDbm;
   wifi["sta_ssid"]   = ws.staSsid;
   wifi["sta_has_password"] = ws.staPassword[0] != '\0';
+  wifi["sta_listen_interval"] = ws.staListenInterval;
   wifi["sta_connected"] = stationConnected();
 
   JsonObject tr = doc["transport"].to<JsonObject>();
@@ -2141,6 +2197,8 @@ void WifiManager::handleWifiPost(AsyncWebServerRequest* request, const char* bod
   if (in["channel"].is<int>())      w.channel     = in["channel"];
   if (in["max_stations"].is<int>()) w.maxStations = in["max_stations"];
   if (in["hidden"].is<bool>())      w.hidden      = in["hidden"];
+  if (in["tx_power"].is<int>())            w.txPowerDbm        = in["tx_power"];
+  if (in["sta_listen_interval"].is<int>()) w.staListenInterval = in["sta_listen_interval"];
   if (in["sta_ssid"].is<const char*>()) {
     String s = in["sta_ssid"].as<String>(); s.trim();
     if (s.length() > 32) { sendError(request, 400, "station ssid must be at most 32 characters"); return; }
@@ -2155,20 +2213,30 @@ void WifiManager::handleWifiPost(AsyncWebServerRequest* request, const char* bod
     }
   }
 
-  char wmsg[160];
-  if (!SettingsRules::validateWifi(w, wmsg, sizeof(wmsg))) { sendError(request, 400, wmsg); return; }
-
-  if (!settings.saveWifi(w)) { sendError(request, 500, "nvs"); return; }
-
-  JsonDocument out;
-  out["ok"] = true;
-  out["restart"] = true;
-  out["ssid"] = w.ssid[0] ? w.ssid : _ssid;   // auto-derived name does not change
-  out["security"] = Settings::securityName(w.security);
-  // Asked before the answer is sent, so the answer can say whether it was
-  // granted; the delay is what lets the reply leave, not the order here.
-  out["restart"] = Bootloader::reboot();
-  sendJson(request, 200, out);
+  // Through the same commit the console uses (SettingsFields.h): it holds
+  // the one copy of the live/restart split — the TX ceiling and the station
+  // listen interval apply now, and everything the access point or the join
+  // is built from asks for the restart. The restart is asked for before the
+  // answer is sent, so the answer can say whether it was granted; the
+  // bootloader's delay is what lets the reply leave, not the order here.
+  char wmsg[160] = "";
+  const SettingsFields::Result res = SettingsFields::commitWifi(w, wmsg, sizeof(wmsg));
+  switch (res) {
+    case SettingsFields::Result::Ok:
+    case SettingsFields::Result::OkRestart:
+    case SettingsFields::Result::OkNextBoot: {
+      JsonDocument out;
+      out["ok"] = true;
+      out["restart"] = (res == SettingsFields::Result::OkRestart);
+      out["ssid"] = w.ssid[0] ? w.ssid : _ssid;   // auto-derived name does not change
+      out["security"] = Settings::securityName(w.security);
+      sendJson(request, 200, out);
+      return;
+    }
+    case SettingsFields::Result::Busy:      sendError(request, 503, wmsg[0] ? wmsg : kRestartingMsg); return;
+    case SettingsFields::Result::NvsFailed: sendError(request, 500, "nvs"); return;
+    default:                                sendError(request, 400, wmsg[0] ? wmsg : "refused"); return;
+  }
 }
 
 void WifiManager::handleAdminPost(AsyncWebServerRequest* request, const char* body, size_t len) {
@@ -2247,6 +2315,7 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   JsonObject w = doc["wifi"].to<JsonObject>();
   w["ssid"] = ws.ssid; w["security"] = Settings::securityName(ws.security); w["password"] = ws.password;
   w["channel"] = ws.channel; w["max_stations"] = ws.maxStations; w["hidden"] = ws.hidden;
+  w["tx_power"] = ws.txPowerDbm; w["sta_listen_interval"] = ws.staListenInterval;
   w["sta_ssid"] = ws.staSsid; w["sta_password"] = ws.staPassword;
   JsonObject t = doc["transport"].to<JsonObject>();
   t["enabled"] = ts.enabled; t["lora_mode"] = ts.loraMode; t["wifi_mode"] = ts.wifiMode;
@@ -2335,8 +2404,14 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     if (w["sta_ssid"].is<const char*>()) strlcpy(ws.staSsid, w["sta_ssid"], sizeof(ws.staSsid));
     if (w["sta_password"].is<const char*>()) strlcpy(ws.staPassword, w["sta_password"], sizeof(ws.staPassword));
     ws.channel = w["channel"] | ws.channel; ws.maxStations = w["max_stations"] | ws.maxStations; ws.hidden = w["hidden"] | ws.hidden;
+    ws.txPowerDbm = w["tx_power"] | ws.txPowerDbm;
+    ws.staListenInterval = w["sta_listen_interval"] | ws.staListenInterval;
     if (ws.security != ApSecurity::Open && strlen(ws.password) < 8) ws.security = ApSecurity::Open;
-    if (ws.channel < 1 || ws.channel > 13 || ws.maxStations < 1 || ws.maxStations > 10) { sendError(request, 400, "wifi section invalid"); return; }
+    // The shared rule, not a local copy of its bounds: the inline check that
+    // sat here knew channel and max_stations and would have silently waved
+    // every later field through — the drift SettingsRules exists to prevent.
+    char wmsg[160];
+    if (!SettingsRules::validateWifi(ws, wmsg, sizeof(wmsg))) { sendError(request, 400, wmsg); return; }
     settings.saveWifi(ws);
   }
   bool storeHomeIgnored = false;

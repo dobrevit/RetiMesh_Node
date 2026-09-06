@@ -89,6 +89,8 @@ void Settings::load() {
   LOAD(_wifi.channel,     "w_chan", getUChar("w_chan"));
   LOAD(_wifi.maxStations, "w_max",  getUChar("w_max"));
   LOAD(_wifi.hidden,      "w_hid",  getBool ("w_hid"));
+  LOAD(_wifi.txPowerDbm,  "w_txp",  getChar ("w_txp"));
+  LOAD(_wifi.staListenInterval, "w_sli", getUChar("w_sli"));
   if (_prefs.isKey("w_sta"))  _prefs.getString("w_sta",  _wifi.staSsid, sizeof(_wifi.staSsid));
   if (_prefs.isKey("w_stap")) _prefs.getString("w_stap", _wifi.staPassword, sizeof(_wifi.staPassword));
 
@@ -181,6 +183,8 @@ bool Settings::saveWifi(const WifiSettings& w) {
   ok &= _prefs.putUChar ("w_chan", w.channel)  > 0;
   ok &= _prefs.putUChar ("w_max",  w.maxStations) > 0;
   ok &= _prefs.putBool  ("w_hid",  w.hidden)   > 0;
+  ok &= _prefs.putChar  ("w_txp",  w.txPowerDbm) > 0;
+  ok &= _prefs.putUChar ("w_sli",  w.staListenInterval) > 0;
   ok &= _prefs.putString("w_sta",  w.staSsid)  >= 0;
   ok &= _prefs.putString("w_stap", w.staPassword) >= 0;
   if (!ok) log_e("NVS write failed (wifi)");
