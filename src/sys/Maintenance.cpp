@@ -324,10 +324,10 @@ static void doStatus() {
           Power::wifiPsName(), txp);
   }
   // The access point's actual state against its switch. "idle-off" and "off"
-  // are different downs with different remedies — a wake (the button, WIFI ON
-  // here, an admin message) brings the first back; only the operator's switch
-  // brings back the second — and an operator at this console is exactly who
-  // has to tell them apart.
+  // are different downs with different remedies — a wake (the button, SET
+  // links.wifi_ap on or WIFI ON here, an admin message) brings the first
+  // back; only the operator's switch brings back the second — and an
+  // operator at this console is exactly who has to tell them apart.
   dataf("STATUS", "wifi_ap=%s idle_off=%s idle_minutes=%u",
         wifiManager.apStateName(), settings.wifi().apIdleOff ? "on" : "off",
         (unsigned)settings.wifi().apIdleMinutes);

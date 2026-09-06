@@ -246,11 +246,14 @@
 #endif
 // AP idle auto-off — wifi.ap_idle_off / wifi.ap_idle_minutes' defaults. With
 // the switch on, an access point that has stood empty for the configured
-// minutes is taken down until something wakes it: the button, WIFI ON at the
-// console (even when the switch is already on), or an admin message. Off by
-// default, deliberately: the AP is usually the only management path on an
-// unattended node, and a policy bug that keeps it down is a site visit —
-// the operator opts in per node. Bounds (1-1440 min) live in SettingsRules.
+// minutes is taken down until something wakes it: the button, SET
+// links.wifi_ap on or WIFI ON at the console (either wakes even when the
+// switch is already on — but WIFI ON writes both Wi-Fi switches, so on a
+// node that keeps its station off it also restarts), or an admin message.
+// Off by default, deliberately: the AP is usually the only management path
+// on an unattended node, and a policy bug that keeps it down is a site
+// visit — the operator opts in per node. Bounds (1-1440 min) live in
+// SettingsRules.
 #ifndef AP_IDLE_OFF_DEFAULT
   #define AP_IDLE_OFF_DEFAULT 0
 #endif

@@ -185,6 +185,41 @@ static void test_with_the_console_off_and_no_link_there_is_no_way_in() {
   TEST_ASSERT_TRUE(wouldLockOut(false, false, false));
 }
 
+// --- what a links ask does beyond saving (LocalLink::applyLinks asks this) ---
+static void test_asking_the_ap_on_wakes_even_when_nothing_changes() {
+  // The regression this pins really shipped once: WIFI ON on a node whose
+  // switch was already on read as Unchanged and did nothing, while the idle
+  // policy held the AP down — the one documented recovery command failed to
+  // recover. The wake is judged from the ask, before any unchanged
+  // early-return.
+  const LinksApplyVerdict v = judgeLinksApply(true, true, false, false);
+  TEST_ASSERT_TRUE(v.wakeAp);
+  TEST_ASSERT_FALSE(v.apFollowsLive);      // nothing flips: the save is Unchanged...
+  TEST_ASSERT_FALSE(v.staNeedsRestart);    // ...yet the wake stands
+}
+
+static void test_asking_the_ap_off_never_wakes() {
+  TEST_ASSERT_FALSE(judgeLinksApply(true, false, true, false).wakeAp);   // even flipping it off
+  TEST_ASSERT_FALSE(judgeLinksApply(false, false, false, false).wakeAp); // not in the ask at all
+  TEST_ASSERT_FALSE(judgeLinksApply(false, false, false, true).wakeAp);  // a station-only ask
+}
+
+static void test_the_ap_switch_applies_live_and_the_station_switch_restarts() {
+  // The AP has a runtime up/down path (the tick convergence the idle policy
+  // rides); the station's join is built at boot. One flip each way:
+  const LinksApplyVerdict ap = judgeLinksApply(true, true, true, false);
+  TEST_ASSERT_TRUE(ap.apFollowsLive);
+  TEST_ASSERT_FALSE(ap.staNeedsRestart);
+  const LinksApplyVerdict sta = judgeLinksApply(false, false, false, true);
+  TEST_ASSERT_FALSE(sta.apFollowsLive);
+  TEST_ASSERT_TRUE(sta.staNeedsRestart);
+  // WIFI ON writes both switches at once: live and restart ride one ask.
+  const LinksApplyVerdict both = judgeLinksApply(true, true, true, true);
+  TEST_ASSERT_TRUE(both.wakeAp);
+  TEST_ASSERT_TRUE(both.apFollowsLive);
+  TEST_ASSERT_TRUE(both.staNeedsRestart);
+}
+
 // --- when a link that is built on demand may be built ------------------------
 static void test_a_build_that_failed_is_not_retried_every_pass() {
   // poll() runs hundreds of times a second. A node out of byte-addressable
@@ -237,6 +272,9 @@ int main() {
   RUN_TEST(test_nothing_is_built_or_torn_down_while_a_teardown_runs);
   RUN_TEST(test_a_build_that_worked_clears_an_earlier_failure);
   RUN_TEST(test_an_existing_link_is_not_built_again);
+  RUN_TEST(test_asking_the_ap_on_wakes_even_when_nothing_changes);
+  RUN_TEST(test_asking_the_ap_off_never_wakes);
+  RUN_TEST(test_the_ap_switch_applies_live_and_the_station_switch_restarts);
   RUN_TEST(test_the_console_alone_is_a_way_in);
   RUN_TEST(test_with_the_console_off_a_link_needs_something_listening_on_it);
   RUN_TEST(test_with_the_console_off_and_no_link_there_is_no_way_in);

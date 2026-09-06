@@ -61,6 +61,14 @@ static const char kRestartingMsg[] = "the node is restarting";
 static const char PORTAL_URL[] = "http://10.42.0.1/";
 static const char ADMIN_USER[] = "admin";
 
+// How many times tick() re-tries the AP config patch after startAccessPoint()
+// had it refused with ESP_ERR_WIFI_STATE (a station connect in flight). 15
+// tries at the 2 s gate span ~30 s — one full station-watchdog reconnect
+// period — so at least one attempt lands in the quiet gap between connects;
+// bounded, so a driver refusing for some other reason cannot buy itself a
+// permanent 2 s poll.
+static const uint8_t kApPatchAttempts = 15;
+
 // ---------------------------------------------------------------------------
 // Body accumulation for JSON POSTs. Chunks land in request->_tempObject,
 // which the request destructor free()s. Returns the complete body on the
@@ -581,6 +589,64 @@ void WifiManager::staConnect(const char* ssid, const char* password) {
   if (err != ESP_OK) log_w("station: connect to \"%s\" failed (err 0x%x)", ssid, err);
 }
 
+// WPA needs 8..63 characters; anything else means an open network. One rule
+// for the password softAP() runs with and the auth mode the config patch
+// writes, so the two cannot drift apart.
+static bool apSecured(const WifiSettings& w) {
+  return w.security != ApSecurity::Open && strlen(w.password) >= 8;
+}
+
+// One read-modify-write of the AP config. After softAP(): the Arduino core
+// builds its config with beacon_interval = 100 on every softAP() call and
+// writes it whenever any field it compares differs (core AP.cpp —
+// softap_config_equal ignores beacon_interval, so an identical call skips
+// the write and a standing patch survives it, but any real change writes the
+// fresh config and silently reverts the beacon). The beacon slows on every
+// shape of AP (400 TU ≈ 410 ms: a 4x cut in beacon airtime and current, for
+// phones taking a moment longer to list the network — Config.h says why this
+// is a build default rather than a setting); the auth mode joins the same
+// transaction only where WPA3 is asked for, because the Arduino wrapper
+// knows only open/WPA2 — through ESP-IDF the AP config accepts
+// WPA2_WPA3_PSK / WPA3_PSK (cipher forced to CCMP, PMF implied by SAE), and
+// mixed mode lets WPA2-only clients still join.
+//
+// esp_wifi_set_config is documented to refuse with ESP_ERR_WIFI_STATE while
+// a station connect is in flight (esp_wifi.h). At boot the caller dodges
+// that by ordering this before the join; at a runtime AP re-up the station
+// is not ours to schedule around — the 30 s watchdog's reconnect keeps a
+// connect in flight much of the time on a LAN-down node — so that refusal
+// is reported through inFlight and tick() retries just this RMW until the
+// connect settles. Every other failure is logged here and final.
+bool WifiManager::applyApConfigPatch(bool& inFlight) {
+  inFlight = false;
+  const WifiSettings& w = settings.wifi();
+  const bool wantWpa3 = apSecured(w) && w.security != ApSecurity::WPA2;
+  const bool patchWpa3 = wantWpa3 && WPA3_SOFTAP_SUPPORTED;
+  wifi_config_t conf;
+  if (esp_wifi_get_config(WIFI_IF_AP, &conf) != ESP_OK) {
+    log_w("AP config could not be read — the beacon%s patch was skipped",
+          patchWpa3 ? "/WPA3" : "");
+    return false;
+  }
+  conf.ap.beacon_interval = WIFI_AP_BEACON_TU;
+  if (patchWpa3) {
+    conf.ap.authmode = (w.security == ApSecurity::WPA3) ? WIFI_AUTH_WPA3_PSK
+                                                        : WIFI_AUTH_WPA2_WPA3_PSK;
+    conf.ap.pairwise_cipher = WIFI_CIPHER_TYPE_CCMP;
+  }
+  const esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &conf);
+  if (err == ESP_OK) {
+    if (patchWpa3)
+      _securityName = (w.security == ApSecurity::WPA3) ? "wpa3" : "wpa2wpa3";
+    return true;
+  }
+  inFlight = (err == ESP_ERR_WIFI_STATE);
+  if (!inFlight)
+    log_w("AP config patch rejected by the Wi-Fi driver (err 0x%x) — beacons stay at "
+          "100 TU%s", err, patchWpa3 ? " and the AP stays on WPA2" : "");
+  return false;
+}
+
 void WifiManager::startAccessPoint() {
   const WifiSettings& w = settings.wifi();
   resolveNames();
@@ -596,8 +662,7 @@ void WifiManager::startAccessPoint() {
   // case, so an SSID someone has renamed to "Shed roof" still yields a legal
   // "shed-roof.local".
 
-  // WPA needs 8..63 characters; anything else means an open network.
-  bool secured = w.security != ApSecurity::Open && strlen(w.password) >= 8;
+  const bool secured = apSecured(w);         // the one WPA-validity rule, above
   const char* pass = secured ? w.password : nullptr;
 
   bool wantAp, wantSta;
@@ -626,45 +691,26 @@ void WifiManager::startAccessPoint() {
   const bool wantWpa3 = secured && w.security != ApSecurity::WPA2;
   if (wantWpa3 && !WPA3_SOFTAP_SUPPORTED)
     log_w("WPA3 needs an ESP-IDF 5 core; this build runs the AP as WPA2");
-  // One read-modify-write of the AP config, and it must sit exactly here.
-  // After softAP(): the Arduino core builds its config with beacon_interval
-  // = 100 on every softAP() call and writes it whenever any field it
-  // compares differs (core AP.cpp — softap_config_equal ignores
-  // beacon_interval, so an identical call skips the write and a standing
-  // patch survives it, but any real change writes the fresh config and
-  // silently reverts the beacon). Before the station join below:
-  // esp_wifi_set_config is documented to refuse with ESP_ERR_WIFI_STATE
-  // while a station connect is in flight (esp_wifi.h), so sitting after the
-  // join exposed this patch to that refusal on every AP+STA boot. The beacon
-  // slows on every shape of AP; the auth mode joins the same transaction only
-  // where WPA3 is asked for, because the Arduino wrapper knows only
-  // open/WPA2 — through ESP-IDF the AP config accepts WPA2_WPA3_PSK /
-  // WPA3_PSK (cipher forced to CCMP, PMF implied by SAE), and mixed mode
-  // lets WPA2-only clients still join.
+  // The AP config read-modify-write (applyApConfigPatch above), and it must
+  // sit exactly here: after softAP() built the config, and before the
+  // station join below — esp_wifi_set_config refuses with ESP_ERR_WIFI_STATE
+  // while a station connect is in flight, so sitting after the join exposed
+  // the patch to that refusal on every AP+STA boot. This ordering only
+  // protects the boot path, though: at a runtime AP re-up the watchdog's
+  // reconnect can already have a connect in flight, so that one refusal
+  // arms a bounded retry that tick() serves once the connect settles.
   if (wantAp) {
-    wifi_config_t conf;
-    if (esp_wifi_get_config(WIFI_IF_AP, &conf) == ESP_OK) {
-      // 400 TU ≈ 410 ms: a 4x cut in beacon airtime and current, for phones
-      // taking a moment longer to list the network. Config.h says why this
-      // is a build default rather than a setting.
-      conf.ap.beacon_interval = WIFI_AP_BEACON_TU;
-      const bool patchWpa3 = wantWpa3 && WPA3_SOFTAP_SUPPORTED;
-      if (patchWpa3) {
-        conf.ap.authmode = (w.security == ApSecurity::WPA3) ? WIFI_AUTH_WPA3_PSK
-                                                            : WIFI_AUTH_WPA2_WPA3_PSK;
-        conf.ap.pairwise_cipher = WIFI_CIPHER_TYPE_CCMP;
-      }
-      esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &conf);
-      if (err == ESP_OK) {
-        if (patchWpa3)
-          _securityName = (w.security == ApSecurity::WPA3) ? "wpa3" : "wpa2wpa3";
-      } else {
-        log_w("AP config patch rejected by the Wi-Fi driver (err 0x%x) — beacons stay at "
-              "100 TU%s", err, patchWpa3 ? " and the AP stays on WPA2" : "");
-      }
+    bool inFlight = false;
+    if (applyApConfigPatch(inFlight)) {
+      _apPatchRetries = 0;
+    } else if (inFlight) {
+      _apPatchRetries = kApPatchAttempts;
+      _apPatchGate.prime(millis());
+      log_w("AP config patch deferred: a station connect is in flight — retrying from tick() "
+            "(beacons at 100 TU%s until it lands)",
+            wantWpa3 && WPA3_SOFTAP_SUPPORTED ? ", WPA2" : "");
     } else {
-      log_w("AP config could not be read — the beacon%s patch was skipped",
-            wantWpa3 && WPA3_SOFTAP_SUPPORTED ? "/WPA3" : "");
+      _apPatchRetries = 0;                 // a final rejection; the helper logged it
     }
   }
 
@@ -706,8 +752,9 @@ void WifiManager::tick() {
   // The verdict, at a 1 s cadence — softAPgetStationNum() is a driver call,
   // and the policy needs no finer clock than the minutes it counts in. With
   // the feature off the policy answers "never" from its first line and the
-  // driver is not asked at all: a node with the switch off runs this block
-  // as two setting reads and a comparison.
+  // station count is never asked for: a node with the switch off runs this
+  // block as two setting reads, the WiFi.getMode() read below and a
+  // comparison.
   if (_apIdleGate.due(millis())) {
     const bool en   = settings.wifi().apIdleOff && settings.links().wifiApEnabled;
     const bool apUp = (WiFi.getMode() & WIFI_MODE_AP) != 0;
@@ -718,8 +765,8 @@ void WifiManager::tick() {
       _apSuppressed = suppress;
       _modeSyncReq = true;               // the transition rides the one convergence
       if (suppress)
-        log_i("access point: empty for %u min — going down (the button, WIFI ON at the "
-              "console, or an admin message brings it back)",
+        log_i("access point: empty for %u min — going down (the button, SET links.wifi_ap on "
+              "or WIFI ON at the console, or an admin message brings it back)",
               (unsigned)settings.wifi().apIdleMinutes);
       else
         log_i("access point: idle-off lifted — coming back up");
@@ -848,6 +895,29 @@ void WifiManager::tick() {
     _modeSyncReq = false;
     syncRadioShape();
   }
+  // The AP config patch a runtime re-up could not land: the driver refused
+  // esp_wifi_set_config(AP) with ESP_ERR_WIFI_STATE because a station
+  // connect was in flight (on a LAN-down node the 30 s watchdog keeps one
+  // going much of the time). Re-run just the RMW — not the whole bring-up —
+  // until it lands or the attempts run out.
+  if (_apPatchRetries && _apPatchGate.due(millis())) {
+    if (!(WiFi.getMode() & WIFI_MODE_AP)) {
+      _apPatchRetries = 0;                 // the AP left; its next bring-up patches afresh
+    } else {
+      bool inFlight = false;
+      if (applyApConfigPatch(inFlight)) {
+        _apPatchRetries = 0;
+        log_i("AP config patch landed on retry: %s, %u TU beacons", _securityName,
+              (unsigned)WIFI_AP_BEACON_TU);
+      } else if (!inFlight) {
+        _apPatchRetries = 0;               // a final rejection; the helper logged it
+      } else if (--_apPatchRetries == 0) {
+        log_w("AP config patch still refused after %u attempts — a station connect never "
+              "settled; beacons stay at 100 TU until the next AP cycle",
+              (unsigned)kApPatchAttempts);
+      }
+    }
+  }
   // Station watchdog: log transitions, kick a reconnect if auto-reconnect
   // gave up (e.g. the LAN was down at boot).
   if (wifiEnabled() && stationConfigured()) {
@@ -910,18 +980,30 @@ void WifiManager::syncRadioShape() {
     if (want == WIFI_MODE_NULL) {
       // Nothing left to run. AutoInterface goes first — end() exists so the
       // netifs are never cycled under its joined discovery group — and the
-      // driver stops with the mode.
+      // driver stops with the mode. (Closing its sockets is also what drops
+      // their multicast memberships, so this path never strands one.)
       if (AutoInterface::enabled()) { AutoInterface::end(); _autoIfEnded = true; }
       WiFi.mode(WIFI_MODE_NULL);
       log_i("wifi: radio off%s", _apSuppressed ? " (access point idled down; a wake brings it back)" : "");
-    } else if (wantAp && !haveAp) {
-      startAccessPoint();
-      apServicesUp();
-      log_i("access point \"%s\" (%s) back up at %s", _ssid, _securityName,
-            WiFi.softAPIP().toString().c_str());
     } else {
-      WiFi.mode(want);
-      if (dropAp) log_i("access point down; the radio stays up for the station");
+      // A netif being stripped while AutoInterface keeps running must leave
+      // the discovery group first, while that netif is still alive: asked
+      // after the mode change, the leave hits lwIP's netif-gone ENXIO path,
+      // which returns before the socket's membership slot (one of
+      // CONFIG_LWIP_MAX_SOCKETS = 16) is unregistered — each AP idle-down
+      // cycle then stranded a slot until every join was refused, for good.
+      if (dropAp) AutoInterface::linkDown("WIFI_AP_DEF");
+      if ((have & WIFI_MODE_STA) && !(want & WIFI_MODE_STA))
+        AutoInterface::linkDown("WIFI_STA_DEF");
+      if (wantAp && !haveAp) {
+        startAccessPoint();
+        apServicesUp();
+        log_i("access point \"%s\" (%s) back up at %s", _ssid, _securityName,
+              WiFi.softAPIP().toString().c_str());
+      } else {
+        WiFi.mode(want);
+        if (dropAp) log_i("access point down; the radio stays up for the station");
+      }
     }
   }
   // Only rejoined where this path ended it: a task that never started (the

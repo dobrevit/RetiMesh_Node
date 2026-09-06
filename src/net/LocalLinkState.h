@@ -239,6 +239,43 @@ inline bool wouldLockOut(bool anyLinkOn, bool consoleEnabled, bool webUi) {
   return !(anyLinkOn && webUi);
 }
 
+// What applying a links ask must do beyond saving it, judged once — the
+// console's WIFI ON, SET links.*, and the HTTP links handler all land in
+// LocalLink::applyLinks, and applyLinks asks here.
+//
+//   wakeAp — the ask names the access point and asks it ON. Judged from the
+//   ask alone, not from whether anything changes, and the caller must serve
+//   it BEFORE any unchanged early-return: WIFI ON on a node whose switch is
+//   already on means "bring it back" — the idle policy may be holding the
+//   AP down — and an Unchanged that did nothing was exactly how the one
+//   documented recovery command once failed to recover. Asking the AP off
+//   is never a wake.
+//   apFollowsLive — the AP switch actually flips: it applies live, through
+//   the runtime convergence (the same path the idle policy rides), with no
+//   restart.
+//   staNeedsRestart — the station switch actually flips: restart-applied,
+//   because the join is built at boot and reshaping a running station under
+//   the LAN session that asked is the instability the restart-applied
+//   pattern exists to avoid.
+//
+// Here rather than inline in applyLinks so the rules can be held to their
+// cases on the host (test/test_local_link) — both have been wrong in ways a
+// bench found first.
+struct LinksApplyVerdict {
+  bool wakeAp;
+  bool apFollowsLive;
+  bool staNeedsRestart;
+};
+
+inline LinksApplyVerdict judgeLinksApply(bool apAsked, bool apAskedOn,
+                                         bool apFlips, bool staFlips) {
+  LinksApplyVerdict v;
+  v.wakeAp          = apAsked && apAskedOn;
+  v.apFollowsLive   = apFlips;
+  v.staNeedsRestart = staFlips;
+  return v;
+}
+
 // Whether a serial speed may be used for PPP on this board: one of the rates
 // the board's registry entry lists (boards.json uart.qualification, handed
 // to the build as BOARD_UART_BAUDS) and no faster than the highest rate

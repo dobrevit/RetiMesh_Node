@@ -150,6 +150,13 @@ private:
   // the listen interval is written into the config exactly once, between
   // the core building it and the connect being issued (see the definition).
   void staConnect(const char* ssid, const char* password);
+  // The AP config read-modify-write (beacon interval, and WPA3 where asked):
+  // startAccessPoint() applies it after softAP(), and tick() re-runs just
+  // this when the driver refused it with ESP_ERR_WIFI_STATE — a station
+  // connect in flight closes esp_wifi_set_config's window. Returns true when
+  // the patch landed; inFlight reports that retryable refusal, and every
+  // other failure is logged inside.
+  bool applyApConfigPatch(bool& inFlight);
   // The radio shape the settings ask for — the AP and STA switches, and
   // whether a station is even configured, combined exactly once.
   // startAccessPoint() brings the node up in this shape and tick()'s
@@ -227,14 +234,25 @@ private:
   volatile bool   _modeSyncReq = false;
   //   _apWakeReq — somebody asked for the access point (apWake()). Volatile
   //   like the rest: raised from the display task or the AsyncTCP task,
-  //   served by tick(). Everything below it is tick()'s own state, written
-  //   and read on the loop task only.
+  //   served by tick(). _apSuppressed below is tick()'s alone to write, but
+  //   not loop-task-only to read: the status surfaces (handleStatus and
+  //   handleSettingsGet on the AsyncTCP task, apStateName()/apIdleDown()
+  //   from the console and the glass) read it, so it is volatile like the
+  //   flags above. Everything after it is tick()'s own state, written and
+  //   read on the loop task only.
   volatile bool   _apWakeReq   = false;
   ApIdlePolicy    _apIdle;               // fed by tick() at the gate's cadence
   SampleGate      _apIdleGate{1000};     // the 1 s station-count poll
-  bool            _apSuppressed = false; // the policy's verdict, mirrored for settingsWifiMode
+  volatile bool   _apSuppressed = false; // the policy's verdict, mirrored for settingsWifiMode
   bool            _apDownStaged = false; // a teardown is waiting out its grace
   uint32_t        _apDownDueMs  = 0;
+  // The AP config patch that could not land yet: esp_wifi_set_config(AP)
+  // refuses with ESP_ERR_WIFI_STATE while a station connect is in flight —
+  // on a LAN-down node the 30 s watchdog keeps one going much of the time —
+  // and a runtime AP re-up landing in that window would otherwise beacon at
+  // 100 TU/WPA2 until the next cycle. Attempts left; 0 = none armed.
+  uint8_t         _apPatchRetries = 0;
+  SampleGate      _apPatchGate{2000};    // one retry every 2 s while armed
   bool            _mdnsUp       = false; // startMdns() has run (this boot)
   bool            _autoIfEnded  = false; // we ended AutoInterface; re-begin on the way up
 };

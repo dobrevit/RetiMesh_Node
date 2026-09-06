@@ -38,6 +38,16 @@ static void test_disabled_never_suppresses_however_long_it_stands_empty() {
   TEST_ASSERT_FALSE(p.suppressed(kIdleMs * 10, false, true, 0, kIdleMs));
   TEST_ASSERT_FALSE(p.suppressed(0xFFFFFFF0u, false, true, 0, kIdleMs));   // wrap-side too
   TEST_ASSERT_FALSE(p.suppressed(50, false, true, 0, kIdleMs));
+  // Now with the latch armed first: enabled asks latch the verdict, then the
+  // feature goes off. Disabled must answer false from the very next ask and
+  // keep answering false whatever arrives — a wake, stations, more emptiness
+  // — so a mutant that consults the latch before the switch cannot survive.
+  TEST_ASSERT_FALSE(p.suppressed(100, true, true, 0, kIdleMs));
+  TEST_ASSERT_TRUE (p.suppressed(100 + kIdleMs, true, true, 0, kIdleMs));  // latched
+  TEST_ASSERT_FALSE(p.suppressed(100 + kIdleMs + 1, false, true, 0, kIdleMs));
+  p.wake(100 + kIdleMs + 2);                                               // interleaved wake
+  TEST_ASSERT_FALSE(p.suppressed(100 + kIdleMs + 3, false, true, 3, kIdleMs)); // stations too
+  TEST_ASSERT_FALSE(p.suppressed(100 + kIdleMs * 5, false, true, 0, kIdleMs)); // empty for ages
 }
 
 static void test_the_first_ask_seeds_the_clock_not_the_epoch() {
@@ -100,6 +110,29 @@ static void test_the_verdict_latches_while_the_ap_is_down() {
   TEST_ASSERT_TRUE(p.suppressed(kIdleMs, true, true, 0, kIdleMs));
   TEST_ASSERT_TRUE(p.suppressed(kIdleMs + 1000, true, false, 0, kIdleMs));  // now actually down
   TEST_ASSERT_TRUE(p.suppressed(kIdleMs * 400, true, false, 0, kIdleMs));   // ... for days
+}
+
+static void test_a_station_arriving_during_the_grace_lifts_the_latch() {
+  // The verdict latches at the bell, but the AP stays on the air through the
+  // staged teardown grace; a client that associates in that window ends the
+  // emptiness the verdict was about and must be served, not cut off. Only an
+  // on-air AP can produce a station — down, nothing can associate, which is
+  // why this cannot re-open the latch's "down with zero stations" case.
+  ApIdlePolicy p;
+  p.suppressed(0, true, true, 0, kIdleMs);
+  TEST_ASSERT_TRUE (p.suppressed(kIdleMs, true, true, 0, kIdleMs));           // latched
+  TEST_ASSERT_FALSE(p.suppressed(kIdleMs + 1000, true, true, 1, kIdleMs));    // grace arrival
+  // The visitor re-arms the clock like any other: the whole window again,
+  // counted from the last ask that saw them.
+  TEST_ASSERT_FALSE(p.suppressed(kIdleMs + 2000, true, true, 0, kIdleMs));
+  TEST_ASSERT_FALSE(p.suppressed(kIdleMs + 1000 + kIdleMs - 1, true, true, 0, kIdleMs));
+  TEST_ASSERT_TRUE (p.suppressed(kIdleMs + 1000 + kIdleMs,     true, true, 0, kIdleMs));
+  // A station count against a down AP does not lift it (there can be no such
+  // station; the guard is the AP being genuinely on the air).
+  ApIdlePolicy q;
+  q.suppressed(0, true, true, 0, kIdleMs);
+  q.suppressed(kIdleMs, true, true, 0, kIdleMs);
+  TEST_ASSERT_TRUE(q.suppressed(kIdleMs + 1000, true, false, 1, kIdleMs));
 }
 
 static void test_a_wake_clears_the_verdict_at_once_and_rearms_the_clock() {
@@ -169,6 +202,7 @@ int main() {
   RUN_TEST(test_a_station_appearing_resets_the_window);
   RUN_TEST(test_an_ap_that_is_not_up_does_not_count);
   RUN_TEST(test_the_verdict_latches_while_the_ap_is_down);
+  RUN_TEST(test_a_station_arriving_during_the_grace_lifts_the_latch);
   RUN_TEST(test_a_wake_clears_the_verdict_at_once_and_rearms_the_clock);
   RUN_TEST(test_switching_the_feature_off_clears_the_latch);
   RUN_TEST(test_the_window_holds_across_a_millis_wrap);

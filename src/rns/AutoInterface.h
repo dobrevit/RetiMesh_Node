@@ -74,6 +74,19 @@ void begin();                         // again, with the ring the boot begin() h
                                       // over — the Wi-Fi re-up transition's call
 void end();                           // stops it: peers disconnected, sockets closed;
                                       // begin() may follow. For Wi-Fi teardown to call.
+
+// One Wi-Fi netif is about to be taken away while the task keeps running —
+// the runtime AP drop that leaves the station standing, and its mirror.
+// Leaves the discovery group on that link while its netif is still alive,
+// which is the only time a leave can work: lwIP's IPV6_LEAVE_GROUP resolves
+// the netif index first and returns ENXIO *before* it unregisters the
+// socket's membership slot, so a leave attempted after the netif is gone
+// strands the slot — one of CONFIG_LWIP_MAX_SOCKETS (16) — for the socket's
+// whole life, and a table full of strandings refuses every later join.
+// netifKey is the esp_netif if-key ("WIFI_AP_DEF", "WIFI_STA_DEF"). Call
+// BEFORE WiFi.mode() strips the interface; safe from any task, and a no-op
+// when peering does not run or never joined that link.
+void linkDown(const char* netifKey);
 size_t peers(Peer* out, size_t max);
 size_t peerCount();
 const char* localAddress();           // our link-local on the first joined link, "" until one is

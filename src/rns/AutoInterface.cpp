@@ -76,11 +76,19 @@ struct Link {
   int         ifindex = 0;
   char        local[46] = "";       // our link-local on it, RFC 5952 text
   bool        joined = false;
+  // The membership was already given back while the netif lived (linkDown,
+  // called by the Wi-Fi convergence before it strips the interface). The
+  // link stays marked joined until the netif actually goes — the definition
+  // of linkDown says why — and this is what tells the stale branch below
+  // that there is nothing left to leave.
+  bool        leftEarly = false;
 };
 Link sLinks[] = {
   { "WIFI_AP_DEF",  "the access point" },
   { "WIFI_STA_DEF", "the station network" },
 };
+
+bool bindSocket(int& fd, uint16_t port, const char* what);   // defined below
 
 // ff + type '1' (temporary) + scope '2' (link) + ":0:" + six 16-bit words
 // from bytes 2..13 of sha256(group id) — RNS.Interfaces.AutoInterface.
@@ -126,6 +134,33 @@ const Link* linkByIndex(int ifindex) {
   return nullptr;
 }
 
+// A leave against an already-removed netif has stranded a membership slot on
+// sDisc: lwIP's IPV6_LEAVE_GROUP handler resolves the netif index first and
+// returns ENXIO *before* lwip_socket_unregister_mld6_membership runs, so the
+// slot — one of CONFIG_LWIP_MAX_SOCKETS (16, the pinned sdkconfig) — stays
+// occupied and no later setsockopt can free it; enough of them and every
+// join is refused, once a second, for ever. The one thing that does free
+// them is closing the socket (lwIP drops every registration a socket holds
+// on close), so the discovery socket is rebuilt and every link marked
+// unjoined; the normal join path re-joins the live ones within a second.
+void rebuildDiscovery() {
+  int d = sDisc;
+  sDisc = -1;                    // the fd variable reads "closed" before the fd goes (closeSockets' rule)
+  if (d >= 0) close(d);
+  Sys::Lock held(sLock);
+  for (Link& l : sLinks) { l.joined = false; l.ifindex = 0; l.local[0] = '\0'; l.leftEarly = false; }
+  held.release();
+  if (!bindSocket(sDisc, kDiscPort, "discovery")) {
+    // No socket to select on. Ask the task to end through its own stop path
+    // (endTask: peers disconnected, remaining sockets closed, watchdog
+    // unsubscribed); the next Wi-Fi transition's begin() starts clean.
+    log_e("AutoInterface: could not rebuild the discovery socket; stopping");
+    sStop = true;
+    return;
+  }
+  log_w("AutoInterface: discovery socket rebuilt to free a stranded group membership");
+}
+
 // Join the discovery group on any link that has come up and is not joined
 // yet. Called at start and once a second afterwards, so a station that
 // associates minutes after boot is peered on without a restart.
@@ -140,21 +175,44 @@ void refreshLinks() {
       // that link would be dead for the life of the task with nothing in
       // the log to say so. Judged by the ifindex and the link-local both,
       // because either goes first depending on how the netif went down.
+      // A link linkDown() has already left holds this branch too: while the
+      // netif it anticipated losing still stands, the continue below leaves
+      // the link exactly as it is — unjoining it early would let the next
+      // pass re-join a netif that is about to die, recreating the stranded
+      // slot linkDown exists to prevent.
       esp_netif_t* netif = esp_netif_get_handle_from_ifkey(l.key);
       const int nowIndex = netif ? esp_netif_get_netif_impl_index(netif) : 0;
       char nowLocal[sizeof(l.local)];
       if (nowIndex == l.ifindex && linkLocalOf(l.key, nowLocal, sizeof(nowLocal))) continue;
-      // Give the membership back against the old ifindex, best effort: if
-      // lwIP kept it across a stop/start it would refuse the fresh join
-      // below, and if the netif is truly gone this fails harmlessly.
-      ipv6_mreq old = {};
-      inet_pton(AF_INET6, kGroupAddr, &old.ipv6mr_multiaddr);
-      old.ipv6mr_interface = l.ifindex;
-      setsockopt(sDisc, IPPROTO_IPV6, IPV6_LEAVE_GROUP, &old, sizeof(old));
+      bool leftEarly;
+      { Sys::Lock held(sLock); leftEarly = l.leftEarly; }
+      bool stranded = false;
+      if (!leftEarly) {
+        // Give the membership back against the old ifindex, best effort: if
+        // lwIP kept it across a stop/start it would refuse the fresh join
+        // below. Not attempted when linkDown already left while the netif
+        // lived — there is nothing registered, and the ENXIO this would
+        // return is indistinguishable from the stranding checked for next.
+        ipv6_mreq old = {};
+        inet_pton(AF_INET6, kGroupAddr, &old.ipv6mr_multiaddr);
+        old.ipv6mr_interface = l.ifindex;
+        if (setsockopt(sDisc, IPPROTO_IPV6, IPV6_LEAVE_GROUP, &old, sizeof(old)) < 0 &&
+            errno == ENXIO) {
+          // The netif went before the leave could reach it, and lwIP's
+          // ENXIO path returns before the socket's membership slot is
+          // unregistered — that slot (one of CONFIG_LWIP_MAX_SOCKETS = 16)
+          // is now stranded on sDisc, and each one lost is a join the
+          // future is refused. Only a socket rebuild frees it. Any other
+          // failure (EADDRNOTAVAIL: the netif stands, the group was not
+          // on it) has still unregistered the slot and needs nothing.
+          stranded = true;
+        }
+      }
       Sys::Lock held(sLock);
-      l.joined = false; l.ifindex = 0; l.local[0] = '\0';
+      l.joined = false; l.ifindex = 0; l.local[0] = '\0'; l.leftEarly = false;
       held.release();
       log_i("AutoInterface: %s went away; peering resumes when it returns", l.what);
+      if (stranded) rebuildDiscovery();
       continue;   // the netif is down or mid-change; the join below waits its turn
     }
     char local[sizeof(l.local)];
@@ -174,6 +232,7 @@ void refreshLinks() {
     strlcpy(l.local, local, sizeof(l.local));
     l.ifindex = ifindex;
     l.joined  = true;
+    l.leftEarly = false;
     held.release();
     log_i("AutoInterface: peering on %s, link-local %s (ifindex %d)", l.what, l.local, l.ifindex);
   }
@@ -429,7 +488,7 @@ void endTask() {
   // stale. Dropped here so a later begin() joins from nothing; under the
   // lock, because localAddress() reads the links from other tasks.
   Sys::Lock links(sLock);
-  for (Link& l : sLinks) { l.joined = false; l.ifindex = 0; l.local[0] = '\0'; }
+  for (Link& l : sLinks) { l.joined = false; l.ifindex = 0; l.local[0] = '\0'; l.leftEarly = false; }
   links.release();
   log_i("AutoInterface: stopped; %u peer%s disconnected", (unsigned)n, n == 1 ? "" : "s");
   // Off the watchdog before the task goes: nothing in IDF clears a
@@ -475,6 +534,10 @@ void task(void*) {
           staAssociated = wifiManager.stationConnected();
           livePeers     = AutoInterface::peerCount();
         }
+        // refreshLinks can lose its socket and ask to stop (rebuildDiscovery
+        // with no fd to rebind into): back to the top, where endTask runs,
+        // rather than on to an FD_SET of -1.
+        if (sStop) continue;
         if (policy.discoveryDue(now, apStation, staAssociated, livePeers)) sendDiscovery();
         if (now - lastReverse >= kReverseMs) { lastReverse = now; sendReversePeering(); }
 
@@ -566,6 +629,56 @@ void end() {
   // and sits well inside the caller's own 30 s watchdog (WATCHDOG_TIMEOUT_S).
   for (int i = 0; i < 500 && sTaskAlive; i++) vTaskDelay(pdMS_TO_TICKS(10));
   if (sTaskAlive) log_w("AutoInterface: the task did not stop inside 5 s");
+}
+
+// The Wi-Fi convergence is about to strip one netif while the task keeps
+// running. The leave must happen now, against the live netif: lwIP's
+// IPV6_LEAVE_GROUP resolves the netif index first and returns ENXIO *before*
+// lwip_socket_unregister_mld6_membership runs, so a leave after the netif is
+// gone strands the socket's membership slot — one of CONFIG_LWIP_MAX_SOCKETS
+// (16). Each runtime AP down/up cycle then leaked one, and once the table
+// filled every join was refused: peering fell silent with a once-a-second
+// log line as the only symptom. (The whole-radio-off path never needed this:
+// end() closes the socket, and closing drops all of its registrations.)
+//
+// Runs on the caller's task (the loop task) while the autoif task keeps
+// selecting on the same socket, and that is safe: lwIP serialises socket
+// operations through the tcpip thread, the fd is never closed here, and the
+// only thing that changes is a group membership — at worst the select loop
+// stops seeing that group's datagrams, which is the point. What would NOT be
+// safe is marking the link unjoined here: refreshLinks runs once a second on
+// the autoif task, and an unjoined link whose netif is still alive — which
+// it is until WiFi.mode() lands, some time after this returns — is exactly
+// what refreshLinks re-joins, re-registering the membership this call just
+// gave back on a netif about to die. So only leftEarly is set (under sLock,
+// like every sLinks write since M2), the link stays marked joined, and the
+// autoif task itself retires the mark on its next pass after the netif has
+// actually changed — knowing from leftEarly that there is nothing to leave.
+void linkDown(const char* netifKey) {
+  const int fd = sDisc;              // snapshot: the fd variables read "closed"
+  if (fd < 0 || !sLock) return;      //   before any fd goes (closeSockets' rule)
+  Link* target = nullptr;
+  for (Link& l : sLinks) if (strcmp(l.key, netifKey) == 0) { target = &l; break; }
+  if (!target) return;
+  bool joined, leftEarly;
+  int  ifindex;
+  {
+    Sys::Lock held(sLock);
+    joined = target->joined; ifindex = target->ifindex; leftEarly = target->leftEarly;
+  }
+  if (!joined || leftEarly) return;  // never joined, or already given back
+  ipv6_mreq mreq = {};
+  inet_pton(AF_INET6, kGroupAddr, &mreq.ipv6mr_multiaddr);
+  mreq.ipv6mr_interface = ifindex;
+  if (setsockopt(fd, IPPROTO_IPV6, IPV6_LEAVE_GROUP, &mreq, sizeof(mreq)) < 0) {
+    // Nothing more to do here: refreshLinks' stale branch attempts the same
+    // leave once the netif is gone, and its safety net rebuilds the socket
+    // if that strands the slot.
+    log_w("AutoInterface: could not leave the group before %s goes (errno %d)", netifKey, errno);
+    return;
+  }
+  Sys::Lock held(sLock);
+  target->leftEarly = true;
 }
 
 bool enabled() { return sEnabled; }

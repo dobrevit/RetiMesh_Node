@@ -160,34 +160,33 @@ Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Sourc
   }
   if (lockedOut(next, settings.maintenance().consoleEnabled, settings.maintenance().webUi))
     return Apply::RefusedLockedOut;
-  // Asking for the access point is a wake, judged before the unchanged
-  // return on purpose: WIFI ON on a node whose switch is already on means
-  // "bring it back", and the idle policy may be holding it down — an
-  // Unchanged that did nothing was exactly how the one documented recovery
-  // command failed to recover. The wake is a raised flag, nothing more, so
-  // it is safe from this (HTTP or console) task; a node with the idle
-  // feature off serves it as a no-op.
-  {
-    bool apAskedOn = false;
-    for (size_t i = 0; i < n; i++)
-      if (changed[i] && f[i].type == Type::WifiAp && want.*(f[i].on)) apAskedOn = true;
-    if (apAskedOn) wifiManager.apWake();
-  }
+  // What this ask means beyond the save — the wake, and which switch applies
+  // how — judged by the one rule in LocalLinkState.h (test_local_link holds
+  // it to its cases). The wake is served before the unchanged return below,
+  // which is the property the rule's comment pins: WIFI ON on a node whose
+  // switch is already on means "bring it back", and an Unchanged that did
+  // nothing was exactly how the one documented recovery command failed to
+  // recover. The wake is a raised flag, nothing more, so it is safe from
+  // this (HTTP or console) task; a node with the idle feature off serves it
+  // as a no-op.
+  bool apAsked = false, apAskedOn = false;
+  for (size_t i = 0; i < n; i++)
+    if (changed[i] && f[i].type == Type::WifiAp) { apAsked = true; apAskedOn = want.*(f[i].on); }
+  const LinksApplyVerdict verdict = judgeLinksApply(
+      apAsked, apAskedOn,
+      next.wifiApEnabled  != settings.links().wifiApEnabled,
+      next.wifiStaEnabled != settings.links().wifiStaEnabled);
+  if (verdict.wakeAp) wifiManager.apWake();
   bool same = next.pppBaud == settings.links().pppBaud;
   for (size_t i = 0; i < n; i++) if (next.*(f[i].on) != settings.links().*(f[i].on)) same = false;
   if (same) return Apply::Unchanged;
-  // The two Wi-Fi switches part ways here. The access point's applies live:
-  // the runtime up/down path exists now (WifiManager's tick convergence,
-  // which stages a grace before a teardown so this very reply leaves first),
-  // and it is the same path the idle policy rides. The station's still needs
-  // the restart — the join is built at boot, and reshaping a running
-  // station under the LAN session that asked is the instability the
-  // restart-applied pattern exists to avoid.
-  const bool apChanged  = next.wifiApEnabled  != settings.links().wifiApEnabled;
-  const bool staChanged = next.wifiStaEnabled != settings.links().wifiStaEnabled;
   if (!settings.saveLinks(next)) return Apply::NvsFailed;
-  if (apChanged) wifiManager.requestModeSync();   // converge on the loop task
-  if (!staChanged) return Apply::Saved;
+  // The two Wi-Fi switches part ways here; the rule says why (the AP has a
+  // runtime up/down path — the tick convergence, which stages a grace before
+  // a teardown so this very reply leaves first — while the station's join is
+  // built at boot).
+  if (verdict.apFollowsLive) wifiManager.requestModeSync();   // converge on the loop task
+  if (!verdict.staNeedsRestart) return Apply::Saved;
   return Bootloader::reboot(source) ? Apply::SavedRestarting : Apply::SavedNextBoot;
 }
 

@@ -29,10 +29,13 @@
 //  the access point is not actually up, the idle clock re-arms. Once the AP
 //  has stood empty for the configured time, the verdict latches to
 //  "suppress" — and stays latched, because the moment the AP goes down
-//  nobody can associate to end the emptiness: the only ways back are a wake
-//  (a button press, WIFI ON at the console, an admin message) or the feature
-//  being switched off. A wake clears the latch at once and re-arms the
-//  clock, so the AP that comes back gets its full idle window again.
+//  nobody can associate to end the emptiness: the ways back are a wake
+//  (a button press, WIFI ON or SET links.wifi_ap on at the console, an
+//  admin message), the feature being switched off, or a client that manages
+//  to associate while the AP is still genuinely on the air (the staged
+//  teardown grace) — their arrival ends the emptiness the verdict was
+//  about. A wake clears the latch at once and re-arms the clock, so the AP
+//  that comes back gets its full idle window again.
 //
 //  Pure — no Arduino, no clock of its own, no Wi-Fi — so the decisions are
 //  unit-tested on the host (test/test_ap_idle) rather than waited out on a
@@ -69,7 +72,18 @@ public:
       _asked = false;              // the next enabled ask re-seeds the clock
       return false;
     }
-    if (_suppressed) return true;  // beacon-less: only wake() or off ends it
+    if (_suppressed && apUp && stations > 0) {
+      // Someone associated while the verdict stood — only possible in the
+      // window where the AP is still genuinely on the air (the staged
+      // teardown grace): down, it sends no beacons and can produce no
+      // station. Their arrival ends the emptiness the verdict was about, so
+      // it lifts the latch rather than being cut off by it; the ask falls
+      // through to the re-arm below, so the visitor buys the AP its whole
+      // window again.
+      _suppressed = false;
+    }
+    if (_suppressed) return true;  // still empty or already down: only wake(),
+                                   // off, or the arrival above ends it
     // The first enabled ask seeds the clock: a boot-time zero would read as
     // "empty since the epoch" and take the AP down on the spot, when the
     // window is supposed to start from the moment the counting does.
