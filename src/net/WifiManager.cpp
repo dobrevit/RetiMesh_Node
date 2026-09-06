@@ -283,10 +283,15 @@ void WifiManager::begin() {
       // the driver is started, and starting is exactly what these events say.
       Power::applyWifiTxPower();
     }
-    // The listen interval rides the station's own start: STA_START fires on
-    // every station bring-up, which is every time there is a freshly-built
-    // config for the read-modify-write to patch.
-    if (event == ARDUINO_EVENT_WIFI_STA_START) wifiManager.applyStaListenInterval();
+    // Belt-and-braces for the listen interval: staConnect() writes it into
+    // the config before the connect goes out, and this re-applies it after
+    // every association in case something rebuilt the config in between.
+    // Not STA_START — that fires inside WiFi.begin(), where a write from
+    // this (event-task) hook races the config the core is building on the
+    // caller's task. On a config that already holds the value the helper's
+    // early-out makes this a read and no write, so an ordinary connect
+    // never touches an associated station's config.
+    if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) wifiManager.applyStaListenInterval();
   });
   if (wifiEnabled()) {
     startAccessPoint();
@@ -487,21 +492,53 @@ wifi_mode_t WifiManager::settingsWifiMode(bool& wantAp, bool& wantSta) const {
 
 // The station's listen interval — how many AP beacon intervals it may doze
 // between wakes under the battery profile's max modem sleep (the driver
-// ignores it in every other power-save mode). WiFi.begin() memsets a whole
-// wifi_config_t and connects immediately (core STA.cpp), so there is no gap
-// in which to set the field before the connect: this reads the config the
-// core just wrote, patches the one field, and writes it back — called right
-// after every begin() and again from the STA_START hook. Whether the patch
-// lands in time for the association already in flight is a bench question;
-// worst case that first association runs at the driver default of 3 and the
-// value holds from the next (re)association on.
+// ignores it in every other power-save mode). One read-modify-write of the
+// station config: staConnect() calls it with the config freshly written and
+// nothing in flight, the STA_CONNECTED hook re-applies it after every
+// association, and the settings commit calls it for a live change. The
+// driver reads a stored 0 as its default of 3, so 0 and 3 are one value
+// with two spellings — normalized before the early-out, or a node on the
+// default setting would rewrite an associated station's config on every
+// unrelated live commit (and esp_wifi_set_config on an associated station
+// may bounce the link). Whether the driver's doze then actually follows the
+// interval on the air is a bench question; the write itself is now checked
+// and logged.
 void WifiManager::applyStaListenInterval() {
   wifi_config_t conf;
   if (esp_wifi_get_config(WIFI_IF_STA, &conf) != ESP_OK) return;   // no station interface up
   const uint8_t want = settings.wifi().staListenInterval;
-  if (conf.sta.listen_interval == want) return;                    // nothing to write
+  const uint8_t have = conf.sta.listen_interval ? conf.sta.listen_interval : 3;
+  if (have == want) return;                                        // nothing to write
   conf.sta.listen_interval = want;
-  (void)esp_wifi_set_config(WIFI_IF_STA, &conf);
+  const esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &conf);
+  if (err != ESP_OK)
+    log_w("station: listen interval %u not applied (err 0x%x) — the driver dozes at its default",
+          (unsigned)want, err);
+}
+
+// One station connect for every site that starts a join — the boot's, the
+// glass's, and the fallback after a failed join. WiFi.begin() alone rebuilds
+// the whole station config (a memset, core STA.cpp) and issues the connect
+// in the same call, and esp_wifi_set_config is documented to refuse with
+// ESP_ERR_WIFI_STATE while that connect is in flight (esp_wifi.h) — so a
+// listen interval applied "right after begin()" was a write into a closing
+// door, and the discarded refusal left the driver on its default. The core
+// offers the two halves separately: begin() with connect=false does
+// everything up to the connect — interface up, config written, dynamic IP
+// asked for — which opens a quiet gap for the read-modify-write, and
+// esp_wifi_connect() is then exactly the call the core's own tryConnect
+// path would have made. The core's auto-reconnect and WiFi.reconnect()
+// re-use the stored config without rebuilding it (STA.cpp), so what is
+// written here is what every later association runs.
+void WifiManager::staConnect(const char* ssid, const char* password) {
+  if (WiFi.begin(ssid, (password && password[0]) ? password : nullptr, 0, nullptr,
+                 /*connect=*/false) == WL_CONNECT_FAILED) {
+    log_w("station: could not configure \"%s\"", ssid);
+    return;                              // the core did not take the config; nothing to connect
+  }
+  applyStaListenInterval();              // clean write: the connect has not been issued yet
+  const esp_err_t err = esp_wifi_connect();
+  if (err != ESP_OK) log_w("station: connect to \"%s\" failed (err 0x%x)", ssid, err);
 }
 
 void WifiManager::startAccessPoint() {
@@ -540,24 +577,21 @@ void WifiManager::startAccessPoint() {
   }
   WiFi.enableIPv6();
 
-  // Station mode: join the configured LAN too. The AP and the STA share
-  // one radio, so the AP follows the LAN's channel once connected.
-  if (wantSta) {
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
-    applyStaListenInterval();            // begin() rebuilt the config; see the helper
-    log_i("station: joining \"%s\"", w.staSsid);
-    _staRetryAt = millis() + 30000;
-  }
   _securityName = secured ? "wpa2" : "open";
 
   const bool wantWpa3 = secured && w.security != ApSecurity::WPA2;
   if (wantWpa3 && !WPA3_SOFTAP_SUPPORTED)
     log_w("WPA3 needs an ESP-IDF 5 core; this build runs the AP as WPA2");
-  // One read-modify-write of the AP config, and it must live here, after
-  // softAP(): the Arduino core builds a fresh config with beacon_interval =
-  // 100 on EVERY softAP() call (core AP.cpp), so a beacon interval patched
-  // anywhere else is silently reverted by the next AP bring-up. The beacon
+  // One read-modify-write of the AP config, and it must sit exactly here.
+  // After softAP(): the Arduino core builds its config with beacon_interval
+  // = 100 on every softAP() call and writes it whenever any field it
+  // compares differs (core AP.cpp — softap_config_equal ignores
+  // beacon_interval, so an identical call skips the write and a standing
+  // patch survives it, but any real change writes the fresh config and
+  // silently reverts the beacon). Before the station join below:
+  // esp_wifi_set_config is documented to refuse with ESP_ERR_WIFI_STATE
+  // while a station connect is in flight (esp_wifi.h), so sitting after the
+  // join exposed this patch to that refusal on every AP+STA boot. The beacon
   // slows on every shape of AP; the auth mode joins the same transaction only
   // where WPA3 is asked for, because the Arduino wrapper knows only
   // open/WPA2 — through ESP-IDF the AP config accepts WPA2_WPA3_PSK /
@@ -584,7 +618,19 @@ void WifiManager::startAccessPoint() {
         log_w("AP config patch rejected by the Wi-Fi driver (err 0x%x) — beacons stay at "
               "100 TU%s", err, patchWpa3 ? " and the AP stays on WPA2" : "");
       }
+    } else {
+      log_w("AP config could not be read — the beacon%s patch was skipped",
+            wantWpa3 && WPA3_SOFTAP_SUPPORTED ? "/WPA3" : "");
     }
+  }
+
+  // Station mode: join the configured LAN too. The AP and the STA share
+  // one radio, so the AP follows the LAN's channel once connected.
+  if (wantSta) {
+    WiFi.setAutoReconnect(true);
+    staConnect(w.staSsid, w.staPassword);
+    log_i("station: joining \"%s\"", w.staSsid);
+    _staRetryAt = millis() + 30000;
   }
 }
 
@@ -602,8 +648,7 @@ void WifiManager::tick() {
       _joinDeadline = millis() + 20000;  // WPA against a present AP settles well inside this
       _joining = true;
       WiFi.disconnect();                 // whatever the station was doing before
-      WiFi.begin(_joinSsid, _joinPass[0] ? _joinPass : nullptr);
-      applyStaListenInterval();          // begin() rebuilt the config; see the helper
+      staConnect(_joinSsid, _joinPass);
       log_i("station: joining \"%s\" (asked from the glass)", _joinSsid);
     } else {
       // Wi-Fi went off between the ask and this pass. Starting the join
@@ -659,8 +704,7 @@ void WifiManager::tick() {
         // stored) — fall back to it and let the watchdog take over. The
         // re-assert below is a no-op on this path: the shape it computes
         // keeps the STA bit this begin() needs.
-        WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
-        applyStaListenInterval();        // begin() rebuilt the config; see the helper
+        staConnect(w.staSsid, w.staPassword);
         _staRetryAt = millis() + 30000;
       }
       // Nothing to fall back to — none stored, or the switch off — is no
@@ -2228,6 +2272,12 @@ void WifiManager::handleWifiPost(AsyncWebServerRequest* request, const char* bod
       JsonDocument out;
       out["ok"] = true;
       out["restart"] = (res == SettingsFields::Result::OkRestart);
+      // "restart": false alone covers two shapes an operator must tell
+      // apart — only the live fields changed (applied now), or the restart
+      // was needed and not granted. The note is the distinction, in the
+      // same words the links endpoint uses for the same state.
+      if (res == SettingsFields::Result::OkNextBoot)
+        out["note"] = "saved; a restart is already in progress, so the change applies at the next boot";
       out["ssid"] = w.ssid[0] ? w.ssid : _ssid;   // auto-derived name does not change
       out["security"] = Settings::securityName(w.security);
       sendJson(request, 200, out);
@@ -2407,6 +2457,13 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     ws.txPowerDbm = w["tx_power"] | ws.txPowerDbm;
     ws.staListenInterval = w["sta_listen_interval"] | ws.staListenInterval;
     if (ws.security != ApSecurity::Open && strlen(ws.password) < 8) ws.security = ApSecurity::Open;
+    // The unusable password goes with the coercion, whichever import wrote
+    // it: kept, it fails validateWifi's 8-63 rule below, turning files that
+    // imported fine before this validation existed — and self-exports of
+    // nodes the coercion above already ran on, which say "open" with the
+    // short password still in them — into 400s. Cleared, the section means
+    // exactly what the node will run: an open network.
+    if (ws.password[0] != '\0' && strlen(ws.password) < 8) ws.password[0] = '\0';
     // The shared rule, not a local copy of its bounds: the inline check that
     // sat here knew channel and max_stations and would have silently waved
     // every later field through — the drift SettingsRules exists to prevent.

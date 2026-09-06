@@ -59,6 +59,8 @@ struct RadioSettings {
   bool     gpsSharePosition = false;             // publish coordinates on the public status API
 };
 
+// New field? Classify it in SettingsRules::wifiChangeNeedsRestart — a field
+// missing there applies without a restart, silently.
 struct WifiSettings {
   char       ssid[33]     = "";         // empty => AP_SSID_PREFIX-<MAC tail>
   char       password[65] = AP_PASSWORD;

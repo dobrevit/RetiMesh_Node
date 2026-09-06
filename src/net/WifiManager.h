@@ -77,11 +77,12 @@ public:
   bool wifiEnabled() const;
 
   // Re-applies wifi.sta_listen_interval to the station config, by
-  // read-modify-write — WiFi.begin() builds that config from scratch, so
-  // every begin() call site and the STA_START hook call this after it, and
-  // the settings commit calls it for a live change. Public for the commit's
-  // sake (SettingsFields::commitWifi); safe to call with no station up (it
-  // does nothing then).
+  // read-modify-write. staConnect() calls it in the quiet gap it opens
+  // between writing the config and connecting, the STA_CONNECTED hook
+  // re-applies it after every association, and the settings commit calls it
+  // for a live change. Public for the commit's sake
+  // (SettingsFields::commitWifi); safe to call with no station up (it does
+  // nothing then).
   void applyStaListenInterval();
 
   // --- joining a network from the glass -----------------------------------
@@ -107,6 +108,11 @@ public:
 
 private:
   void startAccessPoint();
+  // The one station connect. Every site that starts a join — the boot's,
+  // the glass's, the fallback after a failed join — goes through here, so
+  // the listen interval is written into the config exactly once, between
+  // the core building it and the connect being issued (see the definition).
+  void staConnect(const char* ssid, const char* password);
   // The radio shape the settings ask for — the AP and STA switches, and
   // whether a station is even configured, combined exactly once.
   // startAccessPoint() brings the node up in this shape and tick()'s

@@ -169,6 +169,38 @@ static void test_the_listen_interval_counts_beacons_one_to_sixteen() {
   TEST_ASSERT_NOT_NULL(strstr(err, "1-16"));
 }
 
+static void test_the_wifi_restart_split_is_pinned_per_field() {
+  // The live/restart split lives in wifiChangeNeedsRestart and nowhere else.
+  // Every field is asserted one at a time, so a WifiSettings member added
+  // without being classified shows up as a missing line here rather than as
+  // a setting that silently never restarts (the predicate enumerates the
+  // restart fields, so omission means live).
+  WifiSettings a, b;
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "no change must not restart");
+
+  b = a; b.txPowerDbm = (int8_t)(a.txPowerDbm == 7 ? 8 : 7);
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "tx power applies live");
+  b = a; b.staListenInterval = (uint8_t)(a.staListenInterval == 9 ? 10 : 9);
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "listen interval applies live");
+
+  b = a; strlcpy(b.ssid, "another-name", sizeof(b.ssid));
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "ssid rebuilds the AP");
+  b = a; strlcpy(b.password, "anotherpass", sizeof(b.password));
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "password rebuilds the AP");
+  b = a; b.security = (a.security == ApSecurity::Open) ? ApSecurity::WPA2 : ApSecurity::Open;
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "security rebuilds the AP");
+  b = a; b.channel = (uint8_t)(a.channel == 6 ? 7 : 6);
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "channel rebuilds the AP");
+  b = a; b.maxStations = (uint8_t)(a.maxStations == 4 ? 5 : 4);
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "max stations rebuilds the AP");
+  b = a; b.hidden = !a.hidden;
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "hidden rebuilds the AP");
+  b = a; strlcpy(b.staSsid, "another-lan", sizeof(b.staSsid));
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "station ssid rebuilds the join");
+  b = a; strlcpy(b.staPassword, "another-lan-pass", sizeof(b.staPassword));
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "station password rebuilds the join");
+}
+
 static void test_an_ssid_is_judged_before_it_is_truncated() {
   char err[160] = "";
   char long_one[64];
@@ -193,6 +225,7 @@ int main() {
   RUN_TEST(test_a_secured_network_needs_a_password_and_the_lengths_are_wifis);
   RUN_TEST(test_the_wifi_tx_ceiling_is_two_to_twenty_dbm);
   RUN_TEST(test_the_listen_interval_counts_beacons_one_to_sixteen);
+  RUN_TEST(test_the_wifi_restart_split_is_pinned_per_field);
   RUN_TEST(test_an_ssid_is_judged_before_it_is_truncated);
   return UNITY_END();
 }

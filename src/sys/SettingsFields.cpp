@@ -173,8 +173,9 @@ Result commitTransport(TransportSettings& t, char* err, size_t n) {
 // fields are not part of the AP's or the join's shape and apply live instead —
 // the TX ceiling (a driver register) and the station listen interval (a
 // config read-modify-write) — so a change to only those keeps the node, and
-// the session the change arrived on, up. The split lives here and nowhere
-// else; handleWifiPost commits through this.
+// the session the change arrived on, up. The split is
+// SettingsRules::wifiChangeNeedsRestart's, held by test_settings_rules;
+// handleWifiPost commits through this.
 Result commitWifi(WifiSettings& w, char* err, size_t n) {
   if (restartPending(err, n)) return Result::Busy;
   if (!SettingsRules::validateWifi(w, err, n)) return Result::BadValue;
@@ -182,12 +183,7 @@ Result commitWifi(WifiSettings& w, char* err, size_t n) {
   if (!settings.saveWifi(w)) return Result::NvsFailed;
   Power::applyWifiTxPower();                 // live, wherever the driver is up
   wifiManager.applyStaListenInterval();      // live; lands at the next association
-  const bool needRestart =
-      strcmp(before.ssid, w.ssid) != 0 || strcmp(before.password, w.password) != 0 ||
-      before.security != w.security || before.channel != w.channel ||
-      before.maxStations != w.maxStations || before.hidden != w.hidden ||
-      strcmp(before.staSsid, w.staSsid) != 0 || strcmp(before.staPassword, w.staPassword) != 0;
-  if (!needRestart) return Result::Ok;
+  if (!SettingsRules::wifiChangeNeedsRestart(before, w)) return Result::Ok;
   return askRestart();
 }
 

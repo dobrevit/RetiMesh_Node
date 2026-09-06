@@ -240,4 +240,21 @@ inline bool validateWifi(const WifiSettings& w, char* err, size_t errLen) {
   return true;
 }
 
+// Which Wi-Fi changes need the restart, decided once. The access point and
+// the station join are built at start-up from the fields compared here; the
+// two deliberately absent — txPowerDbm and staListenInterval — apply live
+// (SettingsFields::commitWifi applies them as it saves). The comparison
+// enumerates the restart fields, so a field missing from it applies without
+// a restart, silently: a new WifiSettings member must be classified here the
+// moment it exists (the struct says so beside it), and the
+// test_settings_rules suite pins every field's classification one at a time.
+inline bool wifiChangeNeedsRestart(const WifiSettings& before, const WifiSettings& after) {
+  return strcmp(before.ssid, after.ssid) != 0 ||
+         strcmp(before.password, after.password) != 0 ||
+         before.security != after.security || before.channel != after.channel ||
+         before.maxStations != after.maxStations || before.hidden != after.hidden ||
+         strcmp(before.staSsid, after.staSsid) != 0 ||
+         strcmp(before.staPassword, after.staPassword) != 0;
+}
+
 } // namespace SettingsRules
