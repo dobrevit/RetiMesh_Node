@@ -199,7 +199,7 @@ static void test_the_hash_tells_frames_apart_and_repeats_itself() {
   TEST_ASSERT_NOT_EQUAL(clean, RefreshPolicy::hash(big, sizeof(big)));
 }
 
-static void test_brightness_percent_maps_onto_the_hardwares_byte() {
+static void test_brightness_percent_maps_onto_the_hardware_byte() {
   // One mapping for the OLED's contrast register and the TFT backlight's
   // duty cycle: the settings floor (5 %) lands at 12, the default 80 % at
   // 204, full at exactly 255, and anything past 100 is full rather than a
@@ -232,6 +232,6 @@ int main() {
   RUN_TEST(test_urgency_lapses_when_the_frame_it_asked_for_is_unchanged);
   RUN_TEST(test_the_clock_wrapping_does_not_freeze_the_panel);
   RUN_TEST(test_the_hash_tells_frames_apart_and_repeats_itself);
-  RUN_TEST(test_brightness_percent_maps_onto_the_hardwares_byte);
+  RUN_TEST(test_brightness_percent_maps_onto_the_hardware_byte);
   return UNITY_END();
 }

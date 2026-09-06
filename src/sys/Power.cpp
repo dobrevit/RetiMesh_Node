@@ -55,14 +55,20 @@ uint8_t percentFor(float v) {
   return 0;
 }
 
-#if HAS_BATTERY_ADC
-// One task in the divider at a time. Four tasks ask for the battery — the
-// panel, telemetry, the console and the web server — and on a board whose
-// divider sits behind an enable line, two of them crossing the staleness
-// boundary together meant one released the line while the other was still
-// averaging: a floating pin, scaled and cached as the cell for ten seconds.
+// One task in the battery reader at a time. Four tasks ask for the battery —
+// the panel, telemetry, the console and the web server — and each reader has
+// its own window when two of them cross the sampling boundary together. On a
+// board whose divider sits behind an enable line, one released the line while
+// the other was still averaging: a floating pin, scaled and cached as the
+// cell for ten seconds. On a PMU board the window is the cache itself: the
+// gate advances before the I2C read and the cache fills field-by-field, so
+// the caller that skipped the sample copied it half-written — all zeroes,
+// "no battery", at the first ask after boot.
+#if HAS_BATTERY_ADC || HAS_PMU
 SemaphoreHandle_t sSampleLock = nullptr;
+#endif
 
+#if HAS_BATTERY_ADC
 // The enable line parked once; the attenuation is handled per read, below —
 // both orderings of "configure the pin once up front" were tried against the
 // hardware and neither survives: analogReadMilliVolts selects its calibration
@@ -203,16 +209,11 @@ uint32_t displaySleepMs() {
 }
 
 void begin() {
-#if HAS_BATTERY_ADC
-  // The default for every channel attached from here on, rather than a
-  // per-pin setting: core 3 attaches a pin to the ADC on its first read and
-  // refuses to configure one that is not attached yet, so the per-pin call
-  // before the first sample logged an error and set nothing.
-  
-#if HAS_BATTERY_ADC
+#if HAS_BATTERY_ADC || HAS_PMU
   sSampleLock = xSemaphoreCreateMutex();   // before any task can ask
-  adcSetup();
 #endif
+#if HAS_BATTERY_ADC
+  adcSetup();
   sample();
   // Primed, not left untouched: the reading above is fresh, so the gate holds
   // its full interval from here instead of sampling again on the first ask.
@@ -270,7 +271,16 @@ Battery battery() {
   // The gate's first ask samples (SampleGate.h): nothing primes this branch,
   // and answering from the zero-initialised cache for the first ten seconds
   // made every PMU board report "no battery" everywhere right after boot.
+  //
+  // Gate, read, cache-fill and the answer's copy all sit under the sample
+  // lock. The gate advances before the I2C read and the cache fills
+  // field-by-field, so a second task crossing with the first would skip the
+  // sample and copy the cache half-written — at the very first ask, the
+  // all-zero "no battery" the priming rule above exists to prevent. Held
+  // across the I2C transaction, exactly as sample() holds it across the
+  // divider read; the wait is one battery conversion at worst.
   static Battery sCached{};
+  if (sSampleLock) xSemaphoreTake(sSampleLock, portMAX_DELAY);
   if (sSampleGate.due(millis())) {
     Pmu::Battery p = Pmu::battery();
     sCached.volts     = p.volts;
@@ -280,7 +290,9 @@ Battery battery() {
     sCached.percent   = p.present ? p.percent : 0;
     recordHistory(sCached.present, sCached.percent);
   }
-  return sCached;
+  const Battery out = sCached;        // copied inside the lock, whole
+  if (sSampleLock) xSemaphoreGive(sSampleLock);
+  return out;
 #elif HAS_BATTERY_ADC
   if (sSampleGate.due(millis())) sample();
   Battery b;
