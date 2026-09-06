@@ -50,6 +50,39 @@
 
 namespace SettingsRules {
 
+// A wide integer bound for a narrower stored field, refused when the trip
+// through the target's width would change it — so the bounds below always
+// judge the number that was actually sent, never what a cast made of it.
+//
+// The web handlers need this because their JSON layer narrows before any
+// rule runs: the pinned ArduinoJson (7.4.3) does not wrap an out-of-range
+// integer, it converts it to 0 (Numbers/convertNumber.hpp), and 0 is a
+// *legal* value for several fields — a sync word, 0 dBm on a transceiver
+// whose floor is negative, "off" for the beacon and announce intervals and
+// the duty cycle — so `"tx_dbm": 258` was stored as 0 dBm under a 200 with
+// nothing anywhere saying so. The handlers now read the value wide (long
+// long holds every integer JSON can carry) and narrow through here. The
+// console's parsers already hold the same width rule from the other side
+// (parseU32Max / parseI32Range carry each field's exact width); this is its
+// one JSON-side counterpart, deliberately free of any per-field bound —
+// those stay in the validate*() rules below, once.
+//
+// Integral targets only. `out` is untouched on refusal.
+template <typename T>
+inline bool narrowInt(long long wide, T& out, const char* what,
+                      char* err, size_t errLen) {
+  static_assert(sizeof(T) <= sizeof(long long), "narrowInt narrows, it does not widen");
+  const T narrowed = (T)wide;
+  // The sign test guards the one case the round-trip cannot: a negative into
+  // an unsigned target of the same width survives the trip modulo 2^64.
+  if ((long long)narrowed != wide || (wide < 0 && (T)-1 > (T)0)) {
+    snprintf(err, errLen, "%s is out of range", what);
+    return false;
+  }
+  out = narrowed;
+  return true;
+}
+
 // The radio. `caps` is the transceiver actually fitted and `maxDbm` the most
 // it will emit — both are asked of the driver rather than assumed, because an
 // SX1280 tunes 2400-2500 MHz and has four bandwidths, none of which appear in
@@ -189,6 +222,14 @@ inline bool validateTransport(const TransportSettings& t, char* err, size_t errL
     snprintf(err, errLen, "announce cap must be 1-100 %%");
     return false;
   }
+  // The profile travels as a number only in an exported file — the POST path
+  // takes the name through Power::profileFromName, which can only produce
+  // 0-2 — so this bound exists for the import, which reads back the number
+  // the export wrote. The names are Power.h's Profile values, in order.
+  if (t.powerProfile > 2) {
+    snprintf(err, errLen, "power_profile must be 0-2 (performance|balanced|battery)");
+    return false;
+  }
   return validateGroupId(t.autoGroupId, err, errLen);
 }
 
@@ -219,7 +260,52 @@ inline bool validateWifi(const WifiSettings& w, char* err, size_t errLen) {
     snprintf(err, errLen, "max stations must be 1-10");
     return false;
   }
+  // 2-20 dBm: the driver's own legal window is 2-21 in quarter-dBm units
+  // ([8,84]), and 20 is what the PHY is configured for at the top
+  // (CONFIG_ESP_PHY_MAX_TX_POWER). The driver quantizes DOWN to its own
+  // steps, so what sticks may sit below what passed here — the read-back
+  // (Power::wifiTxPowerDbm) is the honest figure, this bound is what may be
+  // asked for.
+  if (w.txPowerDbm < 2 || w.txPowerDbm > 20) {
+    snprintf(err, errLen, "wifi tx power must be 2-20 dBm");
+    return false;
+  }
+  // Units are AP beacon intervals. 16 is the ceiling worth offering: beyond
+  // it a station misses so many DTIMs that buffered broadcast traffic —
+  // ARP included — starts expiring at the AP, and the maintenance path this
+  // trades latency on stops being a path.
+  if (w.staListenInterval < 1 || w.staListenInterval > 16) {
+    snprintf(err, errLen, "station listen interval must be 1-16 beacon intervals");
+    return false;
+  }
+  // Minutes of standing empty before the AP idles down. A day is the most an
+  // idle window can mean, and zero is not "off" — wifi.ap_idle_off is. Held
+  // whether or not the switch is on, so a value stored while the feature is
+  // off cannot walk in the moment it is switched on.
+  if (w.apIdleMinutes < 1 || w.apIdleMinutes > 1440) {
+    snprintf(err, errLen, "ap idle minutes must be 1-1440");
+    return false;
+  }
   return true;
+}
+
+// Which Wi-Fi changes need the restart, decided once. The access point and
+// the station join are built at start-up from the fields compared here; the
+// four deliberately absent — txPowerDbm and staListenInterval (applied by
+// SettingsFields::commitWifi as it saves), apIdleOff and apIdleMinutes (they
+// arm a timer the WifiManager tick reads, not a radio shape) — apply live.
+// The comparison
+// enumerates the restart fields, so a field missing from it applies without
+// a restart, silently: a new WifiSettings member must be classified here the
+// moment it exists (the struct says so beside it), and the
+// test_settings_rules suite pins every field's classification one at a time.
+inline bool wifiChangeNeedsRestart(const WifiSettings& before, const WifiSettings& after) {
+  return strcmp(before.ssid, after.ssid) != 0 ||
+         strcmp(before.password, after.password) != 0 ||
+         before.security != after.security || before.channel != after.channel ||
+         before.maxStations != after.maxStations || before.hidden != after.hidden ||
+         strcmp(before.staSsid, after.staSsid) != 0 ||
+         strcmp(before.staPassword, after.staPassword) != 0;
 }
 
 } // namespace SettingsRules

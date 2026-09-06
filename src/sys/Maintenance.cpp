@@ -309,11 +309,28 @@ static void doStatus() {
         (unsigned long)h.largestDramBlock);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
-  // wifi_ps is read back from the driver itself (esp_wifi_get_ps()), not
-  // assumed from the profile: it is the proof a profile switch actually
-  // took effect, not just that one was asked for.
-  dataf("STATUS", "power profile=%s cpu_mhz=%u wifi_ps=%s",
-        Power::profileName(Power::profile()), (unsigned)getCpuFrequencyMhz(), Power::wifiPsName());
+  // wifi_ps and wifi_tx_dbm are read back from the driver itself
+  // (esp_wifi_get_ps() / esp_wifi_get_max_tx_power()), not assumed from the
+  // profile or the setting: the proof a change actually took effect, not
+  // just that one was asked for. The TX ceiling is quantized down to the
+  // driver's own steps, so the figure here can sit below wifi.tx_power;
+  // both read n/a with Wi-Fi off.
+  {
+    char txp[8] = "n/a";
+    const float t = Power::wifiTxPowerDbm();
+    if (!isnan(t)) snprintf(txp, sizeof(txp), "%.3g", (double)t);
+    dataf("STATUS", "power profile=%s cpu_mhz=%u wifi_ps=%s wifi_tx_dbm=%s",
+          Power::profileName(Power::profile()), (unsigned)getCpuFrequencyMhz(),
+          Power::wifiPsName(), txp);
+  }
+  // The access point's actual state against its switch. "idle-off" and "off"
+  // are different downs with different remedies — a wake (the button, SET
+  // links.wifi_ap on or WIFI ON here, an admin message) brings the first
+  // back; only the operator's switch brings back the second — and an
+  // operator at this console is exactly who has to tell them apart.
+  dataf("STATUS", "wifi_ap=%s idle_off=%s idle_minutes=%u",
+        wifiManager.apStateName(), settings.wifi().apIdleOff ? "on" : "off",
+        (unsigned)settings.wifi().apIdleMinutes);
 #if HAS_BQ25896 || HAS_IMU
   dataf("STATUS", "parts charger=%s imu=%s",
         Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");

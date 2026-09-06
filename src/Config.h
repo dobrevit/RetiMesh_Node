@@ -219,6 +219,62 @@
 #ifndef AP_MAX_STATIONS
   #define AP_MAX_STATIONS   8
 #endif
+// SoftAP beacon interval, in 802.11 time units (1 TU = 1.024 ms, so 400 TU is
+// about 410 ms). The Arduino core hardcodes 100 TU inside WiFi.softAP() — ten
+// beacons a second at the lowest basic rate, around the clock, usually for
+// nobody — and rebuilds that config on every call, which is why the value is
+// applied by a read-modify-write after softAP() (WifiManager::startAccessPoint)
+// and lives nowhere else. 4x less beacon airtime and current; the cost is a
+// phone taking a moment longer to see the network in a scan list. A build
+// default rather than a runtime setting, deliberately.
+#ifndef WIFI_AP_BEACON_TU
+  #define WIFI_AP_BEACON_TU 400
+#endif
+// Default Wi-Fi TX power ceiling, dBm — wifi.tx_power's default, one global
+// ceiling for the AP and the station together (the chip has one radio). 14 is
+// plenty for the AP-as-maintenance-portal case of a phone at arm's length; a
+// node genuinely bridging a LAN at range turns it up (setting bounds 2-20,
+// SettingsRules).
+#ifndef WIFI_TX_POWER_DBM
+  #define WIFI_TX_POWER_DBM 14
+#endif
+// How many AP beacon intervals a dozing station sleeps between wakes —
+// wifi.sta_listen_interval's default, which is also the driver's own default.
+// The driver consults it only under WIFI_PS_MAX_MODEM (the battery profile).
+#ifndef WIFI_STA_LISTEN_INTERVAL
+  #define WIFI_STA_LISTEN_INTERVAL 3
+#endif
+// AP idle auto-off — wifi.ap_idle_off / wifi.ap_idle_minutes' defaults. With
+// the switch on, an access point that has stood empty for the configured
+// minutes is taken down until something wakes it: the button, SET
+// links.wifi_ap on or WIFI ON at the console (either wakes even when the
+// switch is already on — but WIFI ON writes both Wi-Fi switches, so on a
+// node that keeps its station off it also restarts), or an admin message.
+// Off by default, deliberately: the AP is usually the only management path
+// on an unattended node, and a policy bug that keeps it down is a site
+// visit — the operator opts in per node. Bounds (1-1440 min) live in
+// SettingsRules.
+#ifndef AP_IDLE_OFF_DEFAULT
+  #define AP_IDLE_OFF_DEFAULT 0
+#endif
+#ifndef AP_IDLE_MINUTES
+  #define AP_IDLE_MINUTES 10
+#endif
+// How long a runtime access-point teardown holds off after the change that
+// asked for it, so the reply — an HTTP 200 to a browser on the AP itself, a
+// console OK — leaves before the link it rides goes away. The same job
+// RESTART_ACK_DELAY_MS does for a restart's acknowledgement, folded into the
+// one teardown path (WifiManager's convergence) so no caller can shorten it.
+// Invariant (WifiManager.h holds the static_assert): the grace must exceed
+// the idle-gate cadence (_apIdleGate, 1 s), so at least one policy ask lands
+// inside every grace — that ask is what re-reads the station count and lets a
+// station that associated during the grace cancel the staged teardown. At
+// 700 ms the teardown beat the next ask in a healthy loop and cut such a
+// station off; 1200 ms still reads as instant and covers the async reply
+// many times over.
+#ifndef AP_STOP_GRACE_MS
+  #define AP_STOP_GRACE_MS 1200
+#endif
 
 // Admin password protecting the settings API/page (HTTP Basic Auth,
 // user "admin"). Change it from the settings page; stored in NVS.

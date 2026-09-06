@@ -160,19 +160,33 @@ Apply applyLinks(const LinkSettings& want, const bool* changed, Bootloader_Sourc
   }
   if (lockedOut(next, settings.maintenance().consoleEnabled, settings.maintenance().webUi))
     return Apply::RefusedLockedOut;
-  // Either link changing needs the restart, not only the pair as a whole: the
-  // radio's mode is chosen once at bring-up, so turning the access point off
-  // while the station stays on is still a change the running radio cannot make.
-  const bool wifiChanged = next.wifiApEnabled  != settings.links().wifiApEnabled ||
-                           next.wifiStaEnabled != settings.links().wifiStaEnabled;
+  // What this ask means beyond the save — the wake, and which switch applies
+  // how — judged by the one rule in LocalLinkState.h (test_local_link holds
+  // it to its cases). The wake is served before the unchanged return below,
+  // which is the property the rule's comment pins: WIFI ON on a node whose
+  // switch is already on means "bring it back", and an Unchanged that did
+  // nothing was exactly how the one documented recovery command failed to
+  // recover. The wake is a raised flag, nothing more, so it is safe from
+  // this (HTTP or console) task; a node with the idle feature off serves it
+  // as a no-op.
+  bool apAsked = false, apAskedOn = false;
+  for (size_t i = 0; i < n; i++)
+    if (changed[i] && f[i].type == Type::WifiAp) { apAsked = true; apAskedOn = want.*(f[i].on); }
+  const LinksApplyVerdict verdict = judgeLinksApply(
+      apAsked, apAskedOn,
+      next.wifiApEnabled  != settings.links().wifiApEnabled,
+      next.wifiStaEnabled != settings.links().wifiStaEnabled);
+  if (verdict.wakeAp) wifiManager.apWake();
   bool same = next.pppBaud == settings.links().pppBaud;
   for (size_t i = 0; i < n; i++) if (next.*(f[i].on) != settings.links().*(f[i].on)) same = false;
   if (same) return Apply::Unchanged;
   if (!settings.saveLinks(next)) return Apply::NvsFailed;
-  if (!wifiChanged) return Apply::Saved;
-  // The access point cannot be torn down under the request that asked, so a
-  // Wi-Fi change takes effect at a restart; whether one is granted now is the
-  // bootloader manager's answer.
+  // The two Wi-Fi switches part ways here; the rule says why (the AP has a
+  // runtime up/down path — the tick convergence, which stages a grace before
+  // a teardown so this very reply leaves first — while the station's join is
+  // built at boot).
+  if (verdict.apFollowsLive) wifiManager.requestModeSync();   // converge on the loop task
+  if (!verdict.staNeedsRestart) return Apply::Saved;
   return Bootloader::reboot(source) ? Apply::SavedRestarting : Apply::SavedNextBoot;
 }
 
@@ -220,7 +234,7 @@ uint32_t MachineLink::netmask() const {
 // Wi-Fi adapters
 // ---------------------------------------------------------------------------
 bool      WifiApLink::wanted() const  { return settings.links().wifiApEnabled; }
-bool      WifiApLink::carrier() const { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
+bool      WifiApLink::carrier() const { return wifiManager.apUp(); }   // the one mode-bit read
 IPAddress WifiApLink::ip() const      { return WiFi.softAPIP(); }
 IPAddress WifiApLink::mask() const    { return WiFi.softAPSubnetMask(); }
 uint8_t   WifiApLink::clients() const { return WiFi.softAPgetStationNum(); }

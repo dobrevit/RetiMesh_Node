@@ -171,12 +171,12 @@ because the console shares its port with the log.
 |---|---|
 | `HELP` | one `RM HELP cmd=… help="…"` line per command |
 | `VERSION` | firmware, version, board, IDF, asset stamp |
-| `STATUS` | uptime, boot count, reset reason, heap, radio, transport, a `power profile=… cpu_mhz=… wifi_ps=…` line (`wifi_ps` read back from the Wi-Fi driver — `n/a` with Wi-Fi off), whether a restart is pending — and when one is, its target, who asked (`restart_source`) and `restart_in_ms` |
+| `STATUS` | uptime, boot count, reset reason, heap, radio, transport, a `power profile=… cpu_mhz=… wifi_ps=… wifi_tx_dbm=…` line (`wifi_ps` and `wifi_tx_dbm` read back from the Wi-Fi driver, not from the settings — the TX ceiling is quantized down to the driver's own steps, so it can read below `wifi.tx_power`; both `n/a` with Wi-Fi off), a `wifi_ap=up\|down\|idle-off\|off idle_off=… idle_minutes=…` line — the access point's actual state against its switch, and the only console line that keeps `idle-off` (down by the idle timer; a wake brings it back) apart from `off` (down by the switch) — whether a restart is pending — and when one is, its target, who asked (`restart_source`) and `restart_in_ms` |
 | `USB_STATUS` | how the host is attached, the bootloader methods this board offers |
 | `NETWORK_STATUS` | one line per local link |
 | `LINKS` | per link: hardware / firmware / enabled, and the reason when it cannot run; for ppp0 the speed and the addresses it asks for (`baud=`, `asks=`, `peer=`) |
 | `MESSAGES [n]` | the last LXMF messages, newest first — two lines each: the facts on one, the text on the next, tied by `seq=`. Default 12, up to 16; the ring keeps 50 |
-| `WIFI ON` / `WIFI OFF` | saves the link setting and restarts — the way back from a Wi-Fi-off node |
+| `WIFI ON` / `WIFI OFF` | writes both Wi-Fi switches (`links.wifi_ap`, `links.wifi_sta`). The access point half applies live — taken down or brought up with no restart; a restart happens only when the station switch flips. `WIFI ON` (like `SET links.wifi_ap on`) also wakes an access point the idle policy has down, even when the switch already reads on — the way back from a Wi-Fi-off node |
 | `PPP ON` / `PPP OFF` | saves the PPP switch; applies live, no restart. Typed on the very port PPP will take, before pppd is started on it |
 | `RESET CONFIRM` | restart into the application |
 | `BOOTLOADER CONFIRM` | restart into the ROM downloader (`501` on a classic ESP32, which cannot) |
@@ -494,13 +494,15 @@ one.
 
 ## Wi-Fi is optional
 
-`links.wifi` off (settings page, `POST /api/settings/links {"wifi":false}`,
-or `WIFI OFF` at the console) restarts the node without its access point or
-station. The web server and the Reticulum TCP server still start, bound to
-every interface, so the USB link — or PPP on a bridged board — serves them
-unchanged; the console always does. `WIFI ON` at the console is the way
-back, and so is `http://10.64.<n>.1/` over the cable on a native-USB board
-or `http://10.65.<n>.1/` over pppd on a bridged one.
+Both Wi-Fi switches off (settings page, `POST /api/settings/links
+{"wifi_ap":false,"wifi_sta":false}`, or `WIFI OFF` at the console) leave the
+node without its access point or station: the access point goes down live,
+and the node restarts only if the station switch flipped. The web server and
+the Reticulum TCP server keep running, bound to every interface, so the USB
+link — or PPP on a bridged board — serves them unchanged; the console always
+does. `WIFI ON` at the console is the way back, and so is
+`http://10.64.<n>.1/` over the cable on a native-USB board or
+`http://10.65.<n>.1/` over pppd on a bridged one.
 Turning every link off is allowed and the answer says so in words.
 
 ## Native USB: the composite device

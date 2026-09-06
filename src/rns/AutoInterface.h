@@ -25,6 +25,8 @@
 //  29716. token = sha256(group_id + peer_link_local_address_as_text). A
 //  receiver recomputes it for the sender's address; on a match the sender
 //  is a peer for 22 s, and RNS packets flow as UDP unicast to port 42671.
+//  This node announces at that rate only while somebody could hear it, and
+//  backs off when the neighbourhood is empty — AutoIfPolicy.h is the rule.
 //
 //  The same token also goes out unicast to every known peer every 5.2 s, on
 //  port 29717 — RNS's reverse peering. It is what keeps peerings alive on a
@@ -60,11 +62,52 @@ struct Peer {
 
 constexpr uint32_t AUTO_ID_BASE = 0x80000000UL;   // ids above this are AutoInterface peers
 
+// Whether AutoInterface will run this boot: compiled in and switched on.
+// transport.auto_enabled is restart-applied, so the answer is stable for the
+// life of the process, and everything that exists only for this interface
+// asks it here — begin() itself, and WifiManager's two IPv6 enables (this
+// interface is the firmware's only consumer of link-local IPv6).
+bool wanted();
+
 void begin(RingbufHandle_t inRing);   // starts the discovery/data task (core 0)
+void begin();                         // again, with the ring the boot begin() handed
+                                      // over — the Wi-Fi re-up transition's call
+// Stops the task: peers disconnected, sockets closed; begin() may follow.
+// For the Wi-Fi teardown to call, and it answers that caller's one question:
+// true when the task confirmed the stop (or never ran), false when it never
+// answered inside the 5 s bound — and the netifs must NOT be cycled yet,
+// because taking them away under the task's joined discovery group is the
+// stranded-membership failure this ordering exists to prevent. The caller
+// retries the pass; WifiManager::syncRadioShape bounds how many times.
+bool end();
+
+// One Wi-Fi netif is about to be taken away while the task keeps running —
+// the runtime AP drop that leaves the station standing, and its mirror.
+// Leaves the discovery group on that link while its netif is still alive,
+// which is the only time a leave can work: lwIP's IPV6_LEAVE_GROUP resolves
+// the netif index first and returns ENXIO *before* it unregisters the
+// socket's membership slot, so a leave attempted after the netif is gone
+// strands the slot — one of CONFIG_LWIP_MAX_SOCKETS (16) — for the socket's
+// whole life, and a table full of strandings refuses every later join.
+// netifKey is the esp_netif if-key ("WIFI_AP_DEF", "WIFI_STA_DEF"). Call
+// BEFORE WiFi.mode() strips the interface; safe from any task, and a no-op
+// when peering does not run or never joined that link.
+void linkDown(const char* netifKey);
 size_t peers(Peer* out, size_t max);
 size_t peerCount();
 const char* localAddress();           // our link-local on the first joined link, "" until one is
 bool enabled();
+
+// The task ended itself while still wanted — rebuildDiscovery lost the
+// discovery socket and could not rebind (AutoInterface.cpp) — AND is
+// actually gone (the definition says why both terms). No WifiManager end()
+// bracketed the stop, so WifiManager's tick reads this to raise the
+// convergence whose need-based restart re-begins the task (its restart no
+// longer needs the flag — it starts whatever is wanted and not running —
+// but a self-stop happens with the radio's shape already settled, so
+// nothing else would ever run that convergence); cleared when begin()
+// actually starts a task.
+bool stoppedUnexpectedly();
 
 // Called from the RNS task: one RNS packet as a UDP datagram to one peer.
 bool sendTo(uint32_t peerId, const uint8_t* packet, size_t len);

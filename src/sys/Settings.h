@@ -59,6 +59,8 @@ struct RadioSettings {
   bool     gpsSharePosition = false;             // publish coordinates on the public status API
 };
 
+// New field? Classify it in SettingsRules::wifiChangeNeedsRestart — a field
+// missing there applies without a restart, silently.
 struct WifiSettings {
   char       ssid[33]     = "";         // empty => AP_SSID_PREFIX-<MAC tail>
   char       password[65] = AP_PASSWORD;
@@ -67,9 +69,26 @@ struct WifiSettings {
   uint8_t    channel      = AP_CHANNEL;
   uint8_t    maxStations  = AP_MAX_STATIONS;
   bool       hidden       = false;
+  // One TX ceiling for the whole radio — the AP and the station share it.
+  // dBm; the driver quantizes down to its own quarter-dBm steps, so the
+  // honest figure is the read-back (Power::wifiTxPowerDbm), not this.
+  // Applies live, unlike the fields the AP is built from.
+  int8_t     txPowerDbm   = WIFI_TX_POWER_DBM;
   // Station mode: also join an existing Wi-Fi network (AP stays up).
   char       staSsid[33]     = "";      // "" = station mode off
   char       staPassword[65] = "";
+  // How many AP beacon intervals the station may doze between wakes. Units
+  // are the AP's beacons, not milliseconds, and the driver consults it only
+  // under the battery profile's max modem sleep (Power::applyWifiSleep).
+  uint8_t    staListenInterval = WIFI_STA_LISTEN_INTERVAL;
+  // AP idle auto-off (ApIdlePolicy.h): with the switch on, an access point
+  // that has stood empty for apIdleMinutes goes down until something wakes
+  // it — the button, SET links.wifi_ap on or WIFI ON at the console, an
+  // admin message. Both apply live: they arm a timer rather than reshape
+  // the radio, which is why they are deliberately absent from
+  // wifiChangeNeedsRestart.
+  bool       apIdleOff     = AP_IDLE_OFF_DEFAULT != 0;
+  uint16_t   apIdleMinutes = AP_IDLE_MINUTES;   // 1-1440 (SettingsRules)
 };
 
 // Interface modes use rnsd's vocabulary: 1 full, 2 gateway, 3 access_point,

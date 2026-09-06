@@ -115,6 +115,73 @@ static void test_transport_modes_are_rnsds_one_to_five() {
   t.loraMode = 1; t.wifiMode = 6; TEST_ASSERT_FALSE(validateTransport(t, err, sizeof(err)));
 }
 
+static void test_the_power_profile_number_names_a_real_profile() {
+  // The POST path takes the profile by name, which can only produce 0-2; an
+  // exported file carries the number, and the import reads it back through
+  // this same rule — an inline check in the import handler used to know
+  // only the modes and the cap, so 200 went straight into NVS.
+  TransportSettings t;
+  char err[160] = "";
+  t.powerProfile = 2;
+  TEST_ASSERT_TRUE_MESSAGE(validateTransport(t, err, sizeof(err)), err);
+  t.powerProfile = 3;
+  TEST_ASSERT_FALSE(validateTransport(t, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "power_profile"));
+}
+
+static void test_a_wide_value_that_cannot_fit_its_field_is_refused_not_reshaped() {
+  // The bounds above only work when they judge the number that was sent.
+  // The web handlers narrow JSON integers into int8/uint8/uint16 fields, and
+  // the JSON layer's own narrowing rewrites an out-of-range value (the
+  // pinned ArduinoJson converts it to 0 — a *legal* value for a sync word,
+  // for 0 dBm on a radio whose floor is negative, for "off" on the
+  // intervals) — so the handlers read wide and narrow through narrowInt,
+  // which refuses any value the width would change and touches nothing on
+  // refusal.
+  char err[96] = "";
+  uint8_t u8 = 7;
+  TEST_ASSERT_FALSE(narrowInt(256LL, u8, "channel", err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "channel"));       // the refusal names the field
+  TEST_ASSERT_EQUAL_UINT8(7, u8);                     // a refusal writes nothing
+  TEST_ASSERT_FALSE(narrowInt(-1LL, u8, "channel", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_UINT8(7, u8);
+
+  int8_t i8 = 3;
+  TEST_ASSERT_FALSE(narrowInt(258LL, i8, "tx_power", err, sizeof(err)));   // the wrap would say 2
+  TEST_ASSERT_FALSE(narrowInt(-129LL, i8, "tx_power", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_INT8(3, i8);
+
+  uint16_t u16 = 10;
+  TEST_ASSERT_FALSE(narrowInt(65537LL, u16, "ap_idle_minutes", err, sizeof(err)));  // the wrap would say 1
+  TEST_ASSERT_EQUAL_UINT16(10, u16);
+}
+
+static void test_narrowing_passes_every_value_the_field_can_hold_exactly() {
+  // The helper carries no per-field bound — those stay in the validate*()
+  // rules — so the width's own extremes must pass through unchanged.
+  char err[96] = "";
+  uint8_t u8 = 0;
+  TEST_ASSERT_TRUE_MESSAGE(narrowInt(0LL, u8, "x", err, sizeof(err)), err);
+  TEST_ASSERT_EQUAL_UINT8(0, u8);
+  TEST_ASSERT_TRUE(narrowInt(255LL, u8, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_UINT8(255, u8);
+
+  int8_t i8 = 0;
+  TEST_ASSERT_TRUE(narrowInt(-128LL, i8, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_INT8(-128, i8);
+  TEST_ASSERT_TRUE(narrowInt(127LL, i8, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_INT8(127, i8);
+
+  uint16_t u16 = 0;
+  TEST_ASSERT_TRUE(narrowInt(65535LL, u16, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_UINT16(65535, u16);
+
+  int32_t i32 = 0;
+  TEST_ASSERT_TRUE(narrowInt(-2147483648LL, i32, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_INT32(-2147483648LL, i32);
+  TEST_ASSERT_FALSE(narrowInt(2147483648LL, i32, "x", err, sizeof(err)));
+}
+
 static void test_a_secured_network_needs_a_password_and_the_lengths_are_wifis() {
   WifiSettings w;
   char err[160] = "";
@@ -130,6 +197,107 @@ static void test_a_secured_network_needs_a_password_and_the_lengths_are_wifis() 
   TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
   w.channel = 6; w.maxStations = 11;
   TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+}
+
+static void test_the_wifi_tx_ceiling_is_two_to_twenty_dbm() {
+  // The driver's own window in quarter-dBm is [8,84]; 2-20 dBm is the slice
+  // offered, and the refusal names it. The value is what may be asked for —
+  // the driver then quantizes down to its own steps, which the read-back
+  // reports, so the bound holds the request rather than the result.
+  WifiSettings w;
+  char err[160] = "";
+  w.txPowerDbm = 1;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "2-20"));
+  w.txPowerDbm = 2;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.txPowerDbm = 20;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.txPowerDbm = 21;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "2-20"));
+}
+
+static void test_the_listen_interval_counts_beacons_one_to_sixteen() {
+  // Units are AP beacon intervals, and zero is not "off" — the driver reads
+  // 0 as its default, which is a value that lies about itself in a settings
+  // dump. The refusal names the bound.
+  WifiSettings w;
+  char err[160] = "";
+  w.staListenInterval = 0;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "1-16"));
+  w.staListenInterval = 1;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.staListenInterval = 16;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.staListenInterval = 17;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "1-16"));
+}
+
+static void test_the_wifi_restart_split_is_pinned_per_field() {
+  // The live/restart split lives in wifiChangeNeedsRestart and nowhere else.
+  // Every field is asserted one at a time, so a WifiSettings member added
+  // without being classified shows up as a missing line here rather than as
+  // a setting that silently never restarts (the predicate enumerates the
+  // restart fields, so omission means live).
+  WifiSettings a, b;
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "no change must not restart");
+
+  b = a; b.txPowerDbm = (int8_t)(a.txPowerDbm == 7 ? 8 : 7);
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "tx power applies live");
+  b = a; b.staListenInterval = (uint8_t)(a.staListenInterval == 9 ? 10 : 9);
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "listen interval applies live");
+  b = a; b.apIdleOff = !a.apIdleOff;
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "the AP idle switch arms a timer, live");
+  b = a; b.apIdleMinutes = (uint16_t)(a.apIdleMinutes == 30 ? 31 : 30);
+  TEST_ASSERT_FALSE_MESSAGE(wifiChangeNeedsRestart(a, b), "the AP idle window arms a timer, live");
+
+  b = a; strlcpy(b.ssid, "another-name", sizeof(b.ssid));
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "ssid rebuilds the AP");
+  b = a; strlcpy(b.password, "anotherpass", sizeof(b.password));
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "password rebuilds the AP");
+  b = a; b.security = (a.security == ApSecurity::Open) ? ApSecurity::WPA2 : ApSecurity::Open;
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "security rebuilds the AP");
+  b = a; b.channel = (uint8_t)(a.channel == 6 ? 7 : 6);
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "channel rebuilds the AP");
+  b = a; b.maxStations = (uint8_t)(a.maxStations == 4 ? 5 : 4);
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "max stations rebuilds the AP");
+  b = a; b.hidden = !a.hidden;
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "hidden rebuilds the AP");
+  b = a; strlcpy(b.staSsid, "another-lan", sizeof(b.staSsid));
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "station ssid rebuilds the join");
+  b = a; strlcpy(b.staPassword, "another-lan-pass", sizeof(b.staPassword));
+  TEST_ASSERT_TRUE_MESSAGE(wifiChangeNeedsRestart(a, b), "station password rebuilds the join");
+}
+
+static void test_the_ap_idle_window_counts_minutes_one_to_a_day() {
+  // 1-1440: a day is the most an idle window can mean, and zero is not
+  // "off" — wifi.ap_idle_off is. Held whether or not the switch is on, so a
+  // stored value cannot walk in the moment the feature is enabled.
+  WifiSettings w;
+  char err[160] = "";
+  w.apIdleOff = false;                       // the bound holds even switched off
+  w.apIdleMinutes = 0;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "1-1440"));
+  w.apIdleMinutes = 1;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.apIdleMinutes = 1440;
+  TEST_ASSERT_TRUE_MESSAGE(validateWifi(w, err, sizeof(err)), err);
+  w.apIdleMinutes = 1441;
+  TEST_ASSERT_FALSE(validateWifi(w, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "1-1440"));
+}
+
+static void test_the_ap_idle_defaults_ship_off_and_at_ten_minutes() {
+  // Default OFF is a decision, not an accident: the AP is usually the only
+  // management path on an unattended node, and the operator opts in per
+  // node. Changing either default should have to change this test.
+  WifiSettings w;
+  TEST_ASSERT_FALSE_MESSAGE(w.apIdleOff, "AP idle auto-off must ship OFF");
+  TEST_ASSERT_EQUAL_UINT16(10, w.apIdleMinutes);
 }
 
 static void test_an_ssid_is_judged_before_it_is_truncated() {
@@ -153,7 +321,15 @@ int main() {
   RUN_TEST(test_the_admin_password_bound_is_the_apis);
   RUN_TEST(test_the_announce_cap_floor_is_one_not_zero);
   RUN_TEST(test_transport_modes_are_rnsds_one_to_five);
+  RUN_TEST(test_the_power_profile_number_names_a_real_profile);
+  RUN_TEST(test_a_wide_value_that_cannot_fit_its_field_is_refused_not_reshaped);
+  RUN_TEST(test_narrowing_passes_every_value_the_field_can_hold_exactly);
   RUN_TEST(test_a_secured_network_needs_a_password_and_the_lengths_are_wifis);
+  RUN_TEST(test_the_wifi_tx_ceiling_is_two_to_twenty_dbm);
+  RUN_TEST(test_the_listen_interval_counts_beacons_one_to_sixteen);
+  RUN_TEST(test_the_wifi_restart_split_is_pinned_per_field);
+  RUN_TEST(test_the_ap_idle_window_counts_minutes_one_to_a_day);
+  RUN_TEST(test_the_ap_idle_defaults_ship_off_and_at_ten_minutes);
   RUN_TEST(test_an_ssid_is_judged_before_it_is_truncated);
   return UNITY_END();
 }

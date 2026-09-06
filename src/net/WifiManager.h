@@ -40,13 +40,18 @@
 //  LocalLink.h.
 //
 //  Radio changes apply live through LoRaRadio::requestReconfigure();
-//  Wi-Fi changes are saved and followed by a scheduled restart, because
-//  reconfiguring the AP drops the very connection the request came on.
+//  Wi-Fi *settings* changes are saved and followed by a scheduled restart,
+//  because reconfiguring the AP drops the very connection the request came
+//  on. The AP's *switch* (links.wifi_ap) and the idle policy are the
+//  exception: they only take the AP up or down, never reshape it, and ride
+//  tick()'s convergence with a short grace so the reply leaves first.
 // ============================================================================
 #pragma once
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include "ApIdlePolicy.h"
+#include "SampleGate.h"
 #include "CaptiveDns.h"
 #include <ESPAsyncWebServer.h>
 #include "Config.h"
@@ -76,6 +81,56 @@ public:
   void tick();
   bool wifiEnabled() const;
 
+  // --- AP idle auto-off (ApIdlePolicy.h) ----------------------------------
+  // The one wake entry. Every wake source asks here — the button on the
+  // display task, the console's WIFI ON even when the settings are unchanged
+  // (and with it an admin message, which runs the same parser), the AP
+  // switch being asked on. Raise-only, safe from any task; tick() serves it
+  // on the loop task, where the policy and the driver live. A station
+  // cannot wake a suppressed AP: the AP is down and beacon-less, so there
+  // is nothing to associate to.
+  void apWake() { _apWakeReq = true; }
+  // A link switch the running radio can follow changed — links.wifi_ap,
+  // which LocalLink::applyLinks now applies live. Raise-only, any task;
+  // tick() converges, staging a short grace before any AP teardown so the
+  // reply that asked leaves first.
+  void requestModeSync() { _modeSyncReq = true; }
+  // Whether the idle policy is holding the access point down. "Down by
+  // policy" and "off by switch" must stay distinguishable on every status
+  // surface: a wake brings the first back, only the operator the second.
+  bool apIdleDown() const { return _apSuppressed; }
+  // The access point actually on the air — the driver's mode bit, read in
+  // one place for every consumer that must agree on it: the captive-portal
+  // probes (a stored switch is not a running AP — with the AP idled down and
+  // the station up, a probe redirected to the AP's address sends a LAN
+  // client chasing 10.42.0.1 into a void and its OS declares a captive
+  // portal), the idle policy's inputs, the patch retry, apStateName, and
+  // WifiApLink::carrier().
+  bool apUp() const { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
+  // The AP against its switch, in one word: "up", "down" (enabled, not on
+  // the air — starting, or inside the teardown grace), "idle-off", "off".
+  const char* apStateName() const;
+
+  // Re-applies wifi.sta_listen_interval to the station config, by
+  // read-modify-write. staConnect() calls it in the quiet gap it opens
+  // between writing the config and connecting, the STA_CONNECTED hook
+  // re-applies it after every association, and the settings commit calls it
+  // for a live change. Public for the commit's sake
+  // (SettingsFields::commitWifi); safe to call with no station up (it does
+  // nothing then).
+  void applyStaListenInterval();
+  // A Wi-Fi save just landed whose restart-applied fields — security among
+  // them — the running AP must NOT follow until the reboot. tick() drops any
+  // pending AP config patch retry. Belt and braces: applyApConfigPatch
+  // applies the snapshot startAccessPoint() froze when it armed the retry,
+  // never settings.wifi() (the _apPatch members below say why), so a retry
+  // left standing could not patch the new security on anyway — but it was
+  // armed for an AP whose bring-up predates the save, so dropping it loses
+  // nothing. Raise-only, any task (SettingsFields::commitWifi calls it
+  // from the console and AsyncTCP tasks); tick() serves it on the loop task
+  // like the flags below.
+  void cancelApConfigPatch() { _apPatchCancelReq = true; }
+
   // --- joining a network from the glass -----------------------------------
   // The GUI's scanner drives these. A live join, deliberately: the AP's
   // settings apply at a restart because the AP cannot be rebuilt under the
@@ -99,6 +154,39 @@ public:
 
 private:
   void startAccessPoint();
+  // tick()'s convergence body: computes the shape the settings and the idle
+  // policy ask for, stages the grace before an AP teardown, applies the
+  // change on this task, and carries the dependent services with it —
+  // AutoInterface bracketing the netif changes, captive DNS and mDNS's
+  // first start reconciled to the AP's observed state at the end of every
+  // pass (the reconcile's comment says why observed, never intended).
+  void syncRadioShape();
+  // The idle policy asked with inputs read this instant — station count
+  // included — and its verdict mirrored into _apSuppressed (raising the
+  // convergence on a change). Two callers: tick() behind the 1 s SampleGate,
+  // and syncRadioShape() once more, ungated, at the moment a staged AP
+  // teardown comes due — the gate bounds how often the driver is polled,
+  // never the final word, so the teardown's last word is a fresh one.
+  void askApIdlePolicy();
+  // What the AP's observed state carries with it. Both idempotent — that is
+  // what lets syncRadioShape reconcile them unconditionally every pass.
+  void apServicesDown();          // the AP is off the air
+  void apServicesUp();            // the AP is on it
+  // The mDNS responder, started once — from begin() on a Wi-Fi boot, or
+  // from the first runtime Wi-Fi up on a node that booted with it off.
+  void startMdns();
+  // The one station connect. Every site that starts a join — the boot's,
+  // the glass's, the fallback after a failed join — goes through here, so
+  // the listen interval is written into the config exactly once, between
+  // the core building it and the connect being issued (see the definition).
+  void staConnect(const char* ssid, const char* password);
+  // The AP config read-modify-write (beacon interval, and WPA3 where asked):
+  // startAccessPoint() applies it after softAP(), and tick() re-runs just
+  // this when the driver refused it with ESP_ERR_WIFI_STATE — a station
+  // connect in flight closes esp_wifi_set_config's window. Returns true when
+  // the patch landed; inFlight reports that retryable refusal, and every
+  // other failure is logged inside.
+  bool applyApConfigPatch(bool& inFlight);
   // The radio shape the settings ask for — the AP and STA switches, and
   // whether a station is even configured, combined exactly once.
   // startAccessPoint() brings the node up in this shape and tick()'s
@@ -174,6 +262,64 @@ private:
   volatile bool   _joinReq     = false;
   volatile bool   _scanActive  = false;
   volatile bool   _modeSyncReq = false;
+  //   _apWakeReq — somebody asked for the access point (apWake()). Volatile
+  //   like the rest: raised from the display task or the AsyncTCP task,
+  //   served by tick(). _apSuppressed below is tick()'s alone to write, but
+  //   not loop-task-only to read: the status surfaces (handleStatus and
+  //   handleSettingsGet on the AsyncTCP task, apStateName()/apIdleDown()
+  //   from the console and the glass) read it, so it is volatile like the
+  //   flags above. Everything after it is tick()'s own state, written and
+  //   read on the loop task only.
+  volatile bool   _apWakeReq   = false;
+  ApIdlePolicy    _apIdle;               // fed by tick() at the gate's cadence
+  // The 1 s station-count poll. Invariant: AP_STOP_GRACE_MS must exceed this
+  // cadence, so at least one policy ask lands inside every teardown grace —
+  // that ask is what re-reads the station count, lifts the suppression for a
+  // station that associated during the grace, and drops the staged teardown
+  // before it lands (syncRadioShape arms the stage AT a gate ask, so a
+  // shorter grace expires before the next ask in a healthy loop).
+  static constexpr uint32_t kApIdleGateMs = 1000;
+  static_assert(AP_STOP_GRACE_MS > kApIdleGateMs,
+                "the AP teardown grace must outlast the idle-gate cadence, or a station "
+                "associating during the grace cannot cancel the teardown");
+  SampleGate      _apIdleGate{kApIdleGateMs};
+  volatile bool   _apSuppressed = false; // the policy's verdict, mirrored for settingsWifiMode
+  bool            _apDownStaged = false; // a teardown is waiting out its grace
+  uint32_t        _apDownDueMs  = 0;
+  // The AP config patch that could not land yet: esp_wifi_set_config(AP)
+  // refuses with ESP_ERR_WIFI_STATE while a station connect is in flight —
+  // on a LAN-down node the 30 s watchdog keeps one going much of the time —
+  // and a runtime AP re-up landing in that window would otherwise beacon at
+  // 100 TU/WPA2 until the next cycle. Attempts left; 0 = none armed.
+  uint8_t         _apPatchRetries = 0;
+  SampleGate      _apPatchGate{2000};    // one retry every 2 s while armed
+  // The patch's inputs, frozen at arm time (startAccessPoint) rather than
+  // read from settings.wifi() per attempt: a Wi-Fi save with restart-applied
+  // fields can land between two retries, and a retry that re-read it would
+  // patch the next boot's security onto the AP the operator was just told
+  // keeps its shape. cancelApConfigPatch() still drops the retries on such a
+  // save — belt and braces; the snapshot is what closes the window where the
+  // save lands after a tick pass has read the cancel flag. The beacon half
+  // needs no snapshot: WIFI_AP_BEACON_TU is a build constant.
+  bool            _apPatchWpa3     = false;  // patch the auth mode at all
+  bool            _apPatchWpa3Only = false;  // WPA3_PSK rather than WPA2_WPA3_PSK
+  // cancelApConfigPatch()'s ask — volatile like the request flags above:
+  // raised from whatever task the settings commit runs on, served at the top
+  // of tick() so a bring-up later in the same pass can re-arm afresh (its
+  // patch is built from the settings the save just wrote, so it is current).
+  volatile bool   _apPatchCancelReq = false;
+  bool            _mdnsUp       = false; // startMdns() has run (this boot)
+  // Convergence passes on which AutoInterface::end() has not confirmed its
+  // stop. While under the cap, the radio-off transition is NOT taken — the
+  // netifs must not be cycled under the task's joined discovery group, which
+  // is the stranded-membership failure end() exists to prevent — and the
+  // pass retries. At the cap it proceeds anyway: a wedged task must not hold
+  // the radio on for ever (and it panics the node through its own watchdog
+  // subscription soon after regardless, so what is being bounded here is how
+  // long the operator's OFF is ignored, not whether the wedge is survived).
+  // 3 passes ≈ 15 s of waiting on top of the watchdog's own 30 s.
+  static constexpr uint8_t kAutoIfEndFailsMax = 3;
+  uint8_t         _autoIfEndFails = 0;
 };
 
 extern WifiManager wifiManager;

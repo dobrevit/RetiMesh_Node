@@ -49,6 +49,7 @@
 #include "BootloaderPlan.h"
 
 struct MaintenanceSettings;
+struct WifiSettings;
 
 namespace SettingsFields {
 
@@ -114,6 +115,12 @@ Result endBatch();   // Ok, or OkRestart/OkNextBoot once armed
 // restart. The rule for whether a change leaves a way into the node, and for
 // what the portal's switch costs, has one home and this is it.
 Result commitMaintenance(MaintenanceSettings& m, char* err, size_t n);
+
+// The Wi-Fi section's commit, exported for the same reason: the web API
+// writes the same section, and the split between what applies live (the TX
+// ceiling, the station listen interval) and what asks for the restart
+// (everything the access point or the join is built from) has one home.
+Result commitWifi(WifiSettings& w, char* err, size_t n);
 
 // Puts the remote-administration list into `m`, or says why it will not. Both
 // the console's SET and the HTTP endpoint ask this rather than each checking

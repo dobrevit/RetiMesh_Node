@@ -21,7 +21,7 @@ per PlatformIO environment.
 
 The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 
-## Wi-Fi access point (saves and restarts)
+## Wi-Fi access point (most rows restart; the marked ones apply live)
 | Setting | Default | Notes |
 |---|---|---|
 | SSID | `retimesh-XXXXXX` (MAC-derived) | custom ≤ 32 chars |
@@ -30,7 +30,23 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 | Channel | 6 | 1–13 |
 | Max clients | 8 | 1–10 |
 | Hidden SSID | no | |
+| TX power | 14 dBm | 2–20, one ceiling for the AP and the station together (the chip has one radio). **Applies live, no restart.** The driver rounds down to its own quarter-dBm steps, so the status surfaces read the ceiling back (`wifi_tx_dbm`) rather than echoing the setting. 14 dBm covers a phone at portal range; turn it up for a node genuinely bridging a LAN at range |
 | Station network / password | off | also join an existing LAN (AP+STA); the AP follows the LAN's channel; AutoInterface and mDNS work on both |
+| Station listen interval | 3 | 1–16 — how many of the LAN's beacon intervals a dozing station may sleep through between wakes. Consulted by the driver only under the battery profile's max modem sleep; higher saves more and answers slower on the maintenance path. **Applies live**, from the next association |
+| AP idle auto-off (`wifi.ap_idle_off`) | off | take the access point down once it has stood with no client for the configured minutes. An AP must beacon and cannot sleep, so an empty one is the largest steady draw on a battery node. It comes back on the node's button, on `SET links.wifi_ap on` or `WIFI ON` at the console (serial or TCP :4243 — either wakes even when the switch is already on, but `WIFI ON` writes both Wi-Fi switches, so on a node that keeps its station off it also restarts), or on an admin message; a phone **cannot** wake it, because a down AP sends no beacons to join. The station link, LoRa and the transport keep running throughout. **Applies live** |
+| AP idle minutes (`wifi.ap_idle_minutes`) | 10 | 1–1440 — how long the AP must stand empty before it goes down. A client associating (or the AP going down for any other reason) re-arms the clock; a wake re-arms it too, so a woken AP gets its whole window again. **Applies live** |
+
+The TX power, station listen interval and AP idle rows apply live; every
+other row restarts the node, because the access point cannot be rebuilt
+under the request that changed it. The access point beacons at 400 TU
+(~410 ms) rather than the stack's default 100 — a quarter of the beacon
+airtime and current, at the price of phones taking a moment longer to list
+the network; it is a build-time default (`WIFI_AP_BEACON_TU`), not a
+setting. When the idle policy has the AP down, the console's `STATUS` says
+`wifi_ap=idle-off`, `/api/status` marks the `wifi_ap` link with
+`"idle_down": true`, and the portal's links card says so — all three keep
+"down by the idle timer" distinct from "off by the switch", which look the
+same from a phone.
 
 ## Reticulum transport (saves and restarts)
 | Setting | Default | Notes |
@@ -39,7 +55,7 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 | LoRa interface mode | `full` | `full`, `gateway`, `access_point`, `roaming`, `boundary` |
 | Client interface mode | `full` | one interface per client on :4242 (Sideband, `rnsd`) |
 | Peer interface mode | `full` | one interface per zero-config peer — the other nodes and hosts on the Wi-Fi links |
-| Power profile | performance | `performance` 240 MHz · `balanced` 160 MHz + Wi-Fi modem sleep · `battery` 80 MHz + Wi-Fi sleep + 20 s display timeout; applied live |
+| Power profile | performance | `performance` 240 MHz · `balanced` 160 MHz + Wi-Fi min modem sleep (wake every DTIM) · `battery` 80 MHz + Wi-Fi max modem sleep (the station wakes every *listen interval* beacons — see the Wi-Fi table) + 20 s display timeout; applied live |
 | Zero-config peering (AutoInterface) | enabled | RNS AutoInterface on the access point *and* the station link; group id blank = `reticulum` (peers must share it) |
 | Announce cap | 2 % | share of each interface's bandwidth announces may use (rnsd `announce_cap`) |
 | Announce rate target / grace / penalty | 0 / 0 / 0 | throttle destinations announcing too often (rnsd `announce_rate_*`); 0 = off |
@@ -47,10 +63,11 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 
 See [reticulum.md](reticulum.md#interface-modes) for what the modes do.
 
-## Local links (saves; Wi-Fi changes restart)
+## Local links (saves; the station switch restarts)
 | Setting | Default | Notes |
 |---|---|---|
-| Wi-Fi | on | off = no access point and no station; the web server and Reticulum TCP still run on every other link, and the serial console's `WIFI ON` turns it back on |
+| Wi-Fi access point (`links.wifi_ap`) | on | the node's own network and captive portal. **Applies live, no restart**: the node takes the AP down or up while everything else keeps running, through the same runtime path the AP idle auto-off uses (a short grace lets the reply leave before the AP goes). `SET links.wifi_ap on` at the console asks for it back — and wakes an idled-down AP even when the switch is already on. `WIFI ON` does the same but writes both Wi-Fi switches, so on a node that keeps its station off it also restarts |
+| Wi-Fi station (`links.wifi_sta`) | on | joins the configured LAN. Restart-applied: the join is built at start-up. With both Wi-Fi switches off the web server and Reticulum TCP still run on every other link, and the serial console's `WIFI ON` turns both back on |
 | USB networking (CDC-NCM) | on | on a board whose own USB is on the connector (T3-S3 family, S3 DevKitC): the composite device's network link, `10.64.<n>.1/24` with DHCP — see [local-link.md](local-link.md). Applies live, no restart. Greyed out with the reason on bridged boards |
 | PPP over the serial bridge | off | on the CP2102/CH9102 boards (Heltec V3, Wireless Stick, Wireless Bridge, T-Beam): the node is a PPP *client* on its serial port and the host runs `pppd`; it asks for `10.65.<n>.1` and the host is told to take `.2` — see [local-link.md](local-link.md#ppp-over-the-bridge-uart). Applies live. While a host has PPP open the console on that port is silent. `PPP ON`/`PPP OFF` at the console do the same |
 | Serial speed while PPP is on | 115200 | the whole port's speed — console and log included — while the switch above is on; the console's 115200 otherwise. Only the speeds the board is qualified for are offered (`boards.json` `uart.qualification` up to `uart.tested_max_baud`; every board today: 115200); anything else is refused |

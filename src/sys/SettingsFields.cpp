@@ -30,6 +30,7 @@
 #include "Settings.h"
 #include "SettingsRules.h"
 #include "LocalLink.h"
+#include "WifiManager.h"
 #include "LoRaRadio.h"
 #include "Bootloader.h"
 #include "Gps.h"
@@ -136,16 +137,6 @@ Result commitRadio(RadioSettings& r, char* err, size_t n) {
   return Result::Ok;
 }
 
-// Wi-Fi is applied at a restart: the access point cannot be torn down under
-// the request that changed it, which is the same reason the web API answers
-// "restart": true rather than switching the radio there and then.
-Result commitWifi(WifiSettings& w, char* err, size_t n) {
-  if (restartPending(err, n)) return Result::Busy;
-  if (!SettingsRules::validateWifi(w, err, n)) return Result::BadValue;
-  if (!settings.saveWifi(w)) return Result::NvsFailed;
-  return askRestart();
-}
-
 // The interface modes are registered with Transport at boot, so they need a
 // restart too; the power profile and the store's home are read at boot as well.
 Result commitDisplay(DisplaySettings& d, char* err, size_t n) {
@@ -173,7 +164,36 @@ Result commitTransport(TransportSettings& t, char* err, size_t n) {
   return askRestart();
 }
 
-}  // namespace — commitMaintenance is the web API's too (SettingsFields.h)
+}  // namespace — commitWifi and commitMaintenance are the web API's too
+   // (SettingsFields.h)
+
+// Most of Wi-Fi is applied at a restart: the access point cannot be torn down
+// under the request that changed it, which is the same reason the web API
+// answers "restart": true rather than switching the radio there and then.
+// Four fields are not part of the AP's or the join's shape and apply live
+// instead — the TX ceiling (a driver register), the station listen interval
+// (a config read-modify-write), and the two AP idle-off knobs (they arm a
+// timer the WifiManager tick reads on its next pass) — so a change to only
+// those keeps the node, and the session the change arrived on, up. The split
+// is SettingsRules::wifiChangeNeedsRestart's, held by test_settings_rules;
+// handleWifiPost commits through this.
+Result commitWifi(WifiSettings& w, char* err, size_t n) {
+  if (restartPending(err, n)) return Result::Busy;
+  if (!SettingsRules::validateWifi(w, err, n)) return Result::BadValue;
+  const WifiSettings before = settings.wifi();
+  if (!settings.saveWifi(w)) return Result::NvsFailed;
+  Power::applyWifiTxPower();                 // live, wherever the driver is up
+  wifiManager.applyStaListenInterval();      // live; lands at the next association
+  if (!SettingsRules::wifiChangeNeedsRestart(before, w)) return Result::Ok;
+  // Restart-applied fields changed. A pending AP config patch retry applies
+  // the inputs startAccessPoint() froze when it armed it, never this save
+  // (the _apPatch members in WifiManager.h) — the snapshot is what keeps the
+  // running AP on the shape the "restart" answer promises. The cancel is
+  // belt and braces over that snapshot: the retries were armed for an AP
+  // whose bring-up predates this save, so nothing is lost by dropping them.
+  wifiManager.cancelApConfigPatch();
+  return askRestart();
+}
 
 void beginBatch() { sBatch = true; sWantRestart = false; }
 
@@ -444,6 +464,10 @@ const Entry kFields[] = {
     [](char* o, size_t n) { snprintf(o, n, "%s", settings.wifi().hidden ? "on" : "off"); },
     [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
       WifiSettings w = settings.wifi(); w.hidden = b; return commitWifi(w, e, n); } },
+  { "wifi.tx_power",
+    [](char* o, size_t n) { snprintf(o, n, "%d", (int)settings.wifi().txPowerDbm); },
+    [](const char* v, char* e, size_t n) { int32_t i; if (!parseI32Range(v, -128, 127, i, e, n)) return Result::BadValue;
+      WifiSettings w = settings.wifi(); w.txPowerDbm = (int8_t)i; return commitWifi(w, e, n); } },
   { "wifi.sta_ssid",
     [](char* o, size_t n) { renderStr(o, n, settings.wifi().staSsid); },
     [](const char* v, char* e, size_t n) { WifiSettings w = settings.wifi();
@@ -457,6 +481,21 @@ const Entry kFields[] = {
     [](char* o, size_t n) { renderSecret(o, n, settings.wifi().staPassword); },
     [](const char* v, char* e, size_t n) { WifiSettings w = settings.wifi();
       strlcpy(w.staPassword, v, sizeof(w.staPassword)); return commitWifi(w, e, n); }, true },
+  { "wifi.sta_listen_interval",
+    [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.wifi().staListenInterval); },
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 255, u, e, n)) return Result::BadValue;
+      WifiSettings w = settings.wifi(); w.staListenInterval = (uint8_t)u; return commitWifi(w, e, n); } },
+  // AP idle auto-off. Both apply live — they arm a timer the WifiManager
+  // tick reads, not a radio shape — so neither asks for a restart; turning
+  // the switch off while the policy holds the AP down brings it back.
+  { "wifi.ap_idle_off",
+    [](char* o, size_t n) { snprintf(o, n, "%s", settings.wifi().apIdleOff ? "on" : "off"); },
+    [](const char* v, char* e, size_t n) { bool b; if (!parseBool(v, b)) { snprintf(e, n, "expected on or off"); return Result::BadValue; }
+      WifiSettings w = settings.wifi(); w.apIdleOff = b; return commitWifi(w, e, n); } },
+  { "wifi.ap_idle_minutes",
+    [](char* o, size_t n) { snprintf(o, n, "%u", (unsigned)settings.wifi().apIdleMinutes); },
+    [](const char* v, char* e, size_t n) { uint32_t u; if (!parseU32Max(v, 65535, u, e, n)) return Result::BadValue;
+      WifiSettings w = settings.wifi(); w.apIdleMinutes = (uint16_t)u; return commitWifi(w, e, n); } },
 
   // --- links -------------------------------------------------------------
   // Both at once, kept because the console command, the API and every script

@@ -114,12 +114,24 @@
       <div><label>Channel</label><input name="channel" type="number" min="1" max="13" required></div>
       <div><label>Max clients</label><input name="max_stations" type="number" min="1" max="10" required></div>
       <div><label>Hidden SSID</label><input name="hidden" type="checkbox"></div>
+      <div><label>TX power (dBm, 2&ndash;20)</label><input name="tx_power" type="number" min="2" max="20" required></div>
       <div><label>Also join a Wi-Fi network (station)</label><input name="sta_ssid" maxlength="32" placeholder="home network SSID (blank = off)"></div>
       <div><label>Station password (blank = keep)</label><input name="sta_password" type="password" maxlength="63" autocomplete="new-password"></div>
+      <div><label>Station listen interval (beacons, 1&ndash;16)</label><input name="sta_listen_interval" type="number" min="1" max="16" required></div>
+      <div><label>AP idle auto-off &mdash; down after standing empty</label><input name="ap_idle_off" type="checkbox"></div>
+      <div><label>AP idle minutes (1&ndash;1440)</label><input name="ap_idle_minutes" type="number" min="1" max="1440" required></div>
     </div>
     <div class="note">Station mode keeps the access point up and additionally joins your LAN: the node becomes a LoRa uplink for every
-      Reticulum client there (zero-config via AutoInterface, or TCP to its LAN address), and its own AP moves to the LAN's channel.</div>
-    <button type="submit">Save &amp; restart access point</button>
+      Reticulum client there (zero-config via AutoInterface, or TCP to its LAN address), and its own AP moves to the LAN's channel.<br>
+      <b>TX power</b> caps the one Wi-Fi radio both links share &mdash; 14 dBm is plenty for a phone at portal range, full power for bridging a
+      LAN at range. It applies live, no restart; the driver rounds down to its own steps, and the status page shows what actually stuck.
+      The <b>listen interval</b> is how many of the LAN's beacons a dozing station may sleep through between wakes &mdash; consulted only in the
+      <i>battery</i> power profile (max modem sleep); higher saves more and answers slower. Applies live, from the next association.<br>
+      <b>AP idle auto-off</b> takes the access point down after it has stood with no client for the set minutes &mdash; an AP must beacon and
+      cannot sleep, so an empty one is the biggest steady draw on a battery node. It comes back on the node's button, on <code>WIFI ON</code> at
+      the console (serial or TCP :4243), or on an admin message; a phone <i>cannot</i> wake it, because a down AP sends no beacons to join.
+      Both fields apply live, no restart; the station link and LoRa keep running throughout. Off by default.</div>
+    <button type="submit">Save Wi-Fi settings</button>
     <div class="msg" id="wifiMsg"></div>
     <div class="note" id="wifiNote"></div>
   </form>
@@ -144,7 +156,7 @@
         <input name="auto_enabled" type="checkbox"></div>
       <div><label>AutoInterface group id (blank = reticulum)</label><input name="auto_group_id" maxlength="32" placeholder="reticulum"></div>
       <div><label>Power profile</label>
-        <select name="power_profile"><option value="performance">performance (240 MHz)</option><option value="balanced">balanced (160 MHz, Wi-Fi sleep)</option><option value="battery">battery (80 MHz, Wi-Fi sleep, display 20 s)</option></select></div>
+        <select name="power_profile"><option value="performance">performance (240 MHz)</option><option value="balanced">balanced (160 MHz, Wi-Fi min sleep)</option><option value="battery">battery (80 MHz, Wi-Fi max sleep, display 20 s)</option></select></div>
       <div><label>Announce cap (% of bandwidth)</label><input name="announce_cap" type="number" min="1" max="100" required></div>
       <div><label>Announce rate target (s, 0 = off)</label><input name="announce_rate_target" type="number" min="0" max="3600" required></div>
       <div><label>Rate grace (violations)</label><input name="announce_rate_grace" type="number" min="0" max="100" required></div>
@@ -222,10 +234,12 @@
       must beacon continuously and cannot sleep, so it draws current whether or not anyone is connected, while a <b>station</b> dozes
       between beacons. It frees only a couple of kilobytes of memory &mdash; the radio driver is the bulk of that and the station needs it
       too &mdash; so switch it off for the power, not for the RAM.</div>
-    <div class="note">Either Wi-Fi change restarts the node, because the radio's mode is chosen once at start-up. It stays reachable over
-      USB or PPP where the board has them, and always through the serial maintenance console: <code>WIFI ON</code> there turns both back
-      on, or <code>SET links.wifi_ap on</code> just the one. USB and PPP apply without a restart. With PPP on, the serial speed is the
-      whole port's &mdash; the console and the log run at it too &mdash; and the console goes quiet while a host has PPP open on it.</div>
+    <div class="note">The <b>access point</b> switch applies without a restart: the node takes the AP down or up while everything else keeps
+      running (a short grace lets this page's reply arrive before the AP goes). The <b>station</b> switch still restarts the node, because the
+      join is built at start-up. It stays reachable over USB or PPP where the board has them, and always through the serial maintenance
+      console: <code>WIFI ON</code> there turns both back on, or <code>SET links.wifi_ap on</code> just the one. USB and PPP apply without a
+      restart. With PPP on, the serial speed is the whole port's &mdash; the console and the log run at it too &mdash; and the console goes
+      quiet while a host has PPP open on it.</div>
   </form>
 
   <h2>Maintenance</h2>
@@ -484,6 +498,10 @@ async function load() {
     }
   }
   const reasons = ["usb", "ppp"].filter(k => lk[k] && !lk[k].supported && lk[k].hardware).map(k => k + ": " + lk[k].reason);
+  // Down by the idle timer is not off by the switch — the switch above still
+  // reads On, so without this line the card would contradict the air.
+  if ((lk.wifi_ap || {}).idle_down)
+    reasons.push("wifi_ap: down by the idle timer — the node's button, console WIFI ON or an admin message wakes it");
   $("linksStatus").textContent = reasons.length ? reasons.join(" · ") : "";
 
   // Settings are `maintenance`; what the board can do is `bootloader`, the
@@ -499,7 +517,7 @@ async function load() {
     + " Bootloader methods, best first: " + (bl.methods || []).join(", ") + ". Recovery: " + (bl.recovery || "") + ".";
 
   $("wifiNote").textContent = "Currently: " + cfg.wifi.ssid_active + " (" + cfg.wifi.security_active + "). " +
-    "Saving restarts the node — reconnect to the new network afterwards." +
+    "Changing anything but the live fields (TX power, listen interval, AP idle auto-off) restarts the node — reconnect to the new network afterwards." +
     (cfg.wifi.has_password ? " A password is stored; leave the field blank to keep it." : "") +
     (cfg.wifi.sta_ssid ? " Station: " + cfg.wifi.sta_ssid + (cfg.wifi.sta_connected ? " (connected)." : " (not connected).") : "");
 }
@@ -527,13 +545,22 @@ $("wifiForm").addEventListener("submit", async ev => {
   const f = ev.target.elements;
   const body = { ssid: f.ssid.value, security: f.security.value, password: f.password.value,
     channel: +f.channel.value, max_stations: +f.max_stations.value, hidden: f.hidden.checked,
+    tx_power: +f.tx_power.value, sta_listen_interval: +f.sta_listen_interval.value,
+    ap_idle_off: f.ap_idle_off.checked, ap_idle_minutes: +f.ap_idle_minutes.value,
     sta_ssid: f.sta_ssid.value, sta_password: f.sta_password.value };
   if (body.security !== "open" && !body.password && !cfg.wifi.has_password) {
     setMsg("wifiMsg", "Enter a password for a secured network.", "bad"); return;
   }
   try {
     const res = await api("/api/settings/wifi", body);
-    setMsg("wifiMsg", "Saved. Restarting — join \"" + res.ssid + "\" (" + res.security + ") and open http://10.42.0.1/", "warn");
+    // restart:false with no note means only the live fields changed — the
+    // TX ceiling and the station listen interval apply without touching the
+    // access point. A note means the node saved but could not restart now
+    // (one is already in progress): saying "applied" there would be a lie.
+    setMsg("wifiMsg", res.restart
+      ? "Saved. Restarting — join \"" + res.ssid + "\" (" + res.security + ") and open http://10.42.0.1/"
+      : res.note ? "Saved — not applied yet: " + res.note
+      : "Saved and applied.", res.restart || res.note ? "warn" : "ok");
   } catch (e) { setMsg("wifiMsg", e.message, "bad"); }
 });
 

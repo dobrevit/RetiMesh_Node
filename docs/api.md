@@ -64,7 +64,7 @@ past the checks on the way in.
   "firmware": "RetiMesh Node", "version": "v0.0.3", "board": "LilyGO T3-S3",
   "ssid": "retimesh-8249CC", "hostname": "retimesh-8249cc", "security": "open", "display": true,
   "station": { "configured": true, "ssid": "home", "connected": true, "ip": "192.168.1.42", "rssi": -61 },
-  "power": { "profile": "performance", "cpu_mhz": 240, "wifi_ps": "none", "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
+  "power": { "profile": "performance", "cpu_mhz": 240, "wifi_ps": "none", "wifi_tx_dbm": 14, "battery_present": false, "battery_v": 0.1, "battery_pct": 0 },
   "identity": "69dd5082…", "destination": "8836929b…",
   "uptime_s": 1234, "heap_free": 180000, "heap_min_free": 178000, "psram_free": 2000000,
   "diag": { "boot": { "count": 12, "reason": 3, "reason_name": "panic or unhandled exception",
@@ -231,13 +231,19 @@ it in the page header and in the browser tab. `GET /api/settings` carries it
 too, so the page that changes a node's settings can name the node it is about
 to change.
 
-`power` reports the profile, CPU clock, Wi-Fi power save and the cell:
-`{"profile":"performance","cpu_mhz":240,"wifi_ps":"none","battery_present":true,
-"battery_charging":true,"battery_v":3.53,"battery_pct":10,"pmu":"AXP2101"}`.
+`power` reports the profile, CPU clock, Wi-Fi power save, Wi-Fi TX ceiling
+and the cell:
+`{"profile":"performance","cpu_mhz":240,"wifi_ps":"none","wifi_tx_dbm":14,
+"battery_present":true,"battery_charging":true,"battery_v":3.53,
+"battery_pct":10,"pmu":"AXP2101"}`.
 `wifi_ps` (`none`, `min_modem`, `max_modem`) is read back from the Wi-Fi
 driver rather than assumed from the profile — the proof a profile switch
-actually took. It reflects the profile once a Wi-Fi interface has started,
-and reads `n/a` when Wi-Fi is switched off.
+actually took (`performance` asks for none, `balanced` min, `battery` max).
+It reflects the profile once a Wi-Fi interface has started, and reads `n/a`
+when Wi-Fi is switched off. `wifi_tx_dbm` is the same kind of proof for
+`wifi.tx_power`: read back from the driver, which quantizes down to its own
+quarter-dBm steps, so it can sit below the setting (ask for 9, hold 8.5);
+`null` when Wi-Fi is switched off.
 The board's make and model used to sit here too; it is `board` at the top of
 the document now, beside the firmware that runs on it. `battery_charging` and a trustworthy
 `battery_present` need a power-management chip; boards reading an ADC divider
@@ -296,6 +302,11 @@ decides) or `none`. `hardware`
 says the board has it, `firmware` that this build can run it, `enabled` that
 the operator has it on; when the first is true and the second false, `reason`
 says why. `clients` is present only where the link can count its hosts.
+The `wifi_ap` entry carries `"idle_down": true` while the AP idle auto-off
+policy (`wifi.ap_idle_off`) is holding the access point down — the switch
+still reads enabled and the phase reads `down`, and this is what says the
+remedy is a wake (the node's button, console `SET links.wifi_ap on` or
+`WIFI ON`, an admin message) rather than the switch; absent otherwise.
 Byte counters will appear with a driver that can produce them; the Wi-Fi
 stack cannot, and a field that is always null is not worth polling.
 
@@ -535,12 +546,12 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 ## Settings (auth)
 - `GET /api/settings` → `{ radio, wifi, transport, links, maintenance, bootloader, admin }` (password never returned; `has_password`, `default_password` flags). `links` is `{ wifi: {hardware, supported, enabled}, usb: {…, reason}, ppp: {…, reason, baud, bauds, node_ip, host_ip} }` — `enabled` is false for a link this build cannot run, whatever is stored; on a board that runs PPP, `baud` is the serial speed while PPP is on, `bauds` the speeds this board may be set to (the registry's ladder up to the rate the board has been tried at — the only list the settings page offers), and `node_ip`/`host_ip` the addresses the node asks its peer for (what the host's pppd is told); `maintenance` is `{ bootloader_api, bootloader_from_lan, console_enabled, console_tcp, web_ui, mdns, rns_admin, rns_admins }`; `bootloader` is what the board can do, the same object as `GET /api/system/bootloader`
 - `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct,gps_enabled,gps_share_position}` → applied live; `apply_error` in status if the chip rejected it
-- `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,sta_ssid,sta_password}` → saves, restarts (`"restart":true`); `sta_ssid` blank = station mode off
+- `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,tx_power,sta_ssid,sta_password,sta_listen_interval,ap_idle_off,ap_idle_minutes}` → saves; `tx_power` (2–20 dBm, one ceiling for AP and station), `sta_listen_interval` (1–16 beacon intervals, consulted under the battery profile's max modem sleep) and the AP idle auto-off pair (`ap_idle_off` boolean, `ap_idle_minutes` 1–1440 — the AP goes down after standing empty that long, and comes back on the node's button, console `SET links.wifi_ap on` or `WIFI ON` (the latter writes both Wi-Fi switches, so on a sta-off node it also restarts) or an admin message, never on a phone associating: a down AP sends no beacons) apply live, and a POST changing only those answers `"restart":false`; changing anything the access point or the join is built from restarts (`"restart":true`); when that restart was needed but could not be granted the reply is `"restart":false` with a `note` saying the change applies at the next boot; `sta_ssid` blank = station mode off
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,auto_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text
 - `GET /api/settings/export` → downloadable JSON of all settings (no identity keys). `links` carries only the links this build can run, and `ppp_baud` where it runs PPP: a switch for a driver that does not exist here would carry a meaningless value onto a node where it means something (an import drops a `ppp_baud` the receiving board is not qualified for, likewise)
-- `POST /api/settings/import` (a settings export; sections optional) → applies, restarts
-- `POST /api/settings/links` `{wifi,usb,ppp,ppp_baud}` (any subset; the first three booleans, `ppp_baud` an integer) → saves; `"restart":true` when Wi-Fi changed and the restart was granted; `usb`, `ppp` and `ppp_baud` apply live. A link the board lacks or the build cannot run is refused by name with the reason (`400`) rather than saved; so is a combination that, with the console off, would leave no way to reach the node, and so is a `ppp_baud` outside `links.ppp.bauds` (`400 ppp_baud … refused`). A speed change is applied when the console next owns the port, so one saved over ppp0 does not cut off its own reply
+- `POST /api/settings/import` (a settings export; sections optional) → applies, restarts. Sections are validated and saved one at a time, in order (radio, wifi, transport, links+maintenance, admin), so a `400` from one section leaves the sections before it already saved. On these settings endpoints and on import alike, an integer that does not fit its field's width is refused (`400 <field> is out of range`) rather than silently rewritten to a value that fits, and the wifi and transport sections are judged by the same rules as their own POST endpoints
+- `POST /api/settings/links` `{wifi_ap,wifi_sta,usb,ppp,ppp_baud}` (any subset; the first four booleans, `ppp_baud` an integer) → saves; `wifi_ap`, `usb`, `ppp` and `ppp_baud` apply live — the access point is taken down or up at runtime, with a short grace so the reply riding it leaves first, and asking `wifi_ap:true` also wakes an AP the idle policy has down even when the switch was already on; `"restart":true` only when `wifi_sta` changed and the restart was granted (the station join is built at boot). A link the board lacks or the build cannot run is refused by name with the reason (`400`) rather than saved; so is a combination that, with the console off, would leave no way to reach the node, and so is a `ppp_baud` outside `links.ppp.bauds` (`400 ppp_baud … refused`). A speed change is applied when the console next owns the port, so one saved over ppp0 does not cut off its own reply
 - `POST /api/settings/maintenance` `{bootloader_api,bootloader_from_lan,console_enabled,console_tcp,web_ui,mdns}` → saves; everything but `web_ui` and `mdns` applies live, and a change to either answers `{"ok":true,"restart":true}` and lands at the next boot, since the portal cannot be taken down under the request that asked for it. A combination that would leave no way into the node is refused (`400`): with the console off it needs a link switched on *and* `web_ui`, because the console's own listener (`console_tcp`) goes off with the console. `web_ui:false` is how a board too small for a portal is administered, and `mdns:false` is the next one down. Measured on a Heltec Wireless Stick with `Diag::cost()`, which bills them separately: `http + dns` is `22 028 B` with the portal on against `5 324 B` for the resolver alone, so the portal itself is about `16 700 B`; mDNS is a further `6 368 B`. The three together are the `28 616 B` older notes quote as one figure — so `web_ui:false` does **not** save 28 KB on its own, and the two savings are not additive with it. Neither is a service anything depends on. `mdns` defaults from the board class (`BOARD_DRAM_TIGHT`, Config.h): a Wireless Stick starts without it, every other board starts with it. `web_ui` has no board default and is on everywhere
 - `POST /api/settings/admin` `{password}`
 - `POST /api/settings/reset` → factory defaults, restarts (identity kept)
