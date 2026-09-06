@@ -58,10 +58,11 @@ int  sDisc = -1, sUni = -1, sData = -1;
 bool sEnabled = false;
 std::atomic<bool> sStop{false};                // end() asks; the task obliges
 // The task stopped itself while still wanted — rebuildDiscovery lost the
-// discovery socket and could not rebind. WifiManager's rejoin is keyed on
-// its own end() (_autoIfEnded), which never bracketed this stop, so this
-// flag keys the other restart: read through stoppedUnexpectedly(), cleared
-// when begin() actually starts a task.
+// discovery socket and could not rebind. A self-stop happens with the
+// radio's shape already settled, so no convergence would ever run again on
+// its own; WifiManager's tick reads this (stoppedUnexpectedly()) to raise
+// one, and the convergence's need-based restart re-begins the task. Cleared
+// when begin() actually starts one.
 std::atomic<bool> sSelfStopped{false};
 std::atomic<bool> sTaskAlive{false};           // the task clears this as it goes
 SemaphoreHandle_t sLock;
@@ -150,18 +151,19 @@ const Link* linkByIndex(int ifindex) {
 // on close), so the discovery socket is rebuilt and every link marked
 // unjoined; the normal join path re-joins the live ones within a second.
 void rebuildDiscovery() {
-  int d = sDisc;
-  sDisc = -1;                    // the fd variable reads "closed" before the fd goes (closeSockets' rule)
+  Sys::Lock held(sLock);         // clear-and-close under the lock (closeSockets' rule):
+  int d = sDisc;                 //   linkDown snapshots this fd under it too
+  sDisc = -1;
   if (d >= 0) close(d);
-  Sys::Lock held(sLock);
   for (Link& l : sLinks) { l.joined = false; l.ifindex = 0; l.local[0] = '\0'; l.leftEarly = false; }
   held.release();
   if (!bindSocket(sDisc, kDiscPort, "discovery")) {
     // No socket to select on. Ask the task to end through its own stop path
     // (endTask: peers disconnected, remaining sockets closed, watchdog
     // unsubscribed). Nothing brackets this stop the way WifiManager's own
-    // end() call does, so the self-stop is flagged: syncRadioShape reads
-    // stoppedUnexpectedly() on its next convergence pass and re-begins.
+    // end() call does, so the self-stop is flagged: WifiManager's tick reads
+    // stoppedUnexpectedly(), raises a convergence pass for it, and that
+    // pass's need-based restart re-begins.
     log_e("AutoInterface: could not rebuild the discovery socket; stopping");
     sSelfStopped = true;
     sStop = true;
@@ -182,8 +184,19 @@ void refreshLinks() {
       // leave the link marked joined against an interface that no longer
       // exists, and this loop only ever joins the not-joined: discovery on
       // that link would be dead for the life of the task with nothing in
-      // the log to say so. Judged by the ifindex and the link-local both,
-      // because either goes first depending on how the netif went down.
+      // the log to say so. Judged by the ifindex, the link-local's presence
+      // AND its text, because any of the three goes first depending on how
+      // the netif went down. The ifindex term carries the normal cycle:
+      // esp_netif's stop removes the lwIP netif and its start adds a fresh
+      // one, and lwIP's netif_add hands out netif->num from a rolling
+      // counter over 0..254 that skips numbers in use (netif.c) — so a
+      // cycled netif cannot see its old index again until 255 allocations
+      // have gone by, each of them a whole link cycle somewhere on this
+      // node, and this pass runs every second: the absent netif is seen
+      // long before any wrap could land the old number back. The address
+      // term is the belt for an index that does come back reused with a
+      // different link-local on it — then the text differs and the link is
+      // still retired and re-joined rather than left deaf.
       // A link linkDown() has already left holds this branch too: while the
       // netif it anticipated losing still stands, the continue below leaves
       // the link exactly as it is — unjoining it early would let the next
@@ -192,7 +205,8 @@ void refreshLinks() {
       esp_netif_t* netif = esp_netif_get_handle_from_ifkey(l.key);
       const int nowIndex = netif ? esp_netif_get_netif_impl_index(netif) : 0;
       char nowLocal[sizeof(l.local)];
-      if (nowIndex == l.ifindex && linkLocalOf(l.key, nowLocal, sizeof(nowLocal))) continue;
+      if (nowIndex == l.ifindex && linkLocalOf(l.key, nowLocal, sizeof(nowLocal)) &&
+          strcmp(nowLocal, l.local) == 0) continue;
       bool leftEarly;
       { Sys::Lock held(sLock); leftEarly = l.leftEarly; }
       bool stranded = false;
@@ -327,16 +341,6 @@ void fillAddress(sockaddr_in6& out, const char* addr, uint16_t port, int ifindex
 #endif
 }
 
-bool peerAddress(uint32_t id, sockaddr_in6& out) {
-  bool ok = false;
-  Sys::Lock held(sLock);
-  for (auto& p : sPeers) if (p.addr[0] && p.id == id) {
-    fillAddress(out, p.addr, kDataPort, p.ifindex);
-    ok = true; break;
-  }
-  return ok;
-}
-
 bool bindSocket(int& fd, uint16_t port, const char* what) {
   fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
   if (fd < 0) { log_e("AutoInterface: socket() for %s failed (errno %d)", what, errno); return false; }
@@ -358,12 +362,19 @@ bool bindSocket(int& fd, uint16_t port, const char* what) {
   return true;
 }
 
-// Close whichever of the three sockets are open, in the one order that is
-// safe: the readers on other tasks (sendTo on the RNS task) check the fd
-// variables, so those read "closed" before any fd actually goes.
+// Close whichever of the three sockets are open — under sLock, clear and
+// close together. The variables reading "closed" before the fds went was
+// necessary and not sufficient: sendTo on the RNS task could snapshot a
+// live fd, lose the CPU, and issue its sendto after the close — into a
+// number lwIP may already have handed to some future socket. It now holds
+// the same lock across its snapshot-and-send (and linkDown across its
+// snapshot-and-leave), so an fd judged open under the lock stays that fd
+// until the holder is done with it. The closes are quick (UDP, nothing to
+// linger on), so nobody waits behind them long.
 void closeSockets() {
+  Sys::Lock held(sLock);
   int d = sDisc, u = sUni, dat = sData;
-  sDisc = sUni = sData = -1;              // readers see "closed" before the fds go
+  sDisc = sUni = sData = -1;
   if (d   >= 0) close(d);                 // closing sDisc drops the group memberships
   if (u   >= 0) close(u);
   if (dat >= 0) close(dat);
@@ -623,12 +634,12 @@ void begin() {
   begin(sInRing);
 }
 
-void end() {
+bool end() {
   // The caller is the Wi-Fi teardown (WifiManager::syncRadioShape), which
   // must not cycle the netifs while the discovery group is still joined on
-  // them. Kept synchronous for exactly that caller: when this returns, the
-  // task has disconnected its peers, closed its sockets and gone.
-  if (!sTaskAlive) return;
+  // them. Kept synchronous for exactly that caller: when this returns true,
+  // the task has disconnected its peers, closed its sockets and gone.
+  if (!sTaskAlive) return true;
   sStop = true;
   // The task notices within one select() pass — the drains check sStop per
   // datagram, so a flood cannot hold a pass for its full two-second worst
@@ -637,8 +648,11 @@ void end() {
   // than this caller; 5 s clears the legitimate worst case (a 200 ms select,
   // one last ring-full datagram, endTask's own disconnect posts) with margin,
   // and sits well inside the caller's own 30 s watchdog (WATCHDOG_TIMEOUT_S).
+  // False tells that caller the netifs are not safe to cycle yet; it retries
+  // the pass and bounds how many times (the header says why).
   for (int i = 0; i < 500 && sTaskAlive; i++) vTaskDelay(pdMS_TO_TICKS(10));
-  if (sTaskAlive) log_w("AutoInterface: the task did not stop inside 5 s");
+  if (sTaskAlive) { log_w("AutoInterface: the task did not stop inside 5 s"); return false; }
+  return true;
 }
 
 // The Wi-Fi convergence is about to strip one netif while the task keeps
@@ -668,21 +682,24 @@ void end() {
 // its next pass after the netif has actually changed — knowing from
 // leftEarly that there is nothing to leave.
 void linkDown(const char* netifKey) {
-  const int fd = sDisc;              // snapshot: the fd variables read "closed"
-  if (fd < 0 || !sLock) return;      //   before any fd goes (closeSockets' rule)
+  if (!sLock) return;
   Link* target = nullptr;
   for (Link& l : sLinks) if (strcmp(l.key, netifKey) == 0) { target = &l; break; }
   if (!target) return;
-  bool joined, leftEarly;
-  int  ifindex;
-  {
-    Sys::Lock held(sLock);
-    joined = target->joined; ifindex = target->ifindex; leftEarly = target->leftEarly;
-  }
-  if (!joined || leftEarly) return;  // never joined, or already given back
+  // The fd snapshot, the judgement and the setsockopt under the one lock
+  // (closeSockets' rule, same as sendTo): the autoif task closes sDisc under
+  // it — endTask, or a rebuild — so the fd judged open here cannot go, and
+  // its number be reassigned, before the leave has been issued. The leave
+  // runs on this (the loop) task under lwIP's core lock and is quick; the
+  // lock order is only ever sLock -> lwIP, never the reverse, so nothing
+  // can deadlock on it.
+  Sys::Lock held(sLock);
+  const int fd = sDisc;
+  if (fd < 0) return;
+  if (!target->joined || target->leftEarly) return;  // never joined, or already given back
   ipv6_mreq mreq = {};
   inet_pton(AF_INET6, kGroupAddr, &mreq.ipv6mr_multiaddr);
-  mreq.ipv6mr_interface = ifindex;
+  mreq.ipv6mr_interface = target->ifindex;
   if (setsockopt(fd, IPPROTO_IPV6, IPV6_LEAVE_GROUP, &mreq, sizeof(mreq)) < 0) {
     // Nothing more to do here: refreshLinks' stale branch attempts the same
     // leave once the netif is gone, and its safety net rebuilds the socket
@@ -690,7 +707,6 @@ void linkDown(const char* netifKey) {
     log_w("AutoInterface: could not leave the group before %s goes (errno %d)", netifKey, errno);
     return;
   }
-  Sys::Lock held(sLock);
   target->leftEarly = true;
 }
 
@@ -707,12 +723,25 @@ size_t peerCount() {
 }
 
 bool sendTo(uint32_t peerId, const uint8_t* packet, size_t len) {
+  // The fd check, the peer lookup and the sendto under the one lock:
+  // closeSockets clears and closes under it too, so the fd this judged open
+  // cannot be closed — and its number reassigned by lwIP to a future socket
+  // — between the check and the send. Runs on the RNS task; the socket is
+  // non-blocking UDP, so the send is a copy into a pbuf or an immediate
+  // refusal, and the lock is held for microseconds — nothing the autoif
+  // task's once-a-second bookkeeping or the status readers notice.
+  if (!sLock) return false;
+  Sys::Lock held(sLock);
   if (sData < 0) return false;
-  sockaddr_in6 dst;
-  if (!peerAddress(peerId, dst)) return false;
-  int n = sendto(sData, packet, len, 0, (sockaddr*)&dst, sizeof(dst));
-  if (n < 0) { log_w("AutoInterface: sendto failed (errno %d)", errno); return false; }
-  return true;
+  for (auto& p : sPeers) {
+    if (!p.addr[0] || p.id != peerId) continue;
+    sockaddr_in6 dst;
+    fillAddress(dst, p.addr, kDataPort, p.ifindex);
+    int n = sendto(sData, packet, len, 0, (sockaddr*)&dst, sizeof(dst));
+    if (n < 0) { log_w("AutoInterface: sendto failed (errno %d)", errno); return false; }
+    return true;
+  }
+  return false;                                    // no such peer any more
 }
 
 size_t peers(Peer* out, size_t max) {

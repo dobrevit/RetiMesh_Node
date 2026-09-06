@@ -72,8 +72,14 @@ bool wanted();
 void begin(RingbufHandle_t inRing);   // starts the discovery/data task (core 0)
 void begin();                         // again, with the ring the boot begin() handed
                                       // over — the Wi-Fi re-up transition's call
-void end();                           // stops it: peers disconnected, sockets closed;
-                                      // begin() may follow. For Wi-Fi teardown to call.
+// Stops the task: peers disconnected, sockets closed; begin() may follow.
+// For the Wi-Fi teardown to call, and it answers that caller's one question:
+// true when the task confirmed the stop (or never ran), false when it never
+// answered inside the 5 s bound — and the netifs must NOT be cycled yet,
+// because taking them away under the task's joined discovery group is the
+// stranded-membership failure this ordering exists to prevent. The caller
+// retries the pass; WifiManager::syncRadioShape bounds how many times.
+bool end();
 
 // One Wi-Fi netif is about to be taken away while the task keeps running —
 // the runtime AP drop that leaves the station standing, and its mirror.
@@ -94,9 +100,12 @@ bool enabled();
 
 // The task ended itself while still wanted — rebuildDiscovery lost the
 // discovery socket and could not rebind (AutoInterface.cpp) — so no
-// WifiManager end() bracketed the stop and nothing else would ever restart
-// it. WifiManager's convergence treats a true here exactly like its own
-// _autoIfEnded and re-begins; cleared when begin() actually starts a task.
+// WifiManager end() bracketed the stop. WifiManager's tick reads this to
+// raise the convergence whose need-based restart re-begins the task (its
+// restart no longer needs the flag — it starts whatever is wanted and not
+// running — but a self-stop happens with the radio's shape already settled,
+// so nothing else would ever run that convergence); cleared when begin()
+// actually starts a task.
 bool stoppedUnexpectedly();
 
 // Called from the RNS task: one RNS packet as a UDP datagram to one peer.

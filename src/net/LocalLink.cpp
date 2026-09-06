@@ -234,7 +234,7 @@ uint32_t MachineLink::netmask() const {
 // Wi-Fi adapters
 // ---------------------------------------------------------------------------
 bool      WifiApLink::wanted() const  { return settings.links().wifiApEnabled; }
-bool      WifiApLink::carrier() const { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
+bool      WifiApLink::carrier() const { return wifiManager.apUp(); }   // the one mode-bit read
 IPAddress WifiApLink::ip() const      { return WiFi.softAPIP(); }
 IPAddress WifiApLink::mask() const    { return WiFi.softAPSubnetMask(); }
 uint8_t   WifiApLink::clients() const { return WiFi.softAPgetStationNum(); }

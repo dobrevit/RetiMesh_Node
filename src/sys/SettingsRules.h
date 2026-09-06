@@ -50,6 +50,39 @@
 
 namespace SettingsRules {
 
+// A wide integer bound for a narrower stored field, refused when the trip
+// through the target's width would change it — so the bounds below always
+// judge the number that was actually sent, never what a cast made of it.
+//
+// The web handlers need this because their JSON layer narrows before any
+// rule runs: the pinned ArduinoJson (7.4.3) does not wrap an out-of-range
+// integer, it converts it to 0 (Numbers/convertNumber.hpp), and 0 is a
+// *legal* value for several fields — a sync word, 0 dBm on a transceiver
+// whose floor is negative, "off" for the beacon and announce intervals and
+// the duty cycle — so `"tx_dbm": 258` was stored as 0 dBm under a 200 with
+// nothing anywhere saying so. The handlers now read the value wide (long
+// long holds every integer JSON can carry) and narrow through here. The
+// console's parsers already hold the same width rule from the other side
+// (parseU32Max / parseI32Range carry each field's exact width); this is its
+// one JSON-side counterpart, deliberately free of any per-field bound —
+// those stay in the validate*() rules below, once.
+//
+// Integral targets only. `out` is untouched on refusal.
+template <typename T>
+inline bool narrowInt(long long wide, T& out, const char* what,
+                      char* err, size_t errLen) {
+  static_assert(sizeof(T) <= sizeof(long long), "narrowInt narrows, it does not widen");
+  const T narrowed = (T)wide;
+  // The sign test guards the one case the round-trip cannot: a negative into
+  // an unsigned target of the same width survives the trip modulo 2^64.
+  if ((long long)narrowed != wide || (wide < 0 && (T)-1 > (T)0)) {
+    snprintf(err, errLen, "%s is out of range", what);
+    return false;
+  }
+  out = narrowed;
+  return true;
+}
+
 // The radio. `caps` is the transceiver actually fitted and `maxDbm` the most
 // it will emit — both are asked of the driver rather than assumed, because an
 // SX1280 tunes 2400-2500 MHz and has four bandwidths, none of which appear in

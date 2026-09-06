@@ -115,6 +115,59 @@ static void test_transport_modes_are_rnsds_one_to_five() {
   t.loraMode = 1; t.wifiMode = 6; TEST_ASSERT_FALSE(validateTransport(t, err, sizeof(err)));
 }
 
+static void test_a_wide_value_that_cannot_fit_its_field_is_refused_not_reshaped() {
+  // The bounds above only work when they judge the number that was sent.
+  // The web handlers narrow JSON integers into int8/uint8/uint16 fields, and
+  // the JSON layer's own narrowing rewrites an out-of-range value (the
+  // pinned ArduinoJson converts it to 0 — a *legal* value for a sync word,
+  // for 0 dBm on a radio whose floor is negative, for "off" on the
+  // intervals) — so the handlers read wide and narrow through narrowInt,
+  // which refuses any value the width would change and touches nothing on
+  // refusal.
+  char err[96] = "";
+  uint8_t u8 = 7;
+  TEST_ASSERT_FALSE(narrowInt(256LL, u8, "channel", err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "channel"));       // the refusal names the field
+  TEST_ASSERT_EQUAL_UINT8(7, u8);                     // a refusal writes nothing
+  TEST_ASSERT_FALSE(narrowInt(-1LL, u8, "channel", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_UINT8(7, u8);
+
+  int8_t i8 = 3;
+  TEST_ASSERT_FALSE(narrowInt(258LL, i8, "tx_power", err, sizeof(err)));   // the wrap would say 2
+  TEST_ASSERT_FALSE(narrowInt(-129LL, i8, "tx_power", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_INT8(3, i8);
+
+  uint16_t u16 = 10;
+  TEST_ASSERT_FALSE(narrowInt(65537LL, u16, "ap_idle_minutes", err, sizeof(err)));  // the wrap would say 1
+  TEST_ASSERT_EQUAL_UINT16(10, u16);
+}
+
+static void test_narrowing_passes_every_value_the_field_can_hold_exactly() {
+  // The helper carries no per-field bound — those stay in the validate*()
+  // rules — so the width's own extremes must pass through unchanged.
+  char err[96] = "";
+  uint8_t u8 = 0;
+  TEST_ASSERT_TRUE_MESSAGE(narrowInt(0LL, u8, "x", err, sizeof(err)), err);
+  TEST_ASSERT_EQUAL_UINT8(0, u8);
+  TEST_ASSERT_TRUE(narrowInt(255LL, u8, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_UINT8(255, u8);
+
+  int8_t i8 = 0;
+  TEST_ASSERT_TRUE(narrowInt(-128LL, i8, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_INT8(-128, i8);
+  TEST_ASSERT_TRUE(narrowInt(127LL, i8, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_INT8(127, i8);
+
+  uint16_t u16 = 0;
+  TEST_ASSERT_TRUE(narrowInt(65535LL, u16, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_UINT16(65535, u16);
+
+  int32_t i32 = 0;
+  TEST_ASSERT_TRUE(narrowInt(-2147483648LL, i32, "x", err, sizeof(err)));
+  TEST_ASSERT_EQUAL_INT32(-2147483648LL, i32);
+  TEST_ASSERT_FALSE(narrowInt(2147483648LL, i32, "x", err, sizeof(err)));
+}
+
 static void test_a_secured_network_needs_a_password_and_the_lengths_are_wifis() {
   WifiSettings w;
   char err[160] = "";
@@ -254,6 +307,8 @@ int main() {
   RUN_TEST(test_the_admin_password_bound_is_the_apis);
   RUN_TEST(test_the_announce_cap_floor_is_one_not_zero);
   RUN_TEST(test_transport_modes_are_rnsds_one_to_five);
+  RUN_TEST(test_a_wide_value_that_cannot_fit_its_field_is_refused_not_reshaped);
+  RUN_TEST(test_narrowing_passes_every_value_the_field_can_hold_exactly);
   RUN_TEST(test_a_secured_network_needs_a_password_and_the_lengths_are_wifis);
   RUN_TEST(test_the_wifi_tx_ceiling_is_two_to_twenty_dbm);
   RUN_TEST(test_the_listen_interval_counts_beacons_one_to_sixteen);

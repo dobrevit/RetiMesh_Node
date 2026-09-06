@@ -99,6 +99,14 @@ public:
   // policy" and "off by switch" must stay distinguishable on every status
   // surface: a wake brings the first back, only the operator the second.
   bool apIdleDown() const { return _apSuppressed; }
+  // The access point actually on the air — the driver's mode bit, read in
+  // one place for every consumer that must agree on it: the captive-portal
+  // probes (a stored switch is not a running AP — with the AP idled down and
+  // the station up, a probe redirected to the AP's address sends a LAN
+  // client chasing 10.42.0.1 into a void and its OS declares a captive
+  // portal), the idle policy's inputs, the patch retry, apStateName, and
+  // WifiApLink::carrier().
+  bool apUp() const { return (WiFi.getMode() & WIFI_MODE_AP) != 0; }
   // The AP against its switch, in one word: "up", "down" (enabled, not on
   // the air — starting, or inside the teardown grace), "idle-off", "off".
   const char* apStateName() const;
@@ -149,6 +157,13 @@ private:
   // change on this task, and takes the dependent services (captive DNS,
   // mDNS's first start, AutoInterface) up or down on the same transition.
   void syncRadioShape();
+  // The idle policy asked with inputs read this instant — station count
+  // included — and its verdict mirrored into _apSuppressed (raising the
+  // convergence on a change). Two callers: tick() behind the 1 s SampleGate,
+  // and syncRadioShape() once more, ungated, at the moment a staged AP
+  // teardown comes due — the gate bounds how often the driver is polled,
+  // never the final word, so the teardown's last word is a fresh one.
+  void askApIdlePolicy();
   void apServicesDown();          // the AP is leaving the air
   void apServicesUp();            // the AP is back on it
   // The mDNS responder, started once — from begin() on a Wi-Fi boot, or
@@ -272,13 +287,33 @@ private:
   // 100 TU/WPA2 until the next cycle. Attempts left; 0 = none armed.
   uint8_t         _apPatchRetries = 0;
   SampleGate      _apPatchGate{2000};    // one retry every 2 s while armed
+  // The patch's inputs, frozen at arm time (startAccessPoint) rather than
+  // read from settings.wifi() per attempt: a Wi-Fi save with restart-applied
+  // fields can land between two retries, and a retry that re-read it would
+  // patch the next boot's security onto the AP the operator was just told
+  // keeps its shape. cancelApConfigPatch() still drops the retries on such a
+  // save — belt and braces; the snapshot is what closes the window where the
+  // save lands after a tick pass has read the cancel flag. The beacon half
+  // needs no snapshot: WIFI_AP_BEACON_TU is a build constant.
+  bool            _apPatchWpa3     = false;  // patch the auth mode at all
+  bool            _apPatchWpa3Only = false;  // WPA3_PSK rather than WPA2_WPA3_PSK
   // cancelApConfigPatch()'s ask — volatile like the request flags above:
   // raised from whatever task the settings commit runs on, served at the top
   // of tick() so a bring-up later in the same pass can re-arm afresh (its
   // patch is built from the settings the save just wrote, so it is current).
   volatile bool   _apPatchCancelReq = false;
   bool            _mdnsUp       = false; // startMdns() has run (this boot)
-  bool            _autoIfEnded  = false; // we ended AutoInterface; re-begin on the way up
+  // Convergence passes on which AutoInterface::end() has not confirmed its
+  // stop. While under the cap, the radio-off transition is NOT taken — the
+  // netifs must not be cycled under the task's joined discovery group, which
+  // is the stranded-membership failure end() exists to prevent — and the
+  // pass retries. At the cap it proceeds anyway: a wedged task must not hold
+  // the radio on for ever (and it panics the node through its own watchdog
+  // subscription soon after regardless, so what is being bounded here is how
+  // long the operator's OFF is ignored, not whether the wedge is survived).
+  // 3 passes ≈ 15 s of waiting on top of the watchdog's own 30 s.
+  static constexpr uint8_t kAutoIfEndFailsMax = 3;
+  uint8_t         _autoIfEndFails = 0;
 };
 
 extern WifiManager wifiManager;
