@@ -726,7 +726,7 @@ void WifiManager::tick() {
         _staRetryAt = millis() + 30000;
       }
       // Nothing to fall back to — none stored, or the switch off — is no
-      // longer a branch of its own: the join's WiFi.begin() was the only
+      // longer a branch of its own: the join's staConnect() was the only
       // thing keeping the station interface up, and the re-assert below
       // takes it down with everything else the settings do not ask for.
       _joining = false;

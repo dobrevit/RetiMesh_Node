@@ -20,17 +20,19 @@
 // AutoIfPolicy: when the AutoInterface discovery multicast is worth sending.
 // The properties pinned here are the ones the mesh depends on: the RNS
 // cadence whenever anyone can hear it, minutes of grace after they leave, a
-// back-off that stays inside the plan's band when they are gone, and an
-// immediate answer — not a stale idle interval — the moment anyone appears.
+// back-off that still undercuts the 22 s peering timeout when they are gone,
+// and an immediate answer — not a stale idle interval — the moment anyone
+// appears.
 #include <unity.h>
 #include <stdint.h>
 #include "../../src/rns/AutoIfPolicy.h"
 
-static void test_the_constants_are_what_the_plan_committed_to() {
+static void test_the_constants_are_what_the_policy_committed_to() {
   // 1.6 s is RNS's own announce interval, not ours to retune; the idle
-  // cadence must stay inside the plan's 10-30 s band and under the 22 s
-  // peering timeout; the grace is "minutes". A silent retune of any of them
-  // should have to change this test to get past review.
+  // cadence must stay under the 22 s peering timeout, so a listener we
+  // cannot see still hears us in time; the grace is "minutes". A silent
+  // retune of any of them should have to change this test to get past
+  // review.
   TEST_ASSERT_EQUAL_UINT32(1600,   AutoIfPolicy::kActiveMs);
   TEST_ASSERT_EQUAL_UINT32(15000,  AutoIfPolicy::kIdleMs);
   TEST_ASSERT_EQUAL_UINT32(180000, AutoIfPolicy::kGraceMs);
@@ -95,16 +97,44 @@ static void expect_instant_return(bool ap, bool sta, size_t peers) {
   const uint32_t idleAt = AutoIfPolicy::kGraceMs + AutoIfPolicy::kIdleMs;
   TEST_ASSERT_TRUE(p.discoveryDue(idleAt, false, false, 0));       // an idle-cadence send
   TEST_ASSERT_EQUAL_UINT32(AutoIfPolicy::kIdleMs, p.cadenceMs());
-  TEST_ASSERT_FALSE(p.discoveryDue(idleAt + 1000, false, false, 0));
-  TEST_ASSERT_TRUE(p.discoveryDue(idleAt + 2000, ap, sta, peers)); // they appear: send now
+  TEST_ASSERT_FALSE(p.discoveryDue(idleAt + 500, false, false, 0)); // still absent, not due
+  // They appear 1000 ms after that send — inside even the active cadence,
+  // so nothing but the rising edge of presence can make this ask answer
+  // true. A policy that lost the instant-return term fails right here
+  // instead of being carried by an interval that had elapsed anyway.
+  TEST_ASSERT_TRUE(p.discoveryDue(idleAt + 1000, ap, sta, peers)); // they appear: send now
   TEST_ASSERT_EQUAL_UINT32(AutoIfPolicy::kActiveMs, p.cadenceMs());
   // And the active cadence runs from that send.
-  TEST_ASSERT_FALSE(p.discoveryDue(idleAt + 2000 + 1599, ap, sta, peers));
-  TEST_ASSERT_TRUE(p.discoveryDue(idleAt + 2000 + 1600, ap, sta, peers));
+  TEST_ASSERT_FALSE(p.discoveryDue(idleAt + 1000 + 1599, ap, sta, peers));
+  TEST_ASSERT_TRUE(p.discoveryDue(idleAt + 1000 + 1600, ap, sta, peers));
 }
 static void test_instant_return_when_an_ap_station_appears() { expect_instant_return(true,  false, 0); }
 static void test_instant_return_when_the_sta_connects()      { expect_instant_return(false, true,  0); }
 static void test_instant_return_on_the_first_peer_heard()    { expect_instant_return(false, false, 1); }
+
+static void test_flapping_presence_is_no_worse_than_steady_presence() {
+  // The instant-return term is an extra way to send, so its worst case needs
+  // a ceiling: presence that flaps on every single ask. The asks come at
+  // 1 Hz because that is how often AutoInterface samples presence — the
+  // real-world limiter on how fast the policy can see an edge. Each flap
+  // cycle (2 s) contributes exactly one rising edge and so at most one
+  // instant send; the absent asks in between are 1 s after a send, inside
+  // even the active cadence, and add nothing. So over the horizon the sends
+  // are bounded by one per cycle plus the first ask's — which is no more
+  // than steady presence itself costs at this sampling (1.6 s of cadence
+  // quantised by 1 s asks is a send every 2 s). A caller that ever samples
+  // presence faster than 1 Hz raises the edge rate and must revisit this.
+  AutoIfPolicy p;
+  const uint32_t kAskMs     = 1000;         // the task's presence sampling
+  const uint32_t kHorizonMs = 120000;
+  const uint32_t kBound     = kHorizonMs / (2 * kAskMs) + 1;   // one per cycle + the first
+  uint32_t sends = 0;
+  for (uint32_t t = 0; t <= kHorizonMs; t += kAskMs) {
+    const bool present = (t / kAskMs) % 2 == 0;    // here, gone, here, gone…
+    if (p.discoveryDue(t, present, false, 0)) sends++;
+  }
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(kBound, sends);
+}
 
 static void test_the_active_interval_holds_across_a_millis_wrap() {
   // millis() wraps every 49.7 days, which a solar node lives through many
@@ -142,7 +172,7 @@ void tearDown() {}
 
 int main() {
   UNITY_BEGIN();
-  RUN_TEST(test_the_constants_are_what_the_plan_committed_to);
+  RUN_TEST(test_the_constants_are_what_the_policy_committed_to);
   RUN_TEST(test_the_first_ask_sends_even_alone_at_time_zero);
   RUN_TEST(test_active_cadence_while_a_station_is_associated);
   RUN_TEST(test_an_ap_station_alone_holds_the_active_cadence);
@@ -152,6 +182,7 @@ int main() {
   RUN_TEST(test_instant_return_when_an_ap_station_appears);
   RUN_TEST(test_instant_return_when_the_sta_connects);
   RUN_TEST(test_instant_return_on_the_first_peer_heard);
+  RUN_TEST(test_flapping_presence_is_no_worse_than_steady_presence);
   RUN_TEST(test_the_active_interval_holds_across_a_millis_wrap);
   RUN_TEST(test_a_long_empty_stretch_stays_idle_across_the_wrap);
   return UNITY_END();

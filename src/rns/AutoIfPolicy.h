@@ -53,16 +53,17 @@ public:
   // reference implementation while someone listens risks their view of us.
   static constexpr uint32_t kActiveMs = 1600;
 
-  // The idle cadence, sent to nobody we know of. 15 s sits in the middle of
-  // the plan's 10-30 s band and under the 22 s peering timeout, so even a
-  // listener we cannot see (a host whose multicast reaches us only one way)
-  // hears from us often enough to keep a peering alive. Discovery of a new
-  // arrival does not ride on this: an arrival that speaks AutoInterface
-  // announces itself at 1.6 s, we hear it, and presence snaps us back.
+  // The idle cadence, sent to nobody we know of. The ceiling is the 22 s
+  // peering timeout: even a listener we cannot see (a host whose multicast
+  // reaches us only one way) must hear from us inside it to keep a peering
+  // alive, so 15 s leaves real margin under it while cutting the radio's
+  // wake-ups nearly tenfold. Discovery of a new arrival does not ride on
+  // this: an arrival that speaks AutoInterface announces itself at 1.6 s,
+  // we hear it, and presence snaps us back.
   static constexpr uint32_t kIdleMs = 15000;
 
   // How long "someone was here" keeps the active cadence after they leave.
-  // Minutes, per the plan: long enough that a screen-off phone or a roaming
+  // Minutes: long enough that a screen-off phone or a roaming
   // client returns to a node still announcing at full rate, short enough
   // that a genuinely empty yard stops paying for company within one cup of
   // coffee. Eight times the 22 s peer timeout.

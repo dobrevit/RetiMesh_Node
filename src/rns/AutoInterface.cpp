@@ -132,18 +132,24 @@ const Link* linkByIndex(int ifindex) {
 void refreshLinks() {
   for (Link& l : sLinks) {
     if (l.joined) continue;
-    if (!linkLocalOf(l.key, l.local, sizeof(l.local))) continue;
+    char local[sizeof(l.local)];
+    if (!linkLocalOf(l.key, local, sizeof(local))) continue;
     esp_netif_t* netif = esp_netif_get_handle_from_ifkey(l.key);
-    l.ifindex = netif ? esp_netif_get_netif_impl_index(netif) : 0;
+    int ifindex = netif ? esp_netif_get_netif_impl_index(netif) : 0;
     ipv6_mreq mreq = {};
     inet_pton(AF_INET6, kGroupAddr, &mreq.ipv6mr_multiaddr);
-    mreq.ipv6mr_interface = l.ifindex;
+    mreq.ipv6mr_interface = ifindex;
     if (setsockopt(sDisc, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) < 0) {
       log_w("AutoInterface: could not join the group on %s (errno %d)", l.what, errno);
-      l.local[0] = '\0';
       continue;
     }
-    l.joined = true;
+    // Committed under the lock: localAddress() reads a link from other tasks,
+    // and joined must not read true before the address next to it is whole.
+    Sys::Lock held(sLock);
+    strlcpy(l.local, local, sizeof(l.local));
+    l.ifindex = ifindex;
+    l.joined  = true;
+    held.release();
     log_i("AutoInterface: peering on %s, link-local %s (ifindex %d)", l.what, l.local, l.ifindex);
   }
 }
@@ -259,10 +265,27 @@ bool bindSocket(int& fd, uint16_t port, const char* what) {
   return true;
 }
 
+// Close whichever of the three sockets are open, in the one order that is
+// safe: the readers on other tasks (sendTo on the RNS task) check the fd
+// variables, so those read "closed" before any fd actually goes.
+void closeSockets() {
+  int d = sDisc, u = sUni, dat = sData;
+  sDisc = sUni = sData = -1;              // readers see "closed" before the fds go
+  if (d   >= 0) close(d);                 // closing sDisc drops the group memberships
+  if (u   >= 0) close(u);
+  if (dat >= 0) close(dat);
+}
+
 bool openSockets() {
-  if (!bindSocket(sDisc, kDiscPort, "discovery")) return false;
-  if (!bindSocket(sUni,  kUniPort,  "reverse peering")) return false;
-  if (!bindSocket(sData, kDataPort, "data")) return false;
+  if (!bindSocket(sDisc, kDiscPort, "discovery") ||
+      !bindSocket(sUni,  kUniPort,  "reverse peering") ||
+      !bindSocket(sData, kDataPort, "data")) {
+    // All or nothing: a socket bound before the failure must not outlive it.
+    // Left open, each failed begin()/end() cycle leaked up to two lwIP
+    // socket slots — from a table small enough that the web server starves.
+    closeSockets();
+    return false;
+  }
   log_i("AutoInterface: listening on [%s]:%u, :%u (reverse) and :%u (data)",
         kGroupAddr, kDiscPort, kUniPort, kDataPort);
   return true;
@@ -350,6 +373,12 @@ const int kDrainBatch = 64;
 template <typename Handler>
 bool drain(int fd, uint8_t* buf, size_t cap, Handler handler) {
   for (int i = 0; i < kDrainBatch; i++) {
+    // end() may have asked mid-drain. Checked per datagram because each one
+    // can legitimately cost 20 ms (the ring-full timeout in handleData), so
+    // a full pass over three sockets under a flood approaches two seconds —
+    // and a flood is exactly when the Wi-Fi teardown calls end(). Bailing
+    // here puts the task back at the top of its loop, where endTask() runs.
+    if (sStop) return false;
     sockaddr_in6 src; socklen_t sl = sizeof(src);
     int n = recvfrom(fd, buf, cap, 0, (sockaddr*)&src, &sl);
     if (n < 0) return false;                         // nothing left
@@ -369,15 +398,14 @@ void endTask() {
   held.release();                         // the calls below must not hold it
   for (size_t i = 0; i < n; i++) RnsTransport::clientDisconnected(live[i]);
   sEnabled = false;
-  int d = sDisc, u = sUni, dat = sData;
-  sDisc = sUni = sData = -1;              // readers see "closed" before the fds go
-  if (d   >= 0) close(d);                 // closing sDisc drops the group memberships
-  if (u   >= 0) close(u);
-  if (dat >= 0) close(dat);
+  closeSockets();
   // A netif cycle — which is what end() exists for — hands out fresh
   // ifindexes and link-locals, so everything remembered about the links is
-  // stale. Dropped here so a later begin() joins from nothing.
+  // stale. Dropped here so a later begin() joins from nothing; under the
+  // lock, because localAddress() reads the links from other tasks.
+  Sys::Lock links(sLock);
   for (Link& l : sLinks) { l.joined = false; l.ifindex = 0; l.local[0] = '\0'; }
+  links.release();
   log_i("AutoInterface: stopped; %u peer%s disconnected", (unsigned)n, n == 1 ? "" : "s");
   // Off the watchdog before the task goes: nothing in IDF clears a
   // subscription when its task is deleted, and an entry that can never be
@@ -462,7 +490,11 @@ bool wanted() {
 }
 
 void begin(RingbufHandle_t inRing) {
-  if (sTaskAlive) return;                        // already peering; nothing to redo
+  if (sTaskAlive) {                              // already peering; nothing to redo —
+    if (sStop)                                   // unless an end() timed out on this task:
+      log_w("AutoInterface: not restarted — the previous task never answered end()");
+    return;                                      // then the node runs on without peering,
+  }                                              // and this line is the only trace of why
   // The lock is created once and lives for ever — the heartbeat and the API
   // read the peer table through it whether or not peering runs, and end()
   // deliberately leaves it standing for them.
@@ -492,11 +524,15 @@ void end() {
   // disconnected its peers, closed its sockets and gone.
   if (!sTaskAlive) return;
   sStop = true;
-  // The task notices within one select() pass and confirms by clearing the
-  // aliveness flag on its way out (endTask). Bounded, so a wedged task hangs
-  // the watchdog's timeout rather than this caller.
-  for (int i = 0; i < 200 && sTaskAlive; i++) vTaskDelay(pdMS_TO_TICKS(10));
-  if (sTaskAlive) log_w("AutoInterface: the task did not stop inside 2 s");
+  // The task notices within one select() pass — the drains check sStop per
+  // datagram, so a flood cannot hold a pass for its full two-second worst
+  // case — and confirms by clearing the aliveness flag on its way out
+  // (endTask). Bounded, so a wedged task hangs the watchdog's timeout rather
+  // than this caller; 5 s clears the legitimate worst case (a 200 ms select,
+  // one last ring-full datagram, endTask's own disconnect posts) with margin,
+  // and sits well inside the caller's own 30 s watchdog (WATCHDOG_TIMEOUT_S).
+  for (int i = 0; i < 500 && sTaskAlive; i++) vTaskDelay(pdMS_TO_TICKS(10));
+  if (sTaskAlive) log_w("AutoInterface: the task did not stop inside 5 s");
 }
 
 bool enabled() { return sEnabled; }
@@ -527,8 +563,15 @@ size_t peers(Peer* out, size_t max) {
 }
 
 const char* localAddress() {
-  for (const Link& l : sLinks) if (l.joined) return l.local;
-  return "";
+  // Copied out under the lock: the task rewrites the links as they come and
+  // go (refreshLinks, endTask), and this is read from other tasks. One call
+  // site (the Wi-Fi status JSON) reads the returned buffer.
+  if (!sLock) return "";
+  static char out[46];
+  Sys::Lock held(sLock);
+  out[0] = '\0';
+  for (const Link& l : sLinks) if (l.joined) { strlcpy(out, l.local, sizeof(out)); break; }
+  return out;
 }
 
 } // namespace AutoInterface
