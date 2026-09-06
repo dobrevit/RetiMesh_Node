@@ -566,26 +566,35 @@ void WifiManager::tick() {
         log_w("station: joined \"%s\" but not saved: %s", _joinSsid, why);
       }
       _staRetryAt = millis() + 30000;
+      // A rescan during the join saved the join's own promoted mode as the
+      // "pre-scan" one (staJoin() had cleared the earlier save). The verdict
+      // settles the final shape, so a save from mid-join is void — or the
+      // scan's late restore would re-promote a shape the verdict overruled.
+      _scanModeSaved = false;
       _joining = false;
       _joinVerdict = 1;
     } else if ((int32_t)(millis() - _joinDeadline) >= 0) {
       log_w("station: could not join \"%s\"", _joinSsid);
       const WifiSettings& w = settings.wifi();
       WiFi.disconnect();
-      if (w.staSsid[0]) {
+      bool wantAp, wantSta;
+      const wifi_mode_t want = settingsWifiMode(wantAp, wantSta);
+      if (wantSta) {
+        // The settings ask for the stored station (switch on, network
+        // stored) — fall back to it and let the watchdog take over.
         WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
         _staRetryAt = millis() + 30000;
       } else {
-        // Nothing stored to fall back to, so the join's WiFi.begin() is the
-        // only thing keeping the station interface up — and a disconnect
-        // alone leaves it up. Put the radio back in the shape the settings
-        // ask for (the same rule startAccessPoint() brings the node up
-        // with), or an AP-only node keeps AP+STA for the rest of the boot,
-        // which is exactly the promotion D2 was about.
-        bool wantAp, wantSta;
-        const wifi_mode_t want = settingsWifiMode(wantAp, wantSta);
+        // No station to fall back to — none stored, or the station switch
+        // is off — so the join's WiFi.begin() is the only thing keeping the
+        // station interface up, and a disconnect alone leaves it up. Put
+        // the radio back in the shape the settings ask for (the same rule
+        // startAccessPoint() brings the node up with), or an AP-only node
+        // keeps AP+STA for the rest of the boot, which is exactly the
+        // promotion D2 was about.
         if (WiFi.getMode() != want) WiFi.mode(want);
       }
+      _scanModeSaved = false;            // as on success: the verdict is final
       _joining = false;
       _joinVerdict = 2;
     }
@@ -697,6 +706,14 @@ void WifiManager::staForget() {
   w.staPassword[0] = '\0';
   settings.saveWifi(w);
   WiFi.disconnect();                     // stationConfigured() is now false; the watchdog rests
+  // The disconnect drops the link, not the interface: the STA the boot or a
+  // join brought up stays started, so an AP + stored-station node would keep
+  // WIFI_AP_STA until reboot after an ordinary forget. Re-assert the shape
+  // the settings ask for now that no station is stored — the same rule
+  // tick()'s join-failure path falls back to.
+  bool wantAp, wantSta;
+  const wifi_mode_t want = settingsWifiMode(wantAp, wantSta);
+  if (WiFi.getMode() != want) WiFi.mode(want);
 }
 
 int WifiManager::staRssi() const { return stationConnected() ? WiFi.RSSI() : 0; }
@@ -1143,8 +1160,8 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     pw["profile"] = Power::profileName(Power::profile());
     pw["cpu_mhz"] = getCpuFrequencyMhz();
     // Read back from the driver (esp_wifi_get_ps()), not assumed from the
-    // profile: the proof a profile switch actually took effect (roadmap/
-    // power/06-plan.md round 1 acceptance).
+    // profile: the proof a profile switch actually took effect, not just
+    // that one was asked for.
     pw["wifi_ps"] = Power::wifiPsName();
     pw["battery_present"] = b.present;
     // Null, not false, where the board has no way to tell. A caller can then

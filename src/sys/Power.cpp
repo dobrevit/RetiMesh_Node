@@ -27,7 +27,6 @@
 #include "Settings.h"
 #include "Bq25896.h"
 #include "SampleGate.h"
-#include "WifiManager.h"
 
 namespace {
 Power::Profile sProfile = Power::Profile::Performance;
@@ -175,9 +174,9 @@ const char* wifiPsName() {
   // esp_wifi_get_ps() answers whether or not the driver is up — the IDF
   // header documents it returning only ESP_OK — so a node with Wi-Fi off
   // would otherwise report the driver's default (min_modem) as if a radio it
-  // is not running were saving power. Whether Wi-Fi runs at all is
-  // WifiManager's rule; ask it rather than re-deriving it here.
-  if (!wifiManager.wifiEnabled()) return "n/a";
+  // is not running were saving power. Whether Wi-Fi runs at all is the links
+  // settings' rule (Settings.h); ask it rather than re-deriving it here.
+  if (!settings.links().wifiEnabled()) return "n/a";
   wifi_ps_type_t ps;
   if (esp_wifi_get_ps(&ps) != ESP_OK) return "n/a";
   switch (ps) {

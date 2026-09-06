@@ -57,7 +57,8 @@ bool profileFromName(const char* name, Profile& out);
 // disagree — applyWifiSleep() is a no-op until the driver exists (see
 // above), so this is the one place STATUS/portal can show whether a profile
 // switch actually took. "n/a" with Wi-Fi off: the getter answers even with
-// no driver running, so the off state comes from WifiManager, not from it.
+// no driver running, so the off state comes from the links settings'
+// wifiEnabled() rule (Settings.h), not from the getter.
 const char* wifiPsName();
 
 struct Battery {

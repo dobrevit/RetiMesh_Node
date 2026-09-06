@@ -149,8 +149,10 @@ private:
   // The mode staScanStart() found before promoting to WIFI_AP_STA, restored
   // by staScanDone() — set only while a promotion is actually in effect, so
   // a rescan mid-visit doesn't overwrite it with the promoted mode itself.
-  // staJoin() clears it: a join owns the mode from then on, and its verdict
-  // in tick() — not a scan's restore — decides the radio's final shape.
+  // staJoin() clears it, and so does the verdict in tick(): a join owns the
+  // mode from then on, and its verdict — not a scan's restore — decides the
+  // radio's final shape. A save made mid-join (a rescan during the attempt)
+  // records the join's own promoted mode, which the verdict overrules.
   bool            _scanModeSaved = false;
   wifi_mode_t     _preScanMode = WIFI_MODE_NULL;
 };

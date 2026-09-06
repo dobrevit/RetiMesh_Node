@@ -153,9 +153,8 @@ void Display::displayTask(void* self) {
 #if HAS_LVGL_UI || DISPLAY_KIND == DISPLAY_KIND_OLED
     {
       // The brightness setting reaches the glass here, once per change. OLED
-      // panel current is close to linear in contrast (D3,
-      // roadmap/power/01-defects.md), so this is a real knob there too, not
-      // only on the backlit TFT boards.
+      // panel current is close to linear in contrast, so this is a real
+      // power knob there too, not only on the backlit TFT boards.
       static uint8_t lastB = 255;
       const uint8_t b = settings.display().brightness;
       if (b != lastB) { lastB = b; d->_panelImpl.setBrightness(b); }
