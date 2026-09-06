@@ -18,9 +18,12 @@
 
 
 // Refresh policy: what a page draws and what reaches the glass are not the
-// same thing, and on e-paper the difference is the whole point.
+// same thing, and on e-paper the difference is the whole point. The shared
+// brightness mapping (DisplayLayout) is asserted here too — display policy,
+// one suite.
 #include <unity.h>
 #include "../../src/ui/RefreshPolicy.h"
+#include "../../src/ui/DisplayLayout.h"
 
 using Action = RefreshPolicy::Action;
 
@@ -196,6 +199,18 @@ static void test_the_hash_tells_frames_apart_and_repeats_itself() {
   TEST_ASSERT_NOT_EQUAL(clean, RefreshPolicy::hash(big, sizeof(big)));
 }
 
+static void test_brightness_percent_maps_onto_the_hardware_byte() {
+  // One mapping for the OLED's contrast register and the TFT backlight's
+  // duty cycle: the settings floor (5 %) lands at 12, the default 80 % at
+  // 204, full at exactly 255, and anything past 100 is full rather than a
+  // wrapped surprise.
+  TEST_ASSERT_EQUAL_UINT8(12,  DisplayLayout::brightnessLevel(5));
+  TEST_ASSERT_EQUAL_UINT8(204, DisplayLayout::brightnessLevel(80));
+  TEST_ASSERT_EQUAL_UINT8(255, DisplayLayout::brightnessLevel(100));
+  TEST_ASSERT_EQUAL_UINT8(255, DisplayLayout::brightnessLevel(101));
+  TEST_ASSERT_EQUAL_UINT8(255, DisplayLayout::brightnessLevel(255));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -217,5 +232,6 @@ int main() {
   RUN_TEST(test_urgency_lapses_when_the_frame_it_asked_for_is_unchanged);
   RUN_TEST(test_the_clock_wrapping_does_not_freeze_the_panel);
   RUN_TEST(test_the_hash_tells_frames_apart_and_repeats_itself);
+  RUN_TEST(test_brightness_percent_maps_onto_the_hardware_byte);
   return UNITY_END();
 }

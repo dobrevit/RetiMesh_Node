@@ -58,6 +58,11 @@ See [reticulum.md](reticulum.md#interface-modes) for what the modes do.
 A switch the board cannot honour is refused by the API rather than saved.
 See [local-link.md](local-link.md).
 
+## Display (saves, applies live)
+| Setting | Default | Notes |
+|---|---|---|
+| Brightness (`display.brightness`) | 80 | 5–100 %; anything below 5 is refused — darkness belongs to the sleep timer, not a setting. Applied live, once per change: the backlight duty on the TFT boards and the panel contrast on the OLED boards, where panel current is close to linear in it, so it is a real power knob there too. E-paper has no brightness to set. Set from the on-glass settings (touch boards) or the console (`SET display.brightness 40`) |
+
 ## Maintenance (saves, applies live — except the web portal and mDNS, which restart)
 | Setting | Default | Notes |
 |---|---|---|

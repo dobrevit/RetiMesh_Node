@@ -157,7 +157,9 @@ void TftPanel::backlightBegin() {
 }
 
 void TftPanel::backlightSet(uint8_t pct) {
-  const uint32_t duty = (uint32_t)pct * 255u / 100u;
+  // The percent-to-duty mapping (clamp included) is DisplayLayout's, shared
+  // with the OLED's contrast register rather than written out again here.
+  const uint32_t duty = DisplayLayout::brightnessLevel(pct);
   // Some boards sink the LED's return rather than driving its gate, so the
   // pin is low to light it and the duty cycle runs the other way.
   ledcWrite(PIN_TFT_BL, BACKLIGHT_ACTIVE_LOW ? 255u - duty : duty);
@@ -171,7 +173,11 @@ void TftPanel::applyBacklight() {
 }
 
 void TftPanel::setBrightness(uint8_t pct) {
-  _brightPct = pct > 100 ? 100 : pct;
+  // Stored as given: both backlight kinds clamp inside their own mapping
+  // (DisplayLayout::brightnessLevel for PWM, the sixteen-step clamp above
+  // for the pulse-counted dimmer), so a second clamp here would be the
+  // duplicate rule this file just gave up.
+  _brightPct = pct;
   applyBacklight();
 }
 

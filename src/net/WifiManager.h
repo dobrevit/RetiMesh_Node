@@ -87,11 +87,11 @@ public:
     bool   secured;
   };
   enum class StaJoin : uint8_t { Idle, Trying, Joined, Failed };
-  void staScanStart();                   // async; needs the STA interface, enables it
-  int  staScanCount();                   // -1 still scanning, else how many
+  void staScanStart();                   // a request; tick() starts the scan on the loop task
+  int  staScanCount();                   // -1 still scanning (or not started yet), else how many
   bool staScanResult(int i, StaScanEntry& out);
-  void staScanDone();                    // frees the driver's result table
-  bool staJoin(const char* ssid, const char* password);  // false: unusable credentials
+  void staScanDone();                    // frees the result table; tick() re-asserts the mode
+  bool staJoin(const char* ssid, const char* password);  // false: unusable credentials; tick() starts it
   StaJoin staJoinState();                // pure one-shot verdict; tick() does the work
   void staForget();                      // disconnect and clear the stored network
   int  staRssi() const;                  // dBm while connected, 0 otherwise
@@ -99,6 +99,11 @@ public:
 
 private:
   void startAccessPoint();
+  // The radio shape the settings ask for — the AP and STA switches, and
+  // whether a station is even configured, combined exactly once.
+  // startAccessPoint() brings the node up in this shape and tick()'s
+  // join-failure path falls back to it, so the rule must not exist twice.
+  wifi_mode_t settingsWifiMode(bool& wantAp, bool& wantSta) const;
   void setupRoutes();
   bool authed(AsyncWebServerRequest* request);
 
@@ -141,6 +146,34 @@ private:
   char            _joinSsid[33] = "";
   char            _joinPass[65] = "";
   uint32_t        _joinDeadline = 0;
+  // Every WiFi driver mutation after boot — mode(), begin(), scanNetworks()
+  // — is tick()'s, on the loop task; the display task only asks. These flags
+  // are the asking — volatile, single-slot hand-offs like _joining/
+  // _joinVerdict above, state put down before the flag is raised:
+  //   _scanReq / _joinReq — the glass asked for a scan / a join (credentials
+  //   already in _joinSsid/_joinPass). tick() serves them before it touches
+  //   the mode, so a request pending is a request that will start on the
+  //   settled shape — the old design let the display task call
+  //   scanNetworks()/begin() itself, and tick() could observe "nothing in
+  //   flight" and strip, with WiFi.mode(), the STA bit the display task was
+  //   raising at that very moment. staScanDone()/staForget() clear an
+  //   unserved request: an ask abandoned at the glass is cancelled, not left
+  //   to start work nobody will collect.
+  //   _scanActive — the scan tick() started for the glass is still out.
+  //   tick() must not touch the mode under it: the core raised the STA bit
+  //   itself inside scanNetworks(), and stripping the bit aborts the scan in
+  //   the driver.
+  //   _modeSyncReq — something ended (a scan's results freed, a join verdict,
+  //   a forget) that may have left the radio holding more than the settings
+  //   ask for; tick() re-asserts settingsWifiMode() at its next pass with
+  //   nothing in flight and nothing asked for. Raisers put their state down
+  //   before the flag and tick() drops the flag before reading any, so a
+  //   request cannot slip through the check-then-act window the old
+  //   cross-task restore had.
+  volatile bool   _scanReq     = false;
+  volatile bool   _joinReq     = false;
+  volatile bool   _scanActive  = false;
+  volatile bool   _modeSyncReq = false;
 };
 
 extern WifiManager wifiManager;

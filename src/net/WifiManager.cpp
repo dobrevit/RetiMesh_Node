@@ -270,6 +270,17 @@ static const MaintField kMaintFields[] = {
 };
 
 void WifiManager::begin() {
+  // WiFi.setSleep() only reaches esp_wifi_set_ps() once the interface it
+  // names has actually started; called any earlier (Power::begin() runs
+  // before this) it just caches the request. STA_START/AP_START fire every
+  // time an interface comes up — first boot, a mode change, a reconnect — so
+  // hooking them here is what makes the profile's setting actually stick
+  // rather than leaving the driver on whatever ESP-IDF defaulted to.
+  WiFi.onEvent([](WiFiEvent_t event) {
+    if (event == ARDUINO_EVENT_WIFI_STA_START || event == ARDUINO_EVENT_WIFI_AP_START) {
+      Power::applyWifiSleep();
+    }
+  });
   if (wifiEnabled()) {
     startAccessPoint();
 
@@ -457,6 +468,16 @@ void WifiManager::resolveNames() {
   deriveHostname();
 }
 
+// The radio's mode follows the two switches rather than the one. A station
+// without an access point is now a shape this can be in — it is the shape a
+// carried node wants, since the access point must beacon and cannot sleep —
+// and asking for WIFI_AP_STA there would put the beacon back on the air.
+wifi_mode_t WifiManager::settingsWifiMode(bool& wantAp, bool& wantSta) const {
+  wantAp  = settings.links().wifiApEnabled;
+  wantSta = settings.links().wifiStaEnabled && stationConfigured();
+  return wantAp ? (wantSta ? WIFI_AP_STA : WIFI_AP) : WIFI_STA;
+}
+
 void WifiManager::startAccessPoint() {
   const WifiSettings& w = settings.wifi();
   resolveNames();
@@ -476,15 +497,11 @@ void WifiManager::startAccessPoint() {
   bool secured = w.security != ApSecurity::Open && strlen(w.password) >= 8;
   const char* pass = secured ? w.password : nullptr;
 
-  // The radio's mode follows the two switches rather than the one. A station
-  // without an access point is now a shape this can be in — it is the shape a
-  // carried node wants, since the access point must beacon and cannot sleep —
-  // and asking for WIFI_AP_STA there would put the beacon back on the air.
-  const bool wantAp  = settings.links().wifiApEnabled;
-  const bool wantSta = settings.links().wifiStaEnabled && stationConfigured();
+  bool wantAp, wantSta;
+  const wifi_mode_t mode = settingsWifiMode(wantAp, wantSta);
 
   WiFi.persistent(false);
-  WiFi.mode(wantAp ? (wantSta ? WIFI_AP_STA : WIFI_AP) : WIFI_STA);
+  WiFi.mode(mode);
   // IPv6 link-local on both links, asked for before they start: core 3
   // creates the address when the interface comes up and only then, so a
   // request made afterwards — which is when AutoInterface used to make it —
@@ -530,9 +547,31 @@ void WifiManager::startAccessPoint() {
 }
 
 void WifiManager::tick() {
-  // The join the glass asked for completes here, on the task that owns the
-  // driver — connect, timeout, persist and fallback all in one place, so an
-  // abandoned screen can no longer strand any of them.
+  // The glass's asks are served first, on the task that owns the driver. The
+  // starts live here rather than where they were asked so that no other task
+  // ever calls into the driver: a display-task scanNetworks()/begin() raced
+  // the convergence below — tick() could observe nothing in flight, then
+  // strip with WiFi.mode() the STA bit the display task was raising at that
+  // very moment, aborting its scan in the driver. With the starts on this
+  // task there is no second task left to race.
+  if (_joinReq) {
+    _joinReq = false;
+    if (wifiEnabled()) {
+      _joinDeadline = millis() + 20000;  // WPA against a present AP settles well inside this
+      _joining = true;
+      WiFi.disconnect();                 // whatever the station was doing before
+      WiFi.begin(_joinSsid, _joinPass[0] ? _joinPass : nullptr);
+      log_i("station: joining \"%s\" (asked from the glass)", _joinSsid);
+    } else {
+      // Wi-Fi went off between the ask and this pass. Starting the join
+      // would start the very driver the switch keeps down, so the ask fails
+      // instead; the glass reads the verdict off its usual shelf.
+      _joinVerdict = 2;
+    }
+  }
+  // The join completes here too, still on the one task — connect, timeout,
+  // persist and fallback all in one place, so an abandoned screen can no
+  // longer strand any of them.
   if (_joining) {
     if (WiFi.status() == WL_CONNECTED) {
       WifiSettings w = settings.wifi();
@@ -543,6 +582,20 @@ void WifiManager::tick() {
       // funnel holds, so no side door into the store.
       if (SettingsRules::validateWifi(w, why, sizeof(why))) {
         settings.saveWifi(w);
+        // The switch follows the proof. A join asked for at the glass on a
+        // node whose station switch was off has just run a station anyway,
+        // so the settings say so too — or the re-assert below would drop
+        // the network the person just joined, and a reboot would keep the
+        // credentials but never the link. Straight to saveLinks(), not
+        // through applyLinks(): that funnel restarts the node for shapes
+        // the running radio cannot take, and this is the one it already
+        // holds.
+        if (!settings.links().wifiStaEnabled) {
+          LinkSettings l = settings.links();
+          l.wifiStaEnabled = true;
+          settings.saveLinks(l);
+          log_i("station: the station switch was off — the join turned it on");
+        }
         log_i("station: joined \"%s\", IP %s — saved", w.staSsid,
               WiFi.localIP().toString().c_str());
       } else {
@@ -551,18 +604,73 @@ void WifiManager::tick() {
       _staRetryAt = millis() + 30000;
       _joining = false;
       _joinVerdict = 1;
+      _modeSyncReq = true;               // the verdict ends at the re-assert below
     } else if ((int32_t)(millis() - _joinDeadline) >= 0) {
       log_w("station: could not join \"%s\"", _joinSsid);
       const WifiSettings& w = settings.wifi();
       WiFi.disconnect();
-      if (w.staSsid[0]) {
+      bool wantAp, wantSta;
+      settingsWifiMode(wantAp, wantSta);
+      if (wantSta) {
+        // The settings ask for the stored station (switch on, network
+        // stored) — fall back to it and let the watchdog take over. The
+        // re-assert below is a no-op on this path: the shape it computes
+        // keeps the STA bit this begin() needs.
         WiFi.begin(w.staSsid, w.staPassword[0] ? w.staPassword : nullptr);
         _staRetryAt = millis() + 30000;
       }
+      // Nothing to fall back to — none stored, or the switch off — is no
+      // longer a branch of its own: the join's WiFi.begin() was the only
+      // thing keeping the station interface up, and the re-assert below
+      // takes it down with everything else the settings do not ask for.
       _joining = false;
       _joinVerdict = 2;
+      _modeSyncReq = true;
+    } else {
+      return;                            // still trying; the watchdog waits its turn
     }
-    return;                              // the watchdog waits its turn
+  }
+  // The scan the glass asked for starts here, with no join resolving — the
+  // join block above returns while one is still trying, so a scan request
+  // raised mid-join is simply parked (staScanCount() answers "still
+  // scanning" for it) and served on the pass after the verdict.
+  if (_scanReq) {
+    if (wifiEnabled()) {
+      _scanActive = true;                // claimed before the start, as before
+      if (_scanReq) {                    // re-checked after the claim: a screen
+        WiFi.scanNetworks(true /* async */);   // closed right now cancels an
+        _scanReq = false;                //   unserved request (staScanDone())
+      } else {
+        _scanActive = false;             // cancelled between the check and the claim
+      }
+    } else {
+      _scanReq = false;                  // racing Wi-Fi-off: see the join above
+    }
+  }
+  // The one place the radio's shape is decided while the node runs. Both
+  // verdicts above land here, and so do the glass's endings on the display
+  // task (a scan's results freed, a network forgotten): whatever the STA bit
+  // was raised for is over, so the radio goes back to the shape the settings
+  // ask — computed after the saves above, which is what lets a join that has
+  // just stored its network and its switch keep what it proved. Held while a
+  // scan is out: the core raised the STA bit for it inside scanNetworks(),
+  // and stripping the bit aborts the scan in the driver — staScanDone()
+  // raises the request again, and it is served then. Held just the same
+  // while an ask is pending but unserved: the requests above are served
+  // earlier in this very pass, so a pending flag here means it arrived
+  // moments ago from the display task, and it must reach its serve whole
+  // rather than have the mode settled across it. The flag drops before the
+  // settings are read, so a request racing in from the display task is kept
+  // whole for the next pass rather than half-served by this one; and with
+  // Wi-Fi off in settings nothing is asserted at all, because asserting any
+  // mode would start the very driver the switch keeps down.
+  if (_modeSyncReq && !_scanActive && !_scanReq && !_joinReq) {
+    _modeSyncReq = false;
+    if (wifiEnabled()) {
+      bool wantAp, wantSta;
+      const wifi_mode_t want = settingsWifiMode(wantAp, wantSta);
+      if (WiFi.getMode() != want) WiFi.mode(want);
+    }
   }
   // Station watchdog: log transitions, kick a reconnect if auto-reconnect
   // gave up (e.g. the LAN was down at boot).
@@ -587,13 +695,24 @@ void WifiManager::tick() {
 // actual work on its own task either way.
 // ---------------------------------------------------------------------------
 void WifiManager::staScanStart() {
-  // Scanning wants the station interface; a node running AP-only gains it
-  // here and keeps it — the mode is where a configured station would put it.
-  if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
-  WiFi.scanNetworks(true /* async */);
+  // A pure request: tick() calls scanNetworks() on the loop task, so the
+  // scan starts on whatever shape the convergence there has settled rather
+  // than racing it. (Scanning wants the station interface, and the core
+  // provides it: scanNetworks() calls WiFi.enableSTA(true) itself
+  // (WiFiScan.cpp), which adds the STA bit to whatever shape is running —
+  // a station-only node's scan is mode-neutral, and an AP-only node gains
+  // STA for the scan's duration only.) The one-pass start latency never
+  // shows on the glass: staScanCount() answers "still scanning" for a
+  // request not yet served, and the screen polls at 250 ms anyway.
+  _scanReq = true;
 }
 
 int WifiManager::staScanCount() {
+  // Asked for but not started yet: before any scan the core's scanComplete()
+  // answers WIFI_SCAN_FAILED, which maps to 0 below — and an unserved
+  // request read as "finished, nothing found" would make the glass free a
+  // table it never had and cancel the scan before tick() could start it.
+  if (_scanReq) return -1;
   const int n = WiFi.scanComplete();
   if (n == WIFI_SCAN_RUNNING) return -1;
   if (n == WIFI_SCAN_FAILED)  return 0;
@@ -608,7 +727,26 @@ bool WifiManager::staScanResult(int i, StaScanEntry& out) {
   return out.ssid[0] != '\0';           // hidden networks scan as empty names
 }
 
-void WifiManager::staScanDone() { WiFi.scanDelete(); }
+void WifiManager::staScanDone() {
+  // A request tick() has not served yet is cancelled first — a screen closed
+  // in the ask-to-serve window would otherwise have tick() start a scan
+  // nobody polls, holding the STA promotion (and the convergence gate) for
+  // ever. tick() re-checks the flag after claiming _scanActive, so the
+  // cancel lands on either side of the claim; in the residual few-
+  // instruction window where the start still goes out, _scanActive ends up
+  // false and _modeSyncReq true, and the convergence pass strips the
+  // promoted bit from under the orphan scan — an abort, not a strand.
+  _scanReq = false;
+  // Only the result table is given back here; the mode is not touched on
+  // this task. scanDelete() also clears the core's scanning/done bits, so a
+  // scan abandoned mid-flight cannot wedge the next one. The request hands
+  // the unwind to tick(), which re-asserts the settings shape at its next
+  // pass with no scan or join in flight — a join mid-attempt simply keeps
+  // the request parked until its verdict.
+  WiFi.scanDelete();
+  _scanActive = false;
+  _modeSyncReq = true;
+}
 
 bool WifiManager::staJoin(const char* ssid, const char* password) {
   // What cannot be stored is not attempted: a 64-character raw PSK joins
@@ -618,11 +756,14 @@ bool WifiManager::staJoin(const char* ssid, const char* password) {
   if (password && strlen(password) > 63) return false;
   strlcpy(_joinSsid, ssid, sizeof(_joinSsid));
   strlcpy(_joinPass, password ? password : "", sizeof(_joinPass));
-  _joinDeadline = millis() + 20000;      // WPA against a present AP settles well inside this
-  _joining = true;
-  WiFi.disconnect();                     // whatever the station was doing before
-  WiFi.begin(_joinSsid, _joinPass[0] ? _joinPass : nullptr);
-  log_i("station: joining \"%s\" (asked from the glass)", _joinSsid);
+  // State before flag, like every hand-off here: the credentials land, then
+  // the request. No driver call is made on this task at all — tick() serves
+  // the ask on the loop task (disconnect, begin(), deadline), and its
+  // verdict settles the final shape by re-asserting what the settings ask
+  // for, which a success has just updated to keep the station.
+  // staJoinState() reports Trying off the flag alone, so the screen shows
+  // "Joining..." without waiting a pass for the serve.
+  _joinReq = true;
   return true;
 }
 
@@ -630,7 +771,9 @@ WifiManager::StaJoin WifiManager::staJoinState() {
   // Pure, and one-shot on the verdicts: the work happens in tick() on the
   // loop task. The screen's own poll once carried it, and a screen closed
   // mid-join stranded the station, the watchdog, and the typed password.
-  if (_joining) return StaJoin::Trying;
+  // An ask tick() has not served yet is already Trying — the glass's
+  // "Joining..." must not flicker through Idle while the request waits.
+  if (_joinReq || _joining) return StaJoin::Trying;
   const uint8_t v = _joinVerdict;
   if (v) {
     _joinVerdict = 0;
@@ -640,7 +783,8 @@ WifiManager::StaJoin WifiManager::staJoinState() {
 }
 
 void WifiManager::staForget() {
-  _joining = false;                      // a forget mid-attempt wins
+  _joinReq = false;                      // a forget mid-attempt wins — asked or
+  _joining = false;                      //   already trying alike
   WifiSettings w = settings.wifi();
   if (!w.staSsid[0]) return;
   log_i("station: forgetting \"%s\"", w.staSsid);
@@ -648,6 +792,13 @@ void WifiManager::staForget() {
   w.staPassword[0] = '\0';
   settings.saveWifi(w);
   WiFi.disconnect();                     // stationConfigured() is now false; the watchdog rests
+  // The disconnect drops the link, not the interface: the STA the boot or a
+  // join brought up stays started, so an AP + stored-station node would keep
+  // WIFI_AP_STA until reboot after an ordinary forget. The re-assert of the
+  // settings shape is tick()'s — this task decides no modes — and the save
+  // above landed before the flag, so the convergence it triggers reads the
+  // forgetting, never the forgotten.
+  _modeSyncReq = true;
 }
 
 int WifiManager::staRssi() const { return stationConnected() ? WiFi.RSSI() : 0; }
@@ -1093,6 +1244,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     JsonObject pw = doc["power"].to<JsonObject>();
     pw["profile"] = Power::profileName(Power::profile());
     pw["cpu_mhz"] = getCpuFrequencyMhz();
+    // Read back from the driver (esp_wifi_get_ps()), not assumed from the
+    // profile: the proof a profile switch actually took effect, not just
+    // that one was asked for.
+    pw["wifi_ps"] = Power::wifiPsName();
     pw["battery_present"] = b.present;
     // Null, not false, where the board has no way to tell. A caller can then
     // say "unknown" instead of drawing a conclusion this node never reached.

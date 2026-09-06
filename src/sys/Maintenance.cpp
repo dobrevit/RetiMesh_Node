@@ -309,6 +309,11 @@ static void doStatus() {
         (unsigned long)h.largestDramBlock);
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
         g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
+  // wifi_ps is read back from the driver itself (esp_wifi_get_ps()), not
+  // assumed from the profile: it is the proof a profile switch actually
+  // took effect, not just that one was asked for.
+  dataf("STATUS", "power profile=%s cpu_mhz=%u wifi_ps=%s",
+        Power::profileName(Power::profile()), (unsigned)getCpuFrequencyMhz(), Power::wifiPsName());
 #if HAS_BQ25896 || HAS_IMU
   dataf("STATUS", "parts charger=%s imu=%s",
         Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");

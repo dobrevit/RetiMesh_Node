@@ -11,6 +11,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "I2cReg.h"
+#include "SampleGate.h"
 
 namespace {
 constexpr uint8_t kAddr    = 0x6B;
@@ -45,23 +46,20 @@ bool present() { return sPresent; }
 
 bool charging() {
   if (!sPresent) return false;
-  // Cached on the gauge's own cadence: the status bar asks every second, and
-  // a fresh bus transaction per ask bought nothing for a state that changes
-  // over minutes. A failed read keeps the previous answer — "not charging"
-  // invented from a bus hiccup is the confident wrong answer Power.h warns
-  // against.
-  static bool     sCharging = false;
-  static uint32_t sReadMs   = 0;
-  static bool     sEverRead = false;
-  const uint32_t now = millis();
-  if (!sEverRead || now - sReadMs >= BATTERY_SAMPLE_MS) {
+  // Cached on the gauge's own cadence (SampleGate.h: the first ask reads, so
+  // there is no all-answers-false window after boot): the status bar asks
+  // every second, and a fresh bus transaction per ask bought nothing for a
+  // state that changes over minutes. A failed read keeps the previous answer
+  // until the gate's next turn — "not charging" invented from a bus hiccup
+  // is the confident wrong answer Power.h warns against.
+  static bool       sCharging = false;
+  static SampleGate sGate(BATTERY_SAMPLE_MS);
+  if (sGate.due(millis())) {
     const int s = readReg(kReg0B);
     if (s >= 0) {
       const uint8_t chrg = (s >> 3) & 0x03;  // 00 none, 01 pre, 10 fast, 11 done
       sCharging = chrg == 1 || chrg == 2;
-      sEverRead = true;
     }
-    sReadMs = now;
   }
   return sCharging;
 }

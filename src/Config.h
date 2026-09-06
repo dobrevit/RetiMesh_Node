@@ -1053,6 +1053,13 @@
 #ifndef HAS_BATTERY_ADC
   #define HAS_BATTERY_ADC   1
 #endif
+// One battery reader per board: Power.cpp reads through the PMU when there is
+// one, but its shared sample gate would be primed by the ADC path's begin(),
+// leaving the PMU cache unread for the first interval — a PMU board must set
+// HAS_BATTERY_ADC to 0 (the default is 1).
+#if HAS_PMU && HAS_BATTERY_ADC
+  #error "HAS_PMU and HAS_BATTERY_ADC are mutually exclusive: the PMU is the battery reader; set HAS_BATTERY_ADC 0"
+#endif
 #ifndef BOARD_NAME
   #define BOARD_NAME        "unknown board"
 #endif

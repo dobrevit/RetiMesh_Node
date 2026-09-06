@@ -42,9 +42,24 @@ enum class Profile : uint8_t { Performance = 0, Balanced = 1, Battery = 2 };
 
 void begin();                       // applies the configured profile, starts sampling
 void apply(Profile p);              // live switch
+// Re-applies the current profile's modem sleep setting to the Wi-Fi driver —
+// esp_wifi_set_ps() directly, because WiFi.setSleep() only reaches it while
+// the STA interface is started and an AP-only node never starts one. Before
+// the driver exists the direct call is a harmless no-op, so a caller that
+// changes WiFi.mode() (bringing an interface up or back) must call this
+// again afterwards; WifiManager's STA_START/AP_START hook does exactly that.
+void applyWifiSleep();
 Profile profile();
 const char* profileName(Profile p);
 bool profileFromName(const char* name, Profile& out);
+// What the Wi-Fi driver is actually doing about modem sleep, read back from
+// esp_wifi_get_ps() rather than assumed from the profile: the two can
+// disagree — applyWifiSleep() is a no-op until the driver exists (see
+// above), so this is the one place STATUS/portal can show whether a profile
+// switch actually took. "n/a" with Wi-Fi off: the getter answers even with
+// no driver running, so the off state comes from the links settings'
+// wifiEnabled() rule (Settings.h), not from the getter.
+const char* wifiPsName();
 
 struct Battery {
   bool  present;                    // a cell is connected

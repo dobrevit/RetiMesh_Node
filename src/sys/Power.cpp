@@ -22,17 +22,22 @@
 #include "Power.h"
 #include "Pmu.h"
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <esp32-hal-cpu.h>
 #include "Settings.h"
 #include "Bq25896.h"
+#include "SampleGate.h"
 
 namespace {
 Power::Profile sProfile = Power::Profile::Performance;
 float    sVolts = 0;
-uint32_t sLastSample = 0;
+// One cadence for whichever battery reader this board has (SampleGate.h):
+// the first ask samples, every later one within BATTERY_SAMPLE_MS answers
+// from the cache.
+SampleGate sSampleGate(BATTERY_SAMPLE_MS);
 // When a conversion last actually succeeded, as opposed to when one was last
-// attempted. The difference is the whole point: sLastSample says the sampler is
-// running, and this says it is learning anything by doing so.
+// attempted. The difference is the whole point: the gate above says the
+// sampler is running, and this says it is learning anything by doing so.
 uint32_t sLastGoodMs = 0;
 bool     sStaleWarned = false;
 
@@ -50,14 +55,20 @@ uint8_t percentFor(float v) {
   return 0;
 }
 
-#if HAS_BATTERY_ADC
-// One task in the divider at a time. Four tasks ask for the battery — the
-// panel, telemetry, the console and the web server — and on a board whose
-// divider sits behind an enable line, two of them crossing the staleness
-// boundary together meant one released the line while the other was still
-// averaging: a floating pin, scaled and cached as the cell for ten seconds.
+// One task in the battery reader at a time. Four tasks ask for the battery —
+// the panel, telemetry, the console and the web server — and each reader has
+// its own window when two of them cross the sampling boundary together. On a
+// board whose divider sits behind an enable line, one released the line while
+// the other was still averaging: a floating pin, scaled and cached as the
+// cell for ten seconds. On a PMU board the window is the cache itself: the
+// gate advances before the I2C read and the cache fills field-by-field, so
+// the caller that skipped the sample copied it half-written — all zeroes,
+// "no battery", at the first ask after boot.
+#if HAS_BATTERY_ADC || HAS_PMU
 SemaphoreHandle_t sSampleLock = nullptr;
+#endif
 
+#if HAS_BATTERY_ADC
 // The enable line parked once; the attenuation is handled per read, below —
 // both orderings of "configure the pin once up front" were tried against the
 // hardware and neither survives: analogReadMilliVolts selects its calibration
@@ -126,7 +137,6 @@ void sample() {
             PIN_BATTERY_ADC);
     }
   }
-  sLastSample = millis();
   if (sSampleLock) xSemaphoreGive(sSampleLock);
 }
 #endif
@@ -149,13 +159,47 @@ bool profileFromName(const char* n, Profile& out) {
 
 Profile profile() { return sProfile; }
 
+void applyWifiSleep() {
+  const wifi_ps_type_t want =
+      sProfile == Profile::Performance ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM;
+  // WiFi.setSleep() only reaches esp_wifi_set_ps() while the STA interface is
+  // started — otherwise it just caches the request, and only STA_START ever
+  // applies the cache (WiFiGeneric.cpp). An AP-only node, the default shape,
+  // never starts STA, so the cache is where the profile's choice would end.
+  // The driver is therefore told directly as well; the Arduino call still
+  // runs first, so the core's cache — and its own re-apply on a later
+  // STA_START — agrees with what was set here.
+  WiFi.setSleep(want);
+  // Before the driver exists this fails, and that is fine: the
+  // STA_START/AP_START hook (WifiManager::begin) runs this again the moment
+  // an interface comes up.
+  (void)esp_wifi_set_ps(want);
+}
+
+const char* wifiPsName() {
+  // esp_wifi_get_ps() answers whether or not the driver is up — the IDF
+  // header documents it returning only ESP_OK — so a node with Wi-Fi off
+  // would otherwise report the driver's default (min_modem) as if a radio it
+  // is not running were saving power. Whether Wi-Fi runs at all is the links
+  // settings' rule (Settings.h); ask it rather than re-deriving it here.
+  if (!settings.links().wifiEnabled()) return "n/a";
+  wifi_ps_type_t ps;
+  if (esp_wifi_get_ps(&ps) != ESP_OK) return "n/a";
+  switch (ps) {
+    case WIFI_PS_NONE:      return "none";
+    case WIFI_PS_MIN_MODEM: return "min_modem";
+    default:                return "max_modem";
+  }
+}
+
 void apply(Profile p) {
   sProfile = p;
   switch (p) {
-    case Profile::Battery:     setCpuFrequencyMhz(80);  WiFi.setSleep(true);  break;
-    case Profile::Balanced:    setCpuFrequencyMhz(160); WiFi.setSleep(true);  break;
-    default:                   setCpuFrequencyMhz(240); WiFi.setSleep(false); break;
+    case Profile::Battery:  setCpuFrequencyMhz(80);  break;
+    case Profile::Balanced: setCpuFrequencyMhz(160); break;
+    default:                setCpuFrequencyMhz(240); break;
   }
+  applyWifiSleep();
   log_i("power profile: %s (CPU %u MHz, Wi-Fi sleep %s)", profileName(p), (unsigned)getCpuFrequencyMhz(),
         p == Profile::Performance ? "off" : "on");
 }
@@ -165,17 +209,15 @@ uint32_t displaySleepMs() {
 }
 
 void begin() {
-#if HAS_BATTERY_ADC
-  // The default for every channel attached from here on, rather than a
-  // per-pin setting: core 3 attaches a pin to the ADC on its first read and
-  // refuses to configure one that is not attached yet, so the per-pin call
-  // before the first sample logged an error and set nothing.
-  
-#if HAS_BATTERY_ADC
+#if HAS_BATTERY_ADC || HAS_PMU
   sSampleLock = xSemaphoreCreateMutex();   // before any task can ask
-  adcSetup();
 #endif
+#if HAS_BATTERY_ADC
+  adcSetup();
   sample();
+  // Primed, not left untouched: the reading above is fresh, so the gate holds
+  // its full interval from here instead of sampling again on the first ask.
+  sSampleGate.prime(millis());
 #endif
   apply((Profile)settings.transport().powerProfile);
 }
@@ -223,18 +265,36 @@ Battery battery() {
 #if HAS_PMU
   // The power-management chip measures the cell itself, and knows things an
   // ADC divider cannot: whether a battery is actually connected, and whether
-  // it is charging.
-  Pmu::Battery p = Pmu::battery();
-  Battery b;
-  b.volts    = p.volts;
-  b.present  = p.present;
-  b.charging = p.charging;
-  b.chargeKnown = true;             // the chip is asked directly
-  b.percent  = p.present ? p.percent : 0;
-  recordHistory(b.present, b.percent);
-  return b;
+  // it is charging. Gated the same as the ADC branch below: it sits on I2C,
+  // and the mono OLED path paints twice a second — four live transactions
+  // per paint, for a number that only changes over minutes, before this.
+  // The gate's first ask samples (SampleGate.h): nothing primes this branch,
+  // and answering from the zero-initialised cache for the first ten seconds
+  // made every PMU board report "no battery" everywhere right after boot.
+  //
+  // Gate, read, cache-fill and the answer's copy all sit under the sample
+  // lock. The gate advances before the I2C read and the cache fills
+  // field-by-field, so a second task crossing with the first would skip the
+  // sample and copy the cache half-written — at the very first ask, the
+  // all-zero "no battery" the priming rule above exists to prevent. Held
+  // across the I2C transaction, exactly as sample() holds it across the
+  // divider read; the wait is one battery conversion at worst.
+  static Battery sCached{};
+  if (sSampleLock) xSemaphoreTake(sSampleLock, portMAX_DELAY);
+  if (sSampleGate.due(millis())) {
+    Pmu::Battery p = Pmu::battery();
+    sCached.volts     = p.volts;
+    sCached.present   = p.present;
+    sCached.charging  = p.charging;
+    sCached.chargeKnown = true;       // the chip is asked directly
+    sCached.percent   = p.present ? p.percent : 0;
+    recordHistory(sCached.present, sCached.percent);
+  }
+  const Battery out = sCached;        // copied inside the lock, whole
+  if (sSampleLock) xSemaphoreGive(sSampleLock);
+  return out;
 #elif HAS_BATTERY_ADC
-  if (millis() - sLastSample > BATTERY_SAMPLE_MS) sample();
+  if (sSampleGate.due(millis())) sample();
   Battery b;
   b.volts   = sVolts;
   b.present = sVolts >= BATTERY_MIN_V && sVolts <= BATTERY_MAX_V;

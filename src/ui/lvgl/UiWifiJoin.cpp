@@ -108,6 +108,13 @@ void picked(lv_event_t* e) {
 void showResults(int count) {
   lv_obj_clean(sList);
   if (count <= 0) {
+    // A scan that found nothing (or failed — staScanCount() maps that to 0)
+    // still holds the driver's result table, and tick() is still holding
+    // the scan's STA promotion for it. Hand both back here exactly as the
+    // listed path below does, or an empty first scan keeps the promotion
+    // until some later scan finds networks — the quiet-shelf case D2 was
+    // about.
+    wifiManager.staScanDone();
     lv_list_add_text(sList, "Nothing on the air here.");
     status("No networks found");
     return;
@@ -158,6 +165,13 @@ void rescan(lv_event_t*) {
 namespace Ui {
 
 void openWifiJoin() {
+  // A verdict parked since an earlier visit — the screen closed before its
+  // heartbeat could collect it — would reach this visit's first heartbeat as
+  // a days-old toast and an instant back-navigation. The getter is one-shot,
+  // so taking it off the shelf now discards it; a join genuinely still in
+  // flight answers Trying instead and is left for the heartbeat to report.
+  (void)wifiManager.staJoinState();
+
   lv_obj_t* body = newScreen("Join Wi-Fi");
 
   sStatus = lv_label_create(body);

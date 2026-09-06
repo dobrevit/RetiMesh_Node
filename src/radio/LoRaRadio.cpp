@@ -869,9 +869,14 @@ bool LoRaRadio::mediumFree() {
   const uint32_t rxDone = rxDoneFlag();
   if (rxDone && (_radio->getIrqFlags() & rxDone)) handleRadioIrq();
 
-  if (cad == RADIOLIB_CHANNEL_FREE) return true;
-  _radio->startReceive();                // busy — go back to listening
-  return false;
+  // Listening resumes either way. A busy channel obviously needs it, but a
+  // clear one does too: csmaWait()'s DIFS wait and contention countdown run
+  // right after this returns, and "any traffic during either wait restarts
+  // the whole thing" (csmaWait(), below) only holds if the chip is actually
+  // receiving during them — otherwise the free probe leaves it in STDBY_RC,
+  // deaf to a frame that starts a symbol later.
+  _radio->startReceive();
+  return cad == RADIOLIB_CHANNEL_FREE;
 }
 
 // CSMA as RNode does it: wait for the medium to be free, hold it free for a

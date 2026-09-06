@@ -46,6 +46,14 @@ public:
   void blank(bool on) override {
     _oled.ssd1306_command(on ? SSD1306_DISPLAYOFF : SSD1306_DISPLAYON);
   }
+  // SSD1306 panel current is close to linear in contrast, so this is a real
+  // power knob rather than a cosmetic one. The percent-to-level mapping is
+  // DisplayLayout's, shared with the TFT backlight rather than written out
+  // again here.
+  void setBrightness(uint8_t pct) {
+    _oled.ssd1306_command(SSD1306_SETCONTRAST);
+    _oled.ssd1306_command(DisplayLayout::brightnessLevel(pct));
+  }
   // The panel and its charge pump come off, which is the point of the timer.
   bool blanks() const override { return true; }
   const uint8_t* frame(size_t& len) const override {

@@ -62,6 +62,8 @@ bool begin() {
     sPmu->enablePowerOutput(XPOWERS_ALDO2);             // transceiver
     sPmu->setPowerChannelVoltage(XPOWERS_ALDO3, 3300);
     sPmu->disablePowerOutput(XPOWERS_ALDO3);            // GPS: off for now
+    sPmu->setPowerChannelVoltage(XPOWERS_DCDC1, 3300);
+    sPmu->enablePowerOutput(XPOWERS_DCDC1);             // display/ESP32 (D6)
   }
   sGpsOn = false;
 

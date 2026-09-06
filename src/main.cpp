@@ -491,6 +491,13 @@ void setup() {
   // a first announce — is measured against a timeout meant for steady running.
   Watchdog::watch();
 
+  // Seeded here rather than left for the first heartbeat: the beat below
+  // fires 30 s in, and until then /api/status served heap_min_free as a
+  // literal 0 — poison for a soak monitor watching a minimum, because zero
+  // is the very reading it exists to catch.
+  g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+  g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+
   if (settings.links().wifiEnabled())
     log_i("RetiMesh Node up — join \"%s\", portal http://%s, RNS TCP :%d",
           wifiManager.ssid(), AP_IP.toString().c_str(), RNS_TCP_PORT);
@@ -530,10 +537,17 @@ void loop() {
   // a restart loop would report every run as zero seconds — indistinguishable
   // from one that never got past setup(). One word into RTC RAM, no flash.
   Diag::tick(millis() / 1000);
-  g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-  g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   if (millis() - lastBeat >= 30000) {
     lastBeat = millis();
+    // Walking the whole heap under the allocator's lock belongs on the
+    // heartbeat's cadence, not every pass of loop() (near enough 1 kHz):
+    // get_minimum_free_size() already tracks the all-time low itself, so
+    // asking less often loses nothing. heapMinFree feeds the status page's
+    // legacy heap_min_free field (seeded once in setup() so it is never a
+    // zero); psramFree has no reader in the firmware today — the portal asks
+    // ESP.getFreePsram() live — and is refreshed alongside it all the same.
+    g_stats.heapMinFree = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    g_stats.psramFree   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     // The battery sampler rides whoever calls battery(); with the glass
     // asleep nobody did, and the discharge history's clock silently stopped
     // on exactly the battery-first nodes it exists for. The heartbeat asks.
