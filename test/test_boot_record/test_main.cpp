@@ -144,19 +144,60 @@ static void test_begin_run_stamps_the_magic_and_clears_the_run() {
   TEST_ASSERT_EQUAL_UINT32(0, r.restart.persistMs);
 }
 
-static void test_begin_run_makes_the_previous_run_unreadable() {
-  // This is the ordering contract begin() has to honour: read first, then
-  // claim. A reset before the read loses the evidence silently, which is the
-  // shape of the bug this whole change is fixing.
+static void test_claiming_before_reading_destroys_the_evidence() {
+  // The failure this contract exists to prevent, written out as the thing that
+  // actually goes wrong rather than as the order that goes right. Sequencing
+  // it the wrong way round loses the dead run entirely — and it loses it
+  // silently, reporting a confident zero rather than an error.
   Record r = valid(4242, 9, 5);
-  const Previous kept = readPrevious(r);
-  beginRun(r);
-  const Previous after = readPrevious(r);
+  beginRun(r);                              // the mistake
+  const Previous tooLate = readPrevious(r);
+  TEST_ASSERT_TRUE(tooLate.known);          // still looks like a valid record
+  TEST_ASSERT_EQUAL_UINT32(0, tooLate.uptimeS);      // ...reporting nothing
+  TEST_ASSERT_EQUAL_UINT32(0, tooLate.allocFailures);
+  TEST_ASSERT_EQUAL_UINT32(0, tooLate.caught);
+}
+
+static void test_claim_run_reads_and_claims_in_the_right_order() {
+  // The pairing callers are given, so the order cannot be got wrong in a
+  // caller at all. Diag::begin() uses this and nothing else.
+  Record r = valid(4242, 9, 5);
+  const Previous kept = claimRun(r);
   TEST_ASSERT_TRUE(kept.known);
   TEST_ASSERT_EQUAL_UINT32(4242, kept.uptimeS);
-  TEST_ASSERT_TRUE(after.known);            // still ours, still valid
-  TEST_ASSERT_EQUAL_UINT32(0, after.uptimeS);
-  TEST_ASSERT_EQUAL_UINT32(0, after.allocFailures);
+  TEST_ASSERT_EQUAL_UINT32(9, kept.allocFailures);
+  TEST_ASSERT_EQUAL_UINT32(5, kept.caught);
+  // ...and the record now belongs to this run.
+  TEST_ASSERT_EQUAL_UINT32(kRecordMagic, r.magic);
+  TEST_ASSERT_EQUAL_UINT32(0, r.uptimeS);
+  TEST_ASSERT_EQUAL_UINT32(0, r.allocFailures);
+  TEST_ASSERT_EQUAL_UINT32(0, r.caught);
+}
+
+static void test_claim_run_on_a_dropped_rtc_domain_reports_unknown_and_still_claims() {
+  // A cold start: nothing to carry, but the record must still be claimed or
+  // this run would write into bytes it never validated.
+  Record r{};
+  memset(&r, 0xA5, sizeof(r));
+  const Previous p = claimRun(r);
+  TEST_ASSERT_FALSE(p.known);
+  TEST_ASSERT_EQUAL_UINT32(kRecordMagic, r.magic);
+  TEST_ASSERT_EQUAL_UINT32(0, r.allocFailures);
+}
+
+static void test_a_second_claim_carries_this_run_not_the_one_before() {
+  // Two restarts in a row: each boot must report the run immediately before
+  // it, never an older one still lying in the fields.
+  Record r{};
+  claimRun(r);
+  r.uptimeS = 100; r.allocFailures = 1; r.caught = 0;      // run A
+  const Previous a = claimRun(r);
+  r.uptimeS = 200; r.allocFailures = 7; r.caught = 2;      // run B
+  const Previous b = claimRun(r);
+  TEST_ASSERT_EQUAL_UINT32(100, a.uptimeS);
+  TEST_ASSERT_EQUAL_UINT32(1, a.allocFailures);
+  TEST_ASSERT_EQUAL_UINT32(200, b.uptimeS);
+  TEST_ASSERT_EQUAL_UINT32(7, b.allocFailures);
 }
 
 static void test_a_record_written_then_read_round_trips() {
@@ -174,6 +215,24 @@ static void test_a_record_written_then_read_round_trips() {
 }
 
 // --- the restart marks ------------------------------------------------------
+
+static void test_a_persist_mark_without_an_entry_mark_is_not_a_restart() {
+  // A shape the type permits and a stamping bug could produce: the hand-over
+  // was recorded but the entry was not. There is nothing to measure from, and
+  // inventing a duration out of the RTC clock would be worse than saying so.
+  Record r = valid(50, 0, 0);
+  r.restart = RestartMarks{0, 1234};
+  const Previous p = readPrevious(r);
+  TEST_ASSERT_TRUE(p.known);
+  TEST_ASSERT_FALSE(p.restartMarked);
+  TEST_ASSERT_FALSE(restartTiming(RestartMarks{0, 1234}, 9999).known);
+}
+
+static void test_a_full_width_uptime_survives_the_record() {
+  const Previous p = readPrevious(valid(0xFFFFFFFFu, 0, 0));
+  TEST_ASSERT_TRUE(p.known);
+  TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFFu, p.uptimeS);
+}
 
 static void test_a_run_that_was_not_deliberately_restarted_marks_nothing() {
   const Previous p = readPrevious(valid(100, 0, 0));
@@ -233,7 +292,12 @@ int main(int, char**) {
   RUN_TEST(test_the_counts_are_carried_at_full_width);
   RUN_TEST(test_reading_does_not_disturb_the_record);
   RUN_TEST(test_begin_run_stamps_the_magic_and_clears_the_run);
-  RUN_TEST(test_begin_run_makes_the_previous_run_unreadable);
+  RUN_TEST(test_claiming_before_reading_destroys_the_evidence);
+  RUN_TEST(test_claim_run_reads_and_claims_in_the_right_order);
+  RUN_TEST(test_claim_run_on_a_dropped_rtc_domain_reports_unknown_and_still_claims);
+  RUN_TEST(test_a_second_claim_carries_this_run_not_the_one_before);
+  RUN_TEST(test_a_persist_mark_without_an_entry_mark_is_not_a_restart);
+  RUN_TEST(test_a_full_width_uptime_survives_the_record);
   RUN_TEST(test_a_record_written_then_read_round_trips);
   RUN_TEST(test_a_run_that_was_not_deliberately_restarted_marks_nothing);
   RUN_TEST(test_no_marks_means_no_timing_rather_than_a_timing_of_zero);

@@ -123,14 +123,30 @@ inline Previous readPrevious(const Record& r) {
   return p;
 }
 
-// Claim the record for the run starting now. Call only after readPrevious():
-// this is what makes the previous run's figures unreadable.
+// Claim the record for the run starting now. Prefer claimRun() below — this is
+// the half that destroys the previous run's figures, and on its own it is only
+// correct if the caller has already read them.
 inline void beginRun(Record& r) {
   r.magic         = kRecordMagic;
   r.uptimeS       = 0;
   r.restart       = RestartMarks{0, 0};
   r.allocFailures = 0;
   r.caught        = 0;
+}
+
+// Take what the last run left, then claim the record for this one — in that
+// order, in one call, because the order is the whole contract and splitting it
+// across two statements in a caller is how it gets reversed.
+//
+// The risk is worth closing in the code rather than in a comment: Diag::begin()
+// installs a new-handler that writes to this record, so between claiming and
+// reading there is a window in which a failed allocation overwrites the dead
+// run's count — the exact evidence the record exists to carry. Callers get one
+// function and cannot sequence it wrongly.
+inline Previous claimRun(Record& r) {
+  const Previous previous = readPrevious(r);
+  beginRun(r);
+  return previous;
 }
 
 // How long the restart itself took, from the marks it left and the RTC clock

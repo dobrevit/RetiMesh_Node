@@ -179,15 +179,12 @@ static void onTerminate() {
 }
 
 void begin() {
-  // The record first — before the handlers, not just before beginRun().
+  // The record first — before the handlers, not just before the claim.
   // onAllocationFailed() mirrors into sRtc, so from the moment it is installed
-  // any failed allocation overwrites the dead run's counts. Nothing between
-  // here and there allocates today, which is exactly why this would survive
-  // review as a comment and fail the day someone adds a line that does. Taking
-  // the copy and claiming the record before the handlers exist closes the
-  // window rather than documenting it.
-  const Previous prev = readPrevious(sRtc);
-  beginRun(sRtc);
+  // any failed allocation overwrites the dead run's counts. claimRun() reads
+  // and claims in one call so the two cannot be sequenced wrongly here, and
+  // doing it before the handlers exist means there is no window at all.
+  const Previous prev = claimRun(sRtc);
 
   std::set_new_handler(onAllocationFailed);
   std::set_terminate(onTerminate);
