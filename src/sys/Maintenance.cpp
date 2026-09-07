@@ -370,7 +370,12 @@ static void doStatus() {
   {
     const Compass::Reading c = Compass::read();
     if (!c.valid) {
-      dataf("STATUS", "compass=absent");
+      // Two silences with nothing in common: a part that is not on the bus, and
+      // a part suspended along with the screen. The second ends by itself the
+      // moment anything wakes the panel; the first is a wiring question. An
+      // operator reading this line has to be able to tell them apart.
+      dataf("STATUS", "compass=%s",
+            (Compass::present() && !Compass::running()) ? "asleep" : "absent");
     } else {
       dataf("STATUS", "compass heading=%.1f levelled=%s tilt=%.0f field=%.1fuT cal=%u%%",
             c.headingDeg, c.levelled ? "yes" : "no", c.tiltDeg, c.fieldUt, c.calibration);

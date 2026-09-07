@@ -64,8 +64,28 @@ bool present();
 // moved. Call it from the loop; it is one short transaction.
 void poll();
 
-// The most recent sample, taken now if the last one is stale.
+// The most recent sample, taken now if the last one is stale. Nothing at all
+// while the part is suspended: a heading from before the screen went dark is
+// the one answer a navigator must never be handed as a current one.
 Reading read();
+
+// Put the part into measure mode, or into the suspend state it powers up in.
+// While the screen is dark nothing reads a heading, and a magnetometer left
+// converting continuously is paying for readings nobody collects.
+//
+// A request, not the write. Every I2C transaction to this part is issued from
+// the main loop — poll() here, read() from the console — and the screen state
+// that decides this arrives on the display task, on the other core, whose
+// transactions on the same bus are not ordered against these. So the wanted
+// mode is recorded from wherever, and written at the top of the next poll(),
+// which is a loop pass away. Safe from any task; idempotent; a no-op until
+// begin() has found the part.
+void setRunning(bool run);
+
+// Whether the part is converting. False while suspended and false while
+// absent — running() and present() together tell those two apart, which is
+// what a console line reporting no heading has to do.
+bool running();
 
 } // namespace Compass
 
@@ -80,5 +100,7 @@ inline void begin() {}
 inline bool present() { return false; }
 inline void poll() {}
 inline Reading read() { return Reading{}; }
+inline void setRunning(bool) {}
+inline bool running() { return false; }
 } // namespace Compass
 #endif // HAS_COMPASS

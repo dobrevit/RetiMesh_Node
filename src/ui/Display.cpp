@@ -417,6 +417,13 @@ void Display::pollButton2() {
 
 void Display::setBlank(bool blank) {
   _blank = blank;
+  // The panel is no longer the only thing behind this. Every part that has
+  // nothing to do while nobody is looking is told from one place (Power.h),
+  // and this function is the node's only screen-state edge: the idle timer,
+  // the power menu, both buttons, the touch layer and the deep-sleep path all
+  // arrive here. Before the panel work, so that on a wake the sensors are
+  // already coming back while the glass repaints.
+  Power::onScreenBlank(blank);
 #if HAS_LVGL_UI
   if (sShellUp) LvglUi::onBlank(blank);
 #endif

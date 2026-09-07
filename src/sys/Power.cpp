@@ -27,9 +27,16 @@
 #include "Settings.h"
 #include "Bq25896.h"
 #include "SampleGate.h"
+#include "PeripheralPolicy.h"
+#include "Compass.h"
+#include "Imu.h"
 
 namespace {
 Power::Profile sProfile = Power::Profile::Performance;
+// The other half of what the peripherals are told, beside the profile above.
+// False at boot because the screen is lit when begin() runs.
+bool sScreenDark = false;
+PeripheralPolicy sPeripherals;
 float    sVolts = 0;
 // One cadence for whichever battery reader this board has (SampleGate.h):
 // the first ask samples, every later one within BATTERY_SAMPLE_MS answers
@@ -219,6 +226,38 @@ float wifiTxPowerDbm() {
   return quarter / 4.0f;
 }
 
+namespace {
+// The broadcast. Both things that decide what a peripheral off the data path
+// should be doing — the screen and the profile — come through here, so the
+// rule (PeripheralPolicy.h) is asked in one place and each part is told only
+// when the answer for it actually moved.
+//
+// Every call below is guarded by the part's own board switch, so the seven
+// boards carrying neither compile this down to the policy's own arithmetic and
+// gain nothing to run. Both calls only record what the part is wanted to do;
+// each part's own owner writes it, and on the board that carries both the main
+// loop applies the accelerometer's first — which is the order that matters,
+// since the magnetometer reads it for gravity and must neither ask an
+// accelerometer that has just gone away nor be woken before one.
+void tellPeripherals() {
+  const PeripheralPolicy::Change c [[maybe_unused]] =
+      sPeripherals.update(sScreenDark, (uint8_t)sProfile);
+#if HAS_COMPASS
+  if (c.compass != PeripheralPolicy::Verdict::Unchanged)
+    Compass::setRunning(c.compass == PeripheralPolicy::Verdict::Run);
+#endif
+#if HAS_IMU
+  if (c.imu != PeripheralPolicy::Verdict::Unchanged)
+    Imu::setRunning(c.imu == PeripheralPolicy::Verdict::Run);
+#endif
+}
+} // namespace
+
+void onScreenBlank(bool dark) {
+  sScreenDark = dark;
+  tellPeripherals();
+}
+
 void apply(Profile p) {
   sProfile = p;
   switch (p) {
@@ -227,6 +266,11 @@ void apply(Profile p) {
     default:                setCpuFrequencyMhz(240); break;
   }
   applyWifiSleep();
+  // The profile is the broadcast's other input. It moves no sensor verdict
+  // today and the policy's test says so; it is asked anyway, so that the day
+  // a profile does move one there is no second call site to remember and no
+  // part left in the state the previous profile chose.
+  tellPeripherals();
   log_i("power profile: %s (CPU %u MHz, Wi-Fi sleep %s)", profileName(p), (unsigned)getCpuFrequencyMhz(),
         p == Profile::Performance ? "off" : p == Profile::Battery ? "max" : "min");
 }

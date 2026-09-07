@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Dobrev IT Ltd
+//
+// This file is part of RetiMesh Node.
+//
+// RetiMesh Node is free software: you can redistribute it and/or modify it
+// under the terms of the GNU General Public License as published by the
+// Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// RetiMesh Node is distributed in the hope that it will be useful, but
+// WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+// Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with RetiMesh Node. If not, see <https://www.gnu.org/licenses/>.
+
+
+// ============================================================================
+//  PeripheralPolicy.h — which parts follow the screen, and which the profile
+//
+//  Two things change what a peripheral off the data path ought to be doing:
+//  the screen going dark, and the power profile being switched. Neither used
+//  to reach anything. Display::setBlank() told LVGL and the panel; Power::
+//  apply() told the CPU clock and the Wi-Fi driver; and the parts that were
+//  configured into their hottest mode at boot went on running in it for ever,
+//  converting for a screen nobody was looking at.
+//
+//  The rule for which part follows which lives here, once, and Power's
+//  broadcast (Power::onScreenBlank) asks it. Two subsystems have subscribed so
+//  far, the magnetometer and the accelerometer; both are fitted on two boards
+//  out of nine, and both calls are guarded so the other seven gain nothing.
+//
+//  The rule
+//  --------
+//  Both sensors run while the screen is lit and are suspended while it is
+//  dark. That is all of it, and it is the same rule in every profile:
+//
+//   * the magnetometer is read for a heading on the glass and for a console
+//     line, and its hard-iron calibration is captured from a board being
+//     turned by hand — which is something a person does while looking at it.
+//     Dark, it converts continuously for nobody;
+//   * the accelerometer answers two questions and each board asks only one.
+//     Which way up the panel is being held, which a dark panel does not care
+//     about; or where level went, for the magnetometer's tilt correction,
+//     which is suspended alongside it. Either consumer is the lit screen.
+//
+//  Why the profile moves neither
+//  -----------------------------
+//  The profile is an input to this rule and deliberately does not change it.
+//  A lit screen on a battery-saving handheld is somebody holding the node and
+//  reading it: suspending the compass there would not make the profile
+//  cheaper, it would make the heading wrong, and a profile that quietly breaks
+//  a feature is worse than one that saves a milliamp less. What a profile
+//  could honestly buy on these two parts is a slower conversion rate while
+//  lit — and that is a register value per part which has to come off a
+//  datasheet and be confirmed against the hardware, not be guessed in a
+//  policy header. Until it is, the answer here is invariant in the profile,
+//  and the test says so rather than leaving it to be inferred.
+//
+//  The broadcast carries profile changes all the same, and that is not
+//  decoration: it is what keeps this file the only place the rule lives.
+//  Power::apply() re-asks, gets the same answer, and writes nothing. The
+//  alternative — wiring the profile in on the day it first matters — is a
+//  second call site to find and a peripheral state that only catches up when
+//  the screen happens to move.
+//
+//  Why it remembers
+//  ----------------
+//  Because the events repeat and the drivers must not be written to twice.
+//  setBlank(true) is reached from the idle timer, the power menu, a long
+//  press and the deep-sleep path, and several of those can arrive with the
+//  panel already dark; a profile can be re-applied with nothing changed at
+//  all (the settings commit does it unconditionally). So the verdicts are
+//  latched and an update() answers with what *moved*, which for most events
+//  is nothing. The drivers are idempotent too — they have to be, they are
+//  told from a different task than the one that owns them — but the cheapest
+//  bus transaction is the one nobody asks for.
+//
+//  The verdicts start at "running", because that is the state begin() leaves
+//  both parts in and the screen is lit when it does. So the first ask after
+//  boot moves nothing, which is right: nothing needs saying.
+//
+//  Pure — no Arduino, no FreeRTOS, no clock, no timestamps — so the routing
+//  is unit-tested on the host (test/test_peripheral_policy) instead of being
+//  watched on a bench with a current probe. One caller, one broadcast: not
+//  synchronised, like SampleGate and ApIdlePolicy.
+// ============================================================================
+#pragma once
+
+#include <stdint.h>
+
+class PeripheralPolicy {
+public:
+  // What one subsystem is told by an event, if anything. Unchanged is the
+  // usual answer and the reason this type is not a bool.
+  enum class Verdict : uint8_t { Unchanged, Run, Suspend };
+
+  // What one event moved. Both fields Unchanged means the broadcast has
+  // nothing to say, which is the common case and costs no transactions.
+  struct Change {
+    Verdict compass = Verdict::Unchanged;
+    Verdict imu     = Verdict::Unchanged;
+  };
+
+  // The rule itself, as two pure questions over the node's state. `profile`
+  // is Power::Profile's ordinal, passed rather than interpreted — see why the
+  // profile moves neither, above. Two functions and not one because they are
+  // two different questions that happen to share an answer today, and the day
+  // one of them parts company there is no call site to go hunting for.
+  static constexpr bool compassRuns(bool screenDark, uint8_t profile) {
+    (void)profile;
+    return !screenDark;
+  }
+  static constexpr bool imuRuns(bool screenDark, uint8_t profile) {
+    (void)profile;
+    return !screenDark;
+  }
+
+  // One event: the node's state as it now stands, and what that moves. The
+  // caller passes the whole state rather than the edge, so a broadcast raised
+  // for one input re-checks the other and no subscriber can be left holding a
+  // verdict from a state that has since changed.
+  Change update(bool screenDark, uint8_t profile) {
+    Change c;
+    const bool compass = compassRuns(screenDark, profile);
+    if (compass != _compass) {
+      _compass = compass;
+      c.compass = compass ? Verdict::Run : Verdict::Suspend;
+    }
+    const bool imu = imuRuns(screenDark, profile);
+    if (imu != _imu) {
+      _imu = imu;
+      c.imu = imu ? Verdict::Run : Verdict::Suspend;
+    }
+    return c;
+  }
+
+  // What the last update left each subsystem believing — for the tests, and
+  // for anyone reading a log beside a driver that refused its write.
+  bool compassRunning() const { return _compass; }
+  bool imuRunning() const { return _imu; }
+
+private:
+  bool _compass = true;                  // both parts come up running: begin()
+  bool _imu     = true;                  // configures them and the screen is lit
+};

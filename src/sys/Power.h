@@ -58,6 +58,20 @@ void applyWifiSleep();
 // live change.
 void applyWifiTxPower();
 Profile profile();
+
+// The screen has gone dark, or has come back. One call, from the node's only
+// screen-state edge (Display::setBlank), and from here it reaches every part
+// that has nothing to do while nobody is looking: today the magnetometer and
+// the accelerometer, on the two boards that carry them. What each part does
+// with it is that part's own decision — both record the request and write it
+// on the task that owns their bus — so this is safe from any task and costs
+// nothing on a board with neither part fitted.
+//
+// The rule for which part follows the screen and which follows the profile
+// lives in PeripheralPolicy.h; apply() below re-asks it, so a profile change
+// and a screen change are the same broadcast rather than two.
+void onScreenBlank(bool dark);
+
 const char* profileName(Profile p);
 bool profileFromName(const char* name, Profile& out);
 // What the Wi-Fi driver is actually doing about modem sleep, read back from
