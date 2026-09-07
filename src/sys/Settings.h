@@ -35,6 +35,7 @@
 #include <Preferences.h>
 #include "Config.h"
 #include "StoreHome.h"
+#include <atomic>
 
 enum class ApSecurity : uint8_t { Open = 0, WPA2 = 1, WPA2_WPA3 = 2, WPA3 = 3 };
 
@@ -123,6 +124,12 @@ struct TransportSettings {
   bool     autoEnabled = true;          // RNS AutoInterface peering on the Wi-Fi links
   char     autoGroupId[33] = "";        // "" = RNS default "reticulum"
   uint8_t  powerProfile = 0;            // 0 performance, 1 balanced, 2 battery (Power.h)
+  // What this node is for, as opposed to how hard it is trying: 0 not set,
+  // 1 carried, 2 transport (Power::Role). Not set is the default and means
+  // "behave exactly as this firmware did before roles existed", so an
+  // upgrading node with no stored key changes nothing about what it does.
+  // Later firmware adds roles above 2; the values here never move.
+  uint8_t  nodeRole = NODE_ROLE_DEFAULT;
   bool     sdStore = true;              // the Reticulum store's home is the SD card
   // A move of the store that has been asked for and not made yet. It is
   // carried out at the next boot, before anything opens the store, so it has
@@ -234,6 +241,15 @@ public:
   const WifiSettings&  wifi()  const { return _wifi;  }
   const AdminSettings& admin() const { return _admin; }
   const TransportSettings& transport() const { return _transport; }
+  // The node role on its own, and the only one of these fields that is read
+  // off a task no settings commit ever runs on: Power::role() asks it from the
+  // GNSS reader ten times a second, while a commit from the web, console or
+  // LXMF task assigns the whole struct above. Reading a byte out of a struct
+  // mid-assignment is a data race, and the field it feeds decides whether the
+  // receiver may stop looking — so this one is mirrored into an atomic that
+  // adoptTransport() keeps in step with the struct, and every reader of the
+  // role asks here. Relaxed: the value is the whole message.
+  uint8_t nodeRole() const { return _nodeRole.load(std::memory_order_relaxed); }
   const LinkSettings& links() const { return _links; }
   const MaintenanceSettings& maintenance() const { return _maintenance; }
   const DisplaySettings& display() const { return _display; }
@@ -255,11 +271,17 @@ public:
   static bool securityFromName(const char* name, ApSecurity& out);
 
 private:
+  // The one place _transport is assigned, so the role mirror above cannot
+  // drift from it: load(), saveTransport() and factoryReset() all go through
+  // here rather than each remembering to update two things.
+  void adoptTransport(const TransportSettings& t);
+
   Preferences   _prefs;
   RadioSettings _radio;
   WifiSettings  _wifi;
   AdminSettings _admin;
   TransportSettings _transport;
+  std::atomic<uint8_t> _nodeRole{NODE_ROLE_DEFAULT};   // see nodeRole()
   LinkSettings      _links;
   MaintenanceSettings _maintenance;
   DisplaySettings     _display;

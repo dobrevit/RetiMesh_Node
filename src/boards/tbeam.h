@@ -60,3 +60,6 @@
 #define PIN_GPS_RX          34               // ESP32 receives here
 #define PIN_GPS_TX          12
 #define GPS_BAUD            9600
+// Also u-blox, and recorded for what it is — but the PMU's own GPS rail is a
+// harder off than any message, and Config.h picks the rail on this board.
+#define GPS_UBX             1

@@ -25,6 +25,7 @@
 #include "StoreHome.h"
 #include "Diag.h"
 #include "Watchdog.h"
+#include "SdPollPolicy.h"
 #if HAS_SD
 #include <sd_diskio.h>
 #endif
@@ -129,7 +130,7 @@ bool SdCard::mounted() {
 }
 
 const char* SdCard::formatRefusal() {
-  if (_formatRequested) return "a format is already running";
+  if (_formatRequested.load(std::memory_order_relaxed)) return "a format is already running";
   if (info().state == State::Absent) return "no card";
   // Formatting the card the Reticulum store is open on would pull the
   // filesystem out from under microStore mid-write, and formatting one a
@@ -144,17 +145,103 @@ const char* SdCard::formatRefusal() {
 const char* SdCard::requestFormat() {
   const char* why = formatRefusal();
   if (why) { log_w("SD: format refused, %s", why); return why; }
-  _formatRequested = true;
+  _formatRequested.store(true, std::memory_order_release);
+  poke();
   return nullptr;
+}
+
+void SdCard::lookNow() {
+  _lookNow.store(true, std::memory_order_release);
+  poke();
+}
+
+// The flag is raised first and the task told second, always in that order, and
+// the store is a release against wait()'s acquire so nothing may reorder the
+// pair: the notification is what ends the wait, and the flag is what the wait
+// tests once it is awake. The other way round, a wake could arrive ahead of
+// its own reason, be spent on a flag that still reads false, and leave the
+// request to sit out the rest of an interval that reaches half a minute.
+void SdCard::poke() {
+  TaskHandle_t t = _task.load(std::memory_order_relaxed);
+  if (t) xTaskNotifyGive(t);
 }
 
 void SdCard::task(void* self) {
   auto* sd = static_cast<SdCard*>(self);
+  // Before the first wait, so a poke raised from here on has somewhere to go.
+  sd->_task.store(xTaskGetCurrentTaskHandle(), std::memory_order_relaxed);
   Watchdog::watch();
+  // How long to leave between passes is a decision with a file of its own
+  // (SdPollPolicy.h): an empty slot is both the expensive question and the one
+  // whose answer almost never changes, so it is asked less and less often,
+  // while a mounted card only wants its removal check.
+  SdPollPolicy policy;
   for (;;) {
     Watchdog::feed();
     Diag::guard("the sd card task", [sd] { sd->poll(); });
-    vTaskDelay(pdMS_TO_TICKS(SD_POLL_MS));
+    // An operator asked for a look while the last wait was running: the wait
+    // returned early for it, and the poll above is that look. Consumed here,
+    // on the task that owns the policy, and it puts the cadence back on its
+    // base beat — the point of the poke is the looks *after* this one.
+    if (sd->_lookNow.load(std::memory_order_relaxed)) {
+      sd->_lookNow.store(false, std::memory_order_relaxed);
+      policy.wake();
+    }
+    // Asked after the poll, so the interval follows what the poll just found.
+    // One reading of what the poll believes, not two: mounted() and info() are
+    // a mutex take each and answer the same belief, and deriving both arguments
+    // from the same Info also means the second look cannot disagree with the
+    // first about a slot that changed in between.
+    //
+    // The second question is "is anything in the slot", not "did it mount": a
+    // card that will not mount is one an operator may be about to format, and
+    // backing off from it immediately would be backing off from them — for the
+    // first minute and a half of it (SdPollPolicy).
+    const Info i = sd->info();
+    sd->wait(policy.nextWaitMs(isMounted(i.state), i.state != State::Absent));
+  }
+}
+
+// The policy's interval reaches the task watchdog's whole timeout — ten times
+// the slice, which is where the factor of ten belongs — so it is served in
+// slices with a feed between them: the task keeps reporting progress on the
+// same three-second beat it always did, and a longer look-again interval stays
+// a decision about the card rather than becoming a hole in the supervision.
+//
+// A format request ends the wait, and so does a look request (lookNow()). Both
+// used to end it only at the next slice boundary, which meant a button pressed
+// a millisecond after a slice began waited very nearly three seconds for the
+// look it asks for — while the button's own documentation, and docs/api.md,
+// say the node looks at once. So each slice is served as a task notification
+// with the slice as its timeout, the shape the GNSS reader already uses for
+// this (Gps.cpp), and the request wakes the task itself.
+//
+// Nothing is lost by arriving between slices, or before the wait begins at all:
+// a notification given to a task that is not blocked on one is latched by the
+// kernel, so the next take returns straight away. It is taken with clear-on-
+// exit, so a burst of pokes cannot bank up into a run of skipped slices — at
+// most one spent wake survives a request the task has already served, and that
+// costs one early feed and no lost time, since what is left is measured off the
+// clock rather than counted in slices.
+void SdCard::wait(uint32_t ms) {
+  // What has to clear the watchdog is not the slice on its own: it is one slice
+  // plus everything the task does before its next feed, which is one poll() —
+  // a probe that waits about half a second on an empty slot, or a mount attempt
+  // on a card that is slow to wake. The budget below is that allowance, stated
+  // rather than left implied, so retuning either number has to face it. (The
+  // format is the one pass longer than any timeout, and it steps out of
+  // supervision instead; see doFormat().)
+  constexpr uint32_t kPollBudgetMs = 5000;
+  static_assert(SdPollPolicy::kSliceMs + kPollBudgetMs <= (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
+                "one slice plus one poll has to clear the task watchdog");
+  const uint32_t start = millis();
+  for (uint32_t waited = 0; waited < ms; waited = millis() - start) {
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(SdPollPolicy::nextSliceMs(ms - waited)));
+    // Fed on every pass out of the take, woken early or not, so the longest
+    // this task can go unsupervised is still one slice.
+    Watchdog::feed();
+    if (_formatRequested.load(std::memory_order_acquire) ||
+        _lookNow.load(std::memory_order_acquire)) return;
   }
 }
 
@@ -256,7 +343,9 @@ void SdCard::poll() {
 }
 
 bool SdCard::checkSlot() {
-  if (_formatRequested) { doFormat(); _formatRequested = false; return true; }
+  // The request is cleared by doFormat() itself, on the way out of it by any
+  // route — see the scope guard there.
+  if (_formatRequested.load(std::memory_order_relaxed)) { doFormat(); return true; }
 
   if (_mounted) {
     // Removal check: a raw read of sector 0 fails once the card is gone.
@@ -329,6 +418,17 @@ void SdCard::doFormat() {
   // them is a throw — SD.begin() and measure() both allocate, and the caller
   // is Diag::guard(), which catches what they throw and carries on polling.
   Watchdog::Pause supervisionOff;
+  // The request the caller is serving, cleared here rather than after the call,
+  // and by a scope guard for the same reason the pause above is one: a throw
+  // out of this function is expected, and a flag a throw jumped over latches
+  // for the life of the node. Latched, every wait() ends after its first slice
+  // — the back-off silently gone, with nothing in the log to say so — and
+  // formatRefusal() turns down every later request as one that is already
+  // running. Held until the format is done, so that refusal is true while it is.
+  struct Served {
+    std::atomic<bool>& flag;
+    ~Served() { flag.store(false, std::memory_order_relaxed); }
+  } formatServed{_formatRequested};
   { Sys::Lock held(_lock);
     _info.state = State::Formatting;
     strlcpy(_info.lastFormat, "in progress", sizeof(_info.lastFormat));
@@ -427,6 +527,8 @@ void        SdCard::startPolling() {}
 SdCard::Info SdCard::info() { return Info{}; }
 bool        SdCard::mounted() { return false; }
 const char* SdCard::requestFormat() { return "this board has no card slot"; }
+void        SdCard::lookNow() {}
+void        SdCard::poke() {}
 void        SdCard::reserve(bool) {}
 bool        SdCard::reserved() { return false; }
 bool        SdCard::storageLost() { return false; }

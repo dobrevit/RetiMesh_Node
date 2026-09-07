@@ -64,7 +64,13 @@ public:
   // forces the lot; there is nothing to ghost, so nothing else needs it.
   void flush(bool full) override;
   // A backlight is most of what this panel costs, so blanking is real money:
-  // the glass goes dark and the LED goes off.
+  // the glass goes dark, the LED goes off, and the controller behind them is
+  // put to sleep — DISPOFF only stops the output, while the booster, the
+  // oscillator and the frame-RAM refresh carry on. Blocking, but not equally
+  // so on the two edges: waking costs the controller's 5 ms settle, and the
+  // 120 ms ordering wait between the sleep commands is paid on the blanking
+  // edge, where nothing is waiting for the glass. Idempotent, and every wait
+  // sits outside the SPI transaction (see the definition).
   void blank(bool on) override;
   bool blanks() const override { return true; }
   const uint8_t* frame(size_t& len) const override {
@@ -137,6 +143,10 @@ private:
   bool        _lit = false;             // backlight state, so blank() is idempotent
   bool        _blanked = false;
   uint8_t     _brightPct = 80;
+  // When SLPOUT was last sent — begin()'s or a wake's. The blanking edge
+  // counts its ordering wait from this rather than paying a flat 120 ms it
+  // has almost always already served (see blank()).
+  uint32_t    _sleepOutMs = 0;
 };
 
 #endif // HAS_DISPLAY && TFT

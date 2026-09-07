@@ -24,6 +24,8 @@
 #include <Preferences.h>
 #include "I2cReg.h"
 #include "Imu.h"
+#include "SampleGate.h"
+#include <atomic>
 
 namespace {
 
@@ -40,10 +42,40 @@ constexpr uint8_t kCtrl1Run = 0xD3;
 constexpr uint8_t kCtrl2Run = 0x03;
 constexpr uint8_t kSoftReset = 0x80;
 
+// Mode bits clear: the state the part is in when it is first powered, and the
+// state the bench found it in before anything here had configured it — chip id
+// 0x90 answering at 0x00 with both control registers at zero. Writing it back
+// is therefore not a guess about a low-power mode, it is the mode this file's
+// begin() takes the part out of.
+//
+// It clears more than the mode, which is why the resume writes two registers
+// and not one: CTRL1 packs the mode, the oversampling and the output rate
+// together — kCtrl1Run above is all three — so zero drops all of them. Only
+// CTRL2's range survives a suspend, and applyMode() restores both anyway, in
+// begin()'s order.
+constexpr uint8_t kCtrl1Suspend = 0x00;
+
 // Microtesla per count, from the part's scale at the range set above.
 constexpr float kUtPerCount = 0.0488f;
 
 bool sUp = false;
+
+// What the part is doing, and what it has been asked to do. The want is raised
+// from whichever task noticed the screen move; the running flag is only ever
+// written on the task that owns this part's bus access, at the top of poll(),
+// and read back from the display task through running().
+//
+// Both cross tasks, so both are atomics and neither is a volatile bool. That
+// distinction is not pedantry: volatile tells the compiler not to cache or
+// fold the access and says nothing at all about it being indivisible or about
+// what the other task may observe — it is a language feature for hardware
+// registers, not a synchronisation primitive, and a plain bool shared between
+// tasks is a data race whether or not it is spelled volatile. Relaxed, because
+// each of these is a single flag with no companion state to be ordered against:
+// the whole message is the value. Same shape and the same reasoning as
+// Power's sScreenDark and Gps's sNavViewMs.
+std::atomic<bool> sWantRunning{true};
+std::atomic<bool> sRunning{false};
 
 // The extremes each axis has reached, which is how the hard-iron offset is
 // found: the readings from a board turned about lie on a sphere, and the centre
@@ -97,10 +129,24 @@ void loadOffsets() {
         (sMin[2] + sMax[2]) * 0.5f);
 }
 
-void saveOffsets() {
+// `force` skips the throttle and not the dirty test: it is for the one moment
+// there will be no next chance — flush(), on the way into deep sleep or the
+// charger's ship mode, after which the rail may not be there at all. It still
+// writes nothing when nothing was found.
+//
+// Deliberately not the screen going dark. The dirty test is enough on a
+// stationary node and is not on a carried one: twenty seconds lit at ten
+// samples a second is two hundred readings through a changing field, and most
+// such cycles find a new extreme on some axis. A handheld on the battery
+// profile blanks every DISPLAY_SLEEP_BATTERY_MS — twenty seconds — so forcing
+// there would write NVS three times faster than the minute this same file
+// justifies with flash having a finite write budget. Losing up to a minute of
+// extremes costs nearly nothing: the pair only ever widens, and the next turn
+// finds again what was lost.
+void saveOffsets(bool force = false) {
   if (!sStoreOpen || !sDirty) return;
   const uint32_t now = millis();
-  if (sLastSaveMs && now - sLastSaveMs < kSaveEveryMs) return;
+  if (!force && sLastSaveMs && now - sLastSaveMs < kSaveEveryMs) return;
   sLastSaveMs = now ? now : 1;
   sDirty = false;
   sStore.putBytes("min", sMin, sizeof(sMin));
@@ -153,6 +199,7 @@ void begin() {
   delay(10);
 
   sUp = true;
+  sRunning.store(true, std::memory_order_relaxed);   // configured into measure mode, above
   loadOffsets();
   log_i("compass: QMC6309 at 0x%02x, continuous; heading needs the board turned "
         "around once before the hard-iron offsets mean anything", (uint8_t)COMPASS_ADDR);
@@ -246,8 +293,74 @@ static Reading sample() {
 // board barely uses.
 constexpr uint32_t kPollMs = 100;
 
+// A mode write that fails leaves the want standing, so it is tried again — and
+// this is where that has to be bounded. applyMode() runs at the top of poll(),
+// ahead of the sample cadence below, and poll() runs on every loop pass, so an
+// unthrottled retry is a transaction per pass at about a kilohertz. On a bus
+// held low each of those costs TwoWire::_timeOutMillis, 50 ms by default, and
+// the main loop becomes a 20 Hz loop: Maintenance::poll, ConsoleServer::poll,
+// the Reticulum inbox and admin passes and LocalLink::poll all slow by fifty
+// times, silently, because the watchdog is still being fed. Rationed on the
+// same gate the battery readers use — the attempt is what is rationed, so a
+// write that fails still waits its turn — and said out loud once the failures
+// have stopped looking like a hiccup.
+static SampleGate sModeRetry(kPollMs);
+static uint8_t    sModeFails = 0;
+constexpr uint8_t kModeComplainAfter = 10;   // a second of them, at kPollMs
+
+static void noteModeFailure(void) {
+  if (sModeFails < 255) sModeFails++;
+  if (sModeFails == kModeComplainAfter)
+    log_w("compass: the QMC6309 at 0x%02x has refused %u mode writes in a row — the "
+          "part is left as it was and the retry stays on the %u ms cadence",
+          (uint8_t)COMPASS_ADDR, (unsigned)kModeComplainAfter, (unsigned)kPollMs);
+}
+
+// The wanted mode, written here and nowhere else — on the task that owns this
+// part, which is what keeps the screen's verdict off a bus it does not own.
+static void applyMode() {
+  const bool want = sWantRunning.load(std::memory_order_relaxed);
+  if (want == sRunning.load(std::memory_order_relaxed)) return;
+  if (!sModeRetry.due(millis())) return;
+  if (want) {
+    // Both control registers, in begin()'s order, and both of them are needed:
+    // the suspend write took CTRL1's oversampling and output rate down with
+    // its mode bits, since all three share that register (kCtrl1Suspend). Only
+    // CTRL2's range should have survived, and it is restated anyway — one
+    // transaction on a wake, and no question left about what a suspended part
+    // remembers.
+    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, kCtrl2Run)) { noteModeFailure(); return; }
+    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Run)) { noteModeFailure(); return; }
+    // Nothing was measured while it slept, so the held sample is from before
+    // the screen went dark and the output registers still hold that conversion.
+    // Dropped, and the next sample left a poll interval away, which is twenty
+    // conversions at the rate above: a reader in that window is told there is
+    // no heading yet, which is true, rather than one from a minute ago.
+    sLast = Reading{};
+    sLastMs = millis() ? millis() : 1;
+  } else {
+    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Suspend)) { noteModeFailure(); return; }
+    sLast = Reading{};
+    sLastMs = 0;
+    // Nothing is flushed here. The screen goes dark every twenty seconds on a
+    // handheld and the offsets are worth a minute of waiting, not a write per
+    // blank — see saveOffsets() above. The moment there really is no next
+    // chance is the node being switched off, and that comes through flush().
+  }
+  sModeFails = 0;
+  sRunning.store(want, std::memory_order_relaxed);
+}
+
+void setRunning(bool run) { sWantRunning.store(run, std::memory_order_relaxed); }
+
+void flush() { saveOffsets(true); }
+
+bool running() { return sRunning.load(std::memory_order_relaxed); }
+
 void poll() {
   if (!sUp) return;
+  applyMode();                           // the screen's verdict, on this task
+  if (!sRunning.load(std::memory_order_relaxed)) return;   // suspended: nothing to sample
   const uint32_t now = millis();
   if (sLastMs && now - sLastMs < kPollMs) return;
   sample();
@@ -255,7 +368,7 @@ void poll() {
 }
 
 Reading read() {
-  if (!sUp) return Reading{};
+  if (!sUp || !sRunning.load(std::memory_order_relaxed)) return Reading{};
   // Fresh enough is the poller's last sample; otherwise take one now, so a
   // caller is never handed a heading from a minute ago because the loop was
   // busy.

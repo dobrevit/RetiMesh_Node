@@ -42,7 +42,14 @@ void tick(lv_timer_t*) {
     snprintf(v, sizeof(v), "%.10s UTC", f.utc);
     Ui::setLabel(sDate, v);
   } else { Ui::setLabel(sTime, "--:--"); Ui::setLabel(sDate, ""); }
-  if (f.valid) snprintf(v, sizeof(v), "GNSS 3D · %u sv", f.satellites);
+  // This is the screen the device spends its life on, and with the claim above
+  // withheld it is also the screen a receiver rests under — so it is the one
+  // place a satellite count frozen for five minutes would be read as a fault.
+  // The same word the GPS page, the mono page and /api/status use, rather than
+  // a fourth way of saying it.
+  if (f.portFault) snprintf(v, sizeof(v), "GNSS no port");
+  else if (f.resting) snprintf(v, sizeof(v), "GNSS resting");
+  else if (f.valid) snprintf(v, sizeof(v), "GNSS 3D · %u sv", f.satellites);
   else if (f.enabled) snprintf(v, sizeof(v), "GNSS searching");
   else snprintf(v, sizeof(v), "GNSS off");
   Ui::setLabel(sGnss, v);
@@ -120,6 +127,22 @@ void showIdle(bool on) {
 
 bool idleShowing() {
   return sPanel && !lv_obj_has_flag(sPanel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// The claim, refused while this clock is over the page making it. showIdle()
+// hides an overlay on the top layer; the screen beneath keeps its widgets and
+// its timers, which only die on LV_EVENT_DELETE — so the GPS page's refresh,
+// the sky view's and the bearing dial's all go on running under the clock. The
+// glass is still lit at this stage (the shell blanks only after four quiet
+// timeouts), so Power::screenDark() cannot answer this: it means the panel is
+// off, and the compass and accelerometer follow it. What is true here is
+// narrower and belongs to the UI — a page that is painting behind another one
+// is not a page anybody is reading — and left unsaid it deferred the first
+// rest by the whole idle stage, up to four minutes on the default profile.
+void navPainted() {
+#if HAS_GPS
+  if (!idleShowing()) Gps::navViewPainted();
+#endif
 }
 
 } // namespace Ui

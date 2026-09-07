@@ -27,9 +27,23 @@
 #include "Settings.h"
 #include "Bq25896.h"
 #include "SampleGate.h"
+#include "PeripheralPolicy.h"
+#include "GnssDutyPolicy.h"
+#include "Compass.h"
+#include "Imu.h"
+#include <atomic>
 
 namespace {
 Power::Profile sProfile = Power::Profile::Performance;
+// The other half of what the peripherals are told, beside the profile above.
+// False at boot because the screen is lit when begin() runs. Written on the
+// display task inside the section below and read from the GNSS task without
+// it; an atomic rather than a plain bool so that stays a deliberate choice
+// under link-time optimisation rather than one the compiler has been left
+// free to make differently. Relaxed: the value is the whole message, and the
+// section it is written under is there for update()'s latches, not for this.
+std::atomic<bool> sScreenDark{false};
+PeripheralPolicy sPeripherals;
 float    sVolts = 0;
 // One cadence for whichever battery reader this board has (SampleGate.h):
 // the first ask samples, every later one within BATTERY_SAMPLE_MS answers
@@ -159,6 +173,51 @@ bool profileFromName(const char* n, Profile& out) {
 
 Profile profile() { return sProfile; }
 
+// The role's ordinals reach the GNSS duty rule as a plain byte, the way the
+// profile reaches PeripheralPolicy: that header is host code and this one is
+// Arduino code, and neither should have to include the other to be tested.
+// What must not happen is the two vocabularies drifting apart — a renumbering
+// here would silently change what a stored 1 means on every deployed node — so
+// they are pinned against each other in the one file that sees both.
+static_assert((uint8_t)Role::Unset     == GnssDutyPolicy::kRoleUnset,     "node role ordinals have drifted");
+static_assert((uint8_t)Role::Carried   == GnssDutyPolicy::kRoleCarried,   "node role ordinals have drifted");
+static_assert((uint8_t)Role::Transport == GnssDutyPolicy::kRoleTransport, "node role ordinals have drifted");
+// And the numbers themselves, not only that the two headers agree about them.
+// The three above catch one side moving; they say nothing about both sides
+// moving together, which is the renumbering that would keep every build green
+// while changing what a 1 already written into a deployed node's NVS means.
+static_assert((uint8_t)Role::Carried   == 1, "persisted node role ordinal");
+static_assert((uint8_t)Role::Transport == 2, "persisted node role ordinal");
+
+const char* roleName(Role r) {
+  // Anything this build does not recognise reads back as "unset", which is
+  // also how every rule treats it: a role a later firmware wrote and this one
+  // has never heard of is a node whose behaviour nobody here decided.
+  switch (r) {
+    case Role::Carried:   return "carried";
+    case Role::Transport: return "transport";
+    default:              return "unset";
+  }
+}
+
+bool roleFromName(const char* n, Role& out) {
+  if (!n) return false;
+  // Case-insensitively, as every other named value this node takes.
+  if (!strcasecmp(n, "unset"))     { out = Role::Unset;     return true; }
+  if (!strcasecmp(n, "carried"))   { out = Role::Carried;   return true; }
+  if (!strcasecmp(n, "transport")) { out = Role::Transport; return true; }
+  return false;
+}
+
+// Through the settings' own atomic mirror rather than the struct: this is
+// asked from the GNSS reader task ten times a second, while a settings commit
+// on the web, console or LXMF task assigns the whole transport struct at once
+// (Settings::adoptTransport). Reading a byte out from under that assignment is
+// a data race, and it is the byte that decides whether the receiver may stop
+// looking. The mirror costs nothing to read and is seeded at load, so a node
+// that has never committed anything answers with what NVS held.
+Role role() { return (Role)settings.nodeRole(); }
+
 void applyWifiSleep() {
   // Battery goes all the way to max modem sleep: the station dozes
   // wifi.sta_listen_interval beacon intervals between wakes instead of waking
@@ -219,8 +278,129 @@ float wifiTxPowerDbm() {
   return quarter / 4.0f;
 }
 
+namespace {
+// The broadcast. Both things that decide what a peripheral off the data path
+// should be doing — the screen and the profile — come through here, so the
+// rule (PeripheralPolicy.h) is asked in one place and each part is told only
+// when the answer for it actually moved. `dark` and `prof` are whichever of
+// the two inputs this event moved; the other is passed null and left as it
+// stands, read inside the section below rather than at the call site.
+//
+// Under a critical section, because three tasks reach this and the state it
+// walks is not one flag. The display task arrives on a screen edge; the main
+// loop arrives on a settings commit from the console or from LXMF; the
+// async_tcp task arrives on a transport POST from the portal. update() is a
+// read-modify-write on its own latches, so two of those interleaved inside it
+// could hand one part a verdict and lose the other's, or issue the same
+// verdict twice — and sScreenDark is a plain bool written on one task and read
+// on another. The blast radius is small, since the next screen edge
+// re-converges, but a settings POST landing on a blank is precisely the moment
+// this milestone exists for. Same shape as recordHistory() below, and for the
+// same reason.
+//
+// And the verdicts are delivered inside it, not after it. An earlier version
+// handed them out once the section had been released, on the reasoning that a
+// flag store has nothing to do with the state the section protects. That is
+// true of the store and false of its *order*: two tasks really do reach this —
+// the display task on a screen edge, and apply()'s callers on the web, console
+// or LXMF task — so one could compute Suspend, be preempted before delivering
+// it, and let the other compute Run, deliver it and leave. The later verdict
+// lands first, the older one overwrites it, and the policy's latch now reads
+// "running" over two suspended drivers: every screen edge after that answers
+// Unchanged and the parts never come back until something else moves them.
+// Deciding and telling under one lock is what makes the last decision also the
+// last thing said.
+//
+// Safe to hold for, because that is all these calls are: each is one relaxed
+// store into the driver's own flag (Compass.cpp, Imu.cpp) — no bus, no lock,
+// no allocation, a handful of instructions inside a section that already runs
+// the policy's arithmetic. The alternative, stamping each verdict with a
+// generation and having both drivers refuse an older one, buys the same
+// ordering for two more words of state in three files and a rule that has to
+// be got right twice.
+//
+// Every call is guarded by the part's own board switch, so the ten boards
+// carrying neither compile this down to the policy's own arithmetic and the
+// section around it — 160 bytes of flash and no RAM, measured on heltec-v3,
+// which carries neither part. On the board that carries both, the main loop
+// applies the accelerometer's first — the order that matters, since the
+// magnetometer reads it for gravity and must neither ask an accelerometer that
+// has just gone away nor be woken before one.
+portMUX_TYPE sPeripheralMux = portMUX_INITIALIZER_UNLOCKED;
+
+void tellPeripherals(const bool* dark, const Power::Profile* prof) {
+  taskENTER_CRITICAL(&sPeripheralMux);
+  if (dark) sScreenDark.store(*dark, std::memory_order_relaxed);
+  if (prof) sProfile    = *prof;
+  const PeripheralPolicy::Change c [[maybe_unused]] =
+      sPeripherals.update(sScreenDark.load(std::memory_order_relaxed), (uint8_t)sProfile);
+#if HAS_COMPASS
+  if (c.compass != PeripheralPolicy::Verdict::Unchanged)
+    Compass::setRunning(c.compass == PeripheralPolicy::Verdict::Run);
+#endif
+#if HAS_IMU
+  if (c.imu != PeripheralPolicy::Verdict::Unchanged)
+    Imu::setRunning(c.imu == PeripheralPolicy::Verdict::Run);
+#endif
+  taskEXIT_CRITICAL(&sPeripheralMux);
+}
+} // namespace
+
+void onScreenBlank(bool dark) { tellPeripherals(&dark, nullptr); }
+
+// Read without the section the writer takes. It is a single bool, written on
+// the display task and read from the GNSS task ten times a second; the section
+// exists to keep update()'s latches consistent, and a reader that catches the
+// previous value one pass before the edge lands is a tenth of a second of a
+// receiver tracking, not a lost verdict — while taking the section here would
+// stop the scheduler on this core for that same reader.
+bool screenDark() { return sScreenDark.load(std::memory_order_relaxed); }
+
+// How long the node waits, on its way to sleep, for the parts to stop. Twenty
+// loop passes at the drivers' own retry cadence and two hundred at the rate
+// the loop actually runs, so a loop that is running at all lands the verdict
+// in the first few milliseconds; the cap is there for the loop that is not.
+constexpr uint32_t kSleepSettleMs = 200;
+
+void prepareForSleep() {
+  // setBlank(true) reached the parts through onScreenBlank() above, and both
+  // of them only recorded the request: the register writes land in
+  // Compass::poll() and Imu::poll(), on the main loop. Nothing used to wait
+  // for them, and nothing had to — esp_deep_sleep_start() follows within
+  // microseconds on a board whose charger has nothing to say (HAS_BQ25896 0,
+  // which is the M9's case), so the loop task almost certainly never ran.
+  // Deep sleep then holds the pins as they stand and the peripheral rail stays
+  // up, so the magnetometer went on converting at 200 Hz with maximum
+  // oversampling through a menu item named "off".
+  //
+  // Spun on rather than signalled: running() is a flag each driver writes on
+  // its own task once its own write succeeded, so this reads no register,
+  // takes no lock either driver uses and adds nothing to the bus the loop is
+  // busy with. Both answer false while absent, so a board with neither part
+  // leaves this loop on its first test.
+  const uint32_t start = millis();
+  while ((Compass::running() || Imu::running()) && millis() - start < kSleepSettleMs)
+    vTaskDelay(pdMS_TO_TICKS(5));
+  if (Compass::running() || Imu::running())
+    log_w("power: %s%s%s still converting %u ms after the screen went dark — sleeping "
+          "anyway, and deep sleep will hold it that way",
+          Compass::running() ? "the magnetometer" : "",
+          (Compass::running() && Imu::running()) ? " and " : "",
+          Imu::running() ? "the accelerometer" : "", (unsigned)kSleepSettleMs);
+  // And the one flush that is worth a write to flash: after this the rail may
+  // not be there at all. Deliberately here and not on every blank — the screen
+  // goes dark every twenty seconds on a handheld (Compass.cpp). Ordered after
+  // the wait so the part that owns those extremes has stopped sampling them.
+  Compass::flush();
+}
+
 void apply(Profile p) {
-  sProfile = p;
+  // The profile lands inside the broadcast's critical section, because it is
+  // one of that broadcast's two inputs and three tasks reach it. It moves no
+  // sensor verdict today and the policy's test says so; it is asked anyway, so
+  // that the day a profile does move one there is no second call site to
+  // remember and no part left in the state the previous profile chose.
+  tellPeripherals(nullptr, &p);
   switch (p) {
     case Profile::Battery:  setCpuFrequencyMhz(80);  break;
     case Profile::Balanced: setCpuFrequencyMhz(160); break;

@@ -237,6 +237,16 @@ inline bool validateTransport(const TransportSettings& t, char* err, size_t errL
     snprintf(err, errLen, "power_profile must be 0-2 (performance|balanced|battery)");
     return false;
   }
+  // The role travels the same two ways for the same reason: a name on the POST
+  // path, through Power::roleFromName, and the number the export wrote on the
+  // import path. Bounded here so a hand-edited file cannot store a role no
+  // build knows — which would work, because every rule treats an unknown role
+  // as unset, but would then quietly become a *different* role the day a later
+  // firmware defines that number.
+  if (t.nodeRole > 2) {
+    snprintf(err, errLen, "node_role must be 0-2 (unset|carried|transport)");
+    return false;
+  }
   return validateGroupId(t.autoGroupId, err, errLen);
 }
 

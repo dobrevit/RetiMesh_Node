@@ -131,6 +131,14 @@ void openEraseIdentity();                // design screen 21: the key's own deat
 void openPowerMenu();                    // sleep / restart / power off
 void showIdle(bool on);                  // the low-draw clock the panel rests on
 bool idleShowing();
+// A position screen has painted, and wants the receiver kept looking under it
+// (Gps::navViewPainted). Routed through here rather than called directly,
+// because showIdle() hides an overlay over the screen underneath rather than
+// deleting it: the GPS, sky and bearing timers only die on LV_EVENT_DELETE, so
+// they go on firing behind the clock and would go on claiming a receiver for a
+// page nobody can see. One rule, one place — the four screens that claim must
+// not each remember to ask.
+void navPainted();
 void resetIdle();                        // drops the idle panel so it rebuilds
 void retheme();                          // applies the settings' palette, rebuilds
 void showIncoming(const uint8_t from[16], const char* text);  // full-screen interrupt

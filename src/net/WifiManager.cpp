@@ -2018,6 +2018,15 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     gps["satellites"] = g.satellites;
     gps["sentences"]  = g.sentences;
     gps["clock_set"]  = g.clockSet;
+    // Whether the receiver has been told it may stop looking (the node role
+    // setting). Reported beside the fix because without it a satellite count
+    // frozen for five minutes reads as a fault.
+    gps["resting"]    = g.resting;
+    // And the one reading here that is a fault rather than a state: the
+    // receiver's UART could not be opened, so no sentence can arrive however
+    // long anybody waits. Without it "enabled, zero sentences" is the same
+    // report as an antenna indoors.
+    gps["port_fault"] = g.portFault;
     gps["utc"]        = g.utc;
     // Everything above says whether the receiver is working. Where the node
     // physically is says something else, and /api/status is public — on an
@@ -2398,6 +2407,7 @@ void WifiManager::handleSettingsGet(AsyncWebServerRequest* request) {
   tr["auto_enabled"] = settings.transport().autoEnabled;
   tr["auto_group_id"] = settings.transport().autoGroupId;
   tr["power_profile"] = Power::profileName((Power::Profile)settings.transport().powerProfile);
+  tr["node_role"] = Power::roleName(Power::role());
   tr["sd_store"] = settings.transport().sdStore;
   tr["online"]    = g_stats.transportOnline;
 
@@ -2790,6 +2800,11 @@ void WifiManager::handleTransportPost(AsyncWebServerRequest* request, const char
     if (!Power::profileFromName(in["power_profile"], pp)) { sendError(request, 400, "power_profile must be performance|balanced|battery"); return; }
     t.powerProfile = (uint8_t)pp;
   }
+  if (in["node_role"].is<const char*>()) {
+    Power::Role r;
+    if (!Power::roleFromName(in["node_role"], r)) { sendError(request, 400, "node_role must be unset|carried|transport"); return; }
+    t.nodeRole = (uint8_t)r;
+  }
   if (in["auto_group_id"].is<const char*>()) {
     String g = in["auto_group_id"].as<String>(); g.trim();
     if (g.length() > 32) { sendError(request, 400, "group id must be at most 32 characters"); return; }
@@ -2837,7 +2852,8 @@ void WifiManager::handleExport(AsyncWebServerRequest* request) {
   t["announce_cap"] = ts.announceCap; t["announce_rate_target"] = ts.announceRateTarget;
   t["announce_rate_grace"] = ts.announceRateGrace; t["announce_rate_penalty"] = ts.announceRatePenalty;
   t["auto_enabled"] = ts.autoEnabled; t["auto_group_id"] = ts.autoGroupId;
-  t["power_profile"] = ts.powerProfile; t["sd_store"] = ts.sdStore;
+  t["power_profile"] = ts.powerProfile; t["node_role"] = ts.nodeRole;
+  t["sd_store"] = ts.sdStore;
   {
     // Only the links this build can run: an export describes what the node
     // does, and a switch for a driver that does not exist here would carry a
@@ -2977,6 +2993,7 @@ void WifiManager::handleImport(AsyncWebServerRequest* request, const char* body,
     // the data; setting the flag alone never did.
     storeHomeIgnored = t["sd_store"].is<bool>() && (bool)t["sd_store"] != ts.sdStore;
     if (!jsonNarrow(request, t["power_profile"], ts.powerProfile, "power_profile")) return;
+    if (!jsonNarrow(request, t["node_role"], ts.nodeRole, "node_role")) return;
     if (t["auto_group_id"].is<const char*>()) strlcpy(ts.autoGroupId, t["auto_group_id"], sizeof(ts.autoGroupId));
     // The shared rule, not a local copy of its bounds: the inline check that
     // sat here knew the modes and the cap and silently waved auto_group_id

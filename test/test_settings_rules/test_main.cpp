@@ -129,6 +129,29 @@ static void test_the_power_profile_number_names_a_real_profile() {
   TEST_ASSERT_NOT_NULL(strstr(err, "power_profile"));
 }
 
+static void test_the_node_role_number_names_a_real_role() {
+  // Same two routes as the profile above — a name on the POST path, the
+  // exported number on the import path — and the same reason to bound it.
+  // A role no build knows would work today, since every rule treats an
+  // unrecognised role as unset, and would then quietly become a *different*
+  // role the day a later firmware defines that number.
+  TransportSettings t;
+  char err[160] = "";
+  // The default is the one that changes nothing on an upgrading node, and it
+  // is asserted here rather than left to be read off the struct: this is the
+  // value a fleet that never touches the setting will run under for ever.
+  TEST_ASSERT_EQUAL_UINT8(0, t.nodeRole);
+  for (uint8_t r = 0; r <= 2; r++) {
+    t.nodeRole = r;
+    TEST_ASSERT_TRUE_MESSAGE(validateTransport(t, err, sizeof(err)), err);
+  }
+  t.nodeRole = 3;
+  TEST_ASSERT_FALSE(validateTransport(t, err, sizeof(err)));
+  TEST_ASSERT_NOT_NULL(strstr(err, "node_role"));
+  t.nodeRole = 255;
+  TEST_ASSERT_FALSE(validateTransport(t, err, sizeof(err)));
+}
+
 static void test_a_wide_value_that_cannot_fit_its_field_is_refused_not_reshaped() {
   // The bounds above only work when they judge the number that was sent.
   // The web handlers narrow JSON integers into int8/uint8/uint16 fields, and
@@ -341,6 +364,7 @@ int main() {
   RUN_TEST(test_the_announce_cap_floor_is_one_not_zero);
   RUN_TEST(test_transport_modes_are_rnsds_one_to_five);
   RUN_TEST(test_the_power_profile_number_names_a_real_profile);
+  RUN_TEST(test_the_node_role_number_names_a_real_role);
   RUN_TEST(test_a_wide_value_that_cannot_fit_its_field_is_refused_not_reshaped);
   RUN_TEST(test_narrowing_passes_every_value_the_field_can_hold_exactly);
   RUN_TEST(test_a_secured_network_needs_a_password_and_the_lengths_are_wifis);

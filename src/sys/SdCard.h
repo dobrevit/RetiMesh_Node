@@ -53,7 +53,9 @@
 #include <SPI.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include "Config.h"
+#include <atomic>
 
 #if HAS_SD
 #include <SD.h>
@@ -83,6 +85,33 @@ public:
   void startPolling();                   // ... once the store's home is settled
   Info info();
   bool mounted();
+
+  // Whether a state means "there is a filesystem mounted at /sd". Stated once
+  // so that a caller holding an Info can answer it without a second mutex take
+  // for mounted(), and without writing the pair of enumerators out again in a
+  // place that would then have to be found when a state is added.
+  static constexpr bool isMounted(State s) {
+    return s == State::Mounted || s == State::Partial;
+  }
+
+  // "Somebody is at the node." Puts the poll cadence (SdPollPolicy) back on its
+  // base beat and ends the current wait, so a card pushed in after the node has
+  // been sitting with an empty slot is found at once rather than within the
+  // policy's ceiling. Raise-only, safe from any task; the card task consumes it.
+  //
+  // Only unambiguous operator actions may call this. The button qualifies — a
+  // hand on the node is the same hand that pushes a card in, and it is already
+  // the wake for the idle access point. A status read does not: monitoring
+  // tools and soak samplers poll /api/status for ever, and a poke from there
+  // would hold the node on the three-second beat and silently undo the whole
+  // back-off.
+  //
+  // "At once" is meant literally, which is why this is not just a flag: the
+  // card task is woken out of its wait rather than left to notice the flag
+  // when its current slice runs out. A press landing a millisecond after a
+  // slice started used to wait very nearly three seconds for a look the button
+  // and the documentation both promise immediately.
+  void lookNow();
 
   // Asks for a format, and answers with the reason it was refused or nullptr
   // when it was accepted. One call, because the rule turns on a card and a
@@ -134,6 +163,15 @@ private:
   const char* formatRefusal();
 
   void  poll();                          // the slot, and the marker when it moves
+  // Wakes the card task out of its wait. Raised by lookNow() and by
+  // requestFormat(), after the flag they set, and a no-op before the task
+  // exists.
+  void  poke();
+  // Waits the interval SdPollPolicy asked for, in watchdog-sized slices, and
+  // ends the moment a format or a look is asked for — each slice is a task
+  // notification with the slice as its timeout, so a request wakes the task
+  // rather than waiting out the slice it landed in.
+  void  wait(uint32_t ms);
   bool  checkSlot();                     // true when what the slot holds changed
   bool  mount();
   void  unmount();
@@ -149,7 +187,27 @@ private:
   SPIClass*         _spi = nullptr;
   SemaphoreHandle_t _lock = nullptr;
   Info              _info;
-  volatile bool     _formatRequested = false;
+  // Raised from any task, consumed on the card's own. Atomics rather than
+  // volatile bools: volatile keeps the compiler from folding an access away
+  // and promises nothing at all about what another task observes, which is
+  // exactly what sharing a flag between tasks needs.
+  //
+  // The two of them that a poke follows are stored with release and read back
+  // in wait() with acquire, which is stronger than the relaxed flags elsewhere
+  // in this round and deliberately so: here the flag and the notification are
+  // two separate objects that have to be seen in that order. A card task that
+  // woke on the notification and then read the flag as not yet set would go
+  // back to waiting with the wake already spent — and wait out the rest of an
+  // interval that reaches half a minute, which is the delay this pairing
+  // exists to remove. Everywhere else these are read for their own sake and
+  // relaxed is the whole message.
+  std::atomic<bool> _formatRequested{false};
+  std::atomic<bool> _lookNow{false};      // an operator asked for a look (lookNow())
+  // The card task, so a request can end its wait instead of waiting it out.
+  // Recorded by the task itself at its first line, the way the GNSS reader
+  // does (Gps.cpp); null until then, and a request raised in that window is
+  // still served — the flags above are what the wait actually tests.
+  std::atomic<TaskHandle_t> _task{nullptr};
   bool              _mounted = false;
   bool              _reserved = false;   // Reticulum store lives here
   bool              _storageLost = false;

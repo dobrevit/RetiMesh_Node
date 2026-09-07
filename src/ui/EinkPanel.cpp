@@ -67,7 +67,7 @@ bool EinkPanel::begin() {
   // does it with a bare new[] it does not check; giving it the roomier heap
   // is the only influence we have over that. The canvas is ours and is
   // checked.
-  _panel = new (std::nothrow) EInkDisplay_WirelessPaperV1_2();
+  _panel = new (std::nothrow) EinkDriver();
   _canvas = new (std::nothrow) GFXcanvas1(DISPLAY_WIDTH, DISPLAY_HEIGHT);
   if (!_panel || !_canvas || !_canvas->getBuffer()) {
     log_e("e-paper: no room for a %dx%d frame — display disabled", DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -97,17 +97,29 @@ bool EinkPanel::begin() {
 
 void EinkPanel::flush(bool full) {
   if (!_ok) return;
+  // What a controller coming back from deep sleep owes this update, if it is
+  // coming back from one at all (EinkSleep.h). Ordinarily nothing.
+  const EinkSleep::Preamble pre = _sleep.beforeUpdate(full);
+  // The reset the part requires before it will accept anything again. This
+  // driver has no reset of its own to call — reset() is protected and is
+  // reached only from a fastmode change, which does exactly the right thing:
+  // Vext up, the reset pin pulled, BUSY waited on, then the software reset
+  // and the waveform config. Forgetting which mode the controller is in is
+  // how it is asked for one, because the change is what triggers the reload.
+  if (pre.reload) _fastmode = -1;
   // Partial by default because a full pass flashes the panel; full when the
-  // policy says the ghosting has had long enough, and on the first frame,
-  // where what is on the glass is the previous firmware's.
+  // policy says the ghosting has had long enough, on the first frame, where
+  // what is on the glass is the previous firmware's, and after a sleep, where
+  // the difference the partial update is computed against may not have
+  // survived it.
   //
   // Set only when it changes: each of these resets the controller, reloads
   // its waveform and waits on BUSY twice, which is not a thing to do before
   // every update on a panel whose updates are what we are rationing.
-  const int8_t want = full ? 0 : 1;
+  const int8_t want = pre.full ? 0 : 1;
   if (want != _fastmode) {
-    if (full) _panel->fastmodeOff();
-    else      _panel->fastmodeOn();
+    if (pre.full) _panel->fastmodeOff();
+    else          _panel->fastmodeOn();
     _fastmode = want;
   }
   // Clear the page in memory, not on the glass. The obvious call for this,
@@ -119,13 +131,52 @@ void EinkPanel::flush(bool full) {
   _panel->update();
 }
 
+// The glass keeps its picture and the controller stops. Those are two
+// different things on this panel and only the first of them used to happen.
+//
+// The image stays, deliberately: blanking an e-paper panel by clearing it
+// would throw away the reading a passer-by is meant to be able to take off a
+// sleeping node, and it holds that image with no power at all. What was
+// missing is that the part driving it does not stop when the picture does.
+// The driver's update sequence already ends with the analog and the
+// oscillator disabled — the master-activation option it sends, R22h = F7h for
+// a full pass and FFh for a fast one, spells out "Enable clock signal, Enable
+// Analog, Load temperature value, DISPLAY, Disable Analog, Disable OSC" — so
+// what is left between updates is the controller's plain idle, not a running
+// booster. The panel's own DC table puts that at tens of microamps and its
+// deep sleep at about one, so this is a small, continuous saving rather than
+// the milliamps a lit panel costs; it is worth taking on the one board whose
+// selling point is drawing nothing while it stands still.
+//
+// It is not taken after every update, and that is a measurement rather than
+// caution: coming back costs a hardware reset and a full refresh, and a full
+// refresh on this panel is seconds of driving at milliamps — more charge than
+// the deep sleep saves across the five minutes between resting updates. So
+// the sleep is spent where nothing is waiting on the other side of it: a
+// blank somebody asked for, after which the panel is not updated again until
+// they ask for it back.
+//
+// The rail this panel hangs off is not an alternative here. On this board
+// Vext feeds every peripheral on the PCB, the radio's front end included
+// (the board header says so, and the driver library's own platform file calls
+// it "power to Wireless Paper's interfaces (Display + LoRa P/A)"), so it can
+// never drop on a transport node — and the driver raises it again on every
+// mode change regardless. The controller's own deep sleep reaches the same
+// place without touching the radio's supply.
 void EinkPanel::blank(bool on) {
-  // Nothing to switch off: an e-paper panel holds its image without power,
-  // which is most of the point of one. Blanking it would mean clearing the
-  // glass — throwing away the reading a passer-by is meant to be able to
-  // take off a sleeping node — so the panel keeps showing what it last
-  // showed. blanks() tells the display's sleep timer not to bother.
-  (void)on;
+  if (!_ok) return;
+  if (on) {
+    // Idempotent because the screen edge is not: the same blank arrives from
+    // a long press and from the page walker, and a controller already asleep
+    // would not hear the command anyway.
+    if (_sleep.sleep()) _panel->deepSleep();
+    return;
+  }
+  // Nothing to send: the part leaves deep sleep only on a hardware reset, and
+  // that reset belongs to the update that follows — flush() pays it, together
+  // with the full refresh the lost differential reference needs. Waking here
+  // instead would reset a panel that nobody has yet drawn anything for.
+  _sleep.wake();
 }
 
 #endif // HAS_DISPLAY && EINK

@@ -22,6 +22,8 @@
 #include "Diag.h"
 #include "Display.h"
 #include "DisplayLayout.h"
+#include "BacklightLadder.h"
+#include "DisplayPace.h"
 #include "VersionLabel.h"
 #include "esp32-hal-periman.h"
 #include <WiFi.h>
@@ -138,10 +140,15 @@ void Display::displayTask(void* self) {
     // Fed before the pass, not after: an e-paper full refresh is seconds long
     // and is the slowest thing WATCHDOG_TIMEOUT_S has to clear.
     Watchdog::feed();
+    // How long this pass has earned at the end of it. The floor until
+    // something asks for longer, which is the pass the mono pages and a
+    // blanked panel keep running and the one a pass that threw falls back to
+    // (DisplayPace.h).
+    uint32_t pace = DisplayPace::kMinMs;
     // A page that cannot allocate skips that pass rather than taking the node
     // with it: the display is the least important thing on a node under
     // pressure and must be the first to give way (Diag.h).
-    Diag::guard("the display task", [d] {
+    Diag::guard("the display task", [d, &pace] {
     d->pollButton();
 #if !HAS_LVGL_UI && HAS_TOUCH
     d->pollTouch();                      // the shell reads the glass itself
@@ -150,16 +157,11 @@ void Display::displayTask(void* self) {
     d->pollButton2();
 #endif
     uint32_t now = millis();
-#if HAS_LVGL_UI || DISPLAY_KIND == DISPLAY_KIND_OLED
-    {
-      // The brightness setting reaches the glass here, once per change. OLED
-      // panel current is close to linear in contrast, so this is a real
-      // power knob there too, not only on the backlit TFT boards.
-      static uint8_t lastB = 255;
-      const uint8_t b = settings.display().brightness;
-      if (b != lastB) { lastB = b; d->_panelImpl.setBrightness(b); }
-    }
-#endif
+    // The brightness setting reaches the glass through applyBrightness() and
+    // nowhere else. Once per pass here, for a setting the operator changed or
+    // a stage the shell walked into; and once more on the screen-state edge
+    // itself, which is the pass this one cannot serve.
+    d->applyBrightness();
 #if HAS_LVGL_UI
     if (sShellUp) {
       // The rest-and-alarm policy is the shell's own (LvglUi::restTick);
@@ -195,6 +197,13 @@ void Display::displayTask(void* self) {
         // ship mode if the charger answers; the deepest sleep the chip has
         // otherwise, with the user button as the way back.
         d->setBlank(true);
+        // setBlank() only *told* the sensors, on this task; they write their
+        // registers from the main loop, and everything below here either stops
+        // that loop or freezes the pins with it. So wait for the verdicts to
+        // land — bounded, a fifth of a second at worst — and flush what the
+        // rail would otherwise take with it. Before ship mode, because ship
+        // mode opens the battery FET.
+        Power::prepareForSleep();
         Bq25896::shipMode();
         esp_sleep_enable_ext1_wakeup(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
         esp_deep_sleep_start();
@@ -207,6 +216,13 @@ void Display::displayTask(void* self) {
     {
       static uint32_t lastImuMs = 0;
       static Imu::Facing lastF = Imu::Facing::Unknown;
+      // The `!_blank` below is a shortcut, not the rule. Whether the part runs
+      // at all while the screen is dark is PeripheralPolicy's decision and
+      // PeripheralPolicy.h is where it is stated; Imu::facing() already answers
+      // Unknown for a suspended part, so this line only saves the asking. If
+      // the two ever disagree the policy wins: deleting this line costs one
+      // bus read a second and changes nothing else, deleting the policy's rule
+      // leaves the part converting for a panel nobody is looking at.
       if (!d->_blank && now - lastImuMs >= 1000) {   // a dark panel needs no orienting
         lastImuMs = now;
         const Imu::Facing f = Imu::facing();
@@ -250,7 +266,13 @@ void Display::displayTask(void* self) {
         }
       }
     } else {
-      LvglUi::loop();
+      // The shell says when it wants running again and this is the one place
+      // that hears it: LVGL knows what its own timers are waiting for, and a
+      // lit screen with nothing happening on it was costing fifty passes a
+      // second to be told so. Bounded rather than obeyed, because the button
+      // and the watchdog share this pass and the shell can answer seven weeks
+      // (DisplayPace.h).
+      pace = DisplayPace::passMs(LvglUi::loop());
     }
     return;
     }                                    // !sShellUp falls through to the pages
@@ -279,7 +301,7 @@ void Display::displayTask(void* self) {
       d->paint();
     }
     });
-    vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
+    vTaskDelay(pdMS_TO_TICKS(pace));
   }
 }
 
@@ -331,7 +353,17 @@ void Display::pollButton() {
     // page or menu the press was really for should not change that. A raised
     // flag only — WifiManager serves it on its own task — and a no-op on a
     // node whose AP is not suppressed.
-    case PressTracker::Event::Press: _lastActivityMs = now; wifiManager.apWake(); break;
+    //
+    // The card slot is told for the same reason and by the same evidence: the
+    // hand that presses the button is the hand that pushes a card in, and the
+    // poll cadence has backed off precisely because nobody had been near the
+    // node. Also a raised flag, also served on the card's own task, also a
+    // no-op where the cadence is already at its base or the board has no slot.
+    case PressTracker::Event::Press:
+      _lastActivityMs = now;
+      wifiManager.apWake();
+      sdCard.lookNow();
+      break;
     case PressTracker::Event::Long: longPressAction(); break;
     case PressTracker::Event::Short: advancePage(true); break;
     default: break;
@@ -405,27 +437,87 @@ void Display::pollButton2() {
 }
 #endif
 
+// The stage the ladder is asked about, read off the state that already
+// decides it: _blank is this class's own screen-state flag — the same one
+// Power::onScreenBlank() is told from — and the idle clock is the shell's,
+// asked rather than mirrored so there is no second belief about which of the
+// three the panel is in. A mono panel has no ladder and no idle stage: it
+// gets the operator's setting, exactly as before.
+uint8_t Display::backlightPct() const {
+#if HAS_LVGL_UI && DISPLAY_KIND == DISPLAY_KIND_TFT
+  // Which of the three is showing is BacklightLadder::stageOf's rule, not a
+  // ternary written out here: the precedence between the flags is part of the
+  // ladder and is pinned on the host with the rest of it.
+  return BacklightLadder::level(
+      settings.display().brightness,
+      BacklightLadder::stageOf(_blank, sShellUp, LvglUi::idleShowing()),
+      (uint8_t)Power::profile());
+#else
+  return settings.display().brightness;
+#endif
+}
+
+// The single writer. Everything that could change the answer — the operator's
+// setting, the power profile, the shell walking into its idle clock, the
+// screen-state edge — reaches the panel through this and is compared against
+// what was last written, so the panel is written once per change and the
+// remembered value never describes a panel somebody else has moved.
+//
+// E-paper has no brightness to write; on the OLED boards this is the contrast
+// register, where panel current is close to linear in it, so it is a real
+// power knob there too and not only on the backlit TFT boards.
+void Display::applyBrightness() {
+#if HAS_LVGL_UI || DISPLAY_KIND == DISPLAY_KIND_OLED
+  const uint8_t b = backlightPct();
+  if (b == _lastBrightPct) return;
+  _lastBrightPct = b;
+  _panelImpl.setBrightness(b);
+#endif
+}
+
 void Display::setBlank(bool blank) {
   _blank = blank;
+  // The panel is no longer the only thing behind this. Every part that has
+  // nothing to do while nobody is looking is told from one place (Power.h),
+  // and this function is the node's only screen-state edge: the idle timer,
+  // the power menu, both buttons, the touch layer and the deep-sleep path all
+  // arrive here. Before the panel work, so that on a wake the sensors are
+  // already coming back while the glass repaints.
+  Power::onScreenBlank(blank);
 #if HAS_LVGL_UI
   if (sShellUp) LvglUi::onBlank(blank);
 #endif
+  // The level before the panel, on both edges. _blank above already says which
+  // stage this is, so the panel is handed the number it should come up at
+  // rather than replaying the last stage's — which is what left a wake lit at
+  // nothing (the common case, dark until the next pass twenty milliseconds
+  // later) or at the idle clock's dim, depending on which pass the waking tap
+  // landed in. A blanked panel takes the level and stays dark; it is the
+  // panel's own rule that a level cannot light a sleeping glass.
+  applyBrightness();
   if (blank) {
     _panel->blank(true);                 // panel + charge pump off
   } else {
     _panel->blank(false);
-#if !HAS_LVGL_UI
-    // Nothing is known about the glass after it has been off, so the next
-    // frame goes out whether or not it matches the last one drawn. Mono
-    // boards only: on the shell this painter would smear a half-res page
-    // over the LVGL frame — the bench saw it as a flicker at wake — and
-    // onBlank() already invalidates the screen for a full repaint.
-    _refresh.forget();
-    _pageChangedMs = millis();
-    _lastPaintMs = _pageChangedMs;
-    _paintDue = false;
-    paint();
+#if HAS_LVGL_UI
+    if (!sShellUp)
 #endif
+    {
+      // Nothing is known about the glass after it has been off, so the next
+      // frame goes out whether or not it matches the last one drawn. The mono
+      // pages only — and asked of sShellUp rather than of HAS_LVGL_UI,
+      // because the fall-back this serves is a runtime one: begin() promises
+      // these pages on any board whose shell failed to start, and all three
+      // colour boards compile HAS_LVGL_UI. Where the shell *is* up this
+      // painter would smear a half-res page over the LVGL frame — the bench
+      // saw it as a flicker at wake — and onBlank() has already invalidated
+      // the screen for a full repaint.
+      _refresh.forget();
+      _pageChangedMs = millis();
+      _lastPaintMs = _pageChangedMs;
+      _paintDue = false;
+      paint();
+    }
   }
 }
 
@@ -980,9 +1072,19 @@ void Display::paintRadio() {
 // What the receiver can see. Before a fix the satellite count is the useful
 // number — it is what tells you whether the antenna has a view of the sky.
 void Display::paintGps() {
+  // The mono boards' position page, and the same claim the colour shell's
+  // screens make: while this page is the one being painted the receiver keeps
+  // looking. Straight to Gps rather than through the shell's Ui::navPainted(),
+  // and that is not an oversight: this painter runs only where the shell is
+  // down (see setBlank), so there is no idle clock that could be sitting over
+  // it — and paint() has already returned on a blanked panel.
+  Gps::navViewPainted();
   Gps::Fix g = Gps::fix();
   char line[DisplayLayout::rowBytes()];
-  header(g.enabled ? (g.valid ? "GNSS fix" : "GNSS scan") : "GNSS off");
+  header(!g.enabled   ? "GNSS off"
+       : g.portFault  ? "GNSS fault"
+       : g.resting    ? "GNSS rest"
+       : g.valid      ? "GNSS fix" : "GNSS scan");
   if (!g.enabled) {
     _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("Receiver powered down");
     _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("Enable on the settings");
@@ -999,7 +1101,9 @@ void Display::paintGps() {
   } else {
     snprintf(line, sizeof(line), "%lu sentences", (unsigned long)g.sentences);
     _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
-    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(g.sentences ? "waiting for a fix" : "no data from module");
+    _gfx->setCursor(0, DisplayLayout::rowY(2));
+    _gfx->print(g.portFault  ? "port did not open"
+              : g.sentences  ? "waiting for a fix" : "no data from module");
   }
   if (g.timeValid) { _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print(g.utc + 11); _gfx->print(g.clockSet ? " UTC sync" : " UTC"); }
   else             { _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print("no time yet"); }

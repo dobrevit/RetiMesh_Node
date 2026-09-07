@@ -254,6 +254,17 @@
 // on an unattended node, and a policy bug that keeps it down is a site
 // visit — the operator opts in per node. Bounds (1-1440 min) live in
 // SettingsRules.
+// What kind of node this is, when nobody has said: 0 not set, 1 carried,
+// 2 transport (Power::Role). Not set is deliberately the default and is
+// deliberately not guessed from the board class — a handheld on a desk and a
+// relay on a mast are the same board, and the only difference is what its
+// operator did with it. A node that has never been told behaves exactly as
+// every node did before the setting existed, which is what makes the upgrade
+// a no-change. Bounds live in SettingsRules; a board or a future preset may
+// override this, and later firmware may add roles above 2.
+#ifndef NODE_ROLE_DEFAULT
+  #define NODE_ROLE_DEFAULT 0
+#endif
 #ifndef AP_IDLE_OFF_DEFAULT
   #define AP_IDLE_OFF_DEFAULT 0
 #endif
@@ -556,7 +567,8 @@
   #define SD_SPI_BUS        HSPI
 #endif
 #define SD_SPI_HZ           20000000
-#define SD_POLL_MS          3000
+// How often the slot is looked at is no longer one number: it depends on what
+// the last look found, and the ladder lives in sys/SdPollPolicy.h.
 #define SD_PARTIAL_PERCENT  50            // volume < 50 % of the card => "partial"
 #define SD_MOUNT_ATTEMPTS   6             // boot: the first mount after SPI init often fails
 #define SD_MOUNT_RETRY_MS   100           // ~0.6 s of retries before giving up
@@ -1128,6 +1140,50 @@
 #endif
 #ifndef PIN_GPS_STANDBY
   #define PIN_GPS_STANDBY   -1
+#endif
+// Whether the receiver on this board speaks u-blox's binary protocol. Only
+// u-blox parts do, and this tree carries three makes: a u-blox MIA-M10Q on the
+// T-Deck Plus and a u-blox NEO-6M/8M on the T-Beam, against a Quectel L76K on
+// the Heltec V4's expansion kit and an ATGM336H on the ThinkNode M9. Sending a
+// UBX frame to either of the last two is sending a Quectel or a CASIC part a
+// message it has never heard of, so this is a per-board fact and not a default
+// to be optimistic about.
+#ifndef GPS_UBX
+  #define GPS_UBX           0
+#endif
+
+// How this board's receiver is asked to nap, resolved once here rather than
+// re-derived from three pin macros wherever the question comes up.
+//
+// The order is by what costs least and risks least, not by what is most
+// interesting. A standby line is a pin write to a part designed for exactly
+// this and is the same gesture on either module that has one. A switched rail
+// is a real cut and the T-Beam's PMU already does it — its receiver keeps its
+// almanac on the board's backup cell, so a wake is still a warm start. A UBX
+// message is last because it is the one that can be silently ignored, and it
+// is reached only where nothing else exists: the T-Deck Plus has no enable
+// line, no standby line and no switched rail, so its receiver's own protocol
+// is the only off-switch on that board.
+//
+// GPS_NAP_NONE is not a failure. It means the duty policy still runs and still
+// decides, and the driver simply has nothing to send — which is the honest
+// state for a board whose receiver is hard-wired on.
+#define GPS_NAP_NONE        0
+#define GPS_NAP_STANDBY     1
+#define GPS_NAP_RAIL        2
+#define GPS_NAP_PMREQ       3
+#ifndef GPS_NAP
+  #if !HAS_GPS
+    #define GPS_NAP         GPS_NAP_NONE
+  #elif PIN_GPS_STANDBY >= 0
+    #define GPS_NAP         GPS_NAP_STANDBY
+  #elif HAS_PMU
+    #define GPS_NAP         GPS_NAP_RAIL
+  #elif GPS_UBX
+    #define GPS_NAP         GPS_NAP_PMREQ
+  #else
+    #define GPS_NAP         GPS_NAP_NONE
+  #endif
 #endif
 #ifndef HAS_BATTERY_ADC
   #define HAS_BATTERY_ADC   1

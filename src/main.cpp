@@ -527,10 +527,14 @@ void loop() {
   // sometimes a restart (RnsAdmin.h).
   Rns::Admin::poll();
   Leds::tick(millis());
-  // The magnetometer, sampled whether or not anyone is asking. Its hard-iron
-  // offsets are found from the extremes each axis reaches, and those are only
-  // reached while the board is being turned — which is precisely when nobody is
-  // reading a console (Compass.h).
+  // The magnetometer, sampled whether or not anyone is asking — while the
+  // screen is lit. Its hard-iron offsets are found from the extremes each axis
+  // reaches, and those are only reached while the board is being turned, which
+  // is precisely when nobody is reading a console (Compass.h). This is also
+  // where the screen's verdict reaches both sensors: they record what they
+  // were told from whichever task noticed, and write it here, on the task that
+  // owns their side of the bus.
+  Imu::poll();
   Compass::poll();
   // Every pass, not on the heartbeat: a crash 29 s after the last beat would
   // otherwise be recorded as having happened 29 s earlier, and a node stuck in

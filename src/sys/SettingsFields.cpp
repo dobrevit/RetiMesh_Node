@@ -637,6 +637,14 @@ const Entry kFields[] = {
     [](const char* v, char* e, size_t n) { Power::Profile pp;
       if (!Power::profileFromName(v, pp)) { snprintf(e, n, "power_profile must be performance|balanced|battery"); return Result::BadValue; }
       TransportSettings t = settings.transport(); t.powerProfile = (uint8_t)pp; return commitTransport(t, e, n); } },
+  { "transport.node_role",
+    // By name too, and for a stronger reason than the profile above: the
+    // numbers here are only meaningful against a list, and the whole point of
+    // the field is that an operator states what the node is.
+    [](char* o, size_t n) { snprintf(o, n, "%s", Power::roleName(Power::role())); },
+    [](const char* v, char* e, size_t n) { Power::Role r;
+      if (!Power::roleFromName(v, r)) { snprintf(e, n, "node_role must be unset|carried|transport"); return Result::BadValue; }
+      TransportSettings t = settings.transport(); t.nodeRole = (uint8_t)r; return commitTransport(t, e, n); } },
 
   // --- sound ---------------------------------------------------------------
   // The switch gives the hardware back rather than merely silencing it, which

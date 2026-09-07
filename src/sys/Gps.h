@@ -59,6 +59,17 @@ struct Fix {
   uint32_t ageMs     = 0;          // since the last sentence
   bool     timeValid = false;      // date and time seen
   bool     clockSet  = false;      // system clock adopted from the receiver
+  // The receiver has been told it may stop looking (GnssDutyPolicy.h). The
+  // position beside this is the one it last stood behind and is not being
+  // refreshed; ageMs goes on counting, which is the honest reading.
+  bool     resting   = false;
+  // The receiver's UART could not be opened. HardwareSerial::begin() returns
+  // void and a driver it failed to install answers available() with 0 for
+  // ever, so without this the board is indistinguishable from one whose
+  // receiver has nothing to say — and the boards that reopen the port on a
+  // duty cycle would stay that way until somebody toggled the setting. The
+  // reader retries while this stands; it is a fault report, not a state.
+  bool     portFault = false;
   char     utc[20]   = "";         // "YYYY-MM-DD HH:MM:SS"
 };
 
@@ -73,6 +84,14 @@ size_t skyView(Sv* out, size_t max);
 // Safe to call from any task: it holds the same lock as the reader.
 void setEnabled(bool on);
 bool enabled();
+
+// A screen whose purpose is showing where the node is has just painted. It
+// holds the receiver tracking for a few seconds — a claim that expires rather
+// than a flag somebody has to clear, because these screens are torn down from
+// the back arrow, the idle timer, a page walk and a shell teardown, and a flag
+// leaked by any one of those would keep the receiver awake for ever. Safe from
+// any task and costs a single store; a no-op on a board with no receiver.
+void navViewPainted();
 
 // Starts the reader task. Safe to call on boards without a receiver.
 void begin();

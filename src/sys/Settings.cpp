@@ -116,9 +116,17 @@ void Settings::load() {
   LOAD(_transport.announceRatePenalty, "t_arp",   getUShort("t_arp"));
   LOAD(_transport.autoEnabled,         "t_auto",  getBool  ("t_auto"));
   LOAD(_transport.powerProfile,        "t_pwr",   getUChar ("t_pwr"));
+  LOAD(_transport.nodeRole,            "t_role",  getUChar ("t_role"));
   LOAD(_transport.sdStore,             "t_sdst",  getBool  ("t_sdst"));
   if (_prefs.isKey("t_smov")) _transport.pendingMove = (StoreHome::Move)_prefs.getUChar("t_smov");
   if (_prefs.isKey("t_agrp")) _prefs.getString("t_agrp", _transport.autoGroupId, sizeof(_transport.autoGroupId));
+  // The role mirror is seeded here, before any task exists to read it (main.cpp
+  // loads the settings long before Gps::begin starts the reader): the LOAD
+  // macro above writes the struct field directly, and the node would otherwise
+  // run on the default role until the first settings commit. Through the same
+  // one door as every other assignment, whose struct half is a no-op here —
+  // the point of the call is the mirror beside it.
+  adoptTransport(_transport);
   // The one Wi-Fi switch became two. A node that has been running carries only
   // the old key, and reading nothing from the new ones would silently turn its
   // Wi-Fi off at the first boot on new firmware — so the old value seeds both
@@ -220,8 +228,18 @@ bool Settings::saveDisplay(const DisplaySettings& d) {
   return ok;
 }
 
-bool Settings::saveTransport(const TransportSettings& t) {
+// Every assignment to _transport, so the role mirror moves with it. Not a
+// setter for the struct's sake — a copy is a copy — but for the mirror's: a
+// path that assigned the struct and forgot this would leave the GNSS duty rule
+// reading a role the node no longer holds, and there is no test that can see
+// the difference from the host.
+void Settings::adoptTransport(const TransportSettings& t) {
   _transport = t;
+  _nodeRole.store(t.nodeRole, std::memory_order_relaxed);
+}
+
+bool Settings::saveTransport(const TransportSettings& t) {
+  adoptTransport(t);
   bool ok = true;
   ok &= _prefs.putBool  ("t_en",    t.enabled)  > 0;
   ok &= _prefs.putUChar ("t_lmode", t.loraMode) > 0;
@@ -233,6 +251,7 @@ bool Settings::saveTransport(const TransportSettings& t) {
   ok &= _prefs.putUShort("t_arp",   t.announceRatePenalty) > 0;
   ok &= _prefs.putBool  ("t_auto",  t.autoEnabled) > 0;
   ok &= _prefs.putUChar ("t_pwr",   t.powerProfile) > 0;
+  ok &= _prefs.putUChar ("t_role",  t.nodeRole) > 0;
   ok &= _prefs.putBool  ("t_sdst",  t.sdStore) > 0;
   ok &= _prefs.putUChar ("t_smov",  (uint8_t)t.pendingMove) > 0;
   ok &= _prefs.putString("t_agrp",  t.autoGroupId) >= 0;
@@ -292,7 +311,7 @@ void Settings::factoryReset() {
   _radio = RadioSettings();
   _wifi  = WifiSettings();
   _admin = AdminSettings();
-  _transport = TransportSettings();
+  adoptTransport(TransportSettings());
   _links = LinkSettings();
   _maintenance = MaintenanceSettings();
   _display = DisplaySettings();
