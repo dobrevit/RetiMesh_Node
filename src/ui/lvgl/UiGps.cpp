@@ -41,6 +41,9 @@ lv_obj_t* reading(lv_obj_t* parent, const char* label) {
 
 void refresh(lv_timer_t*) {
   if (!sLat || !lv_obj_is_valid(sLat)) return;
+  // This screen exists to show where the node is, so while it is painting the
+  // receiver keeps looking rather than duty-cycling underneath it.
+  Gps::navViewPainted();
   const Gps::Fix f = Gps::fix();
   char v[48];
 
@@ -61,7 +64,12 @@ void refresh(lv_timer_t*) {
                          : "receiver off (settings: radio)");
   }
 
-  Ui::setLabel(sFixVal, f.valid ? "3D" : (f.sentences ? "searching" : "none"));
+  // "resting" rather than a stale "3D": the coordinates above are the ones the
+  // receiver last stood behind, and an operator wondering why the satellite
+  // count has stopped moving deserves to be told which it is.
+  Ui::setLabel(sFixVal, f.resting ? "resting"
+                       : f.valid  ? "3D"
+                       : (f.sentences ? "searching" : "none"));
   lv_obj_set_style_text_color(sFixVal,
       lv_color_hex(f.valid ? UiTheme::kGood : UiTheme::kWarn), 0);
   snprintf(v, sizeof(v), "%u", f.satellites);           Ui::setLabel(sSatVal, v);
@@ -78,6 +86,7 @@ lv_obj_t* sSkyCaption = nullptr;
 
 void skyRefresh(lv_timer_t*) {
   if (!sSkyCol || !lv_obj_is_valid(sSkyCol)) return;
+  Gps::navViewPainted();               // the sky is the receiver's own picture
   Gps::Sv sv[20];
   size_t n = Gps::skyView(sv, 20);
   // An unchanged sky costs nothing: rebuilding forty widgets every two

@@ -60,6 +60,7 @@ Kind kindFor(const char* key, const char* value, bool quoted) {
   if (strcmp(key, "wifi.security") == 0)            return Kind::Words;
   if (strcmp(key, "display.theme") == 0)            return Kind::Words;
   if (strcmp(key, "transport.power_profile") == 0)  return Kind::Words;
+  if (strcmp(key, "transport.node_role") == 0)      return Kind::Words;
   // The three interface modes. They are a fixed vocabulary, not a number, and
   // rendering them as one made the screen ask for a digit between 1 and 5 with
   // nothing on it to say which digit meant what — the portal has shown their
@@ -100,6 +101,16 @@ void wordsFor(const char* key, char* out, size_t len) {
     // enum grows and nothing says so.
     for (uint8_t m = 1; m <= 5; m++)
       n += snprintf(out + n, len - n, "%s%s", m > 1 ? "\n" : "", RnsTransport::modeName(m));
+    return;
+  }
+  if (strcmp(key, "transport.node_role") == 0) {
+    // From Power's own name helper, in the enum's order, for the reason the
+    // list below it is: a retyped vocabulary goes stale the day a role is
+    // added and nothing says so. Round 5's unattended role appears here by
+    // extending the enum.
+    for (uint8_t i = 0; i <= (uint8_t)Power::Role::Transport; i++)
+      n += snprintf(out + n, len - n, "%s%s", i ? "\n" : "",
+                    Power::roleName((Power::Role)i));
     return;
   }
   if (strcmp(key, "wifi.security") == 0) {

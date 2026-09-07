@@ -149,12 +149,64 @@ same from a phone.
 | Client interface mode | `full` | one interface per client on :4242 (Sideband, `rnsd`) |
 | Peer interface mode | `full` | one interface per zero-config peer — the other nodes and hosts on the Wi-Fi links |
 | Power profile | performance | `performance` 240 MHz · `balanced` 160 MHz + Wi-Fi min modem sleep (wake every DTIM) · `battery` 80 MHz + Wi-Fi max modem sleep (the station wakes every *listen interval* beacons — see the Wi-Fi table) + 20 s display timeout. On the colour boards the profile also sets how far the idle clock is dimmed — half the configured brightness, a quarter, an eighth — see the display table below. Applied live |
+| Node role | not set | What this node is *for*, which is a different question from the power profile: the profile is how hard the node tries, the role is what it is. `unset` · `carried` · `transport`. Today it decides one thing — when the GNSS receiver may stop looking — and later rounds add to it. Applied live |
 | Zero-config peering (AutoInterface) | enabled | RNS AutoInterface on the access point *and* the station link; group id blank = `reticulum` (peers must share it) |
 | Announce cap | 2 % | share of each interface's bandwidth announces may use (rnsd `announce_cap`) |
 | Announce rate target / grace / penalty | 0 / 0 / 0 | throttle destinations announcing too often (rnsd `announce_rate_*`); 0 = off |
 | Reticulum store on SD | on | where the store belongs when a card is present. **Read-only on this form** — saving the flag alone moved nothing and left the node reading an empty store, so the store is moved with *Use this card* / *Eject* under SD card, which copy the data and restart into the new home. See [Architecture](architecture.md#the-store-has-one-home). |
 
 See [reticulum.md](reticulum.md#interface-modes) for what the modes do.
+
+### The node role and the GNSS duty cycle (`transport.node_role`)
+
+A GNSS receiver is the most expensive thing on most of these boards that
+nobody is using: tens of milliamps, continuously, for a coordinate that on a
+node bolted to a mast has not changed since it was bolted there. Until this
+setting existed the only control was the on/off switch on the radio page, and
+turning the receiver off takes the node's clock with it.
+
+The role is the missing input. It cannot be inferred from the board — the same
+firmware on the same board is a handheld on one desk and a relay on the next —
+so an operator states it, once, per node:
+
+| Role | Means | The receiver then |
+|---|---|---|
+| `unset` *(default)* | nobody has said | tracks continuously, exactly as every node did before this setting existed |
+| `carried` | a handheld: it moves, and somebody reads its screen | rests **1 minute** at a time once it holds a fix |
+| `transport` | a fixed installation: it does not move | rests **5 minutes** at a time once it holds a fix |
+
+Three rules bound all of that, and they are why the feature is safe to leave on:
+
+- **A receiver that has not found itself is never rested.** You cannot
+  duty-cycle a search: stopping one halfway does not save the energy, it spends
+  it again from the start. A node that cannot see the sky simply keeps looking.
+- **A position screen on the glass holds it tracking.** The GNSS page, the sky
+  view, the bearing dial and the plot each say so while they are painting, and
+  a blanked screen says nothing — so opening one of those ends a rest within a
+  screen paint, in any role.
+- **Every rest is earned again.** A fix has to stand for five seconds *after*
+  the receiver was allowed to look again before the next rest is taken, so a
+  receiver that stops re-acquiring degrades to continuous tracking rather than
+  resting for ever on a fix it held an hour ago.
+
+A resting node reports its last position rather than "no fix" — it was told to
+stop looking, and that position is still its best answer — with `resting` true
+in `/api/status` and the word on the GNSS page. The age beside it goes on
+counting, which is the honest reading.
+
+How the receiver is asked depends on what the board fitted, and only boards
+with a receiver are affected at all:
+
+| Board | Receiver | Rested with |
+|---|---|---|
+| `t-deck` (Plus) | u-blox MIA-M10Q | `UBX-RXM-PMREQ` backup over the UART, woken by a byte on the same line — the only off-switch this board has: no enable line, no standby line, no switched rail. The request also carries the rest's own length as a backstop, so a module that never hears the wake byte comes back by itself rather than needing the board power-cycled |
+| `heltec-v4` | Quectel L76K (expansion kit) | the standby line (GPIO 40), which the firmware already drives high to force the receiver awake |
+| `thinknode-m9` | ATGM336H | the standby line (GPIO 10), likewise |
+| `tbeam` | u-blox NEO-6M/8M | the power-management chip's GPS rail — a real cut, and the board's own backup supply keeps the almanac so a wake is a warm start |
+| every other board | none fitted | nothing to do |
+
+Round 5's solar/unattended preset extends this list of roles rather than
+replacing it; the stored values never move.
 
 ## Local links (saves; the station switch restarts)
 | Setting | Default | Notes |

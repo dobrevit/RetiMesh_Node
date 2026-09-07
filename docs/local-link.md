@@ -157,8 +157,9 @@ that state for the same reason, that a setting saved then might not reach
 flash before the restart does.
 
 Values that have names use them, as the API does: `transport.power_profile` is
-`performance|balanced|battery`, `wifi.security` is `open|wpa2|wpa2wpa3|wpa3`,
-and both are matched without regard to case.
+`performance|balanced|battery`, `transport.node_role` is
+`unset|carried|transport`, `wifi.security` is `open|wpa2|wpa2wpa3|wpa3`, and
+all three are matched without regard to case.
 
 There is no password on any of this, deliberately. The console is the serial
 port: whoever has it can dump the flash, reflash the board, and ask for the

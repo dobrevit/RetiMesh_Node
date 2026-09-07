@@ -169,6 +169,8 @@
       <div><label>AutoInterface group id (blank = reticulum)</label><input name="auto_group_id" maxlength="32" placeholder="reticulum"></div>
       <div><label>Power profile</label>
         <select name="power_profile"><option value="performance">performance (240 MHz)</option><option value="balanced">balanced (160 MHz, Wi-Fi min sleep)</option><option value="battery">battery (80 MHz, Wi-Fi max sleep, display 20 s)</option></select></div>
+      <div><label>Node role</label>
+        <select name="node_role"><option value="unset">not set (nothing behaves differently)</option><option value="carried">carried (handheld: it moves, and somebody reads its screen)</option><option value="transport">transport (fixed installation: it does not move)</option></select></div>
       <div><label>Announce cap (% of bandwidth)</label><input name="announce_cap" type="number" min="1" max="100" required></div>
       <div><label>Announce rate target (s, 0 = off)</label><input name="announce_rate_target" type="number" min="0" max="3600" required></div>
       <div><label>Rate grace (violations)</label><input name="announce_rate_grace" type="number" min="0" max="100" required></div>
@@ -178,6 +180,11 @@
       <code>access_point</code> is sent no announces at all, so neighbours on it can only discover by path request and Sideband's announce
       stream stays empty. Use <code>full</code> unless you mean to withhold them &mdash; and note the peer mode governs the other RetiMesh
       nodes on your LAN, which need announces from each other to route.</div>
+    <div class="note"><b>Node role</b> says what this node is for, which is a different question from the power profile: the profile is how hard
+      the node tries, the role is what it is. It is what lets a node that knows where it is stop looking &mdash; a <code>transport</code> node's
+      GNSS receiver rests five minutes at a time once it holds a fix, a <code>carried</code> one a minute, and either tracks continuously while a
+      position screen is on the glass. Left <b>not set</b> nothing behaves differently, which is why upgrading changes nothing until you choose.
+      Only boards with a receiver are affected today.</div>
     <div class="note">Announce cap limits how much of each interface's airtime announces may use (rnsd default 2 %). The rate target/grace/penalty
       throttle destinations that announce too often — the same knobs as rnsd's <code>announce_rate_*</code>.</div>
     <div class="note">The Reticulum store (path table, announce cache, known destinations) lives in one place at a time: the microSD card when one
@@ -482,7 +489,8 @@ async function load() {
     announce_cap: cfg.transport.announce_cap, announce_rate_target: cfg.transport.announce_rate_target,
     announce_rate_grace: cfg.transport.announce_rate_grace, announce_rate_penalty: cfg.transport.announce_rate_penalty,
     auto_enabled: cfg.transport.auto_enabled, auto_group_id: cfg.transport.auto_group_id || "",
-    power_profile: cfg.transport.power_profile || "performance" });
+    power_profile: cfg.transport.power_profile || "performance",
+    node_role: cfg.transport.node_role || "unset" });
   if (cfg.transport.enabled && !cfg.transport.online) setMsg("transportMsg", "Transport is enabled but did not start — check the console.", "bad");
   if (!cfg.wifi.wpa3_supported) {
     for (const o of $("wifiForm").elements.security.options) {
@@ -605,7 +613,8 @@ $("transportForm").addEventListener("submit", async ev => {
     const res = await api("/api/settings/transport", { enabled: f.enabled.checked, lora_mode: +f.lora_mode.value, wifi_mode: +f.wifi_mode.value, auto_mode: +f.auto_mode.value,
       announce_cap: +f.announce_cap.value, announce_rate_target: +f.announce_rate_target.value,
       announce_rate_grace: +f.announce_rate_grace.value, announce_rate_penalty: +f.announce_rate_penalty.value,
-      auto_enabled: f.auto_enabled.checked, auto_group_id: f.auto_group_id.value, power_profile: f.power_profile.value });
+      auto_enabled: f.auto_enabled.checked, auto_group_id: f.auto_group_id.value, power_profile: f.power_profile.value,
+      node_role: f.node_role.value });
     setMsg("transportMsg", res.restart ? "Saved. Restarting to re-register the interfaces…" : "Saved and applied.", res.restart ? "warn" : "ok");
   } catch (e) { setMsg("transportMsg", e.message, "bad"); }
 });

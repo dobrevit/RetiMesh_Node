@@ -1060,9 +1060,14 @@ void Display::paintRadio() {
 // What the receiver can see. Before a fix the satellite count is the useful
 // number — it is what tells you whether the antenna has a view of the sky.
 void Display::paintGps() {
+  // The mono boards' position page, and the same claim the colour shell's
+  // screens make: while this page is the one being painted the receiver keeps
+  // looking.
+  Gps::navViewPainted();
   Gps::Fix g = Gps::fix();
   char line[DisplayLayout::rowBytes()];
-  header(g.enabled ? (g.valid ? "GNSS fix" : "GNSS scan") : "GNSS off");
+  header(!g.enabled ? "GNSS off" : g.resting ? "GNSS rest"
+                                : g.valid    ? "GNSS fix" : "GNSS scan");
   if (!g.enabled) {
     _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("Receiver powered down");
     _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("Enable on the settings");

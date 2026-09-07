@@ -79,6 +79,9 @@ void northUpXY(double bearingDeg, double radius, int& x, int& y) {
 #if HAS_GPS
 void bearingTick(lv_timer_t*) {
   if (!sDialDeg || !lv_obj_is_valid(sDialDeg)) return;
+  // A live dial needs a live end of the baseline: while it is on the glass the
+  // receiver tracks rather than duty-cycling under it.
+  Gps::navViewPainted();
   char v[80];
   const Gps::Fix own = Gps::fix();
   PeerPositions::Position pp;
@@ -208,6 +211,10 @@ void openPlot() {
   // its path array static for the same reason.
   static RnsTransport::PathInfo sPaths[24];
   size_t placed = 0;
+  // Drawn once at open rather than on a timer, so the claim is made once too —
+  // enough to bring a resting receiver back for whoever just asked to see the
+  // mesh laid out around them.
+  Gps::navViewPainted();
   const Gps::Fix own = Gps::fix();
   if (own.valid) {
     const size_t n = RnsTransport::paths(sPaths, 24);

@@ -334,3 +334,7 @@
 // single figure, which is the fallback if a board turns up with the other
 // receiver in it.
 #define GPS_BAUD            38400
+// A u-blox part, and the only board here where that matters: it has no enable
+// line, no standby line and no switched rail, so the receiver's own protocol
+// is the only way to stop it drawing. See GPS_NAP in Config.h.
+#define GPS_UBX             1

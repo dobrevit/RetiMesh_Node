@@ -116,6 +116,7 @@ void Settings::load() {
   LOAD(_transport.announceRatePenalty, "t_arp",   getUShort("t_arp"));
   LOAD(_transport.autoEnabled,         "t_auto",  getBool  ("t_auto"));
   LOAD(_transport.powerProfile,        "t_pwr",   getUChar ("t_pwr"));
+  LOAD(_transport.nodeRole,            "t_role",  getUChar ("t_role"));
   LOAD(_transport.sdStore,             "t_sdst",  getBool  ("t_sdst"));
   if (_prefs.isKey("t_smov")) _transport.pendingMove = (StoreHome::Move)_prefs.getUChar("t_smov");
   if (_prefs.isKey("t_agrp")) _prefs.getString("t_agrp", _transport.autoGroupId, sizeof(_transport.autoGroupId));
@@ -233,6 +234,7 @@ bool Settings::saveTransport(const TransportSettings& t) {
   ok &= _prefs.putUShort("t_arp",   t.announceRatePenalty) > 0;
   ok &= _prefs.putBool  ("t_auto",  t.autoEnabled) > 0;
   ok &= _prefs.putUChar ("t_pwr",   t.powerProfile) > 0;
+  ok &= _prefs.putUChar ("t_role",  t.nodeRole) > 0;
   ok &= _prefs.putBool  ("t_sdst",  t.sdStore) > 0;
   ok &= _prefs.putUChar ("t_smov",  (uint8_t)t.pendingMove) > 0;
   ok &= _prefs.putString("t_agrp",  t.autoGroupId) >= 0;

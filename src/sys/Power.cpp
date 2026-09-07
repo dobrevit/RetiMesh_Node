@@ -28,6 +28,7 @@
 #include "Bq25896.h"
 #include "SampleGate.h"
 #include "PeripheralPolicy.h"
+#include "GnssDutyPolicy.h"
 #include "Compass.h"
 #include "Imu.h"
 
@@ -166,6 +167,38 @@ bool profileFromName(const char* n, Profile& out) {
 
 Profile profile() { return sProfile; }
 
+// The role's ordinals reach the GNSS duty rule as a plain byte, the way the
+// profile reaches PeripheralPolicy: that header is host code and this one is
+// Arduino code, and neither should have to include the other to be tested.
+// What must not happen is the two vocabularies drifting apart — a renumbering
+// here would silently change what a stored 1 means on every deployed node — so
+// they are pinned against each other in the one file that sees both.
+static_assert((uint8_t)Role::Unset     == GnssDutyPolicy::kRoleUnset,     "node role ordinals have drifted");
+static_assert((uint8_t)Role::Carried   == GnssDutyPolicy::kRoleCarried,   "node role ordinals have drifted");
+static_assert((uint8_t)Role::Transport == GnssDutyPolicy::kRoleTransport, "node role ordinals have drifted");
+
+const char* roleName(Role r) {
+  // Anything this build does not recognise reads back as "unset", which is
+  // also how every rule treats it: a role a later firmware wrote and this one
+  // has never heard of is a node whose behaviour nobody here decided.
+  switch (r) {
+    case Role::Carried:   return "carried";
+    case Role::Transport: return "transport";
+    default:              return "unset";
+  }
+}
+
+bool roleFromName(const char* n, Role& out) {
+  if (!n) return false;
+  // Case-insensitively, as every other named value this node takes.
+  if (!strcasecmp(n, "unset"))     { out = Role::Unset;     return true; }
+  if (!strcasecmp(n, "carried"))   { out = Role::Carried;   return true; }
+  if (!strcasecmp(n, "transport")) { out = Role::Transport; return true; }
+  return false;
+}
+
+Role role() { return (Role)settings.transport().nodeRole; }
+
 void applyWifiSleep() {
   // Battery goes all the way to max modem sleep: the station dozes
   // wifi.sta_listen_interval beacon intervals between wakes instead of waking
@@ -276,6 +309,14 @@ void tellPeripherals(const bool* dark, const Power::Profile* prof) {
 } // namespace
 
 void onScreenBlank(bool dark) { tellPeripherals(&dark, nullptr); }
+
+// Read without the section the writer takes. It is a single bool, written on
+// the display task and read from the GNSS task ten times a second; the section
+// exists to keep update()'s latches consistent, and a reader that catches the
+// previous value one pass before the edge lands is a tenth of a second of a
+// receiver tracking, not a lost verdict — while taking the section here would
+// stop the scheduler on this core for that same reader.
+bool screenDark() { return sScreenDark; }
 
 // How long the node waits, on its way to sleep, for the parts to stop. Twenty
 // loop passes at the drivers' own retry cadence and two hundred at the rate

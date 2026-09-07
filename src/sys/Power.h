@@ -41,6 +41,34 @@ namespace Power {
 
 enum class Profile : uint8_t { Performance = 0, Balanced = 1, Battery = 2 };
 
+// What this node *is*, which is a different question from how hard it is
+// trying to save power. The profile is a dial the operator turns and can turn
+// back; the role is a statement about the installation, and it answers things
+// a dial cannot — whether the receiver may stop looking for a position that
+// has not changed since the node was bolted to its mast, and, in time, what a
+// node left on a solar panel at the end of a track is allowed to do about
+// everything else.
+//
+// The values are persisted (transport.node_role), so they are fixed for ever
+// and later roles are added above rather than inserted between:
+//
+//   Unset      nobody has said. Every rule that reads this must behave exactly
+//              as the firmware did before the rule existed, which is what makes
+//              upgrading a fleet that never asked for any of this a no-change.
+//              It is also what an unrecognised value means — a role written by
+//              a later build and read back by an older one — so the same branch
+//              covers both.
+//   Carried    a handheld: it moves, somebody looks at its screen, and its
+//              position is worth having reasonably fresh.
+//   Transport  a fixed installation: it does not move, usually nobody is
+//              looking at it, and its position is worth having at all mostly
+//              to notice that it has been moved.
+//
+// Deliberately not inferred from the board class. The same firmware on the
+// same board is a handheld on one desk and a relay on the next, and a guess
+// dressed as a fact is worse than a field left unset.
+enum class Role : uint8_t { Unset = 0, Carried = 1, Transport = 2 };
+
 void begin();                       // applies the configured profile, starts sampling
 void apply(Profile p);              // live switch
 // Re-applies the current profile's modem sleep setting to the Wi-Fi driver —
@@ -58,6 +86,15 @@ void applyWifiSleep();
 // live change.
 void applyWifiTxPower();
 Profile profile();
+
+// The persisted role, read straight from the settings rather than cached:
+// nothing has to be applied when it changes — the rules that consult it ask
+// on their own schedule — so there is no state here to go stale. A stored
+// value this build does not recognise is handed on as it stands; every reader
+// is required to treat an unknown role as Unset, and roleName() says so.
+Role role();
+const char* roleName(Role r);
+bool roleFromName(const char* name, Role& out);
 
 // The screen has gone dark, or has come back. One call, from the node's only
 // screen-state edge (Display::setBlank), and from here it reaches every part
@@ -78,6 +115,15 @@ Profile profile();
 // lives in PeripheralPolicy.h; apply() below re-asks it, so a profile change
 // and a screen change are the same broadcast rather than two.
 void onScreenBlank(bool dark);
+
+// Whether the screen is dark, as the broadcast above last recorded it. The one
+// answer to that question in the firmware: the display task owns the edge and
+// several things now need the state, and two modules each keeping their own
+// copy of "is anybody looking" is the arrangement where one of them misses an
+// edge and stays quiesced under a lit panel. False on a board with no display,
+// which is the truthful answer there — nothing is being looked at, but nothing
+// is going dark either, so a rule that only fires while dark must not fire.
+bool screenDark();
 
 // The node is about to stop: deep sleep, or the charger's ship mode, both
 // reached from the power menu with the panel already blanked. Deep sleep holds

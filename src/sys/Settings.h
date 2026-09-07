@@ -123,6 +123,12 @@ struct TransportSettings {
   bool     autoEnabled = true;          // RNS AutoInterface peering on the Wi-Fi links
   char     autoGroupId[33] = "";        // "" = RNS default "reticulum"
   uint8_t  powerProfile = 0;            // 0 performance, 1 balanced, 2 battery (Power.h)
+  // What this node is for, as opposed to how hard it is trying: 0 not set,
+  // 1 carried, 2 transport (Power::Role). Not set is the default and means
+  // "behave exactly as this firmware did before roles existed", so an
+  // upgrading node with no stored key changes nothing about what it does.
+  // Later firmware adds roles above 2; the values here never move.
+  uint8_t  nodeRole = NODE_ROLE_DEFAULT;
   bool     sdStore = true;              // the Reticulum store's home is the SD card
   // A move of the store that has been asked for and not made yet. It is
   // carried out at the next boot, before anything opens the store, so it has
