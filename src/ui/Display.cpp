@@ -23,6 +23,7 @@
 #include "Display.h"
 #include "DisplayLayout.h"
 #include "BacklightLadder.h"
+#include "DisplayPace.h"
 #include "VersionLabel.h"
 #include "esp32-hal-periman.h"
 #include <WiFi.h>
@@ -139,10 +140,15 @@ void Display::displayTask(void* self) {
     // Fed before the pass, not after: an e-paper full refresh is seconds long
     // and is the slowest thing WATCHDOG_TIMEOUT_S has to clear.
     Watchdog::feed();
+    // How long this pass has earned at the end of it. The floor until
+    // something asks for longer, which is the pass the mono pages and a
+    // blanked panel keep running and the one a pass that threw falls back to
+    // (DisplayPace.h).
+    uint32_t pace = DisplayPace::kMinMs;
     // A page that cannot allocate skips that pass rather than taking the node
     // with it: the display is the least important thing on a node under
     // pressure and must be the first to give way (Diag.h).
-    Diag::guard("the display task", [d] {
+    Diag::guard("the display task", [d, &pace] {
     d->pollButton();
 #if !HAS_LVGL_UI && HAS_TOUCH
     d->pollTouch();                      // the shell reads the glass itself
@@ -260,7 +266,13 @@ void Display::displayTask(void* self) {
         }
       }
     } else {
-      LvglUi::loop();
+      // The shell says when it wants running again and this is the one place
+      // that hears it: LVGL knows what its own timers are waiting for, and a
+      // lit screen with nothing happening on it was costing fifty passes a
+      // second to be told so. Bounded rather than obeyed, because the button
+      // and the watchdog share this pass and the shell can answer seven weeks
+      // (DisplayPace.h).
+      pace = DisplayPace::passMs(LvglUi::loop());
     }
     return;
     }                                    // !sShellUp falls through to the pages
@@ -289,7 +301,7 @@ void Display::displayTask(void* self) {
       d->paint();
     }
     });
-    vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
+    vTaskDelay(pdMS_TO_TICKS(pace));
   }
 }
 

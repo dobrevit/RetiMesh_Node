@@ -59,7 +59,9 @@ bool begin(TftPanel& panel);
 
 // One pass: feed the tick, run LVGL's timers, refresh whichever tab is
 // showing if its refresh period has come. Returns the delay in ms LVGL asks
-// for until it wants running again (bounded by the caller's own poll rate).
+// for until it wants running again — a request, which the display task
+// bounds by what the rest of its pass needs (DisplayPace.h). It can be
+// 0xFFFFFFFF, meaning no timer is pending at all.
 uint32_t loop();
 
 // The physical buttons, mapped onto the shell: step between tabs. The touch
