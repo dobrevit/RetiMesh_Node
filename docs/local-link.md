@@ -122,7 +122,7 @@ RM GET radio.region="eu868"
 RM GET radio.freq_mhz=869.525
 RM GET radio.sf=8
 ...
-RM OK GET lines=14
+RM OK GET lines=15
 GET wifi.sta_ssid
 RM GET wifi.sta_ssid="home-network"
 RM OK GET lines=1
@@ -171,7 +171,7 @@ because the console shares its port with the log.
 |---|---|
 | `HELP` | one `RM HELP cmd=… help="…"` line per command |
 | `VERSION` | firmware, version, board, IDF, asset stamp |
-| `STATUS` | uptime, boot count, reset reason, heap, radio, transport, a `power profile=… cpu_mhz=… wifi_ps=… wifi_tx_dbm=…` line (`wifi_ps` and `wifi_tx_dbm` read back from the Wi-Fi driver, not from the settings — the TX ceiling is quantized down to the driver's own steps, so it can read below `wifi.tx_power`; both `n/a` with Wi-Fi off), a `wifi_ap=up\|down\|idle-off\|off idle_off=… idle_minutes=…` line — the access point's actual state against its switch, and the only console line that keeps `idle-off` (down by the idle timer; a wake brings it back) apart from `off` (down by the switch) — whether a restart is pending — and when one is, its target, who asked (`restart_source`) and `restart_in_ms` |
+| `STATUS` | uptime, boot count, reset reason, heap, radio, transport, a `power profile=… cpu_mhz=… wifi_ps=… wifi_tx_dbm=…` line (`wifi_ps` and `wifi_tx_dbm` read back from the Wi-Fi driver, not from the settings — the TX ceiling is quantized down to the driver's own steps, so it can read below `wifi.tx_power`; both `n/a` with Wi-Fi off), a `wifi_ap=up\|down\|idle-off\|off idle_off=… idle_minutes=…` line — the access point's actual state against its switch, and the only console line that keeps `idle-off` (down by the idle timer; a wake brings it back) apart from `off` (down by the switch) — whether a restart is pending — and when one is, its target, who asked (`restart_source`) and `restart_in_ms`, plus a `radio rx_duty_cycle=on\|off supported=… sleep_us=… engages=… armed=…` line — `rx_duty_cycle` is the stored switch and `supported` the fitted chip's answer, but `engages` is *computed*, not echoed: it is what the RadioLib threshold makes of `sleep_us` on this channel, so a node can read `rx_duty_cycle=on supported=yes engages=no`. `armed` is narrower again — whether the receiver is running the mode right now |
 | `USB_STATUS` | how the host is attached, the bootloader methods this board offers |
 | `NETWORK_STATUS` | one line per local link |
 | `LINKS` | per link: hardware / firmware / enabled, and the reason when it cannot run; for ppp0 the speed and the addresses it asks for (`baud=`, `asks=`, `peer=`) |

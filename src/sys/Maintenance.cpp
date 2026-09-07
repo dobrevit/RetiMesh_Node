@@ -35,6 +35,7 @@
 #include "Keypad.h"
 #include "MaintenanceProtocol.h"
 #include "SettingsFields.h"
+#include "LoRaRadio.h"
 
 #include "Config.h"
 #include "Settings.h"
@@ -307,8 +308,33 @@ static void doStatus() {
   dataf("STATUS", "dram_free=%lu dram_min=%lu dram_largest_block=%lu",
         (unsigned long)h.freeDram, (unsigned long)h.minFreeDram,
         (unsigned long)h.largestDramBlock);
-  dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu", g_stats.radioOnline ? "online" : "offline",
-        g_stats.radioModel, (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets);
+  // The carrier-sense counters share this line rather than getting one of their
+  // own, because "online, with rx and tx counting up" is the exact picture a
+  // node with a dead CAD probe presents: it still receives, still transmits and
+  // still reports its airtime, and the only difference is that every packet
+  // waits the whole deferral and no packet was ever measured against the air.
+  // An operator reading radio=online needs the contradiction on the same line.
+  // Both are zero on a healthy node whatever the traffic (docs/api.md).
+  dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu cad_timeouts=%lu cad_arm_errors=%lu",
+        g_stats.radioOnline ? "online" : "offline", g_stats.radioModel,
+        (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets,
+        (unsigned long)g_stats.loraCadTimeouts, (unsigned long)g_stats.loraCadArmErrors);
+  // Duty-cycled receive, read back rather than echoed. The switch being on
+  // proves nothing: the mode exists only on an SX1262, and even there the sleep
+  // the channel yields has to clear the chip's wake-up transition — which at
+  // the default SF8/125 kHz it does not. engages= is the computed answer
+  // (Airtime.h), sleep_us= the figure it was computed from, so a channel that is
+  // close to the threshold can be seen to be close. armed= is the separate and
+  // narrower question of whether the receiver is in the mode right now: it is
+  // what the driver accepted, not what the other four predict, so engages=yes
+  // armed=no is a driver that refused the call and it belongs on the same line
+  // as the prediction rather than in a log nobody was reading at the time.
+  dataf("STATUS", "radio rx_duty_cycle=%s supported=%s sleep_us=%lu engages=%s armed=%s",
+        settings.radio().rxDutyCycle ? "on" : "off",
+        loraRadio.caps().rxDutyCycle ? "yes" : "no",
+        (unsigned long)g_stats.rxDutyCycleSleepUs,
+        g_stats.rxDutyCycleEngages ? "yes" : "no",
+        g_stats.rxDutyCycleArmed ? "yes" : "no");
   // wifi_ps and wifi_tx_dbm are read back from the driver itself
   // (esp_wifi_get_ps() / esp_wifi_get_max_tx_power()), not assumed from the
   // profile or the setting: the proof a change actually took effect, not

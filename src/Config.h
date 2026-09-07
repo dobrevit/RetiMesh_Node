@@ -450,6 +450,16 @@
 #ifndef RF_PREAMBLE_SYMS
   #define RF_PREAMBLE_SYMS  18              // RNode's LORA_PREAMBLE_SYMBOLS_MIN
 #endif
+// Duty-cycled receive: let the transceiver sleep between preamble samples
+// instead of listening continuously. Off by default and deliberately so — a
+// transport node's one job is to be listening, and the saving is worth having
+// only where the channel makes the sleep long enough to be real. It is an
+// SX1262-only mode (RadioCaps::Caps::rxDutyCycle) and at the shipped
+// SF8/125 kHz channel it does not engage at all; docs/configuration.md gives
+// the rule for when it does.
+#ifndef RF_RX_DUTY_CYCLE
+  #define RF_RX_DUTY_CYCLE  0
+#endif
 // 0x12 is the classic SX127x "private network" sync word; RadioLib
 // translates it to the equivalent SX126x two-byte value (0x1424).
 #ifndef RF_SYNCWORD
@@ -494,9 +504,22 @@
 
 // A single timed transmission at boot, to prove the IRQ line is the one the
 // board actually uses. Off everywhere it is not needed: it costs airtime.
+//
+// Where it is on, it runs once per firmware image rather than once per boot:
+// the verdict is kept in NVS under RADIO_NVS_NAMESPACE, keyed to the running
+// binary itself (the ELF SHA-256 in its application descriptor, not the
+// version string it prints), so a node brown-out looping on a flat battery
+// does not re-pay a transmission its own image has already made. A new image
+// proves itself again — the pin map the test is about is the image's. See
+// src/radio/RadioSelfTestPolicy.h.
+//
+// Its own namespace, and the key belongs with it: this is not a setting (a
+// settings reset must not clear it) and it is not restart history either.
 #ifndef RADIO_SELFTEST_ON_BOOT
   #define RADIO_SELFTEST_ON_BOOT 0
 #endif
+#define RADIO_NVS_NAMESPACE      "retimesh-rf"   // max 15 chars
+#define RADIO_SELFTEST_NVS_KEY   "irq"
 
 #ifndef RF_TCXO_VOLTAGE
   #define RF_TCXO_VOLTAGE   1.8
@@ -1258,6 +1281,25 @@ struct NodeStats {
   volatile uint16_t dutyLimitBp   = 0;      // enforced allowance in basis points, 100 = 1 %
   volatile uint16_t csmaSlotMs    = 0;
   volatile uint8_t  csmaBand      = 1;      // contention window band, 1..4
+  // Duty-cycled receive as it would actually behave, not as the switch reads.
+  // The driver falls back to a continuous receive without saying so whenever
+  // the computed sleep is too short to be worth the wake-up, so the setting
+  // alone answers nothing (Airtime.h). Written by the radio task whenever the
+  // channel is applied.
+  volatile uint32_t rxDutyCycleSleepUs = 0;    // per cycle; 0 = the receiver never sleeps
+  volatile bool     rxDutyCycleEngages = false;// setting, chip and channel all agree
+  // The same question with the switch left out: would this chip on this channel
+  // sleep, if it were asked to? Published beside the one above because their
+  // false branches mean different things and a surface that has only the first
+  // cannot tell them apart — every node ships with the setting off, so a hint
+  // built on rxDutyCycleEngages alone would tell an SX1262 at SF10/125 kHz that
+  // the channel was hopeless when in fact the switch is the only thing missing.
+  volatile bool     rxDutyCycleWouldEngage = false;
+  // ...and whether the mode is actually running, which is neither of the above.
+  // Published as a fact rather than left to a sentence in docs/ because a
+  // release that reports a saving it is not making is exactly the failure this
+  // whole block exists to prevent, and prose is not something the API can echo.
+  volatile bool     rxDutyCycleArmed   = false;
   // Where receptions go when they do not become a packet. One counter for all
   // of them told us a node was losing 94 % of its receptions but not why, and
   // the causes have nothing to do with each other: a full ring means the
@@ -1278,6 +1320,15 @@ struct NodeStats {
   volatile uint32_t loraRxCrcErrors   = 0;  // readData() refused it: bad CRC or spurious IRQ
   volatile uint32_t loraRxBadLength   = 0;  // frame shorter than a header or longer than the max
   volatile uint32_t loraRxSpuriousIrq = 0;  // woken with no completed reception to collect
+  // The other half of the radio's health, on the transmit side. A carrier-sense
+  // probe that never reports is read as a busy channel — the only safe reading
+  // of a medium nobody measured — so the fault is silent by construction: the
+  // node stays online, keeps its rx/tx counts and its airtime, and simply waits
+  // the whole CSMA deferral before every packet while transmitting without ever
+  // having measured the air. These two are what that failure looks like from
+  // outside. Both are zero on a healthy node whatever the traffic.
+  volatile uint32_t loraCadTimeouts   = 0;  // scan armed, no verdict before its deadline
+  volatile uint32_t loraCadArmErrors  = 0;  // the driver refused to start the scan at all
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
 };

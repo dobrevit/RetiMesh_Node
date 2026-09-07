@@ -74,6 +74,21 @@ void begin();
 void tx();
 void rx();
 
+// Stand the part down: amplifier out of the path, enable low, rail off.
+//
+// For a shutdown this firmware is driving, and only that — today the radio
+// task's sleep on the way to a restart. It is deliberately not tied to the
+// transceiver's receive state, and that is a decision rather than an
+// omission: an SX1262 in duty-cycled receive cycles itself between sleep and
+// listening with no callback into this firmware at all, so a front end gated
+// on "the radio is asleep" would have the LNA out of the path during the wake
+// windows the receiver is listening in. The node would be deaf for most of
+// every cycle and nothing here would know.
+//
+// A no-op before begin() has run: there is nothing powered to stand down, and
+// the pins are not ours yet.
+void off();
+
 const char* partName();
 
 // The part's approximate transmit gain at a given chip drive, in dB, from the
@@ -90,6 +105,7 @@ namespace LoRaFem {
 inline void begin() {}
 inline void tx() {}
 inline void rx() {}
+inline void off() {}
 inline const char* partName() { return "none"; }
 inline int8_t gainDb(int8_t) { return 0; }
 } // namespace LoRaFem

@@ -73,6 +73,10 @@
       <div><label>Beacon interval (s, 0 = off)</label><input name="beacon_interval" type="number" min="0" max="3600" required></div>
       <div><label>Callsign / beacon name (blank = SSID)</label><input name="callsign" maxlength="32" pattern="[\x21-\x7E]*"></div>
       <div><label>Duty cycle cap (%, 0 = follow the band)</label><input name="duty_cycle_pct" type="number" min="0" max="100" required></div>
+      <!-- Hidden on a transceiver without the mode, the way the GNSS rows are
+           hidden on a board without a receiver: a switch that cannot be
+           honoured is worse than no switch. -->
+      <div id="rxDcField" hidden><label>Duty-cycled receive <span id="rxDcHint" class="hint"></span></label><input name="rx_duty_cycle" type="checkbox"></div>
       <div id="gpsField" hidden><label>GNSS receiver</label>
         <select name="gps_enabled"><option value="1">On — position and clock</option><option value="0">Off — saves power</option></select></div>
       <div id="gpsShareField" hidden><label>Publish position</label>
@@ -91,6 +95,14 @@
       node checks that per packet and warns at boot when the longest frame does not fit. At <b>2.4 GHz</b> neither applies; power and
       listen-before-talk govern, and the node already does the latter. In both, this field is a budget of your own choosing rather than one
       being followed, and the local rules remain yours to know. When a budget is spent, packets wait in the queue instead of being dropped.<br>
+      <b>Duty-cycled receive.</b> Off by default. With it on, an SX1262 sleeps between preamble samples instead of listening
+      continuously &mdash; the 18-symbol preamble floor every conforming sender respects is what makes that safe, and the sleep is sized
+      on that floor rather than on the preamble field above, so raising this node's preamble does not lengthen its sleep. It is worth
+      something only when a symbol is long: the driver refuses to sleep for less than about 6 ms per cycle, which &mdash; with the two
+      sleep symbols an 18-symbol preamble leaves &mdash; needs a symbol time of roughly 3 ms or more (SF9 and up at 125 kHz, or a lower
+      spreading factor at a narrower bandwidth). At the default SF8/125 kHz it does nothing at all and the receiver stays on &mdash; the
+      hint beside the switch says which case this node is in, and whether the mode is armed. The row is absent entirely on a
+      transceiver without the mode.<br>
       <b>GNSS.</b> The receiver gives the node a real clock, which it has no other way to get: without one its idea of time restarts at zero
       on every reboot. Its health (fix, satellites, UTC) is public on the status API; the coordinates are not, unless you publish them
       &mdash; the status page is reachable by anyone who can join this access point.<br>
@@ -389,6 +401,27 @@ function applyRadioCaps(r) {
   for (let n = c.sf_min; n <= c.sf_max; n++) sfs.push(n);
   opts(f.sf, sfs);
 
+  // The chip decides whether the row exists at all; the channel decides what it
+  // is worth. Every answer below is read from the node — the page re-derives
+  // none of the driver's arithmetic. Four states, because the earlier two-state
+  // hint blamed the channel for a false that the switch usually caused: with
+  // the setting shipping off, an SX1262 at SF10/125 kHz was told the mode had
+  // "no effect at this spreading factor and bandwidth", which is the one
+  // configuration where turning it on works. The false branch names the
+  // channel rather than those two dials for the same kind of reason: it also
+  // covers the ceiling, which a long preamble reaches at a perfectly legal
+  // spreading factor and bandwidth.
+  const rxDcMs = Math.round((r.rx_duty_cycle_sleep_us || 0) / 100) / 10;
+  $("rxDcField").hidden = !c.rx_duty_cycle_supported;
+  $("rxDcHint").textContent =
+    !c.rx_duty_cycle_supported ? "not supported by this radio"
+    : !r.rx_duty_cycle_would_engage
+      ? "no effect on this channel — the receiver stays on"
+    : r.rx_duty_cycle_armed ? "receiver sleeps " + rxDcMs + " ms per cycle"
+    : r.rx_duty_cycle_engages
+      ? "would sleep " + rxDcMs + " ms per cycle, not armed"
+    : "off — would sleep " + rxDcMs + " ms per cycle here";
+
   f.tx_dbm.min = c.tx_min_dbm;
   f.tx_dbm.max = r.tx_dbm_max;
   $("pmax").textContent = c.tx_min_dbm + " to " + r.tx_dbm_max
@@ -530,6 +563,7 @@ $("radioForm").addEventListener("submit", async ev => {
     tx_dbm: +f.tx_dbm.value, sync_word: parseInt(f.sync_word.value, 16), preamble: +f.preamble.value,
     beacon_interval: +f.beacon_interval.value, announce_interval: +f.announce_interval.value, callsign: f.callsign.value,
     duty_cycle_pct: +f.duty_cycle_pct.value };
+  if (f.rx_duty_cycle) body.rx_duty_cycle = f.rx_duty_cycle.checked;
   if (f.gps_enabled) body.gps_enabled = f.gps_enabled.value === "1";
   if (f.gps_share_position) body.gps_share_position = f.gps_share_position.value === "1";
   try {

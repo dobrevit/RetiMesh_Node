@@ -45,10 +45,10 @@
 //
 //  Packet flow, radio side:
 //
-//    TCP -> LoRa:   radioTask blocks on the TX ring buffer. Each item is
-//                   one raw RNS packet (<= 500 bytes). It is fragmented
-//                   into RNode-framed LoRa frames and transmitted after
-//                   a CSMA clear-channel check.
+//    TCP -> LoRa:   a producer puts one raw RNS packet (<= 500 bytes) in
+//                   the TX ring and calls wake(); radioTask takes it,
+//                   fragments it into RNode-framed LoRa frames and
+//                   transmits after a CSMA clear-channel check.
 //
 //    LoRa -> TCP:   IRQ fires on RxDone -> ISR notifies radioTask ->
 //                   frame is read, reassembled (split packets), and the
@@ -71,9 +71,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/ringbuf.h>
+#include <atomic>
 #include "Config.h"
 #include "Airtime.h"
 #include "RadioCaps.h"
+#include "RadioRxArmPolicy.h"
 #include "Settings.h"
 
 // ---------------------------------------------------------------------------
@@ -145,6 +147,29 @@ public:
   // immediately. Result is visible in g_stats.radioApplyError.
   void requestReconfigure(const RadioSettings& s);
 
+  // Put the transceiver to sleep, and any amplified front end down with it,
+  // before the node restarts. Asked rather than done, for the same reason
+  // requestReconfigure() is: the radio task is the only code that touches the
+  // chip (see the task-body note in the .cpp), and the restart runs on
+  // whichever task asked for it. requestSleep() returns at once; asleep()
+  // says when the task has finished the job. Bootloader::quiesce() is the
+  // caller, and it waits for a bounded time rather than for this to be true —
+  // a restart that can be held up by a transmission in flight is a restart
+  // that does not happen.
+  //
+  // There is no matching wake: what follows this is esp_restart().
+  void requestSleep();
+  bool asleep() const;
+
+  // "There is something for you." The radio task spends an idle channel parked
+  // in a bounded wait, so anything that makes work visible to it — a packet put
+  // in the TX ring, and the two requests above, which call this themselves —
+  // says so here rather than leaving it to be found when the wait runs out.
+  // Publish the work first, then call this: the ordering is half of the
+  // interlock that makes the wake unmissable (see the .cpp). Thread-safe,
+  // returns immediately, and safe on a node whose radio never came up.
+  void wake();
+
   // FreeRTOS entry point — created pinned to core 1 from main.cpp.
   static void radioTask(void* self);
 
@@ -152,9 +177,26 @@ private:
   void taskLoop();
   void handleRadioIrq();                 // RxDone path: read + reassemble
   void deliverPacket(size_t len);        // completed RNS packet -> RX ring
-  void transmitPacket(const uint8_t* data, size_t len);
+  bool transmitPacket(const uint8_t* data, size_t len);  // false = abandoned
+  bool waitIrq(uint32_t ms);             // block for the chip's IRQ line only
+  void flushIrq();                       // drop a stale interrupt notification
   void csmaWait();                       // DIFS + contention window before TX
   bool mediumFree();                     // one CAD probe
+  // The one place the receiver is put back into receive. Every path that leaves
+  // the chip out of it — a reception, a transmission, a CAD probe, a settings
+  // apply, the boot self-test — comes through here, because the duty-cycled
+  // mode is armed per call and not a state the chip keeps: a single site left
+  // calling startReceive() directly would drop the node back to a continuous
+  // receive the first time a packet arrived, silently, with every surface still
+  // reporting the saving. What it arms is RadioRxArm's decision; whether the
+  // driver took it is what g_stats.rxDutyCycleArmed then says.
+  void armReceive();
+  // Warnings that can repeat once per packet are rate-limited by
+  // RadioWarn::due() (RadioWarnPolicy.h), against the caller's own last-warned
+  // stamp below and its running count. One implementation, because the CAD
+  // failures M3 added and the arm failures need the identical rule and must not
+  // be able to suppress each other; a header rather than a member because the
+  // rule is pure once the clock is passed in, and so host-testable.
   void refreshAirtimeStats();            // publish channel use into g_stats
   bool sendFrame(const uint8_t* frame, size_t len);
 
@@ -167,8 +209,15 @@ private:
   bool probeSX127x(const RadioSettings& s);
   bool probeSX1280(const RadioSettings& s);
   bool probeLR1110(const RadioSettings& s);
-  void irqSelfTest();                    // proves the IRQ line, see the .cpp
+  bool irqSelfTest();                    // proves the IRQ line, see the .cpp
+  void bootSelfTest();                   // ...once per firmware image
+  void enterSleep();                     // radio task context only
   uint32_t rxDoneFlag() const;           // this chip's RxDone bit, raw
+  uint32_t cadDoneFlag() const;          // ...and its channel-scan-finished bits
+  // Which pin the interrupt actually arrives on: DIO1 on an SX126x, SX128x or
+  // LR11x0, DIO0 on an SX127x. Two log lines name it and naming the wrong one
+  // turns a useful diagnostic into a misleading one, so both ask here.
+  int irqPin() const { return _sx1276 ? PIN_LORA_DIO0 : PIN_LORA_DIO1; }
   bool applySettings(const RadioSettings& s);   // radio task context only
   void configureAirtime(const RadioSettings& s);  // symbol time -> duty cycle + CSMA
   void logActive() const;
@@ -192,6 +241,26 @@ private:
   RadioSettings  _active;                // what the chip is running now
   RadioSettings  _pending;               // handed over by requestReconfigure
   volatile bool  _reconfigure = false;
+  volatile bool  _sleepRequest = false;  // set by requestSleep, cleared by the task
+  volatile bool  _asleep       = false;  // ...and the task's answer
+  // Whether the task is in — or about to enter — its idle wait, and so whether
+  // a wake() would reach it. Read by producers on other tasks, written only by
+  // the radio task, and deliberately not under _mux: nobody is being excluded.
+  // What makes it correct is the order it is written in relative to the work a
+  // producer hands over — published before the ring and the two flags are read,
+  // read by the producer after its own hand-over (see wake() in the .cpp).
+  //
+  // std::atomic rather than volatile, because that order is the whole of the
+  // interlock and volatile does not carry it: it orders volatile accesses
+  // against each other and gives no compiler barrier against the ring read next
+  // to it and no hardware fence at all. Today the pairing would survive that on
+  // three unstated accidents — the ringbuffer calls take a portMUX spinlock,
+  // xTaskNotifyWait's own critical section stands in for the fence, and the
+  // producer runs on this core at a lower priority so it cannot preempt — and
+  // the first of those to go is moving the RNS task to core 0, which would
+  // invalidate the ordering silently and cost a 100 ms park per hand-over. A
+  // seq_cst bool is one word and one fence on a path that runs once a pass.
+  std::atomic<bool> _parked{false};
   portMUX_TYPE   _mux = portMUX_INITIALIZER_UNLOCKED;
 
   // RX reassembly state (mirrors RNode's seq/read_len logic)
@@ -204,12 +273,40 @@ private:
 
   Airtime  _airtime;                     // time on air, duty cycle, CSMA sizing
   uint32_t _statsAtMs = 0;               // last publish into g_stats
+  uint32_t _cadWarnAtMs = 0;             // last CAD failure that reached the log
+
+  // How the receiver is armed, decided once per settings apply rather than at
+  // each of the eleven sites that re-arm it (RadioRxArmPolicy.h). Written by
+  // configureAirtime(), read by armReceive(); both are radio-task context,
+  // except at boot where begin() runs them on the setup task before the radio
+  // task exists.
+  RadioRxArm::Plan _rxArmPlan = RadioRxArm::Plan::Continuous;
+  // ...and the sender preamble that arm is sized on, decided by the same rule
+  // at the same moment (RadioRxArm::sizingPreamble). It is the network's floor
+  // narrowed by this node's own setting, not the setting itself, and it is held
+  // rather than re-derived so the figure published as rx_duty_cycle_sleep_us
+  // and the figure handed to startReceiveDutyCycleAuto() cannot come apart.
+  uint16_t _rxArmPreamble = RF_PREAMBLE_SYMS;
+  // Duty-cycle arms the driver refused, and when one of them last reached the
+  // log. Not published, unlike the CAD counters beside them: the fault they
+  // report already has a published *level* in g_stats.rxDutyCycleArmed, which
+  // reads false against an rxDutyCycleEngages of true for exactly as long as
+  // the refusals last. A counter buys nothing a standing flag does not.
+  uint32_t _rxArmErrors  = 0;
+  uint32_t _rxArmWarnAtMs = 0;
 
   uint32_t _lastTxMs  = 0;               // any transmission (packet or beacon)
   uint32_t _helloAtMs = 0;               // boot probe due time (0 = done)
   uint32_t _replyAtMs = 0;               // pending reply to someone's hello
 
-  static TaskHandle_t s_taskHandle;      // notification target for the ISR
+  // Notification target for the ISR — and now for wake() too, so it is read
+  // from three contexts and written from two: the radio task publishes it, and
+  // irqSelfTest() borrows it for the setup task for the length of one probe.
+  // Volatile and not atomic, unlike _parked: this word carries no ordering
+  // relative to anything else — every value it ever holds is a task that can
+  // take the notification, or null — and one of its readers is an ISR, where a
+  // plain aligned load is the one thing certain not to reach out of IRAM.
+  static volatile TaskHandle_t s_taskHandle;
 };
 
 extern LoRaRadio loraRadio;

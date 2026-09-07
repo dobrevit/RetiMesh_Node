@@ -200,8 +200,160 @@ public:
   // Seconds until the hourly figure falls back under the limit, 0 when free.
   uint32_t retryAfterS(uint32_t nowMs, uint16_t limitBp);
 
+  // ---- Duty-cycled receive ------------------------------------------------
+  // Whether telling an SX1262 to sleep between preamble samples would actually
+  // save anything on this channel. The driver decides that silently — the
+  // sleep is a function of the preamble and the symbol time, and when it comes
+  // out shorter than the chip's own wake-up transition RadioLib abandons the
+  // whole idea and arms a plain continuous receive instead, returning success
+  // either way. A node that reported the setting rather than this answer would
+  // claim a saving it is not making, which is the whole reason this lives here
+  // and not inside the radio: it is pure arithmetic, it is host-testable, and
+  // one caller cannot disagree with another about it.
+  //
+  // The constants mirror RadioLib 7.7.1 — PhysicalLayer::calculateRxDutyCycle,
+  // SX126x::startReceiveDutyCycleAuto and SX126x::startReceiveDutyCycle, plus
+  // SX126x::setTCXO's default. They are named so that a driver update that
+  // retunes any of them shows up as a diff here and a failing test rather than
+  // as a node that quietly stopped sleeping.
+
+  // Symbols of preamble the receiver must catch to latch onto it (SX1262
+  // datasheet 6.1.1.1): 8 for SF7-12, 12 for SF5-6. This firmware's floor is
+  // SF7 on every chip (RadioCaps), so 8 is the figure in play.
+  static const uint16_t RX_DC_MIN_SYMBOLS_SF7 = 8;
+  static const uint16_t RX_DC_MIN_SYMBOLS_SF6 = 12;
+  // Shutdown and startup around each wake, added to the TCXO ramp. Below that
+  // total the driver does not sleep at all.
+  static const uint32_t RX_DC_TRANSITION_US   = 1016;
+  // ...and the amount the driver then *deducts* from the sleep before it
+  // programs the chip (SX126x.cpp:479-480). Deliberately not the same number as
+  // the 1016 above: the driver writes them as two separate literals, 1016 in
+  // the threshold it compares against and 1000 in the subtraction it performs,
+  // and folding them into one constant here would misreport the boundary in
+  // whichever direction the fold went. Both are mirrored, both are named.
+  static const uint32_t RX_DC_COMPENSATION_US = 1000;
+  // The sleep period reaches the chip as a 24-bit count of 15.625 us ticks
+  // (SetRxDutyCycle takes three bytes), so the driver rejects anything that
+  // does not fit. Held as the raw ceiling rather than a microsecond figure
+  // because the truncating divide by 125/8 is what decides the boundary.
+  //
+  // SX126x, and only the SX126x. The tick is a property of that part, not of
+  // the idea: an LR11x0 counts its sleep in 30.517 us periods off the 32.768
+  // kHz RTC (LR11x0::startReceiveDutyCycle), so the same 24 bits reach about
+  // 512 s there against roughly 262 s here, and a slow channel this predicate
+  // calls too long is one that part would have taken. Erring in that direction
+  // is safe — the caller is told not to ask, and a receiver left continuously
+  // on hears everything — but only while the one radio RadioCaps marks
+  // rxDutyCycle is the one this arithmetic models. test_radio_plan pins that
+  // pairing, so a capability bit flipped for another part fails a host test
+  // instead of quietly running these numbers against the wrong clock.
+  static const uint32_t RX_DC_PERIOD_RAW_MAX  = 0x00FFFFFFUL;
+  // RadioLib's setTCXO() default ramp. Nothing in this firmware passes a delay,
+  // so every board that names a TCXO voltage gets this one; a board with none
+  // leaves the driver's delay at zero, which is why callers pass it in.
+  static const uint32_t RX_DC_TCXO_DELAY_US   = 5000;
+
+  // 0 selects the driver's own default for the spreading factor.
+  static uint16_t rxDutyCycleMinSymbols(uint8_t sf);
+  // Microseconds the receiver would spend asleep in each cycle. 0 means it
+  // would never sleep: a preamble no longer than the two sampling windows
+  // leaves nothing between them.
+  static uint32_t rxDutyCycleSleepUs(uint8_t sf, float bwKhz, uint16_t preambleSyms,
+                                     uint16_t minSymbols = 0);
+  // ...and whether the driver will actually take that sleep. True means one
+  // thing only, and it is the thing a caller may act on: the call
+  //
+  //     startReceiveDutyCycleAuto(<the same preambleSyms passed above>, 0)
+  //
+  // will arm a duty-cycled receive with it. Both arguments are part of that
+  // claim, because PhysicalLayer::calculateRxDutyCycle reads both and this
+  // predicate mirrors only one shape of the call:
+  //
+  //   * the first is the *sender's* preamble — the shortest preamble the
+  //     senders we mean to hear will transmit — and it is what the sleep is
+  //     computed from. It is emphatically not this node's own preamble
+  //     setting; who chooses it is RadioRxArm::sizingPreamble(), and whatever
+  //     it chooses has to be the figure handed to rxDutyCycleSleepUs() here as
+  //     well, or the prediction is about a different sleep than the chip is
+  //     given. Zero would make the driver fall back to the configured
+  //     preamble, which on a node set above the floor is a longer window than
+  //     any sender guarantees to fill — which is why the caller passes the
+  //     figure out loud instead of leaving it to the default. Anything longer than the
+  //     configured preamble is refused with
+  //     RADIOLIB_ERR_INVALID_PREAMBLE_LENGTH before any of this arithmetic
+  //     runs, and a true here says nothing whatever about that call.
+  //   * the second is a minSymbols override. Zero selects the driver's own
+  //     default for the spreading factor, which is what rxDutyCycleMinSymbols()
+  //     mirrors; pass a figure there and the same figure has to be passed to
+  //     rxDutyCycleSleepUs(), or the predicate is answering about a different
+  //     sleep than the one the chip will be given.
+  //
+  // False covers two outcomes that look nothing alike on the bench and must
+  // not be told apart here, because in both of them the honest answer for a
+  // caller is "do not ask the driver for this mode":
+  //
+  //   * too short — the sleep is under the wake-up transition, so the driver
+  //     quietly arms a plain continuous receive and the node hears normally;
+  //   * too long — the period will not fit the 24 bits the chip's SetRxDutyCycle
+  //     command has, so the driver returns RADIOLIB_ERR_INVALID_SLEEP_PERIOD.
+  //     That return is *before* the stageMode() call, so it arms nothing at
+  //     all: not duty-cycled receive, not continuous receive. The chip is left
+  //     in standby and the node is deaf until something else re-arms it.
+  //
+  // The second is reachable for any caller that sizes its window on a long
+  // preamble — SF12 at 7.8 kHz has a 525 ms symbol, so 516 symbols is enough,
+  // and the validator accepts up to 1000 — which is why this predicate mirrors
+  // the driver's whole acceptance condition rather than only its first gate.
+  // The radio no longer gets there, because it sizes on the 18-symbol interop
+  // floor and so never asks for a sleep past about a second; the gate stays
+  // because the predicate is a statement about the driver, not about today's
+  // one caller, and because the floor is a constant somebody may raise.
+  static bool rxDutyCycleEngages(uint32_t sleepUs,
+                                 uint32_t tcxoDelayUs = RX_DC_TCXO_DELAY_US);
+
   uint32_t slotMs() const;
   uint32_t difsMs() const { return 2 * slotMs(); }
+
+  // ---- Channel activity detection -----------------------------------------
+  // How long to give one CAD probe before giving up on it, in milliseconds.
+  //
+  // The probe belongs to the chip: the driver puts the part into CAD for a
+  // fixed number of symbols and the part raises its interrupt line when it has
+  // finished. How many symbols is the driver's choice per part, and RadioLib
+  // 7.7.1 picks a different one for each — 4 on the SX126x, 8 on the SX128x, 2
+  // on the LR11x0, and the SX127x's own hardware-timed scan of roughly one
+  // symbol. So the bound is written against the longest of them with the same
+  // margin doubled over it: sixteen symbol times, plus a fixed allowance for
+  // the standby transition either side of the scan, the TCXO ramp, the SPI
+  // traffic that carries it and a scheduling tick or two.
+  //
+  // A deadline, not a duration. Nothing here predicts how long a probe takes;
+  // it says when a probe has stopped being a probe and become a chip that is
+  // not answering — a wedged part, or an interrupt line that is not the one the
+  // board header names. It is sized to be unreachable in ordinary operation so
+  // that reaching it means something, and the caller reads it as a busy channel
+  // because deferring on a medium nobody measured is the only safe direction.
+  //
+  // Here rather than in the radio for the reason slotMs() is here: it is
+  // arithmetic on the channel, it is the same arithmetic for every part, and a
+  // host test can pin it where a bench session could not.
+  static const uint16_t CAD_SYMBOLS     = 16;   // twice the longest driver scan
+  static const uint32_t CAD_OVERHEAD_MS = 20;   // transitions, TCXO ramp, SPI, ticks
+  // Floor: on the fastest channels the symbols vanish and the overhead is all
+  // there is, and a deadline shorter than one scheduling round-trip would fire
+  // on a healthy chip.
+  static const uint32_t CAD_TIMEOUT_MIN_MS = 25;
+  // Ceiling: the slowest channel this firmware will accept is SF12 at 7.8 kHz,
+  // where one symbol is 525 ms and sixteen of them are 8.4 s — longer than the
+  // whole CSMA deferral it would be part of, and long enough to matter to the
+  // watchdog. The real scan on that channel is the driver's 4 symbols, about
+  // 2.1 s, so this still clears the longest probe any reachable channel can
+  // produce while staying inside both of those budgets. LoRaRadio.cpp asserts
+  // the two relationships against the constants that hold them.
+  static const uint32_t CAD_TIMEOUT_MAX_MS = 4000;
+
+  uint32_t cadTimeoutMs() const;
+
   uint8_t  cwBand(float shortTerm) const;     // 1..CW_BANDS
   void     contentionWindow(float shortTerm, uint8_t& cwMin, uint8_t& cwMax) const;
 

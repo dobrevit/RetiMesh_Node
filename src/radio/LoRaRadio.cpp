@@ -22,14 +22,19 @@
 #include "Diag.h"
 #include "LoRaRadio.h"
 #include "LoRaFem.h"
+#include "RadioParkPolicy.h"
+#include "RadioSelfTestPolicy.h"
+#include "RadioWarnPolicy.h"
+#include <esp_app_desc.h>
 #include <esp_random.h>
+#include <Preferences.h>
 #include "Neighbors.h"
 #include "WifiManager.h"
 #include "Watchdog.h"
 #include "SpiBus.h"
 
 LoRaRadio loraRadio;
-TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
+volatile TaskHandle_t LoRaRadio::s_taskHandle = nullptr;
 
 // Both bounds come from the caller. The floor used to be a hardcoded 2 dBm,
 // which quietly rewrote anything lower — so an SX1280 asked for -10 dBm, a
@@ -41,14 +46,141 @@ static int8_t clampPower(int8_t dbm, int8_t minDbm, int8_t maxDbm) {
 }
 
 // ---------------------------------------------------------------------------
+// Why the radio task woke
+// ---------------------------------------------------------------------------
+// Two senders share the task's notification: the ISR below, on the chip's IRQ
+// line, and any task that has queued work for the radio (wake()). The value
+// carries a bit per sender rather than a count, because every wait in this file
+// has to know which of the two it heard, and a count cannot say.
+//
+// It is not a cosmetic distinction. A producer's wake read as an interrupt
+// would be charged to rx_spurious_irq by handleRadioIrq() — a counter that
+// reads zero on a healthy node and is watched by the soak rig — and, worse,
+// csmaWait() would read it as traffic on the channel and restart a contention
+// countdown that nothing had disturbed. That second failure has already been
+// paid for once here, when the old blocking channel scan left a notification
+// behind that the contention countdown could not tell from an incoming frame
+// and every node deferred to itself for the whole of CSMA_MAX_WAIT_MS.
+//
+// A bit is also the only carrier that cannot race. The notification value and
+// the "a notification is pending" state are updated together under the
+// kernel's own lock, so a wake and its reason arrive as one; a flag beside the
+// notification, however it is ordered, has a window in which the two disagree.
+static const uint32_t kWakeIrq  = 1u << 0;   // the transceiver raised its line
+static const uint32_t kWakeWork = 1u << 1;   // a producer queued something
+
+// Every wait in this file reads one of these and clears it without disturbing
+// the other, so they must not share a bit. Cheap to keep true, and the failure
+// would be a producer's wake serviced as an interrupt.
+static_assert((kWakeIrq & kWakeWork) == 0, "the two wake reasons need separate bits");
+
+// How long the task parks when there is nothing to do. It is a fallback, not a
+// poll: an arriving frame wakes it through the ISR and queued work wakes it
+// through wake(), so this bound is only what covers the things nobody signals
+// — the beacon clock, the airtime figures, and the watchdog feed at the top of
+// the pass. Widened from 10 ms: at 10 ms the task woke a hundred times a
+// second on an idle channel to find nothing, which is the cost this removes.
+// Do not shorten it back "to reduce latency" — the two things that have
+// latency are woken, not polled.
+static const uint32_t kIdleWaitMs = 100;
+
+// The pass has to feed the watchdog more often than it fires, and the park is
+// the only unbounded-looking wait on the path between two feeds.
+static_assert(kIdleWaitMs < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
+              "the idle park must fit between two watchdog feeds");
+
+// Loud enough to be noticed, bounded enough to be safe to emit from the task
+// that is trying to transmit: at most one line a minute from each kind of
+// failure, after the first, which always goes out at once. The rule itself is
+// RadioWarn::due() — pure, and pinned by test/test_radio_warn.
+static const uint32_t kWarnIntervalMs = 60000;
+
+// ---------------------------------------------------------------------------
 // ISR: the radio's IRQ line (DIO1 on SX126x, DIO0 on SX127x) rises on
 // RxDone / TxDone. Nothing is decided here — the task owns the radio and
 // knows (via its own state) which operation finished.
 // ---------------------------------------------------------------------------
 void IRAM_ATTR LoRaRadio::onRadioIrq() {
   BaseType_t higherPrioWoken = pdFALSE;
-  if (s_taskHandle) vTaskNotifyGiveFromISR(s_taskHandle, &higherPrioWoken);
+  // Read once. The handle is volatile because it changes under this function —
+  // irqSelfTest() borrows it for the setup task — and two reads of it could be
+  // two different values, the second of them null.
+  TaskHandle_t h = s_taskHandle;
+  if (h) xTaskNotifyFromISR(h, kWakeIrq, eSetBits, &higherPrioWoken);
   portYIELD_FROM_ISR(higherPrioWoken);
+}
+
+// Wait for the chip's IRQ line, and say whether that is what ended the wait.
+//
+// The loop is the point. xTaskNotifyWait() unblocks on the notification's
+// pending *state*, not on the bits in its value, so a producer's kWakeWork
+// arriving here ends the wait in no time at all — and every caller of this is
+// counting time: csmaWait() credits a contention slot per call, mediumFree()
+// spends the CAD deadline in slices, and the retry pause between probes is a
+// deliberate airtime interval. Returning early would hand all three a wait
+// that never happened. So a wake that is not ours resumes on what is left of
+// the deadline, and only the clock or the interrupt bit ends this.
+//
+// Nothing is lost by consuming that wake. The producer published its work
+// before it called wake(), and the park in taskLoop() looks at the TX ring and
+// the two request flags itself before it decides to block — so the work is
+// found on the way round, whether or not a notification survived to be
+// collected. (It does not: the wait above takes the pending state with it and
+// leaves only the value bit, which nothing blocks on.)
+bool LoRaRadio::waitIrq(uint32_t ms) {
+  const uint32_t deadline = millis() + ms;
+  for (;;) {
+    const int32_t left = (int32_t)(deadline - millis());
+    if (left <= 0) return false;
+    uint32_t bits = 0;
+    if (xTaskNotifyWait(0, kWakeIrq, &bits, pdMS_TO_TICKS((uint32_t)left)) != pdPASS) return false;
+    if (bits & kWakeIrq) return true;    // anything else is not what we waited for
+  }
+}
+
+// Drop an interrupt notification left over from an operation that has finished,
+// so the next wait cannot read it as its own. A zero-length wait is the whole
+// implementation: it clears the bit whether or not one was pending, and clears
+// the pending state with it. A queued-work wake is deliberately not touched.
+void LoRaRadio::flushIrq() {
+  xTaskNotifyWait(kWakeIrq, kWakeIrq, nullptr, 0);
+}
+
+// ---------------------------------------------------------------------------
+// "There is something for you" — the producer side of the park
+// ---------------------------------------------------------------------------
+// Called after work has been made visible to the task: a packet put in the TX
+// ring, a settings change handed over, a sleep requested. Order matters and is
+// the caller's half of the contract — publish the work first, then call this —
+// because the two halves interlock:
+//
+//   * the task publishes _parked before it looks at any of the three things a
+//     producer can hand it — the TX ring, _sleepRequest, _reconfigure — and
+//     parks for the full interval only when all three are empty. So a producer
+//     that finds _parked set is talking to a task that is either in the wait or
+//     about to enter it, and the wake is seen either way: a notification that
+//     arrives first is already pending when the wait starts and returns from it
+//     immediately.
+//   * a producer that finds it clear is talking to a task that has not yet
+//     published it, and so has not yet read any of the three. It will find the
+//     work on the way into the park, without being told.
+//
+// Both halves of that need the two sides to read each other in opposite orders
+// — publish, then check — which is why _parked is written before those reads
+// and not after, and why it is an atomic rather than a plain flag (LoRaRadio.h
+// says what that buys).
+//
+// Not sent while the task is busy, and that is the point rather than an
+// economy: the waits inside csmaWait() count out a contention window in slots,
+// and a wake delivered into one would cost a slot that was never waited.
+//
+// Safe before the task exists and after it has gone: a radio that never came
+// up deletes its task at the top of taskLoop() and clears the handle first,
+// and _parked is false in both cases.
+void LoRaRadio::wake() {
+  if (!_parked) return;
+  TaskHandle_t h = s_taskHandle;
+  if (h) xTaskNotify(h, kWakeWork, eSetBits);
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +220,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   }
   if (!probeLR1110(_active)) {
     log_e("No LR1110 found on IRQ(DIO9)=%d/BUSY=%d — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY);
+    LoRaFem::off();                              // begin() never fails with the front end up
     return false;
   }
 #elif RF_MODEM_SX1280
@@ -113,6 +246,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   // board header says which.
   if (!probeSX1280(_active)) {
     log_e("No SX1280 found on DIO1=%d/BUSY=%d — check wiring", PIN_LORA_DIO1, PIN_LORA_BUSY);
+    LoRaFem::off();                              // begin() never fails with the front end up
     return false;
   }
 #else
@@ -123,6 +257,15 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   if (!probeSX127x(s) && !probeSX1262(s)) {
     log_e("No LoRa transceiver found (tried SX127x on DIO0=%d and SX1262 on "
           "DIO1=%d/BUSY=%d) — check wiring", PIN_LORA_DIO0, PIN_LORA_DIO1, PIN_LORA_BUSY);
+    // begin() never returns false with the front end up. probeSX1262() powers
+    // it before asking the chip anything — the self-test transmits, and a probe
+    // through a dead front end proves nothing — and a probe that then fails
+    // leaves _online false, so the radio task deletes itself at the top of
+    // taskLoop() and nothing ever reaches enterSleep()'s LoRaFem::off(). The
+    // rail would stay up with the LNA in the path for as long as the node runs,
+    // on the one board where that amplifier is the larger idle draw. A no-op
+    // where there is no front end, and before begin() has run (LoRaFem.h).
+    LoRaFem::off();
     return false;
   }
 #endif
@@ -133,7 +276,7 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
   configureAirtime(_active);                     // the probes bypass applySettings()
   logActive();
   #if RADIO_SELFTEST_ON_BOOT
-    irqSelfTest();
+    bootSelfTest();
   #endif
   return true;
 }
@@ -151,7 +294,10 @@ bool LoRaRadio::begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, const Radi
 // sendFrame() waits on it with an 8 s timeout, so a working line answers in
 // tens of milliseconds and a wrong one takes the full timeout. One short
 // frame, once, and the log says which.
-void LoRaRadio::irqSelfTest() {
+//
+// Returns whether the line answered. Only a true is worth remembering, which
+// is bootSelfTest()'s business; this function's is the chip and the pin.
+bool LoRaRadio::irqSelfTest() {
   // The ISR notifies s_taskHandle, and radioTask has not started yet — begin()
   // runs from setup(). Without this the interrupt fires into a null handle and
   // the test reports a dead line on perfectly good wiring, which is precisely
@@ -165,37 +311,107 @@ void LoRaRadio::irqSelfTest() {
   // mistaken for one, and the split flag is clear so no reassembly starts.
   const uint8_t probe[] = { 0x00, 0x01, 0x02, 0x03 };
   const uint32_t started = millis();
-  ulTaskNotifyTake(pdTRUE, 0);                   // clear anything stale
+  flushIrq();                                    // clear anything stale
   LoRaFem::tx();                                 // the probe proves the front end too
   if (_radio->startTransmit((uint8_t*)probe, sizeof(probe)) != RADIOLIB_ERR_NONE) {
     log_w("radio self-test: could not start a transmission — skipping the IRQ check");
     s_taskHandle = previous;
     LoRaFem::rx();
-    _radio->startReceive();
-    return;
+    armReceive();
+    return false;                                // nothing was proved
   }
-  const uint32_t got = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(3000));
+  const bool got = waitIrq(3000);
   const uint32_t took = millis() - started;
   s_taskHandle = previous;
   _radio->finishTransmit();
   LoRaFem::rx();
-  _radio->startReceive();
+  armReceive();
 
-  // Which pin is the interrupt depends on the family: DIO1 on an SX126x or
-  // SX128x, DIO0 on an SX127x. Naming the wrong one turns a useful diagnostic
-  // into a misleading one.
-  const int irqPin = _sx1276 ? PIN_LORA_DIO0 : PIN_LORA_DIO1;
   if (got) {
     log_i("radio self-test: TxDone interrupt arrived in %lu ms — the IRQ line on GPIO %d is live",
-          (unsigned long)took, irqPin);
+          (unsigned long)took, irqPin());
   } else {
     // Worth being blunt. Everything else about this node will look healthy.
     log_e("radio self-test: NO TxDone interrupt after %lu ms. The chip transmits but nothing "
           "is watching its IRQ, so this node will never receive a packet. GPIO %d is not the "
           "interrupt pin on this board — check the board header against the schematic.",
-          (unsigned long)took, irqPin);
+          (unsigned long)took, irqPin());
   }
+  return got;
 }
+
+#if RADIO_SELFTEST_ON_BOOT
+// ...and once per firmware image rather than once per boot.
+//
+// The airtime is worth paying to answer a question, and worthless to answer it
+// again: the pin map the test proves belongs to the image, so an image that has
+// already answered on this node has nothing left to find out. The case this
+// exists for is a solar node brown-out looping at dawn, spending a transmission
+// on every cycle out of the supply that could not hold the last boot up — and
+// no boot-reason check can help there, because a brown-out is not a clean boot
+// and the RTC domain that would carry the state does not survive the rail
+// dropping. So the verdict goes to NVS, keyed to the image (RadioSelfTestPolicy.h).
+//
+// Its own namespace: this is not a setting, so a settings reset must not clear
+// it, and it is not restart history either. Flashing any different image is
+// what asks the question again — which is also exactly when the answer can
+// have changed.
+void LoRaRadio::bootSelfTest() {
+  // What identifies the image is the image, not what it calls itself: the
+  // application descriptor carries the SHA-256 of the ELF it was built from,
+  // and esptool patches it into the binary at elf2image time, so it differs
+  // between two builds that share a version string. FW_VERSION does not —
+  // see RadioSelfTestPolicy.h for why that difference is the whole point.
+  const esp_app_desc_t* desc = esp_app_get_description();
+  const uint32_t image = RadioSelfTest::buildMark(desc->app_elf_sha256,
+                                                  sizeof(desc->app_elf_sha256));
+  // The field is filled in after the link, by esptool, and this build path
+  // leaves it to find the descriptor on its own rather than being told where it
+  // is. A toolchain that stopped patching leaves 32 zero bytes there — on every
+  // image alike — so the policy answers NO_MARK and the two calls below fall
+  // back to running the test every boot (RadioSelfTestPolicy.h). That is the
+  // safe direction and it is also invisible, so it is said out loud: a node
+  // paying a transmission per boot for ever deserves a reason in its log.
+  if (image == RadioSelfTest::NO_MARK)
+    log_w("radio self-test: this image carries no ELF hash in its application descriptor, so it "
+          "cannot be told apart from any other — running the test every boot. The build's "
+          "elf2image step is not stamping the descriptor.");
+
+  Preferences p;
+  const bool store = p.begin(RADIO_NVS_NAMESPACE, false);
+  // Guarded like every other read in this firmware: Preferences logs an error
+  // for a key that is not there, and on a fresh node it never is.
+  const uint32_t stored = (store && p.isKey(RADIO_SELFTEST_NVS_KEY))
+                            ? p.getUInt(RADIO_SELFTEST_NVS_KEY, RadioSelfTest::NO_MARK)
+                            : RadioSelfTest::NO_MARK;
+
+  if (RadioSelfTest::proven(stored, image)) {
+    // The one line that says which path was taken. The run path says so
+    // itself, in more detail, from irqSelfTest().
+    log_i("radio self-test: skipped — this exact image already proved "
+          "the IRQ line on GPIO %d", irqPin());
+    if (store) p.end();
+    return;
+  }
+
+  const uint32_t mark = RadioSelfTest::markAfter(irqSelfTest(), image);
+  if (store) {
+    if (mark != RadioSelfTest::NO_MARK)        p.putUInt(RADIO_SELFTEST_NVS_KEY, mark);
+    else if (stored != RadioSelfTest::NO_MARK) p.remove(RADIO_SELFTEST_NVS_KEY);
+    p.end();
+  }
+  // A namespace that would not open costs one transmission per boot and
+  // nothing else: the test runs, as it did before any of this existed.
+}
+#endif
+
+// The TCXO ramp RadioLib programs into an SX126x, which decides how long a
+// receive sleep has to be before the driver will take it. Nothing here passes a
+// delay to setTCXO(), so a board that names a voltage gets the driver's own
+// default; a board that names none never has setTCXO() called at all and the
+// delay stays at zero. Compile-time because it is a fact about the board.
+static constexpr uint32_t kTcxoDelayUs =
+    (RF_TCXO_VOLTAGE > 0.0f) ? Airtime::RX_DC_TCXO_DELAY_US : 0;
 
 // Airtime maths follows the channel: symbol time drives both the duty-cycle
 // accounting and the CSMA slot length. RadioLib leaves CRC and the explicit
@@ -206,6 +422,64 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   ap.preambleSyms = s.preamble; ap.crcOn = true; ap.implicitHeader = false;
   _airtime.configure(ap);
   g_stats.csmaSlotMs = (uint16_t)_airtime.slotMs();
+
+  // What duty-cycled receive would do on this channel. Three things have to
+  // agree — the operator asked for it, the fitted chip has the mode, and the
+  // sleep the channel yields is long enough for the driver to bother — and at
+  // the shipped SF8/125 kHz default the third does not hold. Reported rather
+  // than the setting, so the node never claims a saving it is not making.
+  // Recomputed here because this runs on every apply, which is the only time
+  // any of the three can change. The arithmetic is Airtime's; this is a caller.
+  //
+  // Two answers rather than one, derived from the same expression so they can
+  // never disagree: what the chip and channel could do, and that narrowed by
+  // what the operator asked for. A surface with only the second cannot say why
+  // it is false, and with the setting shipping off that is every node.
+  //
+  // Sized on the preamble the *network* guarantees, never on this node's own
+  // setting — see RadioRxArm::sizingPreamble(). Derived once, here: the same
+  // value goes into the prediction below and into the driver call armReceive()
+  // makes, so the published sleep is the sleep the chip was programmed with.
+  _rxArmPreamble = RadioRxArm::sizingPreamble(s.preamble, RF_PREAMBLE_SYMS);
+  const uint32_t rxDcSleepUs = Airtime::rxDutyCycleSleepUs(s.sf, s.bwKhz, _rxArmPreamble);
+  const bool rxDcChannelOk = Airtime::rxDutyCycleEngages(rxDcSleepUs, kTcxoDelayUs);
+  // One rule, asked twice — once as the node is configured, once with the
+  // switch forced on — so the two published answers and the receiver's actual
+  // behaviour cannot drift apart. armReceive() reads the plan; nothing else
+  // re-derives it.
+  _rxArmPlan = RadioRxArm::decide(s.rxDutyCycle, _caps->rxDutyCycle, rxDcChannelOk);
+  g_stats.rxDutyCycleSleepUs     = rxDcSleepUs;
+  g_stats.rxDutyCycleWouldEngage =
+      RadioRxArm::dutyCycled(RadioRxArm::decide(true, _caps->rxDutyCycle, rxDcChannelOk));
+  g_stats.rxDutyCycleEngages     = RadioRxArm::dutyCycled(_rxArmPlan);
+  // Armed-ness is a separate fact from all of the above and is not decided
+  // here: it is what the driver accepted, so armReceive() writes it, on the
+  // re-arm this apply is about to be followed by.
+  //
+  // Said out loud once per apply, at a level the shipped CORE_DEBUG_LEVEL keeps
+  // — and never per packet, which is where the arm itself happens. A node that
+  // is not making the saving has to say which of the three reasons it is, or
+  // the operator is left guessing between a switch, a chip and a channel.
+  switch (_rxArmPlan) {
+  case RadioRxArm::Plan::DutyCycled:
+    log_i("duty-cycled receive: arming it — the receiver sleeps %lu us per cycle at "
+          "SF%u/%.1f kHz, sized on a sender preamble of %u symbols",
+          (unsigned long)rxDcSleepUs, (unsigned)s.sf, (double)s.bwKhz,
+          (unsigned)_rxArmPreamble);
+    break;
+  case RadioRxArm::Plan::ChannelUnsuitable:
+    log_i("duty-cycled receive: on, but not on this channel — the %lu us sleep at SF%u/%.1f kHz "
+          "is not one the driver will take, so the receiver stays on continuously",
+          (unsigned long)rxDcSleepUs, (unsigned)s.sf, (double)s.bwKhz);
+    break;
+  case RadioRxArm::Plan::Unsupported:
+    log_i("duty-cycled receive: on, but the %s has no such mode — the receiver stays on "
+          "continuously", _modelName);
+    break;
+  case RadioRxArm::Plan::Continuous:
+    log_i("duty-cycled receive: off — the receiver listens continuously");
+    break;
+  }
 
   // What the channel is governed by depends on the band it sits in, and the
   // three regimes constrain different things — see Airtime::Regime.
@@ -435,6 +709,68 @@ void LoRaRadio::requestReconfigure(const RadioSettings& s) {
   _pending = s;
   _reconfigure = true;
   portEXIT_CRITICAL(&_mux);
+  // Handed over first, then asked for: a settings page that waited out the
+  // park would take a tenth of a second to answer, and the flag has to be
+  // readable by the time the wake arrives.
+  wake();
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown: the last thing the radio task does before the node restarts
+// ---------------------------------------------------------------------------
+void LoRaRadio::requestSleep() {
+  portENTER_CRITICAL(&_mux);
+  _sleepRequest = true;
+  portEXIT_CRITICAL(&_mux);
+  // The restart gives the radio a fixed 250 ms (Bootloader.cpp) and every
+  // millisecond of it is the transceiver still drawing. A parked task answers
+  // at once rather than when its wait runs out; a busy one is already reading
+  // this flag between CSMA slots, which is the granularity that bound was
+  // sized against and is unchanged by the longer park.
+  wake();
+}
+
+bool LoRaRadio::asleep() const {
+  // A radio that never came up has nothing to put to sleep — and its task
+  // deleted itself at the top of taskLoop(), so nobody is left to answer the
+  // request. Saying "asleep" here is what stops the caller spending its whole
+  // bound waiting for a chip that is not there.
+  return _asleep || !_online;
+}
+
+// Radio task context only. Nothing wakes the chip again: the caller is the
+// restart's quiesce step and what follows it is esp_restart().
+void LoRaRadio::enterSleep() {
+  portENTER_CRITICAL(&_mux);
+  _sleepRequest = false;
+  portEXIT_CRITICAL(&_mux);
+
+  // Wake it before telling it to sleep. SX126x::sleep() clocks SET_SLEEP out
+  // with the BUSY wait skipped, so on a part already in RTC sleep — where a
+  // duty-cycled receive leaves it for most of every cycle — the NSS falling
+  // edge carrying the command is the same edge that wakes the part, and the
+  // command races the wake. That is the drop RadioLib added the separate
+  // wake-NOP to standby() to avoid, and losing it here would leave the chip
+  // sitting in STDBY_RC, drawing, through a restart window the node had just
+  // logged as asleep. One extra command, on a path that runs once per restart.
+  _radio->standby();
+  const int16_t state = _radio->sleep();
+  // Whatever was armed is not running any more, and the restart's 250 ms window
+  // is long enough for STATUS to be asked. Published where it stops being true,
+  // for the same reason armReceive() publishes it where it starts being true.
+  g_stats.rxDutyCycleArmed = false;
+  // The front end goes after the chip, not before: an amplifier whose rail is
+  // pulled while the transceiver is still driving its antenna pin is the one
+  // ordering that could stress the part.
+  LoRaFem::off();
+  // Under the lock like every other write to the pair: quiesce() polls asleep()
+  // from another task and this flag is what ends its wait.
+  portENTER_CRITICAL(&_mux);
+  _asleep = true;
+  portEXIT_CRITICAL(&_mux);
+
+  if (state == RADIOLIB_ERR_NONE) log_i("radio asleep for the restart");
+  else log_w("radio would not sleep for the restart (code %d); restarting anyway", state);
 }
 
 // Called from the radio task only. Leaves the chip in standby; the caller
@@ -503,11 +839,28 @@ void LoRaRadio::taskLoop() {
   // and the portal stay up and say "radio offline" — would otherwise be reset
   // by a watchdog waiting on a task that no longer exists, every thirty
   // seconds, for ever.
-  if (!_online) { Watchdog::unwatch(); vTaskDelete(nullptr); return; }
+  // The handle goes before the task does, so wake() cannot notify something
+  // that is no longer there. Nothing has been able to reach it yet — no
+  // interrupt is attached on a board whose transceiver did not answer, and
+  // _parked is false — but a handle to a deleted task outliving the task is
+  // the kind of thing a later producer finds by crashing on it.
+  if (!_online) {
+    s_taskHandle = nullptr;
+    Watchdog::unwatch();
+    vTaskDelete(nullptr);
+    return;
+  }
 
-  _radio->startReceive();
-  _lastTxMs  = millis();
-  _helloAtMs = millis() + BEACON_HELLO_DELAY_MS;
+  // Not before the sleep check below, and not unconditionally: radioTask() puts
+  // this function back on its feet after a Diag::guard() catch, so a throw on a
+  // node that had already gone to sleep for a restart would re-enter here and
+  // re-arm the receiver — on the V4 with the LNA rail up behind it — for
+  // however long the ROM downloader is left sitting there.
+  if (!_asleep) {
+    armReceive();
+    _lastTxMs  = millis();
+    _helloAtMs = millis() + BEACON_HELLO_DELAY_MS;
+  }
 
   for (;;) {
     // Reported here rather than in radioTask's wrapper around this call: this
@@ -515,7 +868,15 @@ void LoRaRadio::taskLoop() {
     // the node rebooted itself thirty seconds later on a quiet channel. Found
     // on the bench, which is the only place it is cheap to find.
     Watchdog::feed();
-    // (0) Settings changed from the web UI? Apply between packets.
+
+    // (0) A restart is being prepared? Sleep the chip, stand the front end
+    //     down, and then stay out of the way: keep feeding the watchdog, but
+    //     touch nothing. There is no path back — quiesce() asks for this and
+    //     esp_restart() follows it.
+    if (_sleepRequest) enterSleep();
+    if (_asleep) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+
+    // (1) Settings changed from the web UI? Apply between packets.
     if (_reconfigure) {
       RadioSettings s;
       portENTER_CRITICAL(&_mux);
@@ -531,19 +892,50 @@ void LoRaRadio::taskLoop() {
         applySettings(_active);              // roll back to what worked
       }
       _rxSeq = LORA_SEQ_UNSET; _rxLen = 0;   // half packets are meaningless now
-      _radio->startReceive();
+      armReceive();
     }
 
-    // (1) Service the radio: block up to 10 ms for an IRQ notification.
-    //     This doubles as the poll interval for the TX ring below.
-    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0) {
-      handleRadioIrq();
-    }
+    // (2) Park until there is something to do. Three things end this wait, and
+    //     naming them is the point: the chip's IRQ line, through the ISR, which
+    //     is how a received frame gets serviced; a producer calling wake()
+    //     after putting a packet in the TX ring or asking for a reconfigure or
+    //     a sleep; and, failing both, kIdleWaitMs. The timeout is not how work
+    //     is found — it is the clock for the things nobody signals, the beacon
+    //     schedule and the airtime figures below and the watchdog feed above.
+    //
+    //     _parked is published before any of that is looked at and cleared
+    //     after the wait, which is the task's half of wake()'s interlock: a
+    //     producer that sees it set gets a wake through, and one that sees it
+    //     clear is talking to a task that has not read its flag or its ring
+    //     yet. That has to cover all three producers, not just the ring — a
+    //     sleep or a reconfigure read at the top of the pass instead would have
+    //     no such pairing, and a restart asked for a microsecond later would
+    //     wait out the whole park, out of a budget of 250 ms.
+    //
+    //     How long the wait may be is RadioPark::waitMs()'s decision, tested on
+    //     the host. The ring is only asked about when this pass could act on
+    //     the answer: while the transmit budget is spent the packets stay in it
+    //     by design, and the rule keeps the full park there for the same reason
+    //     — a park that skipped itself for a ring nothing is going to drain
+    //     would spin this task at priority 5 for the rest of the hour.
+    _parked = true;
+    const bool dutyLocked = g_stats.dutyLocked;
+    UBaseType_t queued = 0;
+    if (!dutyLocked)
+      vRingbufferGetInfo(_txRing, nullptr, nullptr, nullptr, nullptr, &queued);
+    const bool flagsPending = _sleepRequest || _reconfigure;
+    const uint32_t parkMs = RadioPark::waitMs(dutyLocked, (size_t)queued, flagsPending,
+                                              kIdleWaitMs);
+    uint32_t bits = 0;
+    const bool notified = xTaskNotifyWait(0, kWakeIrq | kWakeWork, &bits,
+                                          pdMS_TO_TICKS(parkMs)) == pdPASS;
+    _parked = false;
+    if (notified && (bits & kWakeIrq)) handleRadioIrq();
 
-    // (1a) Channel-use figures, and the duty-cycle verdict they feed.
+    // (2a) Channel-use figures, and the duty-cycle verdict they feed.
     refreshAirtimeStats();
 
-    // (1b) Beacons: boot hello, pending reply, periodic id when idle.
+    // (2b) Beacons: boot hello, pending reply, periodic id when idle.
     //      At most one beacon per loop pass, and the idle check reads the
     //      clock fresh — a transmission above would otherwise make the
     //      stale `now` minus _lastTxMs wrap and fire immediately.
@@ -554,9 +946,10 @@ void LoRaRadio::taskLoop() {
       else if ((int32_t)(now - _lastTxMs) >= (int32_t)_active.beaconInterval * 1000) sendBeacon('I');
     }
 
-    // (2) TCP -> LoRa: pull one complete RNS packet from the ring buffer
-    //     (queued there by RetiTransportServer's HDLC deframer) and
-    //     transmit it. Non-blocking take; RX keeps priority.
+    // (3) RNS -> LoRa: pull one complete RNS packet from the ring buffer
+    //     (put there by LoRaRnsInterface::send_outgoing, which then calls
+    //     wake()) and transmit it. One item per pass, non-blocking take: RX
+    //     keeps priority, and the next pass skips its park while more remain.
     //     While the hourly transmit budget is spent, leave packets in the
     //     ring: they go out when the window slides rather than being dropped,
     //     and the sender sees back-pressure instead of silence.
@@ -574,6 +967,70 @@ void LoRaRadio::taskLoop() {
 // ---------------------------------------------------------------------------
 // RX path
 // ---------------------------------------------------------------------------
+// Put the receiver back into receive — the only place in this file that does.
+//
+// The chip does not stay in receive: it drops to standby on every reception,
+// every transmission and every channel-activity probe, so something has to arm
+// it again eleven times over. That was startReceive() at each of them until the
+// duty-cycled mode arrived, and the mode is not a state the part remembers — it
+// is a property of the call that armed it. So a decision made at one site and
+// not the others would not be a partial feature; it would be a feature that
+// turned itself off the first time a packet arrived, while the setting, the API
+// and the portal all went on saying it was running. Hence one function, and
+// hence no caller of startReceive() outside it.
+//
+// What to arm is RadioRxArm's rule, decided once per settings apply
+// (configureAirtime) rather than re-derived here. Two things about the call:
+//
+//   * the preamble goes in explicitly, and it is not this node's own. The
+//     argument is the *sender's* preamble (SX126x.h:333) — the shortest one the
+//     peers we mean to hear will transmit — so it is sized on the network's
+//     18-symbol floor rather than on radio.preamble, which an operator may set
+//     anywhere from 6 to 1000. Zero would make the driver substitute the
+//     configured preamble and sleep through a window no peer is obliged to
+//     fill. _rxArmPreamble is that figure, decided by RadioRxArm::sizingPreamble
+//     alongside the plan and used by the published prediction too, which is
+//     what makes this the exact call shape Airtime's predicate was answered
+//     about (Airtime.h). The minSymbols override is zero for the same reason:
+//     the driver's own per-SF default is what the prediction modelled.
+//   * a refusal is not survivable if it is ignored. The driver's rejection path
+//     returns before it stages any mode, so a node that treated the error as
+//     "no saving today" would be left in standby and deaf. The rule should keep
+//     us away from that path entirely, but the code does not get to depend on
+//     the rule being perfect: any non-zero code falls straight through to a
+//     continuous receive.
+//
+// The warning is rate-limited because this runs per packet and per CAD probe,
+// and a chip that refuses once refuses every time — fifty lines per deferral
+// otherwise (the reasoning in RadioWarnPolicy.h is M3's, for the same shape
+// of fault). It does not get a published counter, unlike the CAD failures: the
+// fault already has a published level in rxDutyCycleArmed, which stands false
+// beside an rxDutyCycleEngages of true for as long as the refusals last, and
+// that is strictly more legible than a number that only ever goes up.
+void LoRaRadio::armReceive() {
+  bool accepted = false;
+  if (RadioRxArm::dutyCycled(_rxArmPlan)) {
+    // The plan can only be this on a part whose caps say rxDutyCycle, which is
+    // the SX1262 alone — so this pointer is the one the plan was made about.
+    // The test is the compiler's proof of that rather than a suspicion about
+    // it: the mode is not on PhysicalLayer, so there is no generic call to make.
+    const int16_t state = _sx1262
+        ? _sx1262->startReceiveDutyCycleAuto(_rxArmPreamble, 0)
+        : RADIOLIB_ERR_UNSUPPORTED;
+    accepted = (state == RADIOLIB_ERR_NONE);
+    if (!accepted) {
+      _rxArmErrors++;
+      if (RadioWarn::due(_rxArmWarnAtMs, _rxArmErrors, millis(), kWarnIntervalMs))
+        log_e("duty-cycled receive refused by the driver (code %d) — arming a continuous "
+              "receive instead (%lu so far). The node still hears everything; what is lost "
+              "is the saving, and rx_duty_cycle_armed says so.",
+              (int)state, (unsigned long)_rxArmErrors);
+    }
+  }
+  if (!accepted) _radio->startReceive();
+  g_stats.rxDutyCycleArmed = RadioRxArm::armed(_rxArmPlan, accepted);
+}
+
 // Which bit means "a packet arrived", in the chip's own register.
 //
 // PhysicalLayer::getIrqFlags() looks generic and is not: every driver returns
@@ -605,12 +1062,28 @@ void LoRaRadio::handleRadioIrq() {
   // out of the chip, until the RX ring overflowed. On a channel measured at
   // 0.67 % occupancy the node was reporting several packets a second and
   // discarding 93 % of them; none of that traffic existed.
+  //
+  // Every path out of here re-arms receive through armReceive(), and that is
+  // the acknowledgement too. Each driver clears the chip's whole interrupt
+  // status in the RX branch of its stageMode(), before it puts the part back
+  // into receive: SX126x and SX128x call clearIrqStatus(), SX127x writes
+  // RADIOLIB_SX127X_FLAGS_ALL, LR11x0 clears RADIOLIB_LR11X0_IRQ_ALL. So an
+  // explicit clear on each path — which this handler used to make — was a
+  // second SPI write of the same register a few microseconds ahead of the
+  // driver's own. Named here rather than left to be rediscovered, because a
+  // driver that stopped doing it is one lost acknowledgement away from a
+  // receiver that never fires again.
+  //
+  // The duty-cycled arm is the same guarantee and not a second one to check:
+  // SX126x::startReceiveDutyCycle() reaches the chip through that identical
+  // stageMode(RADIOLIB_RADIO_MODE_RX) — standby, then clearIrqStatus() — and
+  // only then issues SetRxDutyCycle. Whichever receive armReceive() arms, the
+  // flags this handler read have been dropped by the time it returns.
   const uint32_t rxDone = rxDoneFlag();
   const uint32_t irq = _radio->getIrqFlags();
   if (rxDone && (irq & rxDone) == 0) {
     g_stats.loraRxSpuriousIrq++;
-    _radio->clearIrqFlags(0xFFFFFFFF);           // everything; nothing here is ours
-    _radio->startReceive();
+    armReceive();                                // ...and the flags with it
     return;
   }
 
@@ -622,8 +1095,7 @@ void LoRaRadio::handleRadioIrq() {
   // framing ever grows.
   if (len <= LORA_HEADER_LEN || len > LORA_FRAME_MAX) {
     g_stats.loraRxBadLength++;
-    _radio->clearIrqFlags(0xFFFFFFFF);
-    _radio->startReceive();
+    armReceive();
     return;
   }
 
@@ -633,8 +1105,7 @@ void LoRaRadio::handleRadioIrq() {
     // interference — which looks nothing like a node whose consumer is slow,
     // and used to be indistinguishable from it.
     g_stats.loraRxCrcErrors++;
-    _radio->clearIrqFlags(0xFFFFFFFF);
-    _radio->startReceive();
+    armReceive();
     return;
   }
 
@@ -694,10 +1165,9 @@ void LoRaRadio::handleRadioIrq() {
     else                                   deliverPacket(_rxLen);
   }
 
-  // The reception is collected; drop its flags so re-entering receive mode
-  // cannot present the same packet again.
-  _radio->clearIrqFlags(0xFFFFFFFF);
-  _radio->startReceive();
+  // The reception is collected; re-entering receive mode drops its flags, so
+  // it cannot be presented again.
+  armReceive();
 }
 
 // ---------------------------------------------------------------------------
@@ -768,7 +1238,10 @@ void LoRaRadio::sendBeacon(char type) {
   int n = snprintf(text, BEACON_MAX_LEN + 1, "RM1 %c %s %s", type, callsign(), FW_VERSION);
   if (n <= 0) return;
   if ((size_t)n > BEACON_MAX_LEN) n = BEACON_MAX_LEN;
-  transmitPacket(frame, RNS_BEACON_HDR_LEN + (size_t)n);
+  // An abandoned transmission counted nothing, so there is nothing to correct:
+  // the decrement below is undoing transmitPacket's own increment, and applied
+  // to a packet that never went out it would wrap the counter to 4 294 967 295.
+  if (!transmitPacket(frame, RNS_BEACON_HDR_LEN + (size_t)n)) return;
   g_stats.loraTxPackets--;               // transmitPacket counted it as data
   g_stats.beaconsTx++;
   log_i("beacon %c sent: \"%.*s\"", type, n, text);
@@ -798,10 +1271,29 @@ void LoRaRadio::deliverPacket(size_t len) {
 // ---------------------------------------------------------------------------
 // TX path
 // ---------------------------------------------------------------------------
-void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
-  if (len == 0 || len > sizeof(_rxBuf)) return;
+// Returns false when the packet was abandoned rather than worked through. The
+// case that matters is a restart: Bootloader::quiesce() gives the radio 250 ms
+// to sleep and then goes regardless, and this call can hold the task far longer
+// than that — csmaWait() alone is bounded at CSMA_MAX_WAIT_MS plus the one
+// probe that may have started just under it, about 9 s at the worst channel,
+// and two fragments are two 8 s waits on top of that. A restart that arrives
+// mid-transmit therefore used to end with the node in the ROM downloader, where
+// nothing runs and nothing will restart it, with the transceiver still in
+// continuous receive and the V4's LNA rail up behind it — indefinitely.
+// Dropping the packet is the right trade: the node is going down either way,
+// and the sender re-sends.
+//
+// A true is therefore weaker than "every byte reached the air": a sendFrame()
+// that fails mid-packet breaks out of the fragment loop and still returns true,
+// because everything after that point — the counter, the idle-beacon clock,
+// re-arming receive — is what the caller needs either way and the frame that
+// failed has already been logged by sendFrame() itself. Nothing reads this
+// return to decide whether to re-send; the one caller reads it to know whether
+// a restart cut in.
+bool LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
+  if (len == 0 || len > sizeof(_rxBuf)) return false;
 
-  csmaWait();
+  csmaWait();                            // returns early if a sleep is asked for
 
   // RNode framing: one random sequence nibble for all fragments of this
   // packet, FLAG_SPLIT set when the payload spans more than one frame.
@@ -810,6 +1302,25 @@ void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
 
   size_t offset = 0;
   while (offset < len) {
+    // Between fragments, never inside one: a frame that stops mid-air is a
+    // frame every listener has to time out on, and the point of stopping here
+    // is to be quick. Nothing is left half-written — the ring item is returned
+    // by the caller either way, _txFrame is scratch, and the reassembly state
+    // this touches is the receiver's, not ours. The chip is left in standby by
+    // the last sendFrame(); enterSleep() puts it under on the next pass, which
+    // is where it was going.
+    if (_sleepRequest) {
+      log_w("restarting: abandoning a transmission with %u of %u bytes sent",
+            (unsigned)offset, (unsigned)len);
+      // _lastTxMs is deliberately left where it was, even though a fragment may
+      // have gone out above and been charged to the airtime record. Nothing
+      // reads it again on this path: the only reader is the idle-beacon clock
+      // in taskLoop(), and what follows this is enterSleep() and esp_restart()
+      // — there is no wake. Should a sleep ever gain one, this needs the stamp,
+      // or the node comes back believing it has been silent for however long
+      // the restart took and beacons immediately.
+      return false;
+    }
     size_t chunk = min((size_t)LORA_FRAG_PAYLOAD, len - offset);
     _txFrame[0] = header;
     memcpy(_txFrame + 1, data + offset, chunk);
@@ -819,11 +1330,12 @@ void LoRaRadio::transmitPacket(const uint8_t* data, size_t len) {
 
   g_stats.loraTxPackets++;
   _lastTxMs = millis();
-  _radio->startReceive();                // back to listening
+  armReceive();                          // back to listening
+  return true;
 }
 
 bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
-  ulTaskNotifyTake(pdTRUE, 0);           // flush stale notifications
+  flushIrq();                            // drop a stale interrupt notification
 
   LoRaFem::tx();                         // amplifier into the path first
   int16_t state = _radio->startTransmit((uint8_t*)frame, len);
@@ -835,7 +1347,7 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
 
   // Wait for TxDone. SF12/125k worst case is ~5 s per frame; 8 s means the
   // radio wedged, in which case finishTransmit() cleans up.
-  ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(8000));
+  waitIrq(8000);
   // Airtime is progress, and there can be more of it in one pass of taskLoop()
   // than the watchdog allows between feeds: a beacon and a queued packet in
   // the same pass is one deferral plus one frame, then another deferral plus
@@ -848,35 +1360,209 @@ bool LoRaRadio::sendFrame(const uint8_t* frame, size_t len) {
   return true;
 }
 
-// One channel-activity-detection probe. scanChannel() blocks for roughly a
-// symbol and drives the IRQ line itself; sendFrame() flushes any stray
-// notification it leaves behind.
-bool LoRaRadio::mediumFree() {
-  const int16_t cad = _radio->scanChannel();
+// Which bits mean "the channel scan finished", in the chip's own register.
+//
+// The same trap rxDoneFlag() documents, for the other event: getIrqFlags()
+// hands back the raw hardware register and the bits do not line up between
+// parts — CAD-done is bit 2 on an SX127x, bit 7 on an SX126x, bit 12 on an
+// SX128x and bit 8 on an LR11x0. Both bits of each pair are named rather than
+// only "done", because the SX127x raises detected alongside done and a mask
+// that watched for one bit of a two-bit answer would be a scan this code kept
+// waiting for after the chip had already given it.
+//
+// RadioLib owns this table too, and the alternative is worth naming rather than
+// leaving to be rediscovered: PhysicalLayer::getIrqMapped((1UL <<
+// RADIOLIB_IRQ_CAD_DONE) | (1UL << RADIOLIB_IRQ_CAD_DETECTED)) returns the
+// identical mask on all four parts and cannot drift on a library bump. It is
+// not used here for two reasons. It mirrors rxDoneFlag(), which is written
+// explicitly because a generic constant tested against three parts is what
+// broke reception in the first place; and it is a pure function of the part,
+// where the library's map is state — SX127x fills its irqMap inside begin(),
+// so the mask reads zero before it and beginFSK() overwrites the CAD entries
+// with RADIOLIB_IRQ_NOT_SUPPORTED. The host test pins this table against the
+// library's own map for the three parts that populate it in their constructor
+// (test/test_radio_irq_flags).
+uint32_t LoRaRadio::cadDoneFlag() const {
+  if (_sx1276) return RADIOLIB_SX127X_CLEAR_IRQ_FLAG_CAD_DONE |
+                      RADIOLIB_SX127X_CLEAR_IRQ_FLAG_CAD_DETECTED;
+  if (_sx1262) return RADIOLIB_SX126X_IRQ_CAD_DONE | RADIOLIB_SX126X_IRQ_CAD_DETECTED;
+  if (_sx1280) return RADIOLIB_SX128X_IRQ_CAD_DONE | RADIOLIB_SX128X_IRQ_CAD_DETECTED;
+#if RF_MODEM_LR1110
+  if (_lr1110) return RADIOLIB_LR11X0_IRQ_CAD_DONE | RADIOLIB_LR11X0_IRQ_CAD_DETECTED;
+#endif
+  return 0;
+}
 
-  // scanChannel() drives the IRQ line itself, and the notification it leaves
-  // behind is indistinguishable from an incoming frame to the waits in
-  // csmaWait(). So every probe looked like traffic: the contention countdown
-  // saw its own CAD, declared the channel disturbed, reset to zero and probed
-  // again — for as long as CSMA_MAX_WAIT_MS allowed. The node was deferring to
-  // itself, backing off maximally before every transmission and burning about
-  // 1200 pointless task wake-ups doing it.
+// One relationship the deadline has to hold that Airtime cannot check on its
+// own, because it is between two files' constants: a single probe must not be
+// able to outlast the deferral it is one step of, nor the watchdog it is being
+// fed against. Compile-time, so a channel setting can never reach a state the
+// arithmetic forbids.
+static_assert(Airtime::CAD_TIMEOUT_MAX_MS < CSMA_MAX_WAIT_MS,
+              "one CAD probe must not outlast the whole CSMA deferral");
+static_assert(Airtime::CAD_TIMEOUT_MAX_MS < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
+              "one CAD probe must fit between two watchdog feeds");
+
+// One channel-activity-detection probe, without spinning for it.
+//
+// The blocking scanChannel() this replaces polled the interrupt GPIO with
+// yield() until the chip answered. This task is priority 5 on core 1, the
+// highest there, so yield() returned immediately and the poll was a hot loop at
+// 240 MHz for the whole scan — 13-18 ms per probe at SF8, and on a busy channel
+// up to eighty probes per packet, about a second of full-speed CPU spent
+// deciding not to transmit yet, with the rns task on the same core waiting for
+// it. The verdict arrives by interrupt, and this task already has an ISR for
+// that line: startChannelScan() arms the scan, the notification wakes us,
+// getChannelScanResult() reads what the chip decided, and the CPU sleeps in
+// between. No new interrupt wiring: every driver's channel-scan action is the
+// same hook as its packet-received action — DIO1 on an SX126x, SX128x or
+// LR11x0, DIO0 on an SX127x — and begin() has already set it.
+//
+// Telling one notification from another is the whole difficulty here, because
+// the ISR is shared between CAD-done, RxDone and TxDone and says only that the
+// line moved. Two things keep a stale notification from being read as a verdict:
+//
+//   * before the scan is armed, whatever the receiver is already holding is
+//     read out and the notification counter is emptied — sendFrame() empties
+//     the same counter before its own wait, for the same reason. Reading before
+//     flushing is not optional: startChannelScan() clears the chip's whole
+//     interrupt status, so a frame that had arrived but not been collected
+//     would lose its RxDone flag to the scan and its notification to the flush,
+//     and simply vanish. (The old order asked after the scan, by which time the
+//     scan had already wiped the flag it was asking about.)
+//   * a wake is not a verdict until the chip's own flags agree. Anything that
+//     arrives without a CAD-done bit set is ignored and the wait resumes on
+//     what is left of the deadline, so neither a stale notification nor a late
+//     TxDone can be mistaken for a free channel.
+//   * and in the other direction, the scan's own notification never leaves this
+//     function. The wait consumes it — waitIrq() clears the interrupt bit,
+//     and repeats of it collapse into that one bit — and the line falls when
+//     armReceive() clears the flags at the bottom, which raises nothing
+//     further on a rising-edge ISR. That direction is the expensive one, and it
+//     has been paid for once already: the blocking scan drove the line itself
+//     and left a notification behind that csmaWait()'s DIFS wait and contention
+//     countdown could not tell from an incoming frame. Every probe looked like
+//     traffic, the countdown declared the channel disturbed and reset to zero,
+//     and the node deferred to itself for the whole of CSMA_MAX_WAIT_MS — about
+//     1200 pointless wake-ups before every transmission.
+//
+// The deadline is the channel's, from Airtime, and reaching it means BUSY. A
+// scan that never reported is a chip that is not answering, and no driver can
+// tell us that: SX127x::getChannelScanResult() reads "nothing detected" off a
+// scan that has not finished and calls the channel free. Deferring is the only
+// safe reading of a medium nobody measured — a node that transmitted on an
+// unconfirmed channel would be exactly the collision CSMA exists to avoid. It
+// cannot spin, either: the wait above and the caller's CSMA_CAD_RETRY_MS pause
+// between probes are both blocking waits, so a chip that never answers costs
+// two sleeps per probe rather than any CPU.
+//
+// Listening resumes on every path out of here, and that is load-bearing twice
+// over. csmaWait()'s DIFS wait and contention countdown run immediately after
+// this returns, and "any traffic during either wait restarts the whole thing"
+// only holds if the chip is actually receiving during them — otherwise a probe
+// would leave it in standby, deaf to a frame that starts a symbol later. And
+// the paths that return early for a restart leave the chip in a state
+// enterSleep() can put under, which a part left mid-scan is not.
+//
+// Resumes in whichever mode was armed before the probe, because both exits go
+// through armReceive(). A probe arms CAD, which begins with a standby and so
+// cancels a duty-cycled receive outright; re-arming it here is what keeps the
+// saving from being switched off for good by the first packet this node sends.
+bool LoRaRadio::mediumFree() {
+  // Wake the part before asking it anything. With a duty-cycled receive armed
+  // the chip is in RTC sleep for most of every cycle, and asleep it holds BUSY
+  // high — but RadioLib waits on BUSY *before* it pulls NSS low
+  // (Module::SPItransferStream), so the wait can never produce the falling edge
+  // that would end it. Every plain read below would block this task for
+  // min(the sleep period, the driver's 1 s SPI timeout) inside RadioLib's
+  // `while(digitalRead(BUSY)) yield()` — at priority 5, with the rns task on
+  // the same core behind it. Worse on a channel whose sleep outlasts that
+  // timeout: startChannelScan() begins with a getPacketType() of its own, that
+  // read would time out to 0xFF, and the scan would be refused with
+  // ERR_WRONG_MODEM — a counted "the driver would not arm CAD" that was really
+  // this node's own duty cycle.
   //
-  // Consuming the notification here is what breaks that loop. A frame that
-  // genuinely arrived during the probe still has its RxDone flag set in the
-  // chip, so it is collected rather than hidden by the flush.
-  ulTaskNotifyTake(pdTRUE, 0);
+  // standby() is the driver's own wake and the only call here that performs
+  // one: it sends a bare NOP first, purely to pull NSS low and end the sleep,
+  // precisely because the BUSY-gated SET_STANDBY behind it cannot get through
+  // otherwise (SX126x::standby(mode, wakeup)). Taking it here costs one SPI
+  // transaction and loses nothing — it does not clear the interrupt status, so
+  // the pending-RxDone check below still sees the flag and the frame is still
+  // in the chip's buffer — and startChannelScan() was going to issue the same
+  // standby() microseconds later anyway, so the window in which the receiver is
+  // out of receive only gets shorter.
+  _radio->standby();
+
   const uint32_t rxDone = rxDoneFlag();
   if (rxDone && (_radio->getIrqFlags() & rxDone)) handleRadioIrq();
+  flushIrq();                            // ...and only then flush
 
-  // Listening resumes either way. A busy channel obviously needs it, but a
-  // clear one does too: csmaWait()'s DIFS wait and contention countdown run
-  // right after this returns, and "any traffic during either wait restarts
-  // the whole thing" (csmaWait(), below) only holds if the chip is actually
-  // receiving during them — otherwise the free probe leaves it in STDBY_RC,
-  // deaf to a frame that starts a symbol later.
-  _radio->startReceive();
-  return cad == RADIOLIB_CHANNEL_FREE;
+  const int16_t armed = _radio->startChannelScan();
+  if (armed != RADIOLIB_ERR_NONE) {
+    // Nothing was armed, so nothing is going to answer. Busy, for the same
+    // reason a timeout is busy, and the chip goes back to listening. The code
+    // is the driver's own and names a specific failure, so it is carried into
+    // the log rather than discarded: this path used to return in silence.
+    g_stats.loraCadArmErrors++;
+    if (RadioWarn::due(_cadWarnAtMs, g_stats.loraCadArmErrors, millis(), kWarnIntervalMs))
+      log_w("CAD could not be armed, code %d — treating the channel as busy (%lu so far)",
+            (int)armed, (unsigned long)g_stats.loraCadArmErrors);
+    armReceive();
+    return false;
+  }
+
+  // The wait, in slices of one CSMA slot so a restart is noticed at the same
+  // granularity as everywhere else in csmaWait(). The notification ends it
+  // first in every ordinary case — a scan is a handful of symbols and a slot is
+  // twelve — so the slices cost nothing when the radio is healthy.
+  const uint32_t cadDone  = cadDoneFlag();
+  const uint32_t slice    = _airtime.slotMs();
+  const uint32_t deadline = millis() + _airtime.cadTimeoutMs();
+  bool completed = false, abandoned = false;
+  for (;;) {
+    if (_sleepRequest) { abandoned = true; break; }
+    const int32_t left = (int32_t)(deadline - millis());
+    if (left <= 0) break;
+    const uint32_t wait = ((uint32_t)left < slice) ? (uint32_t)left : slice;
+    const bool woke = waitIrq(wait);
+    // A chip with no CAD bits known to this driver cannot confirm anything, so
+    // there the notification has to stand for the verdict; all four parts this
+    // firmware detects have them, so the fallback is unreachable today.
+    //
+    // Unreachable is not the same as harmless, and the take's return is what
+    // makes the difference. Discarding it and accepting the fallback after the
+    // first slice accepted a slice that simply expired as a finished scan, and
+    // completed is what unlocks getChannelScanResult() — which on an SX127x
+    // reads "nothing detected" off a scan still running and calls the channel
+    // free. That is a transmission onto an unmeasured medium, the one outcome
+    // this whole function exists to prevent. handleRadioIrq() reads rxDone == 0
+    // as "cannot tell, do not gate"; the same reading here is "cannot tell, so
+    // only a wake is evidence", never the clock.
+    if (cadDone ? (_radio->getIrqFlags() & cadDone) != 0 : woke) { completed = true; break; }
+  }
+
+  // Read the verdict before anything clears the flags it is read from. Named
+  // clear rather than free: a local called free shadows ::free inside a
+  // translation unit that allocates.
+  const bool clear = completed && _radio->getChannelScanResult() == RADIOLIB_CHANNEL_FREE;
+  if (!completed) {
+    // Cancel a scan that may still be running. Either receive armReceive() can
+    // arm begins with a standby on every driver, so this is the same command it
+    // would issue — but cancelling is this line's job, not a side effect of the
+    // next one's.
+    _radio->standby();
+    // A restart is not a fault: the wait was cut short deliberately and nothing
+    // was measured because nothing was waited for. Only the genuine deadline
+    // counts.
+    if (!abandoned) {
+      g_stats.loraCadTimeouts++;
+      if (RadioWarn::due(_cadWarnAtMs, g_stats.loraCadTimeouts, millis(), kWarnIntervalMs))
+        log_w("CAD did not report within %u ms — treating the channel as busy (%lu so far)",
+              (unsigned)_airtime.cadTimeoutMs(), (unsigned long)g_stats.loraCadTimeouts);
+    }
+  }
+  armReceive();
+  return clear;
 }
 
 // CSMA as RNode does it: wait for the medium to be free, hold it free for a
@@ -885,6 +1571,18 @@ bool LoRaRadio::mediumFree() {
 // a packet defers to whoever is mid-exchange. The window is drawn from a band
 // selected by recent channel use, which spreads nodes out as the channel
 // fills instead of having them all pile in after the same fixed backoff.
+//
+// Every wait in here also watches for a restart — the flag between waits rather
+// than during one, so the worst case is a single wait of one slot or one retry
+// interval, tens of milliseconds. This function is bounded at CSMA_MAX_WAIT_MS
+// plus one probe, because the loop test is at the top: a probe entered at
+// 4999 ms still gets its whole deadline, so the true ceiling is
+// CSMA_MAX_WAIT_MS + Airtime::CAD_TIMEOUT_MAX_MS, about 9 s on the slowest
+// channel the settings accept. The watchdog is unaffected either way — it is
+// fed once per pass of this loop, at most 4050 ms apart, against a 30 s
+// timeout. The restart's own wait for the radio is 250 ms, so a deferral that
+// ran its full length would be many times the budget it is being held against;
+// the caller checks the same flag and drops the packet.
 void LoRaRadio::csmaWait() {
   const uint32_t slot = _airtime.slotMs();
   const uint32_t difs = _airtime.difsMs();
@@ -896,13 +1594,20 @@ void LoRaRadio::csmaWait() {
   const uint32_t started = millis();
   uint32_t waited = 0;                   // contention time accumulated so far
 
-  while (millis() - started < CSMA_MAX_WAIT_MS) {
+  while (!_sleepRequest && millis() - started < CSMA_MAX_WAIT_MS) {
     // Deferring to a busy channel is progress too, and this loop can hold the
     // task for CSMA_MAX_WAIT_MS on its own before a byte is sent.
     Watchdog::feed();
     if (!mediumFree()) {                 // someone is transmitting: start over
       waited = 0;
-      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CSMA_CAD_RETRY_MS)) > 0) handleRadioIrq();
+      // Checked before the pause, like the two waits below check before theirs.
+      // A busy channel spends nearly all of its deferral right here, and this
+      // used to be the one wait in the function that a restart could not cut
+      // short: the loop test above only comes round again after the full retry
+      // interval, and a probe on a slow channel takes longer than the interval
+      // does.
+      if (_sleepRequest) break;
+      if (waitIrq(CSMA_CAD_RETRY_MS)) handleRadioIrq();
       continue;
     }
 
@@ -910,20 +1615,23 @@ void LoRaRadio::csmaWait() {
     // counting down. A frame arriving here means it was not really idle.
     const uint32_t difsStart = millis();
     bool disturbed = false;
-    while (millis() - difsStart < difs) {
-      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(slot)) > 0) { handleRadioIrq(); disturbed = true; break; }
+    while (!_sleepRequest && millis() - difsStart < difs) {
+      if (waitIrq(slot)) { handleRadioIrq(); disturbed = true; break; }
     }
     if (disturbed) { waited = 0; continue; }
 
     // Contention window, one slot at a time so an incoming frame can pause it.
-    while (waited < target) {
-      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(slot)) > 0) { handleRadioIrq(); disturbed = true; break; }
+    while (!_sleepRequest && waited < target) {
+      if (waitIrq(slot)) { handleRadioIrq(); disturbed = true; break; }
       waited += slot;
       if (millis() - started >= CSMA_MAX_WAIT_MS) break;
     }
     if (disturbed) { waited = 0; continue; }
-    return;                              // channel held quiet: transmit
+    return;                              // channel held quiet: transmit — or a
+                                         // restart cut the wait short, and
+                                         // transmitPacket() reads the same flag
   }
+  if (_sleepRequest) return;             // no "gave up" is owed for a restart
   // Deferred for the whole window without a clear run. Transmit anyway rather
   // than dropping the packet — the queue would only grow behind it.
   log_d("CSMA gave up deferring after %u ms", (unsigned)(millis() - started));

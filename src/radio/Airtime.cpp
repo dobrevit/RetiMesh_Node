@@ -249,11 +249,78 @@ uint32_t Airtime::retryAfterS(uint32_t nowMs, uint16_t limitBp) {
   return (uint32_t)BINS * BIN_MS / 1000U;
 }
 
+// ---------------------------------------------------------------------------
+// Duty-cycled receive — see the block comment in Airtime.h. Every step below
+// reproduces RadioLib 7.7.1 rather than deriving an equivalent of it, because
+// the question being asked is not "how long could the receiver sleep" but
+// "what will that driver actually do", and the two differ: the driver truncates
+// its symbol time to whole microseconds and then refuses the mode outright
+// below a threshold. An answer computed a nicer way would be right about the
+// physics and wrong about the node.
+// ---------------------------------------------------------------------------
+/*static*/ uint16_t Airtime::rxDutyCycleMinSymbols(uint8_t sf) {
+  return sf <= 6 ? RX_DC_MIN_SYMBOLS_SF6 : RX_DC_MIN_SYMBOLS_SF7;
+}
+
+/*static*/ uint32_t Airtime::rxDutyCycleSleepUs(uint8_t sf, float bwKhz,
+                                                uint16_t preambleSyms, uint16_t minSymbols) {
+  // Same clamps configure() applies, so a caller handing over an unvalidated
+  // spreading factor gets an answer rather than a shift off the end of the word.
+  if (sf < 5)  sf = 5;
+  if (sf > 12) sf = 12;
+  if (!(bwKhz > 0.0f)) return 0;
+  if (minSymbols == 0) minSymbols = rxDutyCycleMinSymbols(sf);
+  // The receiver has to be awake for minSymbols at each end of the preamble —
+  // worst case the sender starts just before it dozes off, so it must still be
+  // listening minSymbols before the preamble ends. Only what is left in the
+  // middle may be slept through, and a preamble no longer than the two windows
+  // leaves nothing: the driver then arms a continuous receive.
+  if ((uint32_t)2 * minSymbols >= (uint32_t)preambleSyms) return 0;
+  const uint16_t sleepSymbols = (uint16_t)(preambleSyms - 2 * minSymbols);
+  // The driver's own expression, truncation included: (10000 << SF) / (10 * BW).
+  const uint32_t symbolUs = (uint32_t)((float)((uint32_t)10000 << sf) / (10.0f * bwKhz));
+  return symbolUs * (uint32_t)sleepSymbols;
+}
+
+/*static*/ bool Airtime::rxDutyCycleEngages(uint32_t sleepUs, uint32_t tcxoDelayUs) {
+  // Gate one, SX126x::startReceiveDutyCycleAuto (SX126x.cpp:528): a sleep
+  // shorter than the wake-up transition is not worth taking, and the driver
+  // arms a plain continuous receive instead. Benign — the node still hears.
+  if (sleepUs < tcxoDelayUs + RX_DC_TRANSITION_US) return false;
+
+  // Gate two, SX126x::startReceiveDutyCycle (SX126x.cpp:477-494), which the
+  // first one then calls. It deducts the transition (1000 us here, not the 1016
+  // it compared against), divides by 15.625 us, and refuses a period that is
+  // zero or wider than the 24 bits SetRxDutyCycle carries. That refusal returns
+  // before stageMode(), so nothing is armed at all and the chip stays in
+  // standby — the failure mode this gate exists to keep a caller away from.
+  // uint32_t throughout, exactly as the driver has it: the widest sleep any
+  // accepted setting can produce (SF12 at 7.8 kHz, 1000-symbol preamble) is
+  // 516.7 s, whose times-eight still fits a 32-bit word, so mirroring the
+  // driver's type costs nothing and reproducing its arithmetic is the point.
+  //
+  // The rx-period gate sitting beside it is deliberately not mirrored, because
+  // it cannot bite. The wake period is the larger of (17 * symbol + 1000) / 2
+  // and 9 * symbol, so it is bounded by the symbol time rather than by the
+  // preamble: at that same worst case it is 4.7 s — raw 302 473, fifty times
+  // under the ceiling — and never zero, being at least one symbol long.
+  const uint32_t period = sleepUs - (tcxoDelayUs + RX_DC_COMPENSATION_US);
+  const uint32_t raw = (period * 8) / 125;
+  return raw != 0 && raw <= RX_DC_PERIOD_RAW_MAX;
+}
+
 uint32_t Airtime::slotMs() const {
   float slot = (float)SLOT_SYMBOLS * symbolTimeMs();
   if (slot < (float)SLOT_MIN_MS) slot = (float)SLOT_MIN_MS;
   if (slot > (float)SLOT_MAX_MS) slot = (float)SLOT_MAX_MS;
   return (uint32_t)(slot + 0.5f);
+}
+
+uint32_t Airtime::cadTimeoutMs() const {
+  float t = (float)CAD_SYMBOLS * symbolTimeMs() + (float)CAD_OVERHEAD_MS;
+  if (t < (float)CAD_TIMEOUT_MIN_MS) t = (float)CAD_TIMEOUT_MIN_MS;
+  if (t > (float)CAD_TIMEOUT_MAX_MS) t = (float)CAD_TIMEOUT_MAX_MS;
+  return (uint32_t)(t + 0.5f);
 }
 
 uint8_t Airtime::cwBand(float shortTerm) const {

@@ -300,6 +300,25 @@ static void test_the_ap_idle_defaults_ship_off_and_at_ten_minutes() {
   TEST_ASSERT_EQUAL_UINT16(10, w.apIdleMinutes);
 }
 
+// The switch ships off, and turning it on is never a validation error — not
+// even on a chip without the mode. The transceiver is detected at runtime, so
+// refusing it would make one export unusable across a mixed fleet; the node
+// falls back to a continuous receive and reports that instead (Airtime.h).
+static void test_duty_cycled_receive_ships_off_and_is_never_a_validation_error() {
+  RadioSettings dflt;
+  TEST_ASSERT_FALSE_MESSAGE(dflt.rxDutyCycle, "duty-cycled receive must ship OFF");
+
+  char err[160] = "";
+  RadioSettings r = good();
+  r.rxDutyCycle = true;
+  TEST_ASSERT_TRUE_MESSAGE(validateRadio(r, sub(), 22, err, sizeof(err)), err);
+  // ...and on a transceiver that has no such mode, which is the case the rule
+  // deliberately does not police.
+  TEST_ASSERT_FALSE(RadioCaps::kSX1276.rxDutyCycle);
+  r.txDbm = 7;
+  TEST_ASSERT_TRUE_MESSAGE(validateRadio(r, RadioCaps::kSX1276, 17, err, sizeof(err)), err);
+}
+
 static void test_an_ssid_is_judged_before_it_is_truncated() {
   char err[160] = "";
   char long_one[64];
@@ -330,6 +349,7 @@ int main() {
   RUN_TEST(test_the_wifi_restart_split_is_pinned_per_field);
   RUN_TEST(test_the_ap_idle_window_counts_minutes_one_to_a_day);
   RUN_TEST(test_the_ap_idle_defaults_ship_off_and_at_ten_minutes);
+  RUN_TEST(test_duty_cycled_receive_ships_off_and_is_never_a_validation_error);
   RUN_TEST(test_an_ssid_is_judged_before_it_is_truncated);
   return UNITY_END();
 }

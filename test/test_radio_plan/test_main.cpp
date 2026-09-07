@@ -282,6 +282,65 @@ static void test_a_node_name_becomes_a_legal_dns_label() {
   TEST_ASSERT_EQUAL_UINT(5, strlen(small));
 }
 
+// Duty-cycled receive is a feature bit, not a tuning bound, and it is the one
+// entry in the table that is per-driver rather than per-datasheet: RadioLib
+// declares startReceiveDutyCycleAuto on SX126x, LR11x0 and LR2021 — on none of
+// the SX127x or SX128x parts this firmware drives. Getting it wrong
+// on either side is a live fault — claimed where it does not exist arms a mode
+// the driver has no method for; denied where it does costs the saving silently.
+static void test_only_the_sx1262_claims_a_duty_cycled_receive() {
+  TEST_ASSERT_TRUE_MESSAGE(RadioCaps::kSX1262.rxDutyCycle,
+                           "the SX1262 is the chip this feature exists for");
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::kSX1276.rxDutyCycle,
+                            "the SX127x driver has no duty-cycled receive at all");
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::kSX1280.rxDutyCycle,
+                            "the SX128x driver has no duty-cycled receive at all");
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::kLR1110.rxDutyCycle,
+                            "the LR1110 firmware this project pins around cannot drive DIO in sleep");
+}
+
+// ...and the same fact from the other side, because Airtime's ceiling is not
+// chip-agnostic. RX_DC_PERIOD_RAW_MAX is 24 bits of 15.625 us ticks, which is
+// SX126x::startReceiveDutyCycle and nothing else: an LR11x0 counts 30.517 us
+// periods off its RTC and reaches roughly twice as far, so the same channel
+// gets two different verdicts. Today the divergence is in the safe direction —
+// the predicate says "do not ask" where an LR11x0 would have slept, and a
+// receiver left on hears everything — but that only holds while the single
+// radio allowed to answer yes is the one the arithmetic models. Flipping the
+// LR11x0's bit without moving the ceiling with it fails here rather than on a
+// node, which is a deaf receiver.
+static void test_the_only_duty_cycling_radio_is_the_one_the_ceiling_models() {
+  const RadioCaps::Caps* every[] = { &RadioCaps::kSX1276, &RadioCaps::kSX1262,
+                                     &RadioCaps::kSX1280, &RadioCaps::kLR1110,
+                                     &RadioCaps::kUnknown };
+  int claiming = 0;
+  for (const RadioCaps::Caps* c : every) {
+    if (!c->rxDutyCycle) continue;
+    claiming++;
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(
+        "SX1262", c->name,
+        "Airtime's sleep ceiling is the SX126x's 15.625 us tick; a radio with a "
+        "different one must not be marked rxDutyCycle until the ceiling knows about it");
+  }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(1, claiming,
+                                "exactly one radio here has a duty-cycled receive");
+  // The ceiling itself, so a driver update that widened the field is a diff
+  // here too rather than a silently larger sleep than the chip will take.
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0x00FFFFFFUL, Airtime::RX_DC_PERIOD_RAW_MAX,
+                                   "SetRxDutyCycle carries three bytes");
+}
+
+// The no-radio descriptor is permissive everywhere else — it widens bounds so an
+// operator can configure their way out of a failed probe — and must not be here.
+// A permissive bound only allows; a permissive feature bit gets acted on.
+static void test_an_unidentified_radio_is_never_assumed_able_to_sleep() {
+  TEST_ASSERT_FALSE_MESSAGE(RadioCaps::kUnknown.rxDutyCycle,
+                            "an unidentified chip must not be assumed to have the mode");
+  // ...while the rest of that entry stays as permissive as it was.
+  TEST_ASSERT_TRUE(RadioCaps::bandwidthSupported(RadioCaps::kUnknown, 203.125f));
+  TEST_ASSERT_TRUE(RadioCaps::bandwidthSupported(RadioCaps::kUnknown, 7.8f));
+}
+
 static void test_bandwidth_list_renders_for_an_error_message() {
   char buf[96];
   RadioCaps::bandwidthList(RadioCaps::kSX1280, buf, sizeof(buf));
@@ -310,6 +369,9 @@ int main() {
   RUN_TEST(test_the_region_decides_the_budget_not_the_frequency);
   RUN_TEST(test_the_stored_region_wins_and_the_frequency_is_only_a_fallback);
   RUN_TEST(test_a_node_name_becomes_a_legal_dns_label);
+  RUN_TEST(test_only_the_sx1262_claims_a_duty_cycled_receive);
+  RUN_TEST(test_the_only_duty_cycling_radio_is_the_one_the_ceiling_models);
+  RUN_TEST(test_an_unidentified_radio_is_never_assumed_able_to_sleep);
   RUN_TEST(test_bandwidth_list_renders_for_an_error_message);
   return UNITY_END();
 }

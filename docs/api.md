@@ -17,6 +17,7 @@ both the region and the chip.
     "model": "SX1276", "freq_min_mhz": 137, "freq_max_mhz": 1020,
     "bandwidths_khz": [7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125, 250, 500],
     "sf_min": 7, "sf_max": 12, "tx_min_dbm": 2, "tx_max_dbm": 17,
+    "rx_duty_cycle_supported": false,
     "regime": "EU 863-870 SRD", "max_dwell_ms": 0,
     "regions": [
       { "key": "eu868", "name": "Europe 863-870 MHz", "low_mhz": 863, "high_mhz": 870,
@@ -48,6 +49,13 @@ and warns at boot when it does not fit. `bandwidths_khz` are matched to within
 0.001 kHz, the same tolerance the driver uses, so a value the API accepts is
 one the radio will take.
 
+`caps.rx_duty_cycle_supported` says whether this transceiver can sleep its
+receiver between preamble samples at all — true only on an SX1262. It is a
+capability, not a setting: the setting is `radio.rx_duty_cycle`, it is accepted
+on every board, and a chip without the mode simply stays in continuous receive.
+The pair to read alongside it is `radio.rx_duty_cycle_engages`, described under
+[Duty-cycled receive](#duty-cycled-receive) below.
+
 A rejected channel says which bound it missed and names the transceiver, e.g.
 `frequency must be 2400-2483.5 MHz in 2.4 GHz ISM on the SX1280` — the bound is
 the region's allocation intersected with what the chip can tune, which is why it
@@ -57,6 +65,69 @@ stops at the top of the ISM band rather than at the SX1280's own 2500 MHz.
 section against the same region and capability bounds as the POST above — so an
 export always restores onto the node it came from, and never carries a channel
 past the checks on the way in.
+
+### Duty-cycled receive
+
+`radio.rx_duty_cycle` (bool, **ships off**) asks the transceiver to sleep
+between preamble samples instead of listening continuously. What makes that
+safe is the 18-symbol preamble floor every RNode-lineage firmware respects: the
+sleep window is sized so the receiver is awake inside the shortest preamble a
+conforming sender will transmit. It is sized on that floor and **not** on
+`radio.preamble` — raising this node's preamble lengthens what it transmits and
+leaves the sleep exactly where it was, because what the window must fit inside
+is the shortest preamble *other* nodes send. Setting `radio.preamble` below 18
+does shorten the window, since the driver will not expect a preamble longer
+than the radio is configured for, and at 6 symbols nothing is left to sleep
+through and the mode never engages.
+
+Three separate things decide whether it does anything, and the API reports each
+of them — plus the figure the verdict was computed from, and whether the mode is
+running right now:
+
+| Field | Where | Means |
+|---|---|---|
+| `radio.rx_duty_cycle` | settings | what the operator asked for |
+| `radio.caps.rx_duty_cycle_supported` | capabilities | whether the fitted chip has the mode — SX1262 only |
+| `radio.rx_duty_cycle_would_engage` | read-back | whether this chip on this channel *could* sleep, ignoring the switch |
+| `radio.rx_duty_cycle_engages` | read-back | the same, narrowed by the switch: all three agree |
+| `radio.rx_duty_cycle_sleep_us` | read-back | how long per cycle, in microseconds; `0` = never. Sized on the 18-symbol interop floor, so it moves with SF and bandwidth and not with `radio.preamble` |
+| `radio.rx_duty_cycle_armed` | read-back | whether the receiver is running the mode *right now* — the field that says the saving is actually being made |
+
+`_engages` is the one worth acting on; `_would_engage` is what tells a UI *why*
+it is false. They differ only in the switch, so a node with the setting off and
+a channel that suits it reports `would_engage: true, engages: false` — "nobody
+asked", not "this channel cannot".
+
+The driver falls back to a continuous receive, reporting success, whenever the
+sleep the channel yields is shorter than the chip's own wake-up transition —
+about 6 ms with the TCXO ramp these boards use. The sleep is
+`(18 − 16) × symbol_time`, two symbols: **at the shipped SF8/125 kHz channel it
+is 4096 µs against a 6016 µs threshold, so it does not engage and the receiver
+stays on.** It engages from a symbol time of roughly 3 ms — SF9 and above at
+125 kHz, or a lower spreading factor at a narrower bandwidth — so `sf` and
+`bw_khz` are the only fields that move it. There is a ceiling as well as a
+floor: the sleep period reaches the chip as a 24-bit count of 15.625 µs ticks,
+about 262 s, and a period past it makes the driver arm nothing at all rather
+than fall back, so the node checks before asking. No channel can reach it with a
+two-symbol window — the slowest, SF12 at 7.8 kHz, sleeps about 1.05 s.
+
+The setting is accepted on every board, including the ones that cannot honour
+it, so a single export provisions a mixed fleet; the capability flag is what a
+UI should hide the control on.
+
+`_engages` says the conditions are met and `_armed` says the receiver is in the
+mode — and the two are answers to different questions, not a prediction and its
+echo. `_armed` is taken from what the transceiver's driver accepted when the
+receiver was last armed, so it is the field to read when what you need to know
+is whether the saving is being made. The node re-arms its receiver after every
+reception, every transmission and every carrier-sense probe, and each of those
+re-arms decides afresh; `_armed` is the outcome of the most recent one.
+
+`engages: true, armed: false` is not a normal state: it means the driver refused
+a call the channel said it should take. The node falls back to a continuous
+receive immediately — it still hears everything — and logs the driver's error
+code at `error` level with a running count. `engages: false, armed: false` is
+the ordinary reading on the shipped channel and needs no action.
 
 ## `GET /api/status` (public)
 ```json
@@ -80,6 +151,7 @@ past the checks on the way in.
              "rssi": -68, "snr": 11.5, "rx_packets": 27, "tx_packets": 9, "rx_dropped": 0,
              "rx_dropped_ring": 0, "rx_dropped_reassembly": 0, "rx_dropped_partial": 0,
              "rx_crc_errors": 4, "rx_bad_length": 0,
+             "cad_timeouts": 0, "cad_arm_errors": 0,
              "announces_tx": 3, "announces_rx": 5, "beacons_tx": 0, "beacons_rx": 2, "apply_error": 0 },
   "peers": { "rns_tcp": 1, "wifi_sta": 1, "tcp_rx_packets": 12 },
   "wifi_enabled": true,
@@ -166,6 +238,31 @@ count a different unit from the rest. To reconstruct the whole picture:
 So a node's total received traffic is `rx_packets + beacons_rx` plus whatever
 the loss counters record, and a split packet contributes two frames to the air
 but one to those totals.
+
+The transmit side has a pair of its own, and they are the only outward sign of
+a carrier-sense probe that has stopped working. Before every packet the node
+puts the radio into channel-activity detection and waits for the chip to report
+what it heard; a probe that never reports is read as a busy channel, because
+deferring on a medium nobody measured is the only safe direction. That is safe
+but it is not free, and it is invisible everywhere else: `online` stays true,
+`rx_packets` and `tx_packets` keep climbing and the airtime figures look
+normal, while every packet waits the full deferral before it goes out and none
+of them was ever measured against the air.
+
+- `cad_timeouts` — a scan was armed and the chip did not report a verdict
+  before its deadline (the deadline follows the channel; see *Duty-cycled
+  receive* above for how symbol time is derived). **Zero on a healthy node
+  whatever the traffic**, so any sustained rise is a fault rather than a busy
+  channel — a wedged part, or an interrupt line that is not the one the board
+  header names.
+- `cad_arm_errors` — the driver refused to start the scan at all. The RadioLib
+  error code is in the log line beside it (`CAD could not be armed, code …`).
+
+Both are on the console's `STATUS` line as `cad_timeouts=` and
+`cad_arm_errors=` beside `radio=online`, and a failure of either kind is
+logged as a warning — the first one immediately, then at most one a minute so
+a wedged chip cannot flood the console. See
+[troubleshooting.md](troubleshooting.md).
 
 `diag` is what a soak run reads off a node it has no console on.
 
@@ -545,7 +642,7 @@ curl -su admin:retimesh "http://10.42.0.1/api/qr?what=wifi" -o join.svg
 
 ## Settings (auth)
 - `GET /api/settings` → `{ radio, wifi, transport, links, maintenance, bootloader, admin }` (password never returned; `has_password`, `default_password` flags). `links` is `{ wifi: {hardware, supported, enabled}, usb: {…, reason}, ppp: {…, reason, baud, bauds, node_ip, host_ip} }` — `enabled` is false for a link this build cannot run, whatever is stored; on a board that runs PPP, `baud` is the serial speed while PPP is on, `bauds` the speeds this board may be set to (the registry's ladder up to the rate the board has been tried at — the only list the settings page offers), and `node_ip`/`host_ip` the addresses the node asks its peer for (what the host's pppd is told); `maintenance` is `{ bootloader_api, bootloader_from_lan, console_enabled, console_tcp, web_ui, mdns, rns_admin, rns_admins }`; `bootloader` is what the board can do, the same object as `GET /api/system/bootloader`
-- `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct,gps_enabled,gps_share_position}` → applied live; `apply_error` in status if the chip rejected it
+- `POST /api/settings/radio` `{freq_mhz,bw_khz,sf,cr,tx_dbm,sync_word,preamble,announce_interval,beacon_interval,callsign,duty_cycle_pct,rx_duty_cycle,gps_enabled,gps_share_position}` → applied live; `apply_error` in status if the chip rejected it
 - `POST /api/settings/wifi` `{ssid,security,password,channel,max_stations,hidden,tx_power,sta_ssid,sta_password,sta_listen_interval,ap_idle_off,ap_idle_minutes}` → saves; `tx_power` (2–20 dBm, one ceiling for AP and station), `sta_listen_interval` (1–16 beacon intervals, consulted under the battery profile's max modem sleep) and the AP idle auto-off pair (`ap_idle_off` boolean, `ap_idle_minutes` 1–1440 — the AP goes down after standing empty that long, and comes back on the node's button, console `SET links.wifi_ap on` or `WIFI ON` (the latter writes both Wi-Fi switches, so on a sta-off node it also restarts) or an admin message, never on a phone associating: a down AP sends no beacons) apply live, and a POST changing only those answers `"restart":false`; changing anything the access point or the join is built from restarts (`"restart":true`); when that restart was needed but could not be granted the reply is `"restart":false` with a `note` saying the change applies at the next boot; `sta_ssid` blank = station mode off
 - `POST /api/settings/transport` `{enabled,lora_mode,wifi_mode,auto_mode,announce_cap,announce_rate_target,announce_rate_grace,announce_rate_penalty,auto_enabled,auto_group_id,power_profile,sd_store}` — the power profile applies live; the other fields restart the node (modes 1 full, 2 gateway, 3 access_point, 4 roaming, 5 boundary; cap in %, rates in s) → saves, restarts
 - `GET /api/sd/log` (`?prev=1` for the rotated file) → the SD event log as text

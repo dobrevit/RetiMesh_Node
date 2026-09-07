@@ -89,6 +89,19 @@ void rx() {
   digitalWrite(modePin(), LOW);                 // LNA in the receive path
 }
 
+void off() {
+  // Nothing was ever brought up, so there is nothing to take down and the
+  // pins have not been claimed. begin() is the only thing that sets sPart.
+  if (sPart == Part::None) return;
+  // Outwards from the signal: the amplifier out of the path, then the part
+  // disabled, then its rail. Driving the rail first would leave two outputs
+  // held high into a part that no longer has a supply.
+  digitalWrite(modePin(), LOW);
+  digitalWrite(PIN_FEM_ENABLE, LOW);
+  digitalWrite(PIN_FEM_POWER, LOW);
+  log_i("front end: %s powered down", partName());
+}
+
 const char* partName() {
   switch (sPart) {
     case Part::GC1109:   return "GC1109";

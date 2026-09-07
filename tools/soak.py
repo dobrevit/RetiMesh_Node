@@ -19,6 +19,9 @@ prints a summary that answers the questions a soak is actually asked:
   are the tables growing without     paths, links, destinations, announces
     bound
   is traffic being lost, and how     the five loss counters, separately
+  can it still hear the channel      the two carrier-sense counters, which are
+                                     zero on a healthy node whatever the
+                                     traffic, so any value at all is a fault
 
 Every one of those has caught something real on this bench. Nodes are addressed
 by their mDNS names, which is what per-node naming was for.
@@ -58,9 +61,15 @@ FIELDS = [
     "dram_free", "dram_min", "dram_largest",
     # Whether the node announces at all. Without it the summary cannot tell a
     # node that is quiet because it was told to be from one that has stopped
-    # working. Last in the list on purpose: appending to a CSV written before
-    # this column existed leaves every other column where the header says.
+    # working.
     "announce_interval",
+    # Carrier sense, which is the one part of the radio that fails silently: a
+    # probe nobody answers is read as a busy channel, so a node whose CAD has
+    # stopped working keeps routing, keeps counting rx and tx, and defers the
+    # whole CSMA window before every packet it sends. Nothing else here moves.
+    # New columns go at the end, always: appending to a CSV written before they
+    # existed leaves every other column where the header says.
+    "cad_timeouts", "cad_arm_errors",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -116,6 +125,8 @@ def sample(host, timeout=8):
         transport_online=int(bool(d.get("transport", {}).get("online"))),
         announces_tx=radio.get("announces_tx", ""),
         announce_interval=radio.get("announce_interval", ""),
+        cad_timeouts=radio.get("cad_timeouts", ""),
+        cad_arm_errors=radio.get("cad_arm_errors", ""),
         tasks_missing=" ".join(missing_tasks(diag)),
         dram_free=heap.get("dram_free", ""),
         dram_min=heap.get("dram_min_free", ""),
@@ -276,6 +287,36 @@ def summarise(path):
         rx = (num(last["rx_packets"]) or 0) - (num(first["rx_packets"]) or 0)
         print(f"   rx +{rx:.0f}  losses " + (str({k: int(v) for k, v in deltas.items()})
                                              if deltas else "none"))
+
+        # Carrier sense, and not as a delta. The counters above are a matter of
+        # degree — a channel with weather on it drops frames and the question is
+        # how many more than last week — but on a healthy node these two are
+        # zero whatever the traffic, so the value itself is the finding and a
+        # run that starts at a hundred and ends at a hundred is still a broken
+        # node. Reported per sample rather than first-to-last for the same
+        # reason: a fault that stopped when the node last restarted still
+        # happened.
+        #
+        # The two say different things and send you to different places, which
+        # is why they get a sentence each: a timeout is a probe that was armed
+        # and never reported — usually the interrupt line — while an arm error
+        # is the driver refusing to start one, and RadioLib has already said why
+        # in the log. Both are read as a busy channel, so the symptom on the air
+        # is identical and the thing to check is not (docs/troubleshooting.md).
+        cad_meaning = {
+            "cad_timeouts":
+                "the carrier-sense probe is not being answered, so every packet this node "
+                "sends waits out the whole CSMA deferral — check the DIO the scan uses",
+            "cad_arm_errors":
+                "the driver would not arm carrier sense at all, which is a RadioLib refusal "
+                "rather than wiring — the log carries the code; a wedged part looks like this",
+        }
+        for key, meaning in cad_meaning.items():
+            vals = [v for v in (num(r.get(key)) for r in up) if v is not None]
+            if not vals or max(vals) == 0:
+                continue
+            print(f"   ⚠ {key}: {vals[0]:.0f} -> {vals[-1]:.0f} (peak {max(vals):.0f}) — "
+                  f"{meaning} (docs/troubleshooting.md)")
 
 
 def main():

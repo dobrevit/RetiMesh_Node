@@ -195,6 +195,13 @@ public:
       log_w("LoRa TX ring full, dropping %u bytes", (unsigned)data.size());
       return false;
     }
+    // In the ring first, then say so. The radio task spends an idle channel
+    // parked in a bounded wait and would otherwise not look at the ring until
+    // that wait ran out; this hands the packet on immediately instead. The
+    // order is the contract, not a preference: the task reads the ring after
+    // it has announced itself as parked, so a packet that is in the ring
+    // before this call is either seen there or woken for (LoRaRadio.h).
+    loraRadio.wake();
     // What the interface has sent, for /api/status and the transport page.
     // Handed to the ring rather than confirmed on the air: that is the
     // boundary this interface owns, and the radio's own counters

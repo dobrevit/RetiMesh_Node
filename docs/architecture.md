@@ -150,6 +150,7 @@ belong to no unit: one is the board's shape, the other is the boot order.
 | NVS `retimesh` | settings (radio, Wi-Fi, transport, links, maintenance, admin password) |
 | NVS `retimeshid` | identity keys (kept across factory reset) |
 | NVS `retimesh-diag` | boot counter |
+| NVS `retimesh-rf` | the radio boot self-test's verdict, keyed to the image that passed it (kept across factory reset — a settings reset must not make a solar node re-pay the transmission) |
 | LittleFS `/` | `index.html`, `settings.html`, `board.json`, `assets.json` |
 | LittleFS `/rns` **or** SD `/rns` | the Reticulum store: paths, known destinations, hash list, cache |
 | SD `/retimesh/events.log` | rolling event log, downloadable from the portal |

@@ -468,6 +468,61 @@ against the SX127x demodulation floor for the current spreading factor
 (-7.5 dB at SF7 to -20 dB at SF12), because the same SNR means something
 different at SF7 and SF12.
 
+## The radio self-test, and why it stops appearing
+
+Boards whose interrupt pin was in doubt when they were brought up transmit one
+short frame at boot and time the TxDone interrupt back — the Heltec V3, V4,
+Wireless Bridge, Wireless Paper and Wireless Stick, the two SX1280 T3-S3
+variants and the ThinkNode M9. A chip answers SPI, reports itself online and
+accepts a channel whatever pin the interrupt is on, so this is the only thing
+that separates a working board from one that will never receive a packet:
+
+```
+radio self-test: TxDone interrupt arrived in 7 ms — the IRQ line on GPIO 14 is live
+```
+
+(GPIO 14 is the SX1262 interrupt on the three Heltec S3 boards; the Wireless
+Stick and Bridge print 26, the SX1280 T3-S3 variants 9 and the ThinkNode M9 42.)
+
+**It runs once per firmware image, not once per boot.** A pass is written to
+NVS against the running binary — the SHA-256 of the ELF it was built from, out
+of the application descriptor, rather than the version string it prints — and
+later boots of that same image say so and skip the transmission:
+
+```
+radio self-test: skipped — this exact image already proved the IRQ line on GPIO 14
+```
+
+That is a power decision rather than a tidiness one. A solar node whose battery
+is flat at dawn brown-out loops, and the self-test spends a transmission on
+every cycle out of the supply that could not hold the last boot up. What the
+test proves is the board header's pin map, which belongs to the image — so
+flashing any different firmware asks the question again, which is also exactly
+when the answer can have changed. That is why the marker is keyed to the binary
+and not to `FW_VERSION`: a local build takes its version from `git describe
+--always --dirty`, and every build made while the tree stays dirty carries the
+same string. Keyed to the string, the reflash after a pin-map edit would find
+the previous image's marker and announce a line it had never driven — during
+bring-up, which is the one situation this test exists for. A **failure is never
+recorded**: a board with a wrong interrupt pin keeps saying so, every boot,
+until it is fixed.
+
+The marker lives in its own NVS namespace, so neither a settings reset nor
+clearing the diagnostics history touches it.
+
+**"Rebuild it" is not a way to force one more run.** The identity is the image,
+so re-running the build only asks the question again if the image that comes out
+is a different one, and on an unchanged tree it is not: `pio run` finds nothing
+to do, relinks nothing and leaves the previous `firmware.bin` in place, byte for
+byte. Touching a file does not change that either — PlatformIO decides what is
+stale from file contents, not timestamps. What does produce a new image is any
+edit that reaches the binary, and that includes the version stamp: a local build
+takes `FW_VERSION` from `git describe --always --dirty`, so building with an
+uncommitted change in the tree is already a different image from the same commit
+built clean. Failing all that, erase the flash (`--erase-all`, see
+[getting-started.md](getting-started.md)) — the marker goes with the rest of NVS
+and the next boot starts from nothing.
+
 ## Host connectivity and flashing
 What each board puts on its USB connector, which bootloader-entry methods it
 offers and which IP local links it could carry are in the capability matrix in

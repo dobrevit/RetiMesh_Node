@@ -18,8 +18,101 @@ per PlatformIO environment.
 | Announce interval | 600 s | 0 = off; the node's own `lxmf.delivery` and `nomadnetwork.node` announces |
 | Beacon interval | 0 (off) | RetiMesh quick-probe beacons; 10–3600 s |
 | Callsign | (SSID) | printable, ≤ 32 chars; used in announces/beacons |
+| Duty-cycled receive | off | SX1262 only, and inert at the default channel — see below |
 
 The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
+
+### Duty-cycled receive (`radio.rx_duty_cycle`)
+
+Normally the transceiver listens continuously: on an SX1262 that is a constant
+~5 mA floor, paid 24 hours a day whether or not anything is on the air. With
+this setting on, the chip sleeps between preamble samples instead. What makes
+that safe is the 18-symbol preamble floor every RNode-lineage firmware respects
+(`RF_PREAMBLE_SYMS`): the sleep window is sized so the receiver is awake inside
+the shortest preamble a conforming sender will ever transmit.
+
+**The window is sized on that floor, not on this node's `preamble` setting.**
+Raising `preamble` lengthens what this node *transmits* and does not lengthen
+its sleep by a microsecond — what the window has to fit inside is the shortest
+preamble *other* nodes send, and no local setting can raise that. (Sizing on
+the local setting is how a duty-cycled receiver goes deaf: at `preamble 64` the
+window would be 48 symbol times, a standard peer's whole 18-symbol preamble
+fits inside it, and the packet is lost with every surface still reporting the
+mode healthy.) Lowering `preamble` below 18 *does* shorten the window — the
+driver will not expect a preamble longer than the one the radio is configured
+for — and at the bottom of the range, 6 symbols, there is nothing left to sleep
+through at all, so the mode simply never engages.
+
+Three caveats, all of which the node will tell you about:
+
+- **It ships off.** A transport node's one job is to be listening, so sleeping
+  the receiver is opted into per node rather than assumed.
+- **SX1262 only.** The SX1276/78 and SX1280 drivers have no such mode, and the
+  LR1110 on the ThinkNode M9 ships firmware that cannot drive its interrupt
+  lines while asleep. The setting is still accepted on those boards — the chip
+  is detected at runtime, so refusing it would break provisioning a mixed fleet
+  from one export — and they stay in continuous receive.
+- **At the default channel it does nothing.** The receiver must be awake for 8
+  symbols at each end of the preamble, leaving `18 − 16 = 2` symbols to sleep
+  through — 18 being the floor, whatever this node's own `preamble` is set to —
+  and the driver will not sleep for less than its wake-up transition (the 5 ms
+  TCXO ramp plus ~1 ms, so 6016 µs). At **SF8/125 kHz a symbol is 2048 µs**,
+  giving a 4096 µs sleep — under the threshold, so the receiver stays on. It
+  engages from a symbol time of about 3 ms: **SF9 or higher at 125 kHz**, or a
+  lower spreading factor at a narrower bandwidth (SF7 at 31.25 kHz and SF8 at
+  62.5 kHz both qualify). So the channel is the only dial that moves this: SF
+  and bandwidth decide it, the preamble setting does not. There is a ceiling as
+  well — the sleep reaches the chip as a 24-bit count of 15.625 µs ticks, about
+  262 s — but with a two-symbol window no channel this firmware accepts comes
+  near it: the slowest, SF12 at 7.8 kHz, sleeps about 1.05 s. The node still
+  checks, because a period over the ceiling is one the driver refuses outright
+  rather than falling back to a continuous receive, and a refused arm leaves the
+  receiver in standby.
+
+### Checking whether it is actually working on your channel
+
+Two places answer it, and neither is a release note.
+
+`STATUS` on the console reports all of it on one line, computed rather than
+echoed. A node with the setting on at the shipped channel:
+
+```
+RM STATUS radio rx_duty_cycle=on supported=yes sleep_us=4096 engages=no armed=no
+```
+
+...and one on a channel that suits it, actually making the saving:
+
+```
+RM STATUS radio rx_duty_cycle=on supported=yes sleep_us=16384 engages=yes armed=yes
+```
+
+`engages` says the conditions for the saving are met. `armed` says the receiver
+is in the mode right now, and it is what the transceiver's driver accepted
+rather than what the other four predict — so it, not `engages`, is the field to
+read when what you want to know is whether the saving is being made.
+
+`engages=yes armed=no` is therefore not a normal state: it means the node asked
+for a duty-cycled receive on a channel that should have taken one and the driver
+refused. The node falls straight back to a continuous receive, so nothing is
+lost but the saving — it still hears everything — and the log says why, at
+`error` level, with a running count.
+
+The node also says which of the four situations it is in once per settings
+apply, and at boot, at `info` level:
+
+```
+duty-cycled receive: arming it — the receiver sleeps 16384 us per cycle at SF10/125.0 kHz, sized on a sender preamble of 18 symbols
+duty-cycled receive: on, but not on this channel — the 4096 us sleep at SF8/125.0 kHz is not one the driver will take, so the receiver stays on continuously
+duty-cycled receive: on, but the SX1276 has no such mode — the receiver stays on continuously
+duty-cycled receive: off — the receiver listens continuously
+```
+
+`GET /api/settings` carries the same answers as `radio.rx_duty_cycle`,
+`radio.caps.rx_duty_cycle_supported`, `radio.rx_duty_cycle_engages` and
+`radio.rx_duty_cycle_armed`, plus `radio.rx_duty_cycle_would_engage` — the
+engagement question with the switch left out, which is what lets the settings
+page say "off, but it would sleep here" instead of blaming the channel. The
+page hides the switch entirely on a board whose chip lacks the mode.
 
 ## Wi-Fi access point (most rows restart; the marked ones apply live)
 | Setting | Default | Notes |
@@ -119,6 +212,7 @@ rather than failing the whole import.
 | Flag | Default | Purpose |
 |---|---|---|
 | `RF_FREQ_MHZ`, `RF_BW_KHZ`, `RF_SF`, `RF_CR`, `RF_TX_DBM`, `RF_SYNCWORD`, `RF_PREAMBLE_SYMS` | see above | radio defaults |
+| `RF_RX_DUTY_CYCLE` | 0 (off) | default for the duty-cycled receive switch above |
 | `RF_TCXO_VOLTAGE` | 1.8 | SX1262 TCXO; 0 for crystal modules |
 | `RF_DIO2_AS_SWITCH` | true | SX1262 RF switch on DIO2 |
 | `PIN_LORA_*`, `PIN_OLED_*`, `PIN_BUTTON` | T3-S3 map | wiring |
@@ -137,7 +231,7 @@ rather than failing the whole import.
 | `PMU_VBUS_LIMIT_MA` | 500 | how much the node draws from USB |
 | `HAS_GPS`, `PIN_GPS_*`, `GPS_BAUD` | board | u-blox receiver |
 | `HAS_PA`, `HAS_RF_SWITCH`, `PIN_RF_RXEN`, `PIN_RF_TXEN` | 0 | external power amplifier and its RF switch |
-| `RADIO_SELFTEST_ON_BOOT` | 0 | transmit one frame at boot and time the interrupt — proves the DIO wiring rather than assuming it |
+| `RADIO_SELFTEST_ON_BOOT` | 0 | transmit one frame and time the interrupt — proves the DIO wiring rather than assuming it. Once per firmware image, not once per boot: the verdict is kept in NVS against the running binary, so a brown-out loop does not re-pay the airtime |
 | `DIAG_*` | see `Config.h` | boot counter namespace and diagnostics reporting |
 | `ASSET_STAMP` | build hash | set by `tools/asset_stamp.py`; compared at boot against `/assets.json` so a firmware-only update says so |
 | `DISPLAY_SLEEP_MS`, `DISPLAY_PAGE_TIMEOUT_MS` | 60000 / 30000 | |
