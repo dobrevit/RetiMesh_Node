@@ -123,6 +123,11 @@ private:
   uint32_t _pageChangedMs = 0;
   uint32_t _lastActivityMs = 0;          // last button press (boot counts)
   void setBlank(bool blank);             // DISPLAYOFF/ON on the panel
+  // What the glass should be lit at right now, in percent: the operator's
+  // setting on a mono panel, and on the shell the ladder's verdict for
+  // whichever of its three stages is showing (BacklightLadder.h). Read once
+  // per display pass by the one place that writes a brightness.
+  uint8_t backlightPct() const;
   void advancePage(bool forward);
   void longPressAction();               // both buttons' long press, stated once        // what any short press does
   // One press grammar for every input, written once (a review found it

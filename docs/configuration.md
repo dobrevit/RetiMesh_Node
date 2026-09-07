@@ -173,6 +173,18 @@ See [local-link.md](local-link.md).
 |---|---|---|
 | Brightness (`display.brightness`) | 80 | 5–100 %; anything below 5 is refused — darkness belongs to the sleep timer, not a setting. Applied live, once per change: the backlight duty on the TFT boards and the panel contrast on the OLED boards, where panel current is close to linear in it, so it is a real power knob there too. E-paper has no brightness to set. Set from the on-glass settings (touch boards) or the console (`SET display.brightness 40`) |
 
+On the colour boards this setting is the *ceiling* rather than the only level.
+Those panels rest in two stages before they go dark: the screen being used, lit
+at exactly the brightness above; then the idle clock, which is dimmed because
+nobody is reading it — to half that brightness under **performance**, a quarter
+under **balanced** and an eighth under **battery**, never below the 5 % floor
+and never above the setting itself. The stored value is untouched by any of it:
+turn the brightness up and every stage moves with it. The idle clock arrives
+after the display sleep timeout and the panel blanks entirely at four times it,
+which is where the controller is put to sleep as well as the backlight turned
+off — waking from that costs the panel about a fifth of a second before the
+first frame.
+
 ## Maintenance (saves, applies live — except the web portal and mDNS, which restart)
 | Setting | Default | Notes |
 |---|---|---|

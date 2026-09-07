@@ -64,7 +64,11 @@ public:
   // forces the lot; there is nothing to ghost, so nothing else needs it.
   void flush(bool full) override;
   // A backlight is most of what this panel costs, so blanking is real money:
-  // the glass goes dark and the LED goes off.
+  // the glass goes dark, the LED goes off, and the controller behind them is
+  // put to sleep — DISPOFF only stops the output, while the booster, the
+  // oscillator and the frame-RAM refresh carry on. Blocking: each edge pays
+  // the controller's settling time, which is why it is idempotent and why
+  // the wait sits outside the SPI transaction (see the definition).
   void blank(bool on) override;
   bool blanks() const override { return true; }
   const uint8_t* frame(size_t& len) const override {

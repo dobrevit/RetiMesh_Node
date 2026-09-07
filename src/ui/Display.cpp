@@ -22,6 +22,7 @@
 #include "Diag.h"
 #include "Display.h"
 #include "DisplayLayout.h"
+#include "BacklightLadder.h"
 #include "VersionLabel.h"
 #include "esp32-hal-periman.h"
 #include <WiFi.h>
@@ -152,11 +153,16 @@ void Display::displayTask(void* self) {
     uint32_t now = millis();
 #if HAS_LVGL_UI || DISPLAY_KIND == DISPLAY_KIND_OLED
     {
-      // The brightness setting reaches the glass here, once per change. OLED
-      // panel current is close to linear in contrast, so this is a real
-      // power knob there too, not only on the backlit TFT boards.
+      // The brightness setting reaches the glass here, once per change, and
+      // this is still the only place it does: the ladder changed what the
+      // number is, not who writes it. A second writer would race this gate —
+      // it remembers what it last sent so the panel is written once per
+      // change, and a level arriving from anywhere else would leave that
+      // memory describing a panel that has moved on. OLED panel current is
+      // close to linear in contrast, so this is a real power knob there too,
+      // not only on the backlit TFT boards.
       static uint8_t lastB = 255;
-      const uint8_t b = settings.display().brightness;
+      const uint8_t b = d->backlightPct();
       if (b != lastB) { lastB = b; d->_panelImpl.setBrightness(b); }
     }
 #endif
@@ -428,6 +434,25 @@ void Display::pollButton2() {
   }
 }
 #endif
+
+// The stage the ladder is asked about, read off the state that already
+// decides it: _blank is this class's own screen-state flag — the same one
+// Power::onScreenBlank() is told from — and the idle clock is the shell's,
+// asked rather than mirrored so there is no second belief about which of the
+// three the panel is in. A mono panel has no ladder and no idle stage: it
+// gets the operator's setting, exactly as before.
+uint8_t Display::backlightPct() const {
+#if HAS_LVGL_UI && DISPLAY_KIND == DISPLAY_KIND_TFT
+  using Stage = BacklightLadder::Stage;
+  const Stage stage = _blank                            ? Stage::Blank
+                    : sShellUp && LvglUi::idleShowing() ? Stage::Idle
+                                                        : Stage::Active;
+  return BacklightLadder::level(settings.display().brightness, stage,
+                                (uint8_t)Power::profile());
+#else
+  return settings.display().brightness;
+#endif
+}
 
 void Display::setBlank(bool blank) {
   _blank = blank;

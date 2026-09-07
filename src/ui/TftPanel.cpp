@@ -28,6 +28,7 @@
 
 // The ST7789 commands this driver speaks. Names from the datasheet.
 namespace {
+constexpr uint8_t SLPIN   = 0x10;
 constexpr uint8_t SLPOUT  = 0x11;
 constexpr uint8_t NORON   = 0x13;
 constexpr uint8_t INVOFF  = 0x20;
@@ -39,6 +40,13 @@ constexpr uint8_t RASET   = 0x2B;
 constexpr uint8_t RAMWR   = 0x2C;
 constexpr uint8_t MADCTL  = 0x36;
 constexpr uint8_t COLMOD  = 0x3A;
+// The controller's settling time either side of sleep, from the datasheet:
+// after SLPOUT it will not take another command until its booster and
+// oscillator are up, and after SLPIN it will not take a SLPOUT until they
+// have properly stopped. One number, because it is one specification — begin()
+// waits it too, and the wake path below is a copy of what begin() does rather
+// than a delay somebody guessed.
+constexpr uint32_t SLEEP_SETTLE_MS = 120;
 }
 
 void TftPanel::cmd(uint8_t c) { cmd(c, nullptr, 0); }
@@ -241,7 +249,7 @@ bool TftPanel::begin() {
   // so neither is here — the panel that inherits its configuration keeps it,
   // and what is actually wrong with the picture is being looked for elsewhere.
   cmd(SLPOUT);
-  delay(120);
+  delay(SLEEP_SETTLE_MS);
   const uint8_t fmt16 = 0x55;             // RGB565, the panel's native 16 bits
   cmd(COLMOD, &fmt16, 1);
   const uint8_t portrait = 0x00;          // row/column order as the layout assumes
@@ -348,19 +356,74 @@ void TftPanel::flush(bool full) {
   if (!_lit) { _lit = true; applyBacklight(); }
 }
 
+// DISPOFF alone was never sleep. It stops the output while the booster, the
+// oscillator and the frame-RAM refresh go on running — milliamps, on the one
+// part that costs more than the radio while somebody is holding the board. So
+// the controller is put to sleep behind it (SLPIN) and woken in front of it
+// (SLPOUT), which is the pair the datasheet defines and the pair begin()
+// already uses on the way up.
+//
+// Both settling waits are spent outside the SPI transaction. On the T-Deck the
+// radio, the card and this panel are the same three wires (SpiBus.h); holding
+// the bus for a tenth of a second would stall the radio task behind a screen
+// going dark, which is a good deal worse than the current it saves.
 void TftPanel::blank(bool on) {
   if (!_ok) return;
+  // Idempotent, and now worth saying so: setBlank(true) is reached from the
+  // idle timer, the power menu, a long press and the deep-sleep path, several
+  // of which arrive with the panel already dark. Re-sending the pair would
+  // pay a settling wait for a state the panel is already in. Both flags are
+  // tested rather than one, so the boot state — unlit and unblanked, waiting
+  // for the first frame — is not mistaken for a lit panel.
+  if (_blanked == on && _lit != on) return;
+
   _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
-  cmd(on ? DISPOFF : DISPON);
+  if (on) {
+    cmd(DISPOFF);                         // output off...
+    cmd(SLPIN);                           // ...and the parts behind it stopped
+  } else {
+    cmd(SLPOUT);                          // the wake's one command that waits
+  }
   digitalWrite(PIN_TFT_CS, HIGH);
   _spi->endTransaction();
+
   _blanked = on;
   // _lit before the relight, not after: applyBacklight() refuses to light a
   // panel that says it is unlit, and the old order left the PWM at zero on
   // every wake from a full blank — a black glass only a reboot recovered.
   _lit = !on;
-  if (on) backlightSet(0); else applyBacklight();
+  // The LED goes with the command that blanked the glass, not after the wait
+  // below: a tenth of a second of backlight over a panel that has already
+  // stopped driving it is a dim grey rectangle, and it is the current this
+  // whole function exists to stop.
+  if (on) backlightSet(0);
+
+  // One wait per edge, never one per command. Waking, it is the settle SLPOUT
+  // owes before the controller will take the DISPON below. Blanking, it is the
+  // same specification read the other way: the controller refuses a SLPOUT
+  // that arrives too soon after a SLPIN, and a tap landing inside that window
+  // — the button path wakes immediately, without the dark panel's 250 ms poll
+  // gate — would otherwise be answered by a panel that stayed asleep and dark.
+  // Spending it here rather than saving it for the wake is deliberate: nothing
+  // is waiting on a screen that has just gone off, something is always waiting
+  // on one coming back, and the wake is the half with a time budget on it.
+  delay(SLEEP_SETTLE_MS);
+  if (on) return;
+
+  _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_TFT_CS, LOW);
+  cmd(DISPON);
+  digitalWrite(PIN_TFT_CS, HIGH);
+  _spi->endTransaction();
+  // And only now the backlight, over a frame the controller is driving again.
+  // Nothing is done to the shadow, which is deliberate rather than forgotten:
+  // the controller keeps its frame memory through sleep — only the booster,
+  // the oscillator and the panel scan stop — so what flush() believes is on
+  // the glass is still true and the band-diff stays worth having across a
+  // blank. The shell does not use that buffer at all; it repaints from LVGL,
+  // which invalidates the screen on this same edge.
+  applyBacklight();
 }
 
 #endif // HAS_DISPLAY && TFT
