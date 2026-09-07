@@ -70,6 +70,14 @@ FIELDS = [
     # New columns go at the end, always: appending to a CSV written before they
     # existed leaves every other column where the header says.
     "cad_timeouts", "cad_arm_errors",
+    # What has already failed to allocate, and what the node contained when it
+    # did. The firmware has recorded these since 2026-09-01 precisely so a soak
+    # could say *why* a board restarts rather than only that it did — and this
+    # script fetched them in /api/status and threw them away for a week, across
+    # three runs and six days of Wireless Bridge panics that went undiagnosed.
+    # An allocation failure climbing before a panic is the difference between
+    # "it crashed" and "it ran out of byte-addressable DRAM at 06:41".
+    "alloc_failures", "faults_contained", "fault_last_ms_ago",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -95,6 +103,7 @@ def sample(host, timeout=8):
     boot = diag.get("boot", {})
     heap = diag.get("heap", {})
     tables = diag.get("tables", {})
+    faults = diag.get("faults", {})
 
     row.update(
         uptime_s=d.get("uptime_s", ""),
@@ -131,6 +140,12 @@ def sample(host, timeout=8):
         dram_free=heap.get("dram_free", ""),
         dram_min=heap.get("dram_min_free", ""),
         dram_largest=heap.get("dram_largest_block", ""),
+        alloc_failures=faults.get("alloc_failures", ""),
+        faults_contained=faults.get("contained", ""),
+        # Absent, not zero, when nothing has failed yet: the firmware omits the
+        # key until there is a fault to date, and "no failure so far" must not
+        # read as "the last one was 0 ms ago".
+        fault_last_ms_ago=faults.get("last_ms_ago", ""),
     )
     return row
 
@@ -208,6 +223,21 @@ def summarise(path):
         else:
             print(f"   no restarts (boot #{boots[0] if boots else '?'}), "
                   f"uptime {last['uptime_s']}s")
+
+        # What failed to allocate while it was up. This sits with the restarts
+        # rather than with the heap figures because it is the bridge between
+        # them: free heap says how close a node is to the edge, and this says
+        # how many times it has already gone over. A count that climbs across a
+        # boot is the same pressure surviving the reboot.
+        allocs = [n for n in (num(r.get("alloc_failures")) for r in up) if n is not None]
+        caught = [n for n in (num(r.get("faults_contained")) for r in up) if n is not None]
+        if allocs and max(allocs) > 0:
+            print(f"   ⚠ ALLOCATION FAILURES: {int(min(allocs))} -> {int(max(allocs))} during the run"
+                  + (f", {int(max(caught))} contained" if caught else ""))
+        elif allocs:
+            print("   no allocation failures")
+        # else: a CSV written before these columns existed says nothing, and
+        # silence is the honest report — not "none".
 
         # Liveness first, and loudly. Everything below this says whether a node
         # is heading for trouble; this says whether it is doing its job at all,
