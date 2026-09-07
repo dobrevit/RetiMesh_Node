@@ -179,7 +179,16 @@ static void onTerminate() {
 }
 
 void begin() {
-  // Before anything else here allocates.
+  // The record first — before the handlers, not just before beginRun().
+  // onAllocationFailed() mirrors into sRtc, so from the moment it is installed
+  // any failed allocation overwrites the dead run's counts. Nothing between
+  // here and there allocates today, which is exactly why this would survive
+  // review as a comment and fail the day someone adds a line that does. Taking
+  // the copy and claiming the record before the handlers exist closes the
+  // window rather than documenting it.
+  const Previous prev = readPrevious(sRtc);
+  beginRun(sRtc);
+
   std::set_new_handler(onAllocationFailed);
   std::set_terminate(onTerminate);
   const esp_reset_reason_t r = esp_reset_reason();
@@ -195,10 +204,6 @@ void begin() {
                  r == ESP_RST_SW      || r == ESP_RST_DEEPSLEEP ||
                  r == ESP_RST_USB     || r == ESP_RST_JTAG);
 
-  // Read before claiming: beginRun() below is what makes these unreadable, and
-  // doing it the other way round loses the evidence silently. The ordering is
-  // pinned by a host test (test_begin_run_makes_the_previous_run_unreadable).
-  const Previous prev = readPrevious(sRtc);
   if (prev.known) {
     sBoot.prevUptimeKnown   = true;
     sBoot.prevUptimeS       = prev.uptimeS;
@@ -211,7 +216,6 @@ void begin() {
       sBoot.lastRestart.known       = t.known;
     }
   }
-  beginRun(sRtc);
 
   // One small NVS write per boot. This is the counter that tells a node which
   // has been up all week apart from one that has quietly been restarting.
