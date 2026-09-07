@@ -129,6 +129,100 @@ void bearingTick(lv_timer_t*) {
   }
   lv_obj_add_flag(sNeedle, LV_OBJ_FLAG_HIDDEN);
 }
+
+// --- the plot ---------------------------------------------------------------
+//
+// The rings, the compass letters and the dot in the middle are the screen and
+// never move; what moves is where the peers sit relative to us, which is our
+// own fix and theirs. So the peers get a transparent layer of their own over
+// the field and that layer is the only thing a refresh rebuilds.
+lv_obj_t* sPlotOwner = nullptr;
+lv_obj_t* sPlotLayer = nullptr;
+lv_obj_t* sPlotCap   = nullptr;
+uint32_t  sPlotStamp = 0;
+bool      sPlotDrawn = false;
+
+// One peer's place on the glass, worked out before any widget is touched: the
+// geometry is cheap and the widgets are not, so the rebuild below only happens
+// when this has actually moved. Static rather than on the stack for the reason
+// the path array is — this runs on the display task, whose deepest moment is
+// widget-building, and LVGL gives it no second caller to race with.
+struct Placed { int x, y; char who[12]; };
+Placed sPlaced[8];
+
+void plotRefresh(lv_timer_t*) {
+  if (!sPlotLayer || !lv_obj_is_valid(sPlotLayer)) return;
+  // A screen laid out around where the node is needs our end of the baseline,
+  // so the receiver keeps looking under it — renewed on every tick rather than
+  // claimed once at open, because a claim expires (GnssDutyPolicy) and this
+  // screen is one somebody leaves up while walking. Through the shell's rule,
+  // which refuses it while the idle clock is over the page.
+  Ui::navPainted();
+
+  // Off the display task's stack on purpose: this screen's deepest moment is
+  // widget-building, and the sibling file keeps its path array static for the
+  // same reason.
+  static RnsTransport::PathInfo sPaths[24];
+  size_t count = 0;
+  const Gps::Fix own = Gps::fix();
+  if (own.valid) {
+    // Peers with announced positions, north-up from our fix: ring one is a
+    // kilometre, the rim two, and beyond clamps just inside the rim — not on
+    // the compass letters.
+    const size_t n = RnsTransport::paths(sPaths, 24);
+    for (size_t i = 0; i < n && count < 8; i++) {
+      PeerPositions::Position pp;
+      if (!PeerPositions::getByHex(sPaths[i].hash, pp)) continue;
+      double km, deg;
+      GeoMath::distanceAndBearing(own.latitude, own.longitude,
+                                  pp.latitude, pp.longitude, km, deg);
+      double r = km * 50.0;
+      if (r > 96.0) r = 96.0;            // inside the 100 px rim
+      northUpXY(deg, r, sPlaced[count].x, sPlaced[count].y);
+      char who[34];
+      Ui::peerLabelHex(sPaths[i].hash, who, sizeof(who));
+      snprintf(sPlaced[count].who, sizeof(sPlaced[count].who), "%.10s", who);
+      count++;
+    }
+  }
+
+  // An unchanged picture costs nothing, the sky view's rule (UiGps.cpp):
+  // sixteen widgets torn down and rebuilt every couple of seconds for
+  // identical readings is churn on the task the glass is painted from. The
+  // caption's inputs are in the stamp too, since it is redrawn with them.
+  const size_t held = PeerPositions::count();
+  uint32_t stamp = (uint32_t)count * 131u + (uint32_t)held * 7u + (own.valid ? 1u : 0u);
+  for (size_t i = 0; i < count; i++) {
+    stamp = stamp * 31u + (uint32_t)(sPlaced[i].x + 1024) * 2048u
+                        + (uint32_t)(sPlaced[i].y + 1024);
+    for (const char* c = sPlaced[i].who; *c; c++) stamp = stamp * 31u + (uint8_t)*c;
+  }
+  if (sPlotDrawn && stamp == sPlotStamp) return;
+  sPlotStamp = stamp;
+  sPlotDrawn = true;
+
+  lv_obj_clean(sPlotLayer);
+  for (size_t i = 0; i < count; i++) {
+    lv_obj_t* dot = ring(sPlotLayer, 8, UiTheme::kAccent);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(UiTheme::kAccent), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_align(dot, LV_ALIGN_CENTER, sPlaced[i].x, sPlaced[i].y);
+    lv_obj_t* tag = lv_label_create(sPlotLayer);
+    lv_label_set_text(tag, sPlaced[i].who);
+    lv_obj_set_style_text_color(tag, lv_color_hex(UiTheme::kInkDim), 0);
+    lv_obj_align(tag, LV_ALIGN_CENTER, sPlaced[i].x, sPlaced[i].y + 12);
+  }
+  if (count)
+    lv_label_set_text_fmt(sPlotCap, "NORTH UP · %u peer%s placed", (unsigned)count,
+                          count == 1 ? "" : "s");
+  else if (held)
+    // The store knows the truth the old caption guessed at: positions are
+    // on the air; the missing half is our own fix.
+    lv_label_set_text_fmt(sPlotCap, "NORTH UP · own fix needed — %u position%s held",
+                          (unsigned)held, held == 1 ? "" : "s");
+  else
+    lv_label_set_text(sPlotCap, "NORTH UP · no peer positions on the air yet");
+}
 #endif
 } // namespace
 
@@ -206,59 +300,46 @@ void openPlot() {
   lv_obj_t* cap = lv_label_create(body);
   lv_obj_set_style_text_color(cap, lv_color_hex(UiTheme::kInkLabel), 0);
 #if HAS_GPS
-  // Peers with announced positions, north-up from our fix: ring one is a
-  // kilometre, the rim two, and beyond clamps just inside the rim — not on
-  // the compass letters. Off the display task's stack on purpose: this
-  // screen's deepest moment is widget-building, and the sibling file keeps
-  // its path array static for the same reason.
-  static RnsTransport::PathInfo sPaths[24];
-  size_t placed = 0;
-  // Drawn once at open rather than on a timer, so the claim is made once too —
-  // enough to bring a resting receiver back for whoever just asked to see the
-  // mesh laid out around them. Same claim as the timers', so there is one rule
-  // and not a second one that happens to agree.
-  Ui::navPainted();
-  const Gps::Fix own = Gps::fix();
-  if (own.valid) {
-    const size_t n = RnsTransport::paths(sPaths, 24);
-    for (size_t i = 0; i < n && placed < 8; i++) {
-      PeerPositions::Position pp;
-      if (!PeerPositions::getByHex(sPaths[i].hash, pp)) continue;
-      double km, deg;
-      GeoMath::distanceAndBearing(own.latitude, own.longitude,
-                                  pp.latitude, pp.longitude, km, deg);
-      double r = km * 50.0;
-      if (r > 96.0) r = 96.0;            // inside the 100 px rim
-      int x, y;
-      northUpXY(deg, r, x, y);
-      lv_obj_t* dot = ring(field, 8, UiTheme::kAccent);
-      lv_obj_set_style_bg_color(dot, lv_color_hex(UiTheme::kAccent), 0);
-      lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-      lv_obj_align(dot, LV_ALIGN_CENTER, x, y);
-      char who[34];
-      Ui::peerLabelHex(sPaths[i].hash, who, sizeof(who));
-      lv_obj_t* tag = lv_label_create(field);
-      lv_label_set_text_fmt(tag, "%.10s", who);
-      lv_obj_set_style_text_color(tag, lv_color_hex(UiTheme::kInkDim), 0);
-      lv_obj_align(tag, LV_ALIGN_CENTER, x, y + 12);
-      placed++;
+  // The peers get a layer of their own over the rings, because they are the
+  // only part of this picture that moves and a refresh must not take the rings
+  // with it. Transparent and unscrollable: it is a coordinate frame, not a
+  // widget.
+  sPlotLayer = lv_obj_create(field);
+  lv_obj_remove_style_all(sPlotLayer);
+  lv_obj_set_size(sPlotLayer, lv_pct(100), lv_pct(100));
+  lv_obj_remove_flag(sPlotLayer, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_align(sPlotLayer, LV_ALIGN_CENTER, 0, 0);
+  sPlotCap = cap;
+  sPlotDrawn = false;                    // this screen has drawn nothing yet
+
+  // On a timer, not once at open. The claim navPainted() makes is served by
+  // the GNSS task on its own pass, so the fix read a line later is still the
+  // one the resting receiver last stood behind — and with nothing to redraw
+  // the screen, the offsets plotted from it stayed that stale for as long as
+  // the page was up. A claim that expires (GnssDutyPolicy) wants renewing
+  // anyway. Two seconds, the sky view's beat rather than the dial's second:
+  // this one rebuilds widgets, and the stamp in plotRefresh() means an
+  // unchanged picture rebuilds nothing at all.
+  lv_obj_t* scr = Ui::screenOf(body);
+  sPlotOwner = scr;
+  lv_timer_t* t = lv_timer_create(plotRefresh, 2000, nullptr);
+  lv_obj_add_event_cb(scr, [](lv_event_t* e) {
+    lv_timer_delete((lv_timer_t*)lv_event_get_user_data(e));
+    // Only the owner tears the statics down, the dial's rule above: a stale
+    // deferred delete from back()'s slide must not blind a freshly opened one.
+    if ((lv_obj_t*)lv_event_get_target(e) == sPlotOwner) {
+      sPlotOwner = nullptr;
+      sPlotLayer = nullptr;
+      sPlotCap = nullptr;
+      sPlotDrawn = false;
     }
-  }
-  if (placed)
-    lv_label_set_text_fmt(cap, "NORTH UP · %u peer%s placed", (unsigned)placed,
-                          placed == 1 ? "" : "s");
-  else if (PeerPositions::count())
-    // The store knows the truth the old caption guessed at: positions are
-    // on the air; the missing half is our own fix.
-    lv_label_set_text_fmt(cap, "NORTH UP · own fix needed — %u position%s held",
-                          (unsigned)PeerPositions::count(),
-                          PeerPositions::count() == 1 ? "" : "s");
-  else
-    lv_label_set_text(cap, "NORTH UP · no peer positions on the air yet");
+  }, LV_EVENT_DELETE, t);
+  plotRefresh(nullptr);
+  push(scr);
 #else
   lv_label_set_text(cap, "This build has no position receiver.");
-#endif
   push(Ui::screenOf(body));
+#endif
 }
 
 void showFirmware(const char* stage, uint32_t written, uint32_t total) {

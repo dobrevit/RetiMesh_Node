@@ -25,6 +25,7 @@
 #include "I2cReg.h"
 #include "Imu.h"
 #include "SampleGate.h"
+#include <atomic>
 
 namespace {
 
@@ -61,11 +62,20 @@ bool sUp = false;
 
 // What the part is doing, and what it has been asked to do. The want is raised
 // from whichever task noticed the screen move; the running flag is only ever
-// written on the task that owns this part's bus access, at the top of poll().
-// One byte each, aligned, so the cross-task read of the want needs nothing
-// beyond volatile: it is a single flag with one writer and no companion state.
-volatile bool sWantRunning = true;
-bool          sRunning     = false;
+// written on the task that owns this part's bus access, at the top of poll(),
+// and read back from the display task through running().
+//
+// Both cross tasks, so both are atomics and neither is a volatile bool. That
+// distinction is not pedantry: volatile tells the compiler not to cache or
+// fold the access and says nothing at all about it being indivisible or about
+// what the other task may observe — it is a language feature for hardware
+// registers, not a synchronisation primitive, and a plain bool shared between
+// tasks is a data race whether or not it is spelled volatile. Relaxed, because
+// each of these is a single flag with no companion state to be ordered against:
+// the whole message is the value. Same shape and the same reasoning as
+// Power's sScreenDark and Gps's sNavViewMs.
+std::atomic<bool> sWantRunning{true};
+std::atomic<bool> sRunning{false};
 
 // The extremes each axis has reached, which is how the hard-iron offset is
 // found: the readings from a board turned about lie on a sphere, and the centre
@@ -189,7 +199,7 @@ void begin() {
   delay(10);
 
   sUp = true;
-  sRunning = true;                       // configured into measure mode, above
+  sRunning.store(true, std::memory_order_relaxed);   // configured into measure mode, above
   loadOffsets();
   log_i("compass: QMC6309 at 0x%02x, continuous; heading needs the board turned "
         "around once before the hard-iron offsets mean anything", (uint8_t)COMPASS_ADDR);
@@ -309,8 +319,8 @@ static void noteModeFailure(void) {
 // The wanted mode, written here and nowhere else — on the task that owns this
 // part, which is what keeps the screen's verdict off a bus it does not own.
 static void applyMode() {
-  const bool want = sWantRunning;
-  if (want == sRunning) return;
+  const bool want = sWantRunning.load(std::memory_order_relaxed);
+  if (want == sRunning.load(std::memory_order_relaxed)) return;
   if (!sModeRetry.due(millis())) return;
   if (want) {
     // Both control registers, in begin()'s order, and both of them are needed:
@@ -338,19 +348,19 @@ static void applyMode() {
     // chance is the node being switched off, and that comes through flush().
   }
   sModeFails = 0;
-  sRunning = want;
+  sRunning.store(want, std::memory_order_relaxed);
 }
 
-void setRunning(bool run) { sWantRunning = run; }
+void setRunning(bool run) { sWantRunning.store(run, std::memory_order_relaxed); }
 
 void flush() { saveOffsets(true); }
 
-bool running() { return sRunning; }
+bool running() { return sRunning.load(std::memory_order_relaxed); }
 
 void poll() {
   if (!sUp) return;
   applyMode();                           // the screen's verdict, on this task
-  if (!sRunning) return;                 // suspended: nothing to sample
+  if (!sRunning.load(std::memory_order_relaxed)) return;   // suspended: nothing to sample
   const uint32_t now = millis();
   if (sLastMs && now - sLastMs < kPollMs) return;
   sample();
@@ -358,7 +368,7 @@ void poll() {
 }
 
 Reading read() {
-  if (!sUp || !sRunning) return Reading{};
+  if (!sUp || !sRunning.load(std::memory_order_relaxed)) return Reading{};
   // Fresh enough is the poller's last sample; otherwise take one now, so a
   // caller is never handed a heading from a minute ago because the loop was
   // busy.

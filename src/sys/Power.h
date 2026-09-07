@@ -91,11 +91,14 @@ void applyWifiSleep();
 void applyWifiTxPower();
 Profile profile();
 
-// The persisted role, read straight from the settings rather than cached:
-// nothing has to be applied when it changes — the rules that consult it ask
-// on their own schedule — so there is no state here to go stale. A stored
-// value this build does not recognise is handed on as it stands; every reader
-// is required to treat an unknown role as Unset, and roleName() says so.
+// The persisted role. Nothing has to be applied when it changes — the rules
+// that consult it ask on their own schedule — so this stays a read rather than
+// becoming a broadcast like the profile. It is read from Settings::nodeRole(),
+// the atomic the settings keep in step with the transport struct, because the
+// GNSS reader asks it ten times a second on its own task while a commit from
+// the web, console or LXMF task replaces that struct wholesale. A stored value
+// this build does not recognise is handed on as it stands; every reader is
+// required to treat an unknown role as Unset, and roleName() says so.
 Role role();
 const char* roleName(Role r);
 bool roleFromName(const char* name, Role& out);

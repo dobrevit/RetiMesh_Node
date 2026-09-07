@@ -209,7 +209,14 @@ bool roleFromName(const char* n, Role& out) {
   return false;
 }
 
-Role role() { return (Role)settings.transport().nodeRole; }
+// Through the settings' own atomic mirror rather than the struct: this is
+// asked from the GNSS reader task ten times a second, while a settings commit
+// on the web, console or LXMF task assigns the whole transport struct at once
+// (Settings::adoptTransport). Reading a byte out from under that assignment is
+// a data race, and it is the byte that decides whether the receiver may stop
+// looking. The mirror costs nothing to read and is seeded at load, so a node
+// that has never committed anything answers with what NVS held.
+Role role() { return (Role)settings.nodeRole(); }
 
 void applyWifiSleep() {
   // Battery goes all the way to max modem sleep: the station dozes
@@ -291,15 +298,34 @@ namespace {
 // this milestone exists for. Same shape as recordHistory() below, and for the
 // same reason.
 //
-// The setRunning() calls stay outside it: each only stores a flag, and nothing
-// that is not this state belongs inside a section that stops the scheduler on
-// this core. Every one of them is guarded by the part's own board switch, so
-// the ten boards carrying neither compile this down to the policy's own
-// arithmetic and the section around it — 160 bytes of flash and no RAM,
-// measured on heltec-v3, which carries neither part. On the board that carries
-// both, the main loop applies the accelerometer's first — the order that
-// matters, since the magnetometer reads it for gravity and must neither ask an
-// accelerometer that has just gone away nor be woken before one.
+// And the verdicts are delivered inside it, not after it. An earlier version
+// handed them out once the section had been released, on the reasoning that a
+// flag store has nothing to do with the state the section protects. That is
+// true of the store and false of its *order*: two tasks really do reach this —
+// the display task on a screen edge, and apply()'s callers on the web, console
+// or LXMF task — so one could compute Suspend, be preempted before delivering
+// it, and let the other compute Run, deliver it and leave. The later verdict
+// lands first, the older one overwrites it, and the policy's latch now reads
+// "running" over two suspended drivers: every screen edge after that answers
+// Unchanged and the parts never come back until something else moves them.
+// Deciding and telling under one lock is what makes the last decision also the
+// last thing said.
+//
+// Safe to hold for, because that is all these calls are: each is one relaxed
+// store into the driver's own flag (Compass.cpp, Imu.cpp) — no bus, no lock,
+// no allocation, a handful of instructions inside a section that already runs
+// the policy's arithmetic. The alternative, stamping each verdict with a
+// generation and having both drivers refuse an older one, buys the same
+// ordering for two more words of state in three files and a rule that has to
+// be got right twice.
+//
+// Every call is guarded by the part's own board switch, so the ten boards
+// carrying neither compile this down to the policy's own arithmetic and the
+// section around it — 160 bytes of flash and no RAM, measured on heltec-v3,
+// which carries neither part. On the board that carries both, the main loop
+// applies the accelerometer's first — the order that matters, since the
+// magnetometer reads it for gravity and must neither ask an accelerometer that
+// has just gone away nor be woken before one.
 portMUX_TYPE sPeripheralMux = portMUX_INITIALIZER_UNLOCKED;
 
 void tellPeripherals(const bool* dark, const Power::Profile* prof) {
@@ -308,7 +334,6 @@ void tellPeripherals(const bool* dark, const Power::Profile* prof) {
   if (prof) sProfile    = *prof;
   const PeripheralPolicy::Change c [[maybe_unused]] =
       sPeripherals.update(sScreenDark.load(std::memory_order_relaxed), (uint8_t)sProfile);
-  taskEXIT_CRITICAL(&sPeripheralMux);
 #if HAS_COMPASS
   if (c.compass != PeripheralPolicy::Verdict::Unchanged)
     Compass::setRunning(c.compass == PeripheralPolicy::Verdict::Run);
@@ -317,6 +342,7 @@ void tellPeripherals(const bool* dark, const Power::Profile* prof) {
   if (c.imu != PeripheralPolicy::Verdict::Unchanged)
     Imu::setRunning(c.imu == PeripheralPolicy::Verdict::Run);
 #endif
+  taskEXIT_CRITICAL(&sPeripheralMux);
 }
 } // namespace
 

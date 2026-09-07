@@ -25,6 +25,7 @@
 #include "I2cReg.h"
 #include "Lock.h"
 #include "SampleGate.h"
+#include <atomic>
 
 namespace {
 
@@ -49,9 +50,20 @@ uint8_t sAddr = 0;                       // 0 = nothing answered
 // the same bus also carries the charger, which Power::battery() reads from the
 // loop, from the async web task and from the Reticulum task, and ordering this
 // part's reads against those is a bus-wide question no one driver can answer.
+//
+// What the lock does not cover is the pair of flags below, and it never did:
+// running() answers the display task without it, and poll()'s first line reads
+// both to find out whether there is anything to do at all. So they are atomics
+// rather than a volatile bool and a plain one — volatile orders nothing and
+// promises nothing about what another task observes; it is for hardware
+// registers, not for sharing state between tasks. Relaxed, because each is a
+// single flag whose whole message is its value, with no companion state to be
+// ordered against: the register write that the running flag reports on is
+// ordered by the lock, as it was before. Same shape as Power's sScreenDark and
+// Gps's sNavViewMs.
 SemaphoreHandle_t sLock = nullptr;
-volatile bool     sWantRunning = true;   // raised from any task
-bool              sRunning     = false;  // written under the lock
+std::atomic<bool> sWantRunning{true};    // raised from any task
+std::atomic<bool> sRunning{false};       // moved only once the write landed
 
 inline TwoWire& bus() { return I2cReg::busFor(PIN_I2C_SDA, PIN_I2C_SCL, I2C_HZ); }
 
@@ -105,7 +117,7 @@ bool rawAxes(int16_t& x, int16_t& y, int16_t& z) {
   // conversion it made, which is the same trap begin() guards against: the
   // reading would look like a board that has not moved since the screen went
   // dark. Nothing is the honest answer, and both callers already have one.
-  if (!sRunning) return false;
+  if (!sRunning.load(std::memory_order_relaxed)) return false;
   uint8_t raw[6];
   if (!readRegs(kAccelX, raw, sizeof(raw))) return false;
 #if IMU_KIND == IMU_KIND_QMI8658
@@ -172,7 +184,7 @@ void begin() {
     sAddr = 0;
     return;
   }
-  sRunning = true;
+  sRunning.store(true, std::memory_order_relaxed);
   log_i("imu: QMI8658 at 0x%02x, accelerometer running at +/-2 g", sAddr);
 #else
   for (uint8_t addr : { (uint8_t)0x26, (uint8_t)0x27 }) {
@@ -198,16 +210,16 @@ void begin() {
     sAddr = 0;
     return;
   }
-  sRunning = true;
+  sRunning.store(true, std::memory_order_relaxed);
   log_i("imu: DA217 at 0x%02x, accelerometer running", sAddr);
 #endif
 }
 
 bool present() { return sAddr != 0; }
 
-bool running() { return sRunning; }
+bool running() { return sRunning.load(std::memory_order_relaxed); }
 
-void setRunning(bool run) { sWantRunning = run; }
+void setRunning(bool run) { sWantRunning.store(run, std::memory_order_relaxed); }
 
 // A failed mode write leaves the want standing, so poll() tries again on the
 // next pass — and the next pass is a millisecond away. Rationed on the same
@@ -222,16 +234,18 @@ static SampleGate  sModeRetry(kModeRetryMs);
 static uint8_t     sModeFails = 0;
 
 void poll() {
-  // Read without the lock on purpose: two aligned flags with one writer each
-  // and no companion state, so the worst a torn view can do is defer the
+  // Read without the lock on purpose: two atomic flags with one writer each
+  // and no companion state, so the worst a stale view can do is defer the
   // change to the next pass a millisecond later. Taking a mutex a thousand
   // times a second to discover there is nothing to do is the cost this guard
   // exists to avoid.
-  if (!sAddr || sWantRunning == sRunning) return;
+  if (!sAddr || sWantRunning.load(std::memory_order_relaxed) ==
+                sRunning.load(std::memory_order_relaxed)) return;
   if (!sModeRetry.due(millis())) return;
   Sys::Lock held(sLock);
-  const bool want = sWantRunning;
-  if (want == sRunning) return;          // settled while we waited for the lock
+  const bool want = sWantRunning.load(std::memory_order_relaxed);
+  // Settled while we waited for the lock.
+  if (want == sRunning.load(std::memory_order_relaxed)) return;
 #if IMU_KIND == IMU_KIND_QMI8658
   const bool wrote = writeReg(kCtrl7, want ? kCtrl7On : kCtrl7Off);
 #else
@@ -250,7 +264,7 @@ void poll() {
   // reads as a board that never moves, and this driver already refuses to
   // ship that.
   sModeFails = 0;
-  sRunning = want;
+  sRunning.store(want, std::memory_order_relaxed);
 }
 
 bool accel(float g[3]) {
