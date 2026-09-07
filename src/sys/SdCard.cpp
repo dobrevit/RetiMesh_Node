@@ -160,33 +160,54 @@ void SdCard::task(void* self) {
   for (;;) {
     Watchdog::feed();
     Diag::guard("the sd card task", [sd] { sd->poll(); });
+    // An operator asked for a look while the last wait was running: the wait
+    // returned early for it, and the poll above is that look. Consumed here,
+    // on the task that owns the policy, and it puts the cadence back on its
+    // base beat — the point of the poke is the looks *after* this one.
+    if (sd->_lookNow) { sd->_lookNow = false; policy.wake(); }
     // Asked after the poll, so the interval follows what the poll just found.
+    // One reading of what the poll believes, not two: mounted() and info() are
+    // a mutex take each and answer the same belief, and deriving both arguments
+    // from the same Info also means the second look cannot disagree with the
+    // first about a slot that changed in between.
+    //
     // The second question is "is anything in the slot", not "did it mount": a
-    // card that will not mount is one an operator is about to format, and
-    // backing off from it would be backing off from them.
-    sd->wait(policy.nextWaitMs(sd->mounted(), sd->info().state != State::Absent));
+    // card that will not mount is one an operator may be about to format, and
+    // backing off from it immediately would be backing off from them — for the
+    // first minute and a half of it (SdPollPolicy).
+    const Info i = sd->info();
+    sd->wait(policy.nextWaitMs(isMounted(i.state), i.state != State::Absent));
   }
 }
 
-// The policy's interval reaches ten times the task watchdog's timeout, so it is
-// served in slices with a feed between them: the task keeps reporting progress
-// on the same three-second beat it always did, and a longer look-again interval
-// stays a decision about the card rather than becoming a hole in the
-// supervision.
+// The policy's interval reaches the task watchdog's whole timeout — ten times
+// the slice, which is where the factor of ten belongs — so it is served in
+// slices with a feed between them: the task keeps reporting progress on the
+// same three-second beat it always did, and a longer look-again interval stays
+// a decision about the card rather than becoming a hole in the supervision.
 //
 // A format request ends the wait early. It is set on the web task and served at
 // the top of the next checkSlot(), which used to be at most three seconds away;
 // without this, Format on a mounted card would sit there doing nothing for half
-// a minute before anything happened.
+// a minute before anything happened. A look request (lookNow()) ends it for the
+// same reason: it exists to make the next look happen now.
 void SdCard::wait(uint32_t ms) {
-  static_assert(SdPollPolicy::kBaseMs < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
-                "a poll slice has to clear the task watchdog with room to spare");
+  // What has to clear the watchdog is not the slice on its own: it is one slice
+  // plus everything the task does before its next feed, which is one poll() —
+  // a probe that waits about half a second on an empty slot, or a mount attempt
+  // on a card that is slow to wake. The budget below is that allowance, stated
+  // rather than left implied, so retuning either number has to face it. (The
+  // format is the one pass longer than any timeout, and it steps out of
+  // supervision instead; see doFormat().)
+  constexpr uint32_t kPollBudgetMs = 5000;
+  static_assert(SdPollPolicy::kSliceMs + kPollBudgetMs <= (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
+                "one slice plus one poll has to clear the task watchdog");
   for (uint32_t left = ms; left > 0; ) {
-    const uint32_t slice = left < SdPollPolicy::kBaseMs ? left : SdPollPolicy::kBaseMs;
+    const uint32_t slice = SdPollPolicy::nextSliceMs(left);
     vTaskDelay(pdMS_TO_TICKS(slice));
     left -= slice;
     Watchdog::feed();
-    if (_formatRequested) return;
+    if (_formatRequested || _lookNow) return;
   }
 }
 
@@ -288,7 +309,9 @@ void SdCard::poll() {
 }
 
 bool SdCard::checkSlot() {
-  if (_formatRequested) { doFormat(); _formatRequested = false; return true; }
+  // The request is cleared by doFormat() itself, on the way out of it by any
+  // route — see the scope guard there.
+  if (_formatRequested) { doFormat(); return true; }
 
   if (_mounted) {
     // Removal check: a raw read of sector 0 fails once the card is gone.
@@ -361,6 +384,17 @@ void SdCard::doFormat() {
   // them is a throw — SD.begin() and measure() both allocate, and the caller
   // is Diag::guard(), which catches what they throw and carries on polling.
   Watchdog::Pause supervisionOff;
+  // The request the caller is serving, cleared here rather than after the call,
+  // and by a scope guard for the same reason the pause above is one: a throw
+  // out of this function is expected, and a flag a throw jumped over latches
+  // for the life of the node. Latched, every wait() ends after its first slice
+  // — the back-off silently gone, with nothing in the log to say so — and
+  // formatRefusal() turns down every later request as one that is already
+  // running. Held until the format is done, so that refusal is true while it is.
+  struct Served {
+    volatile bool& flag;
+    ~Served() { flag = false; }
+  } formatServed{_formatRequested};
   { Sys::Lock held(_lock);
     _info.state = State::Formatting;
     strlcpy(_info.lastFormat, "in progress", sizeof(_info.lastFormat));

@@ -84,6 +84,27 @@ public:
   Info info();
   bool mounted();
 
+  // Whether a state means "there is a filesystem mounted at /sd". Stated once
+  // so that a caller holding an Info can answer it without a second mutex take
+  // for mounted(), and without writing the pair of enumerators out again in a
+  // place that would then have to be found when a state is added.
+  static constexpr bool isMounted(State s) {
+    return s == State::Mounted || s == State::Partial;
+  }
+
+  // "Somebody is at the node." Puts the poll cadence (SdPollPolicy) back on its
+  // base beat and ends the current wait, so a card pushed in after the node has
+  // been sitting with an empty slot is found at once rather than within the
+  // policy's ceiling. Raise-only, safe from any task; the card task consumes it.
+  //
+  // Only unambiguous operator actions may call this. The button qualifies — a
+  // hand on the node is the same hand that pushes a card in, and it is already
+  // the wake for the idle access point. A status read does not: monitoring
+  // tools and soak samplers poll /api/status for ever, and a poke from there
+  // would hold the node on the three-second beat and silently undo the whole
+  // back-off.
+  void lookNow() { _lookNow = true; }
+
   // Asks for a format, and answers with the reason it was refused or nullptr
   // when it was accepted. One call, because the rule turns on a card and a
   // queued move and both can change between two readings of it: this used to
@@ -135,7 +156,7 @@ private:
 
   void  poll();                          // the slot, and the marker when it moves
   // Sleeps the interval SdPollPolicy asked for, in watchdog-sized slices, and
-  // cuts it short when a format has been requested.
+  // cuts it short when a format or a look has been asked for.
   void  wait(uint32_t ms);
   bool  checkSlot();                     // true when what the slot holds changed
   bool  mount();
@@ -153,6 +174,7 @@ private:
   SemaphoreHandle_t _lock = nullptr;
   Info              _info;
   volatile bool     _formatRequested = false;
+  volatile bool     _lookNow = false;    // an operator asked for a look (lookNow())
   bool              _mounted = false;
   bool              _reserved = false;   // Reticulum store lives here
   bool              _storageLost = false;

@@ -374,6 +374,16 @@ the card's marker, `migrating` while a move is queued or running, and
 node's own answer about whether it would accept each move; a page draws its
 buttons from those rather than working the rule out again from the fields above.
 
+Both blocks report what the card task last found, not a fresh look at the slot.
+It backs off from an empty slot up to 30 s and touches a mounted card every 30 s
+(docs/hardware.md), so `sd.state`, `sd.storage_lost` and `storage.lost` can be
+up to half a minute behind a card that has just been inserted or pulled out.
+Nothing is lost to the lag — writes to a card that has gone fail on their own —
+but a caller should not read a stale `mounted` as proof the card is still there:
+`GET /api/sd/log` can answer `404 no card mounted` while the status it was drawn
+from still says `mounted`, and an upload offered on the strength of `sd.state`
+can be refused. Pressing the node's button makes it look at once.
+
 ### Firmware update
 `update` is where an over-the-air update has got to and whether one may be
 started. `stage` is `idle`, `receiving`, `staged` (the whole bundle is on the

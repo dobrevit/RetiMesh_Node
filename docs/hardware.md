@@ -411,12 +411,17 @@ The SX1262 probe waits on BUSY (GPIO 34 = DIO2 on SX127x boards) and takes
 Optional; hot-plug polled. An empty slot is looked at after 3 s, then 6, 12 and
 24, and every 30 s from three quarters of a minute on: asking an empty slot
 costs the driver about half a second each time, so a node that has been sitting
-with nothing in it stops paying for the answer. A card put in while someone is
-working on the node is found in seconds; one put into a node that has been
-empty for a while is found within 30 s. A mounted card is touched on the same
-30 s beat — that touch is the removal check — and a card that is present but
-will not mount is looked at every 3 s, so a format starts as soon as it is
-asked for. The card is mounted as one FAT volume at
+with nothing in it stops paying for the answer. Two things put it back on the
+3 s beat and nothing else does: the slot's own answer changing — a card turns
+up, or a mounted one is lost — and the node's button being pressed, which also
+makes it look straight away. So a card put into a node that has been up for a
+while is found within 30 s, or at once if you press the button after inserting
+it. A mounted card is touched on the same 30 s beat — that touch is the removal
+check, so a card that has been pulled out can be reported as still present for
+up to half a minute. A card that is present but will not mount is looked at
+every 3 s for the first minute and a half and then backs off the same way;
+asking for a format ends the wait whatever it has reached, so a format still
+starts as soon as it is asked for. The card is mounted as one FAT volume at
 `/sd`. Status values: `mounted`, `partial` (the FAT volume covers less than
 half the card — e.g. a Raspberry Pi image with a small boot partition),
 `unformatted` (no filesystem the node recognises), `formatting`, `error`,

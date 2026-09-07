@@ -331,7 +331,17 @@ void Display::pollButton() {
     // page or menu the press was really for should not change that. A raised
     // flag only — WifiManager serves it on its own task — and a no-op on a
     // node whose AP is not suppressed.
-    case PressTracker::Event::Press: _lastActivityMs = now; wifiManager.apWake(); break;
+    //
+    // The card slot is told for the same reason and by the same evidence: the
+    // hand that presses the button is the hand that pushes a card in, and the
+    // poll cadence has backed off precisely because nobody had been near the
+    // node. Also a raised flag, also served on the card's own task, also a
+    // no-op where the cadence is already at its base or the board has no slot.
+    case PressTracker::Event::Press:
+      _lastActivityMs = now;
+      wifiManager.apWake();
+      sdCard.lookNow();
+      break;
     case PressTracker::Event::Long: longPressAction(); break;
     case PressTracker::Event::Short: advancePage(true); break;
     default: break;
