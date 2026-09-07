@@ -82,10 +82,16 @@ static void test_no_stage_ever_exceeds_the_setting() {
 // ---------------------------------------------------------------------------
 // The dim step, which is what this file was added for
 
+// Swept rather than checked at the shipped default: a step that only exists
+// at 80 % is not a step, and the interesting end is the bottom, where the
+// floor climbs up towards the ceiling and the two could meet early. From
+// floor + 1 upwards there must always be somewhere left to dim to — at the
+// floor itself there is not, which is its own case below.
 static void test_the_idle_clock_is_dimmer_than_the_working_screen() {
-  for (uint8_t p : kProfiles)
-    TEST_ASSERT_LESS_THAN_UINT8(rung(kDefaultPct, Stage::Active, p),
-                                rung(kDefaultPct, Stage::Idle, p));
+  for (uint8_t pct = kFloorPct + 1; pct <= 100; pct++)
+    for (uint8_t p : kProfiles)
+      TEST_ASSERT_LESS_THAN_UINT8(rung(pct, Stage::Active, p),
+                                  rung(pct, Stage::Idle, p));
 }
 
 // The constants themselves, at the shipped default: a retune is a diff on
@@ -99,6 +105,45 @@ static void test_the_idle_rungs_are_the_numbers_they_are() {
   TEST_ASSERT_EQUAL_UINT8(1, BacklightLadder::kIdleShift[kPerformance]);
   TEST_ASSERT_EQUAL_UINT8(2, BacklightLadder::kIdleShift[kBalanced]);
   TEST_ASSERT_EQUAL_UINT8(3, BacklightLadder::kIdleShift[kBattery]);
+}
+
+// ---------------------------------------------------------------------------
+// Which rung is being asked for
+
+// stageOf() is the other half of the rule, and it is pinned exhaustively
+// because it has only eight inputs and every one of them is a screen somebody
+// ends up looking at. The precedence is what matters: blank beats everything,
+// the idle rung needs a shell that is actually running, and a board whose
+// shell failed to start has no idle stage at all — it goes straight from the
+// working screen to dark, which is exactly what its mono pages do.
+static constexpr uint8_t stage(bool blank, bool shellUp, bool idleShowing) {
+  return (uint8_t)BacklightLadder::stageOf(blank, shellUp, idleShowing);
+}
+static constexpr uint8_t kActive = (uint8_t)Stage::Active;
+static constexpr uint8_t kIdle   = (uint8_t)Stage::Idle;
+static constexpr uint8_t kBlank  = (uint8_t)Stage::Blank;
+
+static void test_the_stage_is_read_off_the_three_flags() {
+  //                                   blank  shell  idle
+  TEST_ASSERT_EQUAL_UINT8(kActive, stage(false, false, false));
+  TEST_ASSERT_EQUAL_UINT8(kActive, stage(false, false, true));   // no shell, no idle stage
+  TEST_ASSERT_EQUAL_UINT8(kActive, stage(false, true,  false));
+  TEST_ASSERT_EQUAL_UINT8(kIdle,   stage(false, true,  true));   // the only idle case
+  TEST_ASSERT_EQUAL_UINT8(kBlank,  stage(true,  false, false));
+  TEST_ASSERT_EQUAL_UINT8(kBlank,  stage(true,  false, true));
+  TEST_ASSERT_EQUAL_UINT8(kBlank,  stage(true,  true,  false));
+  TEST_ASSERT_EQUAL_UINT8(kBlank,  stage(true,  true,  true));   // blank outranks the clock
+}
+
+// And it folds, like the rest of the ladder: the display pass asks both
+// halves once per pass and neither costs it a call.
+static void test_the_stage_is_a_constant_expression() {
+  static_assert(BacklightLadder::stageOf(true, true, true) == Stage::Blank, "");
+  static_assert(BacklightLadder::stageOf(false, true, true) == Stage::Idle, "");
+  static_assert(BacklightLadder::stageOf(false, true, false) == Stage::Active, "");
+  constexpr uint8_t folded =
+      BacklightLadder::level(80, BacklightLadder::stageOf(false, true, true), kBalanced);
+  TEST_ASSERT_EQUAL_UINT8(20, folded);
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +266,8 @@ int main() {
   RUN_TEST(test_no_stage_ever_exceeds_the_setting);
   RUN_TEST(test_the_idle_clock_is_dimmer_than_the_working_screen);
   RUN_TEST(test_the_idle_rungs_are_the_numbers_they_are);
+  RUN_TEST(test_the_stage_is_read_off_the_three_flags);
+  RUN_TEST(test_the_stage_is_a_constant_expression);
   RUN_TEST(test_a_thriftier_profile_is_never_brighter);
   RUN_TEST(test_the_profile_moves_only_the_idle_rung);
   RUN_TEST(test_an_unknown_profile_falls_back_to_the_brightest_rung);

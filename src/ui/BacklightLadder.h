@@ -81,6 +81,19 @@ namespace BacklightLadder {
 // about them.
 enum class Stage : uint8_t { Active = 0, Idle = 1, Blank = 2 };
 
+// Which stage the glass is in, from the three facts that decide it. Here
+// rather than in the display task because it is the other half of the same
+// rule — a ladder whose caller picks the rung is a ladder with two owners —
+// and because these three flags have a precedence a reader has to get right:
+// a blanked panel is blank whatever else is true (the shell leaves its idle
+// clock showing when a notice wakes the glass, and a board whose shell never
+// started has no idle stage at all, only the working screen). Pure, so the
+// eight combinations are pinned on the host instead of walked on a bench.
+constexpr Stage stageOf(bool blank, bool shellUp, bool idleShowing) {
+  if (blank) return Stage::Blank;
+  return shellUp && idleShowing ? Stage::Idle : Stage::Active;
+}
+
 // How far the idle clock is stepped down, per Power::Profile ordinal, as a
 // right shift of the configured percentage. Halved, quartered, eighthed:
 // at the default 80 % that is 40 / 20 / 10 %, which brackets the reduction

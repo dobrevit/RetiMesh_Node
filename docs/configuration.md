@@ -148,7 +148,7 @@ same from a phone.
 | LoRa interface mode | `full` | `full`, `gateway`, `access_point`, `roaming`, `boundary` |
 | Client interface mode | `full` | one interface per client on :4242 (Sideband, `rnsd`) |
 | Peer interface mode | `full` | one interface per zero-config peer — the other nodes and hosts on the Wi-Fi links |
-| Power profile | performance | `performance` 240 MHz · `balanced` 160 MHz + Wi-Fi min modem sleep (wake every DTIM) · `battery` 80 MHz + Wi-Fi max modem sleep (the station wakes every *listen interval* beacons — see the Wi-Fi table) + 20 s display timeout; applied live |
+| Power profile | performance | `performance` 240 MHz · `balanced` 160 MHz + Wi-Fi min modem sleep (wake every DTIM) · `battery` 80 MHz + Wi-Fi max modem sleep (the station wakes every *listen interval* beacons — see the Wi-Fi table) + 20 s display timeout. On the colour boards the profile also sets how far the idle clock is dimmed — half the configured brightness, a quarter, an eighth — see the display table below. Applied live |
 | Zero-config peering (AutoInterface) | enabled | RNS AutoInterface on the access point *and* the station link; group id blank = `reticulum` (peers must share it) |
 | Announce cap | 2 % | share of each interface's bandwidth announces may use (rnsd `announce_cap`) |
 | Announce rate target / grace / penalty | 0 / 0 / 0 | throttle destinations announcing too often (rnsd `announce_rate_*`); 0 = off |
@@ -182,8 +182,11 @@ and never above the setting itself. The stored value is untouched by any of it:
 turn the brightness up and every stage moves with it. The idle clock arrives
 after the display sleep timeout and the panel blanks entirely at four times it,
 which is where the controller is put to sleep as well as the backlight turned
-off — waking from that costs the panel about a fifth of a second before the
-first frame.
+off. Waking from that is a press, a key or a tap away, and the panel itself is
+lit about five milliseconds after the wake reaches it — what a finger waits for
+is the poll that notices it: every display pass for the case button, and a
+quarter of a second for the touch layer and the keyboard, which a dark screen
+reads gently rather than ten times a second.
 
 ## Maintenance (saves, applies live — except the web portal and mDNS, which restart)
 | Setting | Default | Notes |

@@ -151,21 +151,11 @@ void Display::displayTask(void* self) {
     d->pollButton2();
 #endif
     uint32_t now = millis();
-#if HAS_LVGL_UI || DISPLAY_KIND == DISPLAY_KIND_OLED
-    {
-      // The brightness setting reaches the glass here, once per change, and
-      // this is still the only place it does: the ladder changed what the
-      // number is, not who writes it. A second writer would race this gate —
-      // it remembers what it last sent so the panel is written once per
-      // change, and a level arriving from anywhere else would leave that
-      // memory describing a panel that has moved on. OLED panel current is
-      // close to linear in contrast, so this is a real power knob there too,
-      // not only on the backlit TFT boards.
-      static uint8_t lastB = 255;
-      const uint8_t b = d->backlightPct();
-      if (b != lastB) { lastB = b; d->_panelImpl.setBrightness(b); }
-    }
-#endif
+    // The brightness setting reaches the glass through applyBrightness() and
+    // nowhere else. Once per pass here, for a setting the operator changed or
+    // a stage the shell walked into; and once more on the screen-state edge
+    // itself, which is the pass this one cannot serve.
+    d->applyBrightness();
 #if HAS_LVGL_UI
     if (sShellUp) {
       // The rest-and-alarm policy is the shell's own (LvglUi::restTick);
@@ -443,14 +433,33 @@ void Display::pollButton2() {
 // gets the operator's setting, exactly as before.
 uint8_t Display::backlightPct() const {
 #if HAS_LVGL_UI && DISPLAY_KIND == DISPLAY_KIND_TFT
-  using Stage = BacklightLadder::Stage;
-  const Stage stage = _blank                            ? Stage::Blank
-                    : sShellUp && LvglUi::idleShowing() ? Stage::Idle
-                                                        : Stage::Active;
-  return BacklightLadder::level(settings.display().brightness, stage,
-                                (uint8_t)Power::profile());
+  // Which of the three is showing is BacklightLadder::stageOf's rule, not a
+  // ternary written out here: the precedence between the flags is part of the
+  // ladder and is pinned on the host with the rest of it.
+  return BacklightLadder::level(
+      settings.display().brightness,
+      BacklightLadder::stageOf(_blank, sShellUp, LvglUi::idleShowing()),
+      (uint8_t)Power::profile());
 #else
   return settings.display().brightness;
+#endif
+}
+
+// The single writer. Everything that could change the answer — the operator's
+// setting, the power profile, the shell walking into its idle clock, the
+// screen-state edge — reaches the panel through this and is compared against
+// what was last written, so the panel is written once per change and the
+// remembered value never describes a panel somebody else has moved.
+//
+// E-paper has no brightness to write; on the OLED boards this is the contrast
+// register, where panel current is close to linear in it, so it is a real
+// power knob there too and not only on the backlit TFT boards.
+void Display::applyBrightness() {
+#if HAS_LVGL_UI || DISPLAY_KIND == DISPLAY_KIND_OLED
+  const uint8_t b = backlightPct();
+  if (b == _lastBrightPct) return;
+  _lastBrightPct = b;
+  _panelImpl.setBrightness(b);
 #endif
 }
 
@@ -466,22 +475,37 @@ void Display::setBlank(bool blank) {
 #if HAS_LVGL_UI
   if (sShellUp) LvglUi::onBlank(blank);
 #endif
+  // The level before the panel, on both edges. _blank above already says which
+  // stage this is, so the panel is handed the number it should come up at
+  // rather than replaying the last stage's — which is what left a wake lit at
+  // nothing (the common case, dark until the next pass twenty milliseconds
+  // later) or at the idle clock's dim, depending on which pass the waking tap
+  // landed in. A blanked panel takes the level and stays dark; it is the
+  // panel's own rule that a level cannot light a sleeping glass.
+  applyBrightness();
   if (blank) {
     _panel->blank(true);                 // panel + charge pump off
   } else {
     _panel->blank(false);
-#if !HAS_LVGL_UI
-    // Nothing is known about the glass after it has been off, so the next
-    // frame goes out whether or not it matches the last one drawn. Mono
-    // boards only: on the shell this painter would smear a half-res page
-    // over the LVGL frame — the bench saw it as a flicker at wake — and
-    // onBlank() already invalidates the screen for a full repaint.
-    _refresh.forget();
-    _pageChangedMs = millis();
-    _lastPaintMs = _pageChangedMs;
-    _paintDue = false;
-    paint();
+#if HAS_LVGL_UI
+    if (!sShellUp)
 #endif
+    {
+      // Nothing is known about the glass after it has been off, so the next
+      // frame goes out whether or not it matches the last one drawn. The mono
+      // pages only — and asked of sShellUp rather than of HAS_LVGL_UI,
+      // because the fall-back this serves is a runtime one: begin() promises
+      // these pages on any board whose shell failed to start, and all three
+      // colour boards compile HAS_LVGL_UI. Where the shell *is* up this
+      // painter would smear a half-res page over the LVGL frame — the bench
+      // saw it as a flicker at wake — and onBlank() has already invalidated
+      // the screen for a full repaint.
+      _refresh.forget();
+      _pageChangedMs = millis();
+      _lastPaintMs = _pageChangedMs;
+      _paintDue = false;
+      paint();
+    }
   }
 }
 

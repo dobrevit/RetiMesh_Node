@@ -40,13 +40,34 @@ constexpr uint8_t RASET   = 0x2B;
 constexpr uint8_t RAMWR   = 0x2C;
 constexpr uint8_t MADCTL  = 0x36;
 constexpr uint8_t COLMOD  = 0x3A;
-// The controller's settling time either side of sleep, from the datasheet:
-// after SLPOUT it will not take another command until its booster and
-// oscillator are up, and after SLPIN it will not take a SLPOUT until they
-// have properly stopped. One number, because it is one specification — begin()
-// waits it too, and the wake path below is a copy of what begin() does rather
-// than a delay somebody guessed.
-constexpr uint32_t SLEEP_SETTLE_MS = 120;
+// The controller's waits, quoted from the ST7789VW datasheet (Sitronix,
+// version 1.0, 2017/09) rather than carried over from a driver's habit.
+// There are three of them and they are three different specifications; the
+// mistake worth naming here is spending the longest one on every edge,
+// which is what made waking cost twenty-four times what the part asks.
+//
+//   §9.1.11 SLPIN and §9.1.12 SLPOUT, Restriction, identically on both:
+//   "It will be necessary to wait 5msec before sending any new commands to a
+//   display module following this command to allow time for the supply
+//   voltages and clock circuits to stabilize."
+//   That is CMD_SETTLE_MS. It is the whole of what either sleep command owes
+//   the command after it, and so the whole of what a wake owes.
+//
+//   Same two pages: "It will be necessary to wait 120msec after sending sleep
+//   out command (when in sleep in mode) before sending an sleep in command."
+//   That is SLEEP_OUT_TO_IN_MS, and it is an ordering constraint between the
+//   two commands rather than a settle — it is owed by the edge that sends
+//   SLPIN, counted from the SLPOUT before it. The datasheet states no
+//   constraint the other way round, so a wake has nothing of this to pay.
+//
+//   §7.4.5 Reset Timing, Table 9, note 7: "It is necessary to wait 5msec
+//   after releasing RESX before sending commands. Also Sleep Out command
+//   cannot be sent for 120msec." That is RESET_TO_SLEEP_OUT_MS, and it is
+//   begin()'s alone — reset recovery is not sleep, and the two numbers being
+//   equal is a coincidence of the part, not a shared rule.
+constexpr uint32_t CMD_SETTLE_MS         = 5;
+constexpr uint32_t SLEEP_OUT_TO_IN_MS    = 120;
+constexpr uint32_t RESET_TO_SLEEP_OUT_MS = 120;
 }
 
 void TftPanel::cmd(uint8_t c) { cmd(c, nullptr, 0); }
@@ -222,18 +243,20 @@ bool TftPanel::begin() {
   pinMode(PIN_TFT_DC, OUTPUT);  digitalWrite(PIN_TFT_DC, HIGH);
   backlightBegin();                       // dark until there is a frame
 
-  // Hardware reset: low for a moment, then the controller wants 120 ms
-  // before it will take SLPOUT seriously. Some boards do not give the panel a
-  // reset line of its own — it is tied to the board's, so the controller comes
-  // out of reset with the MCU and there is nothing here to pulse. Those wait
-  // anyway, because the settling time is the controller's either way.
+  // Hardware reset: low for a moment, then the reset-recovery wait before
+  // SLPOUT may be sent at all. Some boards do not give the panel a reset line
+  // of its own — it is tied to the board's, so the controller comes out of
+  // reset with the MCU and there is nothing here to pulse. Those wait anyway,
+  // because the recovery is the controller's either way. The pulse itself is
+  // shaped well clear of the part's minimums (10 us low, 5 ms of reset
+  // cancel); it is the wait after the release that is specified.
 #if PIN_TFT_RST >= 0
   pinMode(PIN_TFT_RST, OUTPUT);
   digitalWrite(PIN_TFT_RST, HIGH); delay(5);
   digitalWrite(PIN_TFT_RST, LOW);  delay(20);
-  digitalWrite(PIN_TFT_RST, HIGH); delay(120);
+  digitalWrite(PIN_TFT_RST, HIGH); delay(RESET_TO_SLEEP_OUT_MS);
 #else
-  delay(120);
+  delay(RESET_TO_SLEEP_OUT_MS);
 #endif
 
   _spi = &SpiBus::get(TFT_SPI_BUS, PIN_TFT_SCK, PIN_TFT_MISO, PIN_TFT_MOSI);
@@ -249,7 +272,19 @@ bool TftPanel::begin() {
   // so neither is here — the panel that inherits its configuration keeps it,
   // and what is actually wrong with the picture is being looked for elsewhere.
   cmd(SLPOUT);
-  delay(SLEEP_SETTLE_MS);
+  digitalWrite(PIN_TFT_CS, HIGH);
+  _spi->endTransaction();
+  _sleepOutMs = millis();                 // what SLEEP_OUT_TO_IN_MS is counted from
+
+  // The bus is released across the wait, the same rule blank() states and for
+  // the same reason: on the shared-bus boards these are the radio's wires as
+  // well, and boot is not an exemption from that — it is simply the pass on
+  // which they are least likely to be wanted. Five milliseconds now, not the
+  // reset's 120: the reset recovery above has already been paid.
+  delay(CMD_SETTLE_MS);
+  _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_TFT_CS, LOW);
+
   const uint8_t fmt16 = 0x55;             // RGB565, the panel's native 16 bits
   cmd(COLMOD, &fmt16, 1);
   const uint8_t portrait = 0x00;          // row/column order as the layout assumes
@@ -363,10 +398,10 @@ void TftPanel::flush(bool full) {
 // (SLPOUT), which is the pair the datasheet defines and the pair begin()
 // already uses on the way up.
 //
-// Both settling waits are spent outside the SPI transaction. On the T-Deck the
-// radio, the card and this panel are the same three wires (SpiBus.h); holding
-// the bus for a tenth of a second would stall the radio task behind a screen
-// going dark, which is a good deal worse than the current it saves.
+// Every wait is spent outside the SPI transaction. On the T-Deck the radio,
+// the card and this panel are the same three wires (SpiBus.h); holding the bus
+// while a screen goes dark would stall the radio task behind it, which is a
+// good deal worse than the current it saves.
 void TftPanel::blank(bool on) {
   if (!_ok) return;
   // Idempotent, and now worth saying so: setBlank(true) is reached from the
@@ -377,16 +412,31 @@ void TftPanel::blank(bool on) {
   // for the first frame — is not mistaken for a lit panel.
   if (_blanked == on && _lit != on) return;
 
+  if (on) {
+    // The blanking edge's own wait, and the only one of the three that is an
+    // ordering constraint rather than a settle: SLPIN may not follow a SLPOUT
+    // inside SLEEP_OUT_TO_IN_MS. It is counted from the wake (or the boot)
+    // that sent that SLPOUT, so in the life this panel actually leads — a
+    // screen blanks seconds or minutes after it lit — the remainder is zero
+    // and this costs nothing at all. What it buys is the case that is not
+    // hypothetical on a handheld: a tap that wakes the glass and a power-menu
+    // "sleep" a moment later, which without this would put the controller
+    // into a sleep the datasheet does not promise it comes out of.
+    const uint32_t since = millis() - _sleepOutMs;
+    if (since < SLEEP_OUT_TO_IN_MS) delay(SLEEP_OUT_TO_IN_MS - since);
+  }
+
   _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
   if (on) {
     cmd(DISPOFF);                         // output off...
     cmd(SLPIN);                           // ...and the parts behind it stopped
   } else {
-    cmd(SLPOUT);                          // the wake's one command that waits
+    cmd(SLPOUT);                          // the one command a wake has to send
   }
   digitalWrite(PIN_TFT_CS, HIGH);
   _spi->endTransaction();
+  if (!on) _sleepOutMs = millis();
 
   _blanked = on;
   // _lit before the relight, not after: applyBacklight() refuses to light a
@@ -399,20 +449,20 @@ void TftPanel::blank(bool on) {
   // whole function exists to stop.
   if (on) backlightSet(0);
 
-  // One wait per edge, never one per command. Waking, it is the settle SLPOUT
-  // owes before the controller will take the DISPON below. Blanking, it is the
-  // same specification read the other way: the controller refuses a SLPOUT
-  // that arrives too soon after a SLPIN, and a tap landing inside that window
-  // — the button path wakes immediately, without the dark panel's 250 ms poll
-  // gate — would otherwise be answered by a panel that stayed asleep and dark.
-  // Spending it here rather than saving it for the wake is deliberate: nothing
-  // is waiting on a screen that has just gone off, something is always waiting
-  // on one coming back, and the wake is the half with a time budget on it.
-  delay(SLEEP_SETTLE_MS);
+  // The settle both sleep commands owe whatever follows them: five
+  // milliseconds for the supply rails and the clocks, on either edge. On the
+  // blanking edge the thing that follows is a whole cycle away — the next
+  // wake's SLPOUT — but it is still owed, and this is the edge with nothing
+  // waiting on it, so it is spent here rather than added to a wake's budget.
+  delay(CMD_SETTLE_MS);
   if (on) return;
 
   _spi->beginTransaction(SPISettings(TFT_SPI_HZ, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_TFT_CS, LOW);
+  // DISPON because the blanking edge sent DISPOFF, and for no other reason:
+  // it is not a second chance at the SLPOUT above. A controller still in
+  // sleep-in takes DISPON over its MCU interface perfectly happily and stays
+  // dark, so there is nothing here that recovers a wake that did not land.
   cmd(DISPON);
   digitalWrite(PIN_TFT_CS, HIGH);
   _spi->endTransaction();

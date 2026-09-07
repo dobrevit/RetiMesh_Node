@@ -128,6 +128,16 @@ private:
   // whichever of its three stages is showing (BacklightLadder.h). Read once
   // per display pass by the one place that writes a brightness.
   uint8_t backlightPct() const;
+  // That one place. It is a method rather than a block in the task loop
+  // because the screen-state edge has to run it too: setBlank() changes the
+  // answer backlightPct() gives, and a level that only arrived on the next
+  // pass left the glass lit at the previous stage's number — dark, or the
+  // idle clock's dim — for as long as that pass took.
+  void applyBrightness();
+  // What applyBrightness() last wrote, so the panel is written once per
+  // change. A member and not a function-static: the state belongs to the
+  // one writer, and a static would have made a second caller impossible.
+  uint8_t _lastBrightPct = 255;         // 255 = nothing written yet
   void advancePage(bool forward);
   void longPressAction();               // both buttons' long press, stated once        // what any short press does
   // One press grammar for every input, written once (a review found it
