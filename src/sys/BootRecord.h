@@ -93,12 +93,38 @@ struct Record {
 // failure this check exists to prevent.
 constexpr uint32_t kRecordMagic = 0x52544D33;
 
+// RTM2 is still readable, and refusing it was a real fault rather than a
+// tidiness question. Its sixteen bytes are a *strict prefix* of RTM3's
+// twenty-four — `magic`, `uptimeS` and `restart` sit at identical offsets —
+// so everything RTM2 wrote can be read exactly where this layout looks for
+// it. What is not there is the pair of fault counts, and those bytes are
+// whatever RTC memory happened to hold.
+//
+// Refusing the whole record instead cost the one thing this file is for. The
+// fleet updates over the air, `esp_restart()` preserves RTC memory, and every
+// consumer reads "not known" as "the rail dropped" — the boot log says so in
+// words, docs/api.md says so, and tools/soak.py prints "unknown (power
+// lost)". So the first boot after this firmware landed would have reported a
+// **false power cut** for its own upgrade reboot, on the exact surface whose
+// job is telling a power cut from a crash, in the soak run that is always
+// started right afterwards.
+//
+// RTM1 stays refused: it predates the restart marks, so its bytes at that
+// offset are not marks and would be timed as though they were.
+constexpr uint32_t kRecordMagicRtm2 = 0x52544D32;
+
 // What the run that just ended reported. `known` false means the RTC domain
 // did not hold — a power cut or a brownout — or the record was written by a
 // firmware with a different layout. Either way the fields below are not
 // evidence and must not be shown as zero.
 struct Previous {
+  // The record is one this firmware family wrote and the RTC domain held.
   bool     known         = false;
+  // ...and it carried the fault counts. False for a record written by a build
+  // from before they existed, where the run length is trustworthy and the two
+  // counts are not. Separate from `known` because the answers differ: one says
+  // the node lost power, the other says it was upgraded.
+  bool     faultsKnown   = false;
   uint32_t uptimeS       = 0;
   uint32_t allocFailures = 0;
   uint32_t caught        = 0;
@@ -108,11 +134,11 @@ struct Previous {
 
 inline Previous readPrevious(const Record& r) {
   Previous p;
-  if (r.magic != kRecordMagic) return p;
-  p.known         = true;
-  p.uptimeS       = r.uptimeS;
-  p.allocFailures = r.allocFailures;
-  p.caught        = r.caught;
+  const bool current = (r.magic == kRecordMagic);
+  const bool legacy  = (r.magic == kRecordMagicRtm2);
+  if (!current && !legacy) return p;
+  p.known   = true;
+  p.uptimeS = r.uptimeS;
   // A restart that did not stamp its entry left nothing to time. Reporting
   // that as a restart taking however long the RTC clock happens to read would
   // invent a measurement out of a zero.
@@ -120,12 +146,23 @@ inline Previous readPrevious(const Record& r) {
     p.restartMarked = true;
     p.restart       = r.restart;
   }
+  // Only where the writing firmware actually kept them. Past RTM2's sixteen
+  // bytes is uninitialised RTC memory, and reading it would be inventing the
+  // very figure the caller is about to act on.
+  if (current) {
+    p.faultsKnown   = true;
+    p.allocFailures = r.allocFailures;
+    p.caught        = r.caught;
+  }
   return p;
 }
 
-// Claim the record for the run starting now. Prefer claimRun() below — this is
-// the half that destroys the previous run's figures, and on its own it is only
-// correct if the caller has already read them.
+// The half that destroys the previous run's figures. Behind `detail` because
+// on its own it is only correct if the caller has already read them, and
+// leaving it exported next to claimRun() re-opens the ordering that claimRun()
+// exists to close. Firmware calls claimRun(); the tests reach in here to build
+// records and to demonstrate what going the wrong way round costs.
+namespace detail {
 inline void beginRun(Record& r) {
   r.magic         = kRecordMagic;
   r.uptimeS       = 0;
@@ -133,6 +170,7 @@ inline void beginRun(Record& r) {
   r.allocFailures = 0;
   r.caught        = 0;
 }
+}  // namespace detail
 
 // Take what the last run left, then claim the record for this one — in that
 // order, in one call, because the order is the whole contract and splitting it
@@ -145,7 +183,7 @@ inline void beginRun(Record& r) {
 // function and cannot sequence it wrongly.
 inline Previous claimRun(Record& r) {
   const Previous previous = readPrevious(r);
-  beginRun(r);
+  detail::beginRun(r);
   return previous;
 }
 

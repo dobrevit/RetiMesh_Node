@@ -101,9 +101,17 @@ static constexpr uint32_t kAllocLogEveryMs = 5000;
 // happen — a torn value, or a count going backwards past what the record
 // already holds — cannot, because nothing here reads the record to compute
 // what to write.
+// Written through volatile lvalues. The plain stores were already correct in
+// practice — single aligned 32-bit writes to uncached RTC memory — but two
+// things were true only by luck: concurrent plain writes to one object are a
+// data race in the abstract machine, and nothing obliged the compiler to emit
+// the store in onTerminate() before abort(). Volatile costs nothing here and
+// turns both from observations into guarantees.
 static inline void mirrorFaults() {
-  sRtc.allocFailures = sAllocFailures.load(std::memory_order_relaxed);
-  sRtc.caught        = sCaught.load(std::memory_order_relaxed);
+  volatile uint32_t* const allocs = &sRtc.allocFailures;
+  volatile uint32_t* const caught = &sRtc.caught;
+  *allocs = sAllocFailures.load(std::memory_order_relaxed);
+  *caught = sCaught.load(std::memory_order_relaxed);
 }
 
 Faults faults() {
@@ -202,16 +210,13 @@ void begin() {
                  r == ESP_RST_USB     || r == ESP_RST_JTAG);
 
   if (prev.known) {
-    sBoot.prevUptimeKnown   = true;
+    sBoot.prevKnown         = true;
     sBoot.prevUptimeS       = prev.uptimeS;
+    sBoot.prevFaultsKnown   = prev.faultsKnown;
     sBoot.prevAllocFailures = prev.allocFailures;
     sBoot.prevCaught        = prev.caught;
-    if (prev.restartMarked) {
-      const RestartTiming t = restartTiming(prev.restart, rtcMs());
-      sBoot.lastRestart.toPersistMs = t.toPersistMs;
-      sBoot.lastRestart.toBootMs    = t.toBootMs;
-      sBoot.lastRestart.known       = t.known;
-    }
+    if (prev.restartMarked)
+      sBoot.lastRestart = restartTiming(prev.restart, rtcMs());
   }
 
   // One small NVS write per boot. This is the counter that tells a node which
@@ -224,7 +229,7 @@ void begin() {
   }
 
   char ran[48] = "";
-  if (sBoot.prevUptimeKnown)
+  if (sBoot.prevKnown)
     snprintf(ran, sizeof(ran), " after %luh%02lum%02lus",
              (unsigned long)(sBoot.prevUptimeS / 3600),
              (unsigned long)(sBoot.prevUptimeS % 3600 / 60),
@@ -237,7 +242,7 @@ void begin() {
     // brownout or a panic says the node lost power rather than crashed.
     log_w("boot #%lu — previous run ended: %s%s%s", (unsigned long)sBoot.count,
           sBoot.reasonName, ran,
-          sBoot.prevUptimeKnown ? "" : " (run length lost: the RTC domain was not held up)");
+          sBoot.prevKnown ? "" : " (run length lost: the RTC domain was not held up)");
   }
   if (sBoot.lastRestart.known)
     log_i("last restart: %lu ms to the core's persist-restart, %lu ms from there to this boot",
@@ -246,13 +251,20 @@ void begin() {
   // The line this whole change exists to make possible. An unclean boot whose
   // previous run had been failing allocations is a node that died of memory,
   // and until now that could only be guessed at from a heap curve sampled
-  // minutes earlier. Said at warning level next to the reason, because it is
-  // the explanation for it; silent when the run before was clean, so the
-  // absence of this line means something too.
-  if (sBoot.prevUptimeKnown && (sBoot.prevAllocFailures || sBoot.prevCaught))
-    log_w("the run that just ended had %lu allocation failure(s) and contained %lu — "
-          "it was short of memory before it stopped",
-          (unsigned long)sBoot.prevAllocFailures, (unsigned long)sBoot.prevCaught);
+  // minutes earlier.
+  //
+  // Only the allocation count carries that claim. `caught` is every exception
+  // guard() contained — a refused socket bring-up counts there and says
+  // nothing about memory — so folding it into the same condition asserted
+  // "short of memory" about nodes that were not, including on the wake from a
+  // deliberate deep-sleep power-off. Two facts, two lines, and the second is
+  // not a warning.
+  if (sBoot.prevFaultsKnown && sBoot.prevAllocFailures)
+    log_w("the run that just ended had %lu allocation failure(s) — it was short of "
+          "memory before it stopped", (unsigned long)sBoot.prevAllocFailures);
+  if (sBoot.prevFaultsKnown && sBoot.prevCaught)
+    log_i("the run that just ended contained %lu exception(s)",
+          (unsigned long)sBoot.prevCaught);
 }
 
 const Boot& boot() { return sBoot; }

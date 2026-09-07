@@ -227,9 +227,28 @@ def summarise(path):
         if len(boots) > 1:
             print(f"   RESTARTED during the run: boot {boots[0]} -> {boots[-1]}")
             for a, b in zip(up, up[1:]):
-                if a["boot_count"] != b["boot_count"]:
-                    prev = b["prev_uptime_s"] or "unknown (power lost)"
-                    print(f"     {b['ts']}  reason={b['boot_reason']}  previous run {prev}s")
+                if a["boot_count"] == b["boot_count"]:
+                    continue
+                prev = b["prev_uptime_s"] or "unknown (power lost)"
+                print(f"     {b['ts']}  reason={b['boot_reason']}  previous run {prev}s")
+                # What that dead run had already failed to allocate, said here
+                # rather than in its own pass: one restart is one event, and
+                # splitting it across two loops put the reason and the
+                # explanation in different paragraphs with a range summary
+                # between them. Reported per restart, never as a range — each
+                # value belongs to one dead run and a min/max would blur the
+                # one that matters.
+                pa = num(b.get("prev_alloc_failures"))
+                pc = num(b.get("prev_contained"))
+                if pa is None:
+                    continue      # a CSV from before the columns, or nothing survived
+                if pa:
+                    print(f"       ⚠ it had {int(pa)} allocation failure(s) before it "
+                          f"stopped — it died short of memory")
+                if pc:
+                    print(f"       it contained {int(pc)} exception(s)")
+                if not pa and not pc:
+                    print("       it reported no allocation failures")
         else:
             print(f"   no restarts (boot #{boots[0] if boots else '?'}), "
                   f"uptime {last['uptime_s']}s")
@@ -246,23 +265,8 @@ def summarise(path):
                   + (f", {int(max(caught))} contained" if caught else ""))
         elif allocs:
             print("   no allocation failures")
-
-        # And what the runs that ended had already failed to allocate. Reported
-        # per restart rather than as a range: each value belongs to one dead
-        # run, and a min/max across several would blur the one that matters.
-        for a, b in zip(up, up[1:]):
-            if a["boot_count"] == b["boot_count"]:
-                continue
-            pa, pc = num(b.get("prev_alloc_failures")), num(b.get("prev_contained"))
-            if pa is None:
-                continue                      # a CSV from before the column existed
-            if pa or pc:
-                print(f"     ⚠ the run that ended at {b['ts']} had {int(pa)} allocation "
-                      f"failure(s), {int(pc or 0)} contained — it died short of memory")
-            else:
-                print(f"     the run that ended at {b['ts']} reported no allocation failures")
-        # else: a CSV written before these columns existed says nothing, and
-        # silence is the honest report — not "none".
+        # A CSV written before these columns existed says nothing at all here,
+        # and silence is the honest report — not "none".
 
         # Liveness first, and loudly. Everything below this says whether a node
         # is heading for trouble; this says whether it is doing its job at all,

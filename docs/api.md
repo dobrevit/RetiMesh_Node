@@ -286,11 +286,17 @@ A *present* `prev_uptime_s` of `0` means something different again: the run
 ended before the main loop ever ran, i.e. it died during startup. Repeated
 zeroes with a rising `boot.count` are a boot loop.
 
-`boot.prev_alloc_failures` and `boot.prev_contained` are how many allocations
-had already failed in the run that just ended, and how many of those failures
-were caught and contained rather than fatal. They ride across the restart in
-the same RTC record as `prev_uptime_s`, under the same rule: **absent, not
-zero**, when the rail dropped.
+`boot.prev_alloc_failures` is how many allocations had already failed in the
+run that just ended. `boot.prev_contained` is how many *exceptions* that run
+caught and contained — a failed allocation is one kind, a refused socket
+bring-up is another — so it is **not** a subset of `prev_alloc_failures` and
+can legitimately exceed it. Only the first is evidence of memory exhaustion.
+
+They ride across the restart in the same RTC record as `prev_uptime_s`, and
+are **absent, not zero**, when the rail dropped. The two counts can also be
+absent on their own account, with `prev_uptime_s` still present: that is the
+first boot after upgrading from a firmware that did not keep them, where the
+run length survived the reboot and the counts were never written.
 
 These are the fields that explain a restart, and they exist because
 `diag.faults` cannot. `diag.faults` describes the run you are talking to now,
@@ -299,7 +305,8 @@ not about the hours before it — a node that died of memory exhaustion answers
 `"alloc_failures": 0` a minute later, every time. If `boot.clean` is false and
 `prev_alloc_failures` is non-zero, the node ran out of byte-addressable DRAM;
 if it is zero, the panic was something else and the coredump is the next place
-to look.
+to look. A non-zero `prev_contained` beside a zero `prev_alloc_failures` says
+the run was catching exceptions, not running out of memory.
 
 `faults` is the *current* run: `alloc_failures`, `contained`, and
 `last_ms_ago` for the most recent one. Non-zero here on a node that is still

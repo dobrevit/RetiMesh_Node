@@ -40,7 +40,7 @@ static constexpr uint32_t kMagicRtm2 = 0x52544D32;
 
 static Record valid(uint32_t uptimeS = 3600, uint32_t allocs = 0, uint32_t caught = 0) {
   Record r{};
-  beginRun(r);
+  detail::beginRun(r);
   r.uptimeS       = uptimeS;
   r.allocFailures = allocs;
   r.caught        = caught;
@@ -70,14 +70,42 @@ static void test_an_all_zero_record_is_not_evidence_either() {
   TEST_ASSERT_EQUAL_UINT32(0, p.allocFailures);
 }
 
-static void test_a_record_from_an_older_layout_is_refused() {
-  // RTM2 had no fault counts. Its bytes read through this layout would put
-  // whatever followed the restart marks into allocFailures and report it.
+static void test_an_rtm2_record_is_read_for_what_it_does_carry() {
+  // RTM2's sixteen bytes are a strict prefix of this layout, so its run length
+  // and restart marks are exactly where they are looked for. Refusing the
+  // whole record instead reported the *upgrade reboot itself* as a power cut,
+  // on the surface whose only job is telling those two apart.
+  Record r = valid(7200, 11, 4);
+  r.restart = RestartMarks{500, 600};
+  r.magic = kMagicRtm2;
+  const Previous p = readPrevious(r);
+  TEST_ASSERT_TRUE(p.known);
+  TEST_ASSERT_EQUAL_UINT32(7200, p.uptimeS);
+  TEST_ASSERT_TRUE(p.restartMarked);
+  TEST_ASSERT_EQUAL_UINT32(500, p.restart.entryMs);
+}
+
+static void test_an_rtm2_records_fault_counts_are_not_invented() {
+  // Past RTM2's sixteen bytes is uninitialised RTC memory. Whatever it holds
+  // is not a measurement, and reporting it would be worse than reporting
+  // nothing: this is the field an operator acts on.
   Record r = valid(7200, 11, 4);
   r.magic = kMagicRtm2;
-  TEST_ASSERT_FALSE(readPrevious(r).known);
+  const Previous p = readPrevious(r);
+  TEST_ASSERT_TRUE(p.known);
+  TEST_ASSERT_FALSE(p.faultsKnown);
+}
+
+static void test_an_rtm1_record_is_still_refused() {
+  // RTM1 predates the restart marks, so its bytes at that offset are not
+  // marks and would be timed as though they were.
+  Record r = valid(7200, 11, 4);
   r.magic = kMagicRtm1;
   TEST_ASSERT_FALSE(readPrevious(r).known);
+}
+
+static void test_a_current_record_knows_its_fault_counts() {
+  TEST_ASSERT_TRUE(readPrevious(valid(10, 0, 0)).faultsKnown);
 }
 
 static void test_the_magic_is_the_documented_value_and_is_new() {
@@ -90,6 +118,7 @@ static void test_one_wrong_bit_in_the_magic_refuses_the_record() {
   for (int bit = 0; bit < 32; bit++) {
     Record r = valid(60, 1, 1);
     r.magic ^= (uint32_t)1u << bit;
+    if (r.magic == kMagicRtm2) continue;      // the one neighbour that is ours
     TEST_ASSERT_FALSE(readPrevious(r).known);
   }
 }
@@ -135,7 +164,7 @@ static void test_reading_does_not_disturb_the_record() {
 static void test_begin_run_stamps_the_magic_and_clears_the_run() {
   Record r{};
   memset(&r, 0xFF, sizeof(r));
-  beginRun(r);
+  detail::beginRun(r);
   TEST_ASSERT_EQUAL_UINT32(kRecordMagic, r.magic);
   TEST_ASSERT_EQUAL_UINT32(0, r.uptimeS);
   TEST_ASSERT_EQUAL_UINT32(0, r.allocFailures);
@@ -150,7 +179,7 @@ static void test_claiming_before_reading_destroys_the_evidence() {
   // it the wrong way round loses the dead run entirely — and it loses it
   // silently, reporting a confident zero rather than an error.
   Record r = valid(4242, 9, 5);
-  beginRun(r);                              // the mistake
+  detail::beginRun(r);                      // the mistake
   const Previous tooLate = readPrevious(r);
   TEST_ASSERT_TRUE(tooLate.known);          // still looks like a valid record
   TEST_ASSERT_EQUAL_UINT32(0, tooLate.uptimeS);      // ...reporting nothing
@@ -181,8 +210,22 @@ static void test_claim_run_on_a_dropped_rtc_domain_reports_unknown_and_still_cla
   memset(&r, 0xA5, sizeof(r));
   const Previous p = claimRun(r);
   TEST_ASSERT_FALSE(p.known);
+  TEST_ASSERT_FALSE(p.faultsKnown);
   TEST_ASSERT_EQUAL_UINT32(kRecordMagic, r.magic);
   TEST_ASSERT_EQUAL_UINT32(0, r.allocFailures);
+}
+
+static void test_claiming_an_rtm2_record_upgrades_it_in_place() {
+  // The upgrade path end to end: carry what RTM2 had, refuse to invent what it
+  // did not, and leave the record stamped as this layout's.
+  Record r = valid(7200, 0, 0);
+  r.magic = kMagicRtm2;
+  const Previous p = claimRun(r);
+  TEST_ASSERT_TRUE(p.known);
+  TEST_ASSERT_FALSE(p.faultsKnown);
+  TEST_ASSERT_EQUAL_UINT32(7200, p.uptimeS);
+  TEST_ASSERT_EQUAL_UINT32(kRecordMagic, r.magic);
+  TEST_ASSERT_TRUE(readPrevious(r).faultsKnown);   // the next boot gets counts
 }
 
 static void test_a_second_claim_carries_this_run_not_the_one_before() {
@@ -202,7 +245,7 @@ static void test_a_second_claim_carries_this_run_not_the_one_before() {
 
 static void test_a_record_written_then_read_round_trips() {
   Record r{};
-  beginRun(r);
+  detail::beginRun(r);
   r.uptimeS = 61; r.allocFailures = 2; r.caught = 1;
   r.restart = RestartMarks{1000, 1200};
   const Previous p = readPrevious(r);
@@ -284,7 +327,10 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_an_unwritten_record_is_not_evidence);
   RUN_TEST(test_an_all_zero_record_is_not_evidence_either);
-  RUN_TEST(test_a_record_from_an_older_layout_is_refused);
+  RUN_TEST(test_an_rtm2_record_is_read_for_what_it_does_carry);
+  RUN_TEST(test_an_rtm2_records_fault_counts_are_not_invented);
+  RUN_TEST(test_an_rtm1_record_is_still_refused);
+  RUN_TEST(test_a_current_record_knows_its_fault_counts);
   RUN_TEST(test_the_magic_is_the_documented_value_and_is_new);
   RUN_TEST(test_one_wrong_bit_in_the_magic_refuses_the_record);
   RUN_TEST(test_a_valid_record_reports_the_run_that_wrote_it);
@@ -295,6 +341,7 @@ int main(int, char**) {
   RUN_TEST(test_claiming_before_reading_destroys_the_evidence);
   RUN_TEST(test_claim_run_reads_and_claims_in_the_right_order);
   RUN_TEST(test_claim_run_on_a_dropped_rtc_domain_reports_unknown_and_still_claims);
+  RUN_TEST(test_claiming_an_rtm2_record_upgrades_it_in_place);
   RUN_TEST(test_a_second_claim_carries_this_run_not_the_one_before);
   RUN_TEST(test_a_persist_mark_without_an_entry_mark_is_not_a_restart);
   RUN_TEST(test_a_full_width_uptime_survives_the_record);

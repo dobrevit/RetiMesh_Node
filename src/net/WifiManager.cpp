@@ -1783,12 +1783,13 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     bo["clean"]        = b.clean;
     // Absent rather than zero when a power cut took the RTC domain with it:
     // "unknown" and "it ran for no time at all" are not the same answer.
-    if (b.prevUptimeKnown) bo["prev_uptime_s"] = b.prevUptimeS;
-    // What the run that just ended had failed to allocate. Under the same
-    // gate and for the same reason: where the RTC domain dropped these are
-    // not zero, they are unknown, and a soak that read them as zero would
-    // clear a node the evidence never cleared.
-    if (b.prevUptimeKnown) {
+    // Absent rather than zero, on both gates and for the same reason: where
+    // the RTC domain dropped these are unknown, not zero, and a soak that read
+    // them as zero would clear a node the evidence never cleared. The counts
+    // have a gate of their own because a record written before they existed
+    // carries a trustworthy run length and no counts.
+    if (b.prevKnown) bo["prev_uptime_s"] = b.prevUptimeS;
+    if (b.prevFaultsKnown) {
       bo["prev_alloc_failures"] = b.prevAllocFailures;
       bo["prev_contained"]      = b.prevCaught;
     }

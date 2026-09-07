@@ -122,21 +122,41 @@ class SummariseNamesTheDeadRun(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def _rows(self, prev_alloc, prev_contained):
+    def _rows(self, prev_alloc, prev_contained, prev_uptime=15132):
         base = dict(node="n", reachable=1, uptime_s=600, boot_reason="panic or unhandled exception",
                     heap_free=50000, heap_min=40000, heap_largest=30000,
                     stack_lowest=2000, stack_lowest_task="rns")
         return [
             dict(base, ts="2026-09-08T00:00:00+00:00", boot_count=5),
             dict(base, ts="2026-09-08T01:00:00+00:00", boot_count=6,
+                 prev_uptime_s=prev_uptime,
                  prev_alloc_failures=prev_alloc, prev_contained=prev_contained),
         ]
 
     def test_a_run_that_died_short_of_memory_is_named(self):
         out = self._summarise(self._rows(9, 3))
-        self.assertIn("the run that ended at 2026-09-08T01:00:00+00:00", out)
         self.assertIn("9 allocation failure(s)", out)
-        self.assertIn("3 contained", out)
+        self.assertIn("died short of memory", out)
+        self.assertIn("contained 3 exception(s)", out)
+
+    def test_the_dead_run_is_reported_under_its_own_restart(self):
+        # One restart is one event. The reason and the explanation belong in
+        # the same block, not in separate passes with a range summary between.
+        out = self._summarise(self._rows(9, 3))
+        lines = [l for l in out.splitlines() if l.strip()]
+        reason = next(i for i, l in enumerate(lines) if "reason=" in l)
+        detail = next(i for i, l in enumerate(lines) if "died short of memory" in l)
+        self.assertEqual(detail, reason + 1)
+        # ...and the restart line itself still carries the run length.
+        self.assertIn("previous run 15132s", lines[reason])
+
+    def test_contained_exceptions_are_not_called_a_memory_shortage(self):
+        # `contained` counts every exception guard() caught; a contained socket
+        # failure says nothing about memory. Claiming otherwise puts a false
+        # "short of memory" on a healthy node.
+        out = self._summarise(self._rows(0, 4))
+        self.assertIn("contained 4 exception(s)", out)
+        self.assertNotIn("died short of memory", out)
 
     def test_a_clean_previous_run_is_reported_as_clean(self):
         out = self._summarise(self._rows(0, 0))
@@ -147,13 +167,14 @@ class SummariseNamesTheDeadRun(unittest.TestCase):
         # The whole point. Blank columns mean the RTC domain dropped and there
         # is nothing to report; claiming the run was clean would clear a node
         # the evidence never cleared.
-        out = self._summarise(self._rows("", ""))
+        out = self._summarise(self._rows("", "", prev_uptime=""))
         self.assertNotIn("died short of memory", out)
         self.assertNotIn("reported no allocation failures", out)
+        self.assertIn("unknown (power lost)", out)
 
     def test_a_csv_written_before_the_columns_existed_is_silent(self):
         # Old files must summarise exactly as they always did.
-        rows = self._rows("", "")
+        rows = self._rows("", "", prev_uptime="")
         legacy = soak.FIELDS[:-2]
         fd, path = tempfile.mkstemp(suffix=".csv")
         os.close(fd)
@@ -169,7 +190,8 @@ class SummariseNamesTheDeadRun(unittest.TestCase):
             text = out.getvalue()
         finally:
             os.unlink(path)
-        self.assertNotIn("the run that ended", text)
+        self.assertNotIn("died short of memory", text)
+        self.assertNotIn("reported no allocation failures", text)
         self.assertIn("RESTARTED during the run", text)
 
     def test_the_new_columns_are_last_so_old_files_still_parse(self):

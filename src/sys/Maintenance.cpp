@@ -299,14 +299,24 @@ static void doStatus() {
   const Diag::Boot& b = Diag::boot();
   dataf("STATUS", "uptime_s=%lu boot_count=%lu reset=\"%s\"", (unsigned long)(millis() / 1000),
         (unsigned long)b.count, b.reasonName);
-  // Why the run before ended, where it left anything to say. An unclean boot
-  // after a run that had been failing allocations is a node that died of
-  // memory rather than of logic, and this is the only place that answer
-  // survives the restart (Diag.h).
-  if (b.prevUptimeKnown && (b.prevAllocFailures || b.prevCaught))
-    dataf("STATUS", "prev_alloc_failures=%lu prev_contained=%lu prev_uptime_s=%lu",
-          (unsigned long)b.prevAllocFailures, (unsigned long)b.prevCaught,
-          (unsigned long)b.prevUptimeS);
+  // Why the run before ended. Always said, never conditional on the figures
+  // being interesting: here the present/absent distinction *is* the answer, so
+  // suppressing the line on a clean run would make "the previous run failed
+  // nothing" and "nothing survived the restart" look identical — the exact
+  // collapse this whole record exists to prevent, and what docs/troubleshooting
+  // tells an operator to read. The production solar nodes are administered on
+  // this console and not the HTTP API, so it has to carry the same
+  // distinction the API does.
+  if (!b.prevKnown)
+    dataf("STATUS", "prev_uptime_s=unknown prev_alloc_failures=unknown "
+                    "prev_contained=unknown");
+  else if (!b.prevFaultsKnown)
+    dataf("STATUS", "prev_uptime_s=%lu prev_alloc_failures=unknown "
+                    "prev_contained=unknown", (unsigned long)b.prevUptimeS);
+  else
+    dataf("STATUS", "prev_uptime_s=%lu prev_alloc_failures=%lu prev_contained=%lu",
+          (unsigned long)b.prevUptimeS, (unsigned long)b.prevAllocFailures,
+          (unsigned long)b.prevCaught);
   const Diag::Heap h = Diag::heap();
   dataf("STATUS", "heap_free=%lu heap_min=%lu largest_block=%lu psram_free=%lu",
         (unsigned long)h.freeInternal, (unsigned long)h.minFreeInternal,
