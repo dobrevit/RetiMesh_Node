@@ -25,6 +25,7 @@
 #include "StoreHome.h"
 #include "Diag.h"
 #include "Watchdog.h"
+#include "SdPollPolicy.h"
 #if HAS_SD
 #include <sd_diskio.h>
 #endif
@@ -151,10 +152,41 @@ const char* SdCard::requestFormat() {
 void SdCard::task(void* self) {
   auto* sd = static_cast<SdCard*>(self);
   Watchdog::watch();
+  // How long to leave between passes is a decision with a file of its own
+  // (SdPollPolicy.h): an empty slot is both the expensive question and the one
+  // whose answer almost never changes, so it is asked less and less often,
+  // while a mounted card only wants its removal check.
+  SdPollPolicy policy;
   for (;;) {
     Watchdog::feed();
     Diag::guard("the sd card task", [sd] { sd->poll(); });
-    vTaskDelay(pdMS_TO_TICKS(SD_POLL_MS));
+    // Asked after the poll, so the interval follows what the poll just found.
+    // The second question is "is anything in the slot", not "did it mount": a
+    // card that will not mount is one an operator is about to format, and
+    // backing off from it would be backing off from them.
+    sd->wait(policy.nextWaitMs(sd->mounted(), sd->info().state != State::Absent));
+  }
+}
+
+// The policy's interval reaches ten times the task watchdog's timeout, so it is
+// served in slices with a feed between them: the task keeps reporting progress
+// on the same three-second beat it always did, and a longer look-again interval
+// stays a decision about the card rather than becoming a hole in the
+// supervision.
+//
+// A format request ends the wait early. It is set on the web task and served at
+// the top of the next checkSlot(), which used to be at most three seconds away;
+// without this, Format on a mounted card would sit there doing nothing for half
+// a minute before anything happened.
+void SdCard::wait(uint32_t ms) {
+  static_assert(SdPollPolicy::kBaseMs < (uint32_t)WATCHDOG_TIMEOUT_S * 1000UL,
+                "a poll slice has to clear the task watchdog with room to spare");
+  for (uint32_t left = ms; left > 0; ) {
+    const uint32_t slice = left < SdPollPolicy::kBaseMs ? left : SdPollPolicy::kBaseMs;
+    vTaskDelay(pdMS_TO_TICKS(slice));
+    left -= slice;
+    Watchdog::feed();
+    if (_formatRequested) return;
   }
 }
 

@@ -222,7 +222,7 @@ rather than failing the whole import.
 | `ANNOUNCE_INTERVAL_S`, `BEACON_INTERVAL_S` | 600 / 0 | |
 | `HAS_DISPLAY`, `OLED_ADDR`, `OLED_ROTATION` | 1 / 0x3C / 0 | |
 | `HAS_SD`, `PIN_SD_*`, `SD_SPI_HZ`, `SD_PARTIAL_PERCENT` | 1 / T3-S3 map / 20 MHz / 50 | microSD slot |
-| `SD_POLL_MS`, `SD_LOG_MAX_BYTES` | 3000 / 1 MB | slot polling, event-log rotation |
+| `SD_LOG_MAX_BYTES` | 1 MB | event-log rotation (how often the slot is polled is not a constant — see [Hardware](hardware.md#microsd-card)) |
 | `DISPLAY_WIDTH`, `DISPLAY_HEIGHT`, `DISPLAY_COMPACT` | 128 / 64 / 0 | panel size; compact drops pages and columns that do not fit a 64x32 |
 | `HAS_DISPLAY_VEXT`, `PIN_DISPLAY_VEXT`, `PIN_OLED_RST` | 0 / — / — | panels on a switched rail (both Heltec boards) |
 | `PIN_STATUS_LED` | board | activity LED, `-1` where there is none |

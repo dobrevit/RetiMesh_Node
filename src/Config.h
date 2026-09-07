@@ -556,7 +556,8 @@
   #define SD_SPI_BUS        HSPI
 #endif
 #define SD_SPI_HZ           20000000
-#define SD_POLL_MS          3000
+// How often the slot is looked at is no longer one number: it depends on what
+// the last look found, and the ladder lives in sys/SdPollPolicy.h.
 #define SD_PARTIAL_PERCENT  50            // volume < 50 % of the card => "partial"
 #define SD_MOUNT_ATTEMPTS   6             // boot: the first mount after SPI init often fails
 #define SD_MOUNT_RETRY_MS   100           // ~0.6 s of retries before giving up

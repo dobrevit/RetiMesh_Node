@@ -134,6 +134,9 @@ private:
   const char* formatRefusal();
 
   void  poll();                          // the slot, and the marker when it moves
+  // Sleeps the interval SdPollPolicy asked for, in watchdog-sized slices, and
+  // cuts it short when a format has been requested.
+  void  wait(uint32_t ms);
   bool  checkSlot();                     // true when what the slot holds changed
   bool  mount();
   void  unmount();
