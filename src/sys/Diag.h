@@ -45,6 +45,11 @@
 
 #include <Arduino.h>
 #include "Config.h"
+// The layout that outlives a run, and the two decisions made about it. Pure,
+// and host-tested in test/test_boot_record — the magic is what separates "the
+// firmware fell over" from "the rail went away", and neither answer announces
+// itself when it is wrong.
+#include "BootRecord.h"
 
 namespace Diag {
 
@@ -52,7 +57,10 @@ namespace Diag {
 // entering the restart, handing over to the core's persist-restart (the
 // composite device only), and this boot. `known` is false where no restart
 // preceded this boot, or the RTC domain did not hold.
-struct LastRestart { uint32_t toPersistMs = 0, toBootMs = 0; bool known = false; };
+// The same three fields BootRecord.h computes, and now the same type: they
+// were declared twice and copied across by hand, so a fourth field added to
+// one was silently dropped by the other.
+using LastRestart = RestartTiming;
 
 // Why the previous run ended. The reset register is cleared by a power cycle,
 // so "power-on" on a cold start is the expected answer, not a missing one.
@@ -61,8 +69,26 @@ struct Boot {
   const char* reasonName      = "unknown";
   bool        clean           = true;       // false for panic, watchdog, brownout
   uint32_t    count           = 0;          // boots recorded in NVS, this one included
-  bool        prevUptimeKnown = false;      // false after a power cut or brownout
+  // Whether the run before this one left anything readable at all: false after
+  // a power cut or a brownout, which is evidence rather than an absence of it.
+  // Named for what it gates, which is no longer only the uptime.
+  bool        prevKnown       = false;
   uint32_t    prevUptimeS     = 0;          // how long the run that just ended lasted
+  // What the run that just ended had already failed to allocate, and what it
+  // contained, as they stood when it died. Meaningful only where
+  // prevFaultsKnown is true. These are what make a panic diagnosable after the
+  // fact; the live counters in faults() describe this run and are zeroed by
+  // the restart that is the very thing being explained.
+  // ...and whether that record carried them. A build from before the counts
+  // existed leaves a trustworthy run length and no counts, which is a
+  // different answer from a power cut and must not be reported as one.
+  bool        prevFaultsKnown   = false;
+  uint32_t    prevAllocFailures = 0;
+  // Every exception Diag::guard() contained, of which a failed allocation is
+  // one kind. Not a subset of prevAllocFailures and legitimately larger: a
+  // contained socket bring-up failure counts here and says nothing about
+  // memory.
+  uint32_t    prevCaught        = 0;
   LastRestart lastRestart;
 };
 
@@ -74,7 +100,7 @@ const Boot& boot();
 // RTC-resident record beside the run length, so one magic decides whether
 // RTC memory held. Bootloader stamps them as the restart goes (zero: not
 // stamped); begin() reads them into boot().lastRestart and clears them.
-struct RestartMarks { uint32_t entryMs, persistMs; };
+// `RestartMarks` itself lives in BootRecord.h with the rest of the layout.
 RestartMarks& restartMarks();
 // The RTC clock in milliseconds: it runs on through a software reset and the
 // ROM session, which millis() does not.

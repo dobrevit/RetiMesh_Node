@@ -85,6 +85,12 @@ jobs:
       - run: retimesh-flash --help && retimesh-flash ports
       - name: host flashing-tool tests (mocked ports, console and HTTP)
         run: cd tools/retimesh-flash && python -m unittest discover -s tests -t . -v
+      # soak.py decides whether a node's previous run is reported as clean or as
+      # unknown, and the difference is one default argument. Getting it wrong
+      # reads a power cut as a healthy run — the fault that hid a repeating
+      # panic for six days.
+      - name: host tooling tests (soak sampling and summary)
+        run: python -m unittest discover -s tools/tests -t . -v
       - name: boards.json local_link blocks are complete
         run: python tools/check_boards.py
       - name: docs/hardware.md board matrix matches boards.json

@@ -1783,7 +1783,16 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     bo["clean"]        = b.clean;
     // Absent rather than zero when a power cut took the RTC domain with it:
     // "unknown" and "it ran for no time at all" are not the same answer.
-    if (b.prevUptimeKnown) bo["prev_uptime_s"] = b.prevUptimeS;
+    // Absent rather than zero, on both gates and for the same reason: where
+    // the RTC domain dropped these are unknown, not zero, and a soak that read
+    // them as zero would clear a node the evidence never cleared. The counts
+    // have a gate of their own because a record written before they existed
+    // carries a trustworthy run length and no counts.
+    if (b.prevKnown) bo["prev_uptime_s"] = b.prevUptimeS;
+    if (b.prevFaultsKnown) {
+      bo["prev_alloc_failures"] = b.prevAllocFailures;
+      bo["prev_contained"]      = b.prevCaught;
+    }
 
     Diag::Heap h = Diag::heap();
     JsonObject hp = dg["heap"].to<JsonObject>();
@@ -1798,10 +1807,11 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     hp["dram_largest_block"] = h.largestDramBlock;
     hp["psram_free"]    = h.freePsram;
 
-    // What has already failed to allocate, and what was contained when it did.
-    // A node under memory pressure should be readable as such while it is
-    // still running: before this the only evidence was a restart, after the
-    // fact, with a backtrace and no context (Diag.h).
+    // What has already failed to allocate *this run*, and what was contained
+    // when it did. A node under memory pressure should be readable as such
+    // while it is still running (Diag.h). These are zeroed by every restart,
+    // which is why the run before is reported separately under diag.boot —
+    // reading these after a panic says nothing about the panic.
     const Diag::Faults f = Diag::faults();
     JsonObject fo = dg["faults"].to<JsonObject>();
     fo["alloc_failures"] = f.allocFailures;
