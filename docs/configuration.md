@@ -26,10 +26,22 @@ The page prints the matching `rnsd` `RNodeInterface` block for a peer RNode.
 
 Normally the transceiver listens continuously: on an SX1262 that is a constant
 ~5 mA floor, paid 24 hours a day whether or not anything is on the air. With
-this setting on, the chip sleeps between preamble samples instead. The node's
-fixed 18-symbol preamble is what makes that safe — the receiver wakes often
-enough to catch any conforming sender, and every RNode-lineage firmware shares
-the same preamble floor.
+this setting on, the chip sleeps between preamble samples instead. What makes
+that safe is the 18-symbol preamble floor every RNode-lineage firmware respects
+(`RF_PREAMBLE_SYMS`): the sleep window is sized so the receiver is awake inside
+the shortest preamble a conforming sender will ever transmit.
+
+**The window is sized on that floor, not on this node's `preamble` setting.**
+Raising `preamble` lengthens what this node *transmits* and does not lengthen
+its sleep by a microsecond — what the window has to fit inside is the shortest
+preamble *other* nodes send, and no local setting can raise that. (Sizing on
+the local setting is how a duty-cycled receiver goes deaf: at `preamble 64` the
+window would be 48 symbol times, a standard peer's whole 18-symbol preamble
+fits inside it, and the packet is lost with every surface still reporting the
+mode healthy.) Lowering `preamble` below 18 *does* shorten the window — the
+driver will not expect a preamble longer than the one the radio is configured
+for — and at the bottom of the range, 6 symbols, there is nothing left to sleep
+through at all, so the mode simply never engages.
 
 Three caveats, all of which the node will tell you about:
 
@@ -42,16 +54,20 @@ Three caveats, all of which the node will tell you about:
   from one export — and they stay in continuous receive.
 - **At the default channel it does nothing.** The receiver must be awake for 8
   symbols at each end of the preamble, leaving `18 − 16 = 2` symbols to sleep
-  through, and the driver will not sleep for less than its wake-up transition
-  (the 5 ms TCXO ramp plus ~1 ms, so 6016 µs). At **SF8/125 kHz a symbol is
-  2048 µs**, giving a 4096 µs sleep — under the threshold, so the receiver
-  stays on. It engages from a symbol time of about 3 ms: **SF9 or higher at
-  125 kHz**, or a lower spreading factor at a narrower bandwidth (SF7 at
-  31.25 kHz and SF8 at 62.5 kHz both qualify). There is a ceiling too: the
-  sleep reaches the chip as a 24-bit count of 15.625 µs ticks, so a channel
-  slow enough to overflow it — SF12 at 7.8 kHz with a preamble of 516 or more —
-  also reports `engages=no`, and there the driver would refuse outright rather
-  than fall back, so the node does not ask it.
+  through — 18 being the floor, whatever this node's own `preamble` is set to —
+  and the driver will not sleep for less than its wake-up transition (the 5 ms
+  TCXO ramp plus ~1 ms, so 6016 µs). At **SF8/125 kHz a symbol is 2048 µs**,
+  giving a 4096 µs sleep — under the threshold, so the receiver stays on. It
+  engages from a symbol time of about 3 ms: **SF9 or higher at 125 kHz**, or a
+  lower spreading factor at a narrower bandwidth (SF7 at 31.25 kHz and SF8 at
+  62.5 kHz both qualify). So the channel is the only dial that moves this: SF
+  and bandwidth decide it, the preamble setting does not. There is a ceiling as
+  well — the sleep reaches the chip as a 24-bit count of 15.625 µs ticks, about
+  262 s — but with a two-symbol window no channel this firmware accepts comes
+  near it: the slowest, SF12 at 7.8 kHz, sleeps about 1.05 s. The node still
+  checks, because a period over the ceiling is one the driver refuses outright
+  rather than falling back to a continuous receive, and a refused arm leaves the
+  receiver in standby.
 
 ### Checking whether it is actually working on your channel
 
@@ -85,7 +101,7 @@ The node also says which of the four situations it is in once per settings
 apply, and at boot, at `info` level:
 
 ```
-duty-cycled receive: arming it — the receiver sleeps 16384 us per cycle at SF10/125.0 kHz, preamble 18 symbols
+duty-cycled receive: arming it — the receiver sleeps 16384 us per cycle at SF10/125.0 kHz, sized on a sender preamble of 18 symbols
 duty-cycled receive: on, but not on this channel — the 4096 us sleep at SF8/125.0 kHz is not one the driver will take, so the receiver stays on continuously
 duty-cycled receive: on, but the SX1276 has no such mode — the receiver stays on continuously
 duty-cycled receive: off — the receiver listens continuously

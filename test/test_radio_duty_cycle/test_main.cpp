@@ -29,6 +29,8 @@
 // that reads as a complete one is worse than none.
 #include <unity.h>
 #include <RadioLib.h>
+#include "Config.h"             // RF_PREAMBLE_SYMS — the network's preamble floor
+#include "RadioRxArmPolicy.h"   // RadioRxArm::sizingPreamble — which preamble we size on
 #include "Airtime.cpp"
 
 // Never touched: the constructors only store the pointer, and nothing here
@@ -39,20 +41,35 @@
 static Module mod(nullptr, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC);
 static SX1262 sx1262(&mod);
 
-// The driver's answer for one channel, in the shape armReceive() asks for it:
-// the sender's preamble is the configured preamble, and minSymbols 0 selects
-// the driver's own per-SF default.
-static uint32_t driverSleepUs(uint8_t sf, float bwKhz, uint16_t preambleSyms,
-                              uint16_t minSymbols, int16_t* stateOut = nullptr) {
+// The driver's answer for one channel, with the sender's preamble and this
+// node's configured preamble given separately — which is the distinction the
+// whole arm turns on. minSymbols 0 selects the driver's own per-SF default.
+static uint32_t driverSleepUs2(uint8_t sf, float bwKhz, uint16_t senderSyms,
+                               uint16_t configuredSyms, uint16_t minSymbols,
+                               int16_t* stateOut = nullptr) {
   DataRate_t dr = {};
   dr.lora.spreadingFactor = sf;
   dr.lora.bandwidth       = bwKhz;
   dr.lora.codingRate      = 5;
   uint32_t wake = 0, sleep = 0;
-  const int16_t state = sx1262.calculateRxDutyCycle(preambleSyms, preambleSyms,
+  const int16_t state = sx1262.calculateRxDutyCycle(senderSyms, configuredSyms,
                                                     minSymbols, &dr, &wake, &sleep);
   if (stateOut) *stateOut = state;
   return state == RADIOLIB_ERR_NONE ? sleep : 0;
+}
+
+// The same where the two preambles are equal, which is the shape the pure
+// arithmetic pins below are about.
+static uint32_t driverSleepUs(uint8_t sf, float bwKhz, uint16_t preambleSyms,
+                              uint16_t minSymbols, int16_t* stateOut = nullptr) {
+  return driverSleepUs2(sf, bwKhz, preambleSyms, preambleSyms, minSymbols, stateOut);
+}
+
+// One symbol on this channel, by the driver's own truncating expression. Used
+// to say "the sleep is longer than a whole conforming preamble", which is what
+// a missed packet actually looks like.
+static uint32_t symbolUs(uint8_t sf, float bwKhz) {
+  return (uint32_t)((float)((uint32_t)10000 << sf) / (10.0f * bwKhz));
 }
 
 // Every bandwidth the SX1262 offers and every spreading factor this firmware
@@ -140,6 +157,87 @@ static void test_a_longer_sender_preamble_is_refused_before_the_arithmetic() {
                           sx1262.calculateRxDutyCycle(19, 18, 0, &dr, &wake, &sleep));
   TEST_ASSERT_EQUAL_INT16(RADIOLIB_ERR_NONE,
                           sx1262.calculateRxDutyCycle(18, 18, 0, &dr, &wake, &sleep));
+}
+
+// ---------------------------------------------------------------------------
+//  Which preamble the window is sized on, put to the driver rather than argued.
+//  RadioRxArm::sizingPreamble() is the rule and test_radio_rx_arm pins the rule
+//  itself; what is pinned here is that it produces a call this driver accepts,
+//  and a sleep short enough to still catch a conforming sender.
+// ---------------------------------------------------------------------------
+
+// The regression, stated the way the driver states it. A node configured to 64
+// symbols that sized its window on 64 would sleep for 48 symbol times, while a
+// conforming RNode-lineage peer transmits RF_PREAMBLE_SYMS of preamble — 18
+// symbol times fit inside 48 with room to spare, so the peer's whole preamble
+// can land in the sleep and the packet is never heard. Sized on the floor the
+// window is two symbols and cannot swallow it.
+static void test_sizing_on_the_local_preamble_would_sleep_past_a_conforming_sender() {
+  const uint8_t sf = 10; const float bw = 125.0f;         // a channel that engages
+  const uint32_t peerPreambleUs = (uint32_t)RF_PREAMBLE_SYMS * symbolUs(sf, bw);
+
+  const uint32_t naive = driverSleepUs(sf, bw, 64, 0);    // the defect: our own setting
+  TEST_ASSERT_GREATER_THAN_UINT32_MESSAGE(peerPreambleUs, naive,
+      "sizing on a 64-symbol local preamble sleeps longer than a conforming sender's "
+      "entire preamble - that is the missed packet");
+
+  const uint32_t sized =
+      driverSleepUs2(sf, bw, RadioRxArm::sizingPreamble(64, RF_PREAMBLE_SYMS), 64, 0);
+  TEST_ASSERT_LESS_THAN_UINT32_MESSAGE(peerPreambleUs, sized,
+      "sized on the floor, the receiver is awake inside every conforming preamble");
+  // ...and it is exactly the window a node left at the floor would use, which
+  // is the point: the local setting no longer moves it.
+  TEST_ASSERT_EQUAL_UINT32(driverSleepUs(sf, bw, RF_PREAMBLE_SYMS, 0), sized);
+}
+
+// The published figure and the armed figure are one number, across the whole
+// space the validator accepts. configureAirtime() derives it once and hands it
+// both to Airtime::rxDutyCycleSleepUs() and to startReceiveDutyCycleAuto();
+// this asks the driver what that second call computes and requires the first to
+// agree, so rx_duty_cycle_sleep_us can never describe a sleep the chip was not
+// programmed with.
+static void test_what_the_node_publishes_is_what_the_arm_call_computes() {
+  static const uint16_t kCfg[] = { 6, 8, 12, 17, 18, 19, 24, 64, 128, 516, 1000 };
+  for (uint8_t sf = 5; sf <= 12; sf++) {
+    for (size_t b = 0; b < sizeof(kBw) / sizeof(kBw[0]); b++) {
+      for (size_t c = 0; c < sizeof(kCfg) / sizeof(kCfg[0]); c++) {
+        const uint16_t sized = RadioRxArm::sizingPreamble(kCfg[c], RF_PREAMBLE_SYMS);
+        int16_t state = RADIOLIB_ERR_UNKNOWN;
+        const uint32_t theirs = driverSleepUs2(sf, kBw[b], sized, kCfg[c], 0, &state);
+        TEST_ASSERT_EQUAL_INT16_MESSAGE(RADIOLIB_ERR_NONE, state,
+            "the sizing preamble must never exceed the configured one, or the arm is "
+            "refused and the receiver is left unarmed");
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(theirs,
+            Airtime::rxDutyCycleSleepUs(sf, kBw[b], sized),
+            "the published sleep is not the sleep the arm call computes");
+      }
+    }
+  }
+}
+
+// A node configured below the floor sizes on its own shorter preamble — it has
+// to, because the driver refuses a sender preamble past the configured one —
+// and at the bottom of the accepted range there is nothing left to sleep
+// through: two wake windows of eight symbols each already cover six, so the
+// sleep is zero and the mode cannot engage on any channel. Right rather than
+// unfortunate: such a node is outside the interop guarantee to begin with.
+static void test_a_preamble_below_the_floor_shortens_the_window_and_stops_engaging() {
+  for (uint16_t cfg = 6; cfg < (uint16_t)RF_PREAMBLE_SYMS; cfg++) {
+    const uint16_t sized = RadioRxArm::sizingPreamble(cfg, RF_PREAMBLE_SYMS);
+    TEST_ASSERT_EQUAL_UINT16(cfg, sized);
+    for (uint8_t sf = 5; sf <= 12; sf++) {
+      for (size_t b = 0; b < sizeof(kBw) / sizeof(kBw[0]); b++) {
+        const uint32_t ours = Airtime::rxDutyCycleSleepUs(sf, kBw[b], sized);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(driverSleepUs2(sf, kBw[b], sized, cfg, 0), ours,
+                                         "below the floor we still mirror the driver");
+        // Sixteen symbols or fewer leave nothing between the two wake windows
+        // at any spreading factor, so there is no saving to claim.
+        if (cfg <= 16)
+          TEST_ASSERT_FALSE_MESSAGE(Airtime::rxDutyCycleEngages(ours),
+              "a preamble no longer than the two wake windows has no sleep in it");
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +329,9 @@ int main() {
   RUN_TEST(test_our_sleep_period_is_the_drivers_own_with_an_override);
   RUN_TEST(test_the_minimum_symbol_counts_are_the_drivers_own);
   RUN_TEST(test_a_longer_sender_preamble_is_refused_before_the_arithmetic);
+  RUN_TEST(test_sizing_on_the_local_preamble_would_sleep_past_a_conforming_sender);
+  RUN_TEST(test_what_the_node_publishes_is_what_the_arm_call_computes);
+  RUN_TEST(test_a_preamble_below_the_floor_shortens_the_window_and_stops_engaging);
   RUN_TEST(test_the_driver_refuses_the_sleep_our_ceiling_predicts);
   RUN_TEST(test_the_driver_refuses_every_sleep_below_the_transition);
   RUN_TEST(test_the_two_values_that_cannot_be_reached_are_restated);

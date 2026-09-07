@@ -263,17 +263,23 @@ public:
   // ...and whether the driver will actually take that sleep. True means one
   // thing only, and it is the thing a caller may act on: the call
   //
-  //     startReceiveDutyCycleAuto(<the preamble this node is configured for>, 0)
+  //     startReceiveDutyCycleAuto(<the same preambleSyms passed above>, 0)
   //
   // will arm a duty-cycled receive with it. Both arguments are part of that
   // claim, because PhysicalLayer::calculateRxDutyCycle reads both and this
   // predicate mirrors only one shape of the call:
   //
-  //   * the first is the *sender's* preamble, and it is what the sleep is
-  //     computed from. Zero makes the driver fall back to the configured
-  //     preamble, which is the same figure that reached rxDutyCycleSleepUs()
-  //     here; passing the configured preamble is the same thing said out
-  //     loud. Anything longer than the configured preamble is refused with
+  //   * the first is the *sender's* preamble — the shortest preamble the
+  //     senders we mean to hear will transmit — and it is what the sleep is
+  //     computed from. It is emphatically not this node's own preamble
+  //     setting; who chooses it is RadioRxArm::sizingPreamble(), and whatever
+  //     it chooses has to be the figure handed to rxDutyCycleSleepUs() here as
+  //     well, or the prediction is about a different sleep than the chip is
+  //     given. Zero would make the driver fall back to the configured
+  //     preamble, which on a node set above the floor is a longer window than
+  //     any sender guarantees to fill — which is why the caller passes the
+  //     figure out loud instead of leaving it to the default. Anything longer than the
+  //     configured preamble is refused with
   //     RADIOLIB_ERR_INVALID_PREAMBLE_LENGTH before any of this arithmetic
   //     runs, and a true here says nothing whatever about that call.
   //   * the second is a minSymbols override. Zero selects the driver's own
@@ -294,10 +300,14 @@ public:
   //     all: not duty-cycled receive, not continuous receive. The chip is left
   //     in standby and the node is deaf until something else re-arms it.
   //
-  // The second is reachable from settings this firmware already accepts — SF12
-  // at 7.8 kHz has a 525 ms symbol, so a 516-symbol preamble is enough, and the
-  // validator allows up to 1000 — which is why this predicate mirrors the
-  // driver's whole acceptance condition rather than only its first gate.
+  // The second is reachable for any caller that sizes its window on a long
+  // preamble — SF12 at 7.8 kHz has a 525 ms symbol, so 516 symbols is enough,
+  // and the validator accepts up to 1000 — which is why this predicate mirrors
+  // the driver's whole acceptance condition rather than only its first gate.
+  // The radio no longer gets there, because it sizes on the 18-symbol interop
+  // floor and so never asks for a sleep past about a second; the gate stays
+  // because the predicate is a statement about the driver, not about today's
+  // one caller, and because the floor is a constant somebody may raise.
   static bool rxDutyCycleEngages(uint32_t sleepUs,
                                  uint32_t tcxoDelayUs = RX_DC_TCXO_DELAY_US);
 

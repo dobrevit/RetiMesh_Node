@@ -281,6 +281,12 @@ private:
   // except at boot where begin() runs them on the setup task before the radio
   // task exists.
   RadioRxArm::Plan _rxArmPlan = RadioRxArm::Plan::Continuous;
+  // ...and the sender preamble that arm is sized on, decided by the same rule
+  // at the same moment (RadioRxArm::sizingPreamble). It is the network's floor
+  // narrowed by this node's own setting, not the setting itself, and it is held
+  // rather than re-derived so the figure published as rx_duty_cycle_sleep_us
+  // and the figure handed to startReceiveDutyCycleAuto() cannot come apart.
+  uint16_t _rxArmPreamble = RF_PREAMBLE_SYMS;
   // Duty-cycle arms the driver refused, and when one of them last reached the
   // log. Not published, unlike the CAD counters beside them: the fault they
   // report already has a published *level* in g_stats.rxDutyCycleArmed, which

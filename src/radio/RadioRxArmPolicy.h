@@ -73,6 +73,14 @@
 //  feature from a silently inactive one, so it is derived from what the driver
 //  said, never from what the setting or the prediction says.
 //
+//  ---------------------------------------------------------------------------
+//  The fourth number, which is not part of the plan but belongs beside it
+//  ---------------------------------------------------------------------------
+//  Once the plan is DutyCycled the driver still has to be told how long a
+//  preamble to expect *from other people*, and that is a different number from
+//  this node's own preamble setting. sizingPreamble() below is that rule, kept
+//  here because the prediction and the arm call must not each derive it.
+//
 //  Pure, so the whole table is a host test (test/test_radio_rx_arm) rather than
 //  a bench session with an ammeter.
 // ============================================================================
@@ -105,6 +113,46 @@ inline Plan decide(bool settingOn, bool chipCapable, bool channelEngages) {
   if (!chipCapable)    return Plan::Unsupported;
   if (!channelEngages) return Plan::ChannelUnsuitable;
   return Plan::DutyCycled;
+}
+
+// Which preamble the sleep window is sized on — the one number both the
+// prediction and the arm call have to agree about.
+//
+// startReceiveDutyCycleAuto()'s first argument is not this node's preamble. It
+// is the *sender's*: "Expected preamble length of the messages to receive"
+// (SX126x.h:333), and PhysicalLayer::calculateRxDutyCycle sleeps through
+// `senderPreambleLength - 2 * minSymbols` symbols of it
+// (PhysicalLayer.cpp:600). Handing it our own setting says "every peer
+// transmits at least as long a preamble as I do", which is a claim about other
+// people's radios that nothing entitles us to make: radio.preamble is an
+// operator setting this firmware accepts anywhere from 6 to 1000 symbols
+// (SettingsRules.h), while a conforming RNode-lineage peer is only ever
+// obliged to send RF_PREAMBLE_SYMS. A node configured to 64 would sleep for
+// 48 symbol times per cycle, and an 18-symbol preamble from a standard peer
+// can fall wholly inside that window — the packet is simply not heard, on a
+// node whose surfaces all report the mode working perfectly.
+//
+// So the window is sized on the floor the network guarantees, not on our own
+// setting, and `floorSyms` is RF_PREAMBLE_SYMS: the minimum any conforming
+// sender uses. Taking the smaller of the two is safe in both directions and is
+// the whole rule:
+//
+//   * configured above the floor — 64, say — sizes on 18, which is the longest
+//     window that still catches the shortest conforming preamble. Raising this
+//     node's preamble lengthens what it transmits and changes nothing here.
+//   * configured below the floor — 6, say — sizes on 6. It has to: the driver
+//     refuses a sender preamble longer than the configured one with
+//     RADIOLIB_ERR_INVALID_PREAMBLE_LENGTH before it computes anything
+//     (PhysicalLayer.cpp:588-590), so passing 18 there would arm nothing. The
+//     shorter window is also the correct one to sleep for, and at 6 symbols it
+//     floors to zero and the mode never engages at all — which is right, since
+//     a node below the floor is already outside the interop guarantee.
+//
+// Both the published prediction and the arm call read this, once, so what the
+// node reports is what it armed. Pure, so test_radio_rx_arm pins the rule and
+// test_radio_duty_cycle pins it against the driver's own arithmetic.
+inline uint16_t sizingPreamble(uint16_t configuredSyms, uint16_t floorSyms) {
+  return configuredSyms < floorSyms ? configuredSyms : floorSyms;
 }
 
 // Whether that plan means startReceiveDutyCycleAuto() rather than

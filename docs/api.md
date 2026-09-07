@@ -69,10 +69,16 @@ past the checks on the way in.
 ### Duty-cycled receive
 
 `radio.rx_duty_cycle` (bool, **ships off**) asks the transceiver to sleep
-between preamble samples instead of listening continuously. The node's fixed
-18-symbol preamble is what makes that safe: the receiver wakes often enough to
-catch any conforming sender, and every RNode-lineage firmware shares the same
-preamble floor.
+between preamble samples instead of listening continuously. What makes that
+safe is the 18-symbol preamble floor every RNode-lineage firmware respects: the
+sleep window is sized so the receiver is awake inside the shortest preamble a
+conforming sender will transmit. It is sized on that floor and **not** on
+`radio.preamble` — raising this node's preamble lengthens what it transmits and
+leaves the sleep exactly where it was, because what the window must fit inside
+is the shortest preamble *other* nodes send. Setting `radio.preamble` below 18
+does shorten the window, since the driver will not expect a preamble longer
+than the radio is configured for, and at 6 symbols nothing is left to sleep
+through and the mode never engages.
 
 Three separate things decide whether it does anything, and the API reports each
 of them — plus the figure the verdict was computed from, and whether the mode is
@@ -84,7 +90,7 @@ running right now:
 | `radio.caps.rx_duty_cycle_supported` | capabilities | whether the fitted chip has the mode — SX1262 only |
 | `radio.rx_duty_cycle_would_engage` | read-back | whether this chip on this channel *could* sleep, ignoring the switch |
 | `radio.rx_duty_cycle_engages` | read-back | the same, narrowed by the switch: all three agree |
-| `radio.rx_duty_cycle_sleep_us` | read-back | how long per cycle, in microseconds; `0` = never |
+| `radio.rx_duty_cycle_sleep_us` | read-back | how long per cycle, in microseconds; `0` = never. Sized on the 18-symbol interop floor, so it moves with SF and bandwidth and not with `radio.preamble` |
 | `radio.rx_duty_cycle_armed` | read-back | whether the receiver is running the mode *right now* — the field that says the saving is actually being made |
 
 `_engages` is the one worth acting on; `_would_engage` is what tells a UI *why*
@@ -95,15 +101,15 @@ asked", not "this channel cannot".
 The driver falls back to a continuous receive, reporting success, whenever the
 sleep the channel yields is shorter than the chip's own wake-up transition —
 about 6 ms with the TCXO ramp these boards use. The sleep is
-`(preamble − 16) × symbol_time`, which with an 18-symbol preamble is two
-symbols: **at the shipped SF8/125 kHz channel it is 4096 µs against a 6016 µs
-threshold, so it does not engage and the receiver stays on.** It engages from a
-symbol time of roughly 3 ms — SF9 and above at 125 kHz, or a lower spreading
-factor at a narrower bandwidth. There is a ceiling as well as a floor: the sleep
-period reaches the chip as a 24-bit count of 15.625 µs ticks, so a channel slow
-enough to overflow it (SF12 at 7.8 kHz needs only a 516-symbol preamble) reports
-`engages: false` too — there the driver would arm nothing at all rather than
-falling back, so the node must not ask it.
+`(18 − 16) × symbol_time`, two symbols: **at the shipped SF8/125 kHz channel it
+is 4096 µs against a 6016 µs threshold, so it does not engage and the receiver
+stays on.** It engages from a symbol time of roughly 3 ms — SF9 and above at
+125 kHz, or a lower spreading factor at a narrower bandwidth — so `sf` and
+`bw_khz` are the only fields that move it. There is a ceiling as well as a
+floor: the sleep period reaches the chip as a 24-bit count of 15.625 µs ticks,
+about 262 s, and a period past it makes the driver arm nothing at all rather
+than fall back, so the node checks before asking. No channel can reach it with a
+two-symbol window — the slowest, SF12 at 7.8 kHz, sleeps about 1.05 s.
 
 The setting is accepted on every board, including the ones that cannot honour
 it, so a single export provisions a mixed fleet; the capability flag is what a

@@ -96,7 +96,8 @@
       listen-before-talk govern, and the node already does the latter. In both, this field is a budget of your own choosing rather than one
       being followed, and the local rules remain yours to know. When a budget is spent, packets wait in the queue instead of being dropped.<br>
       <b>Duty-cycled receive.</b> Off by default. With it on, an SX1262 sleeps between preamble samples instead of listening
-      continuously &mdash; the node's 18-symbol preamble is what makes that safe, so no conforming sender is missed. It is worth
+      continuously &mdash; the 18-symbol preamble floor every conforming sender respects is what makes that safe, and the sleep is sized
+      on that floor rather than on the preamble field above, so raising this node's preamble does not lengthen its sleep. It is worth
       something only when a symbol is long: the driver refuses to sleep for less than about 6 ms per cycle, which &mdash; with the two
       sleep symbols an 18-symbol preamble leaves &mdash; needs a symbol time of roughly 3 ms or more (SF9 and up at 125 kHz, or a lower
       spreading factor at a narrower bandwidth). At the default SF8/125 kHz it does nothing at all and the receiver stays on &mdash; the

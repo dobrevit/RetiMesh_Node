@@ -435,7 +435,13 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   // never disagree: what the chip and channel could do, and that narrowed by
   // what the operator asked for. A surface with only the second cannot say why
   // it is false, and with the setting shipping off that is every node.
-  const uint32_t rxDcSleepUs = Airtime::rxDutyCycleSleepUs(s.sf, s.bwKhz, s.preamble);
+  //
+  // Sized on the preamble the *network* guarantees, never on this node's own
+  // setting — see RadioRxArm::sizingPreamble(). Derived once, here: the same
+  // value goes into the prediction below and into the driver call armReceive()
+  // makes, so the published sleep is the sleep the chip was programmed with.
+  _rxArmPreamble = RadioRxArm::sizingPreamble(s.preamble, RF_PREAMBLE_SYMS);
+  const uint32_t rxDcSleepUs = Airtime::rxDutyCycleSleepUs(s.sf, s.bwKhz, _rxArmPreamble);
   const bool rxDcChannelOk = Airtime::rxDutyCycleEngages(rxDcSleepUs, kTcxoDelayUs);
   // One rule, asked twice — once as the node is configured, once with the
   // switch forced on — so the two published answers and the receiver's actual
@@ -457,8 +463,9 @@ void LoRaRadio::configureAirtime(const RadioSettings& s) {
   switch (_rxArmPlan) {
   case RadioRxArm::Plan::DutyCycled:
     log_i("duty-cycled receive: arming it — the receiver sleeps %lu us per cycle at "
-          "SF%u/%.1f kHz, preamble %u symbols",
-          (unsigned long)rxDcSleepUs, (unsigned)s.sf, (double)s.bwKhz, (unsigned)s.preamble);
+          "SF%u/%.1f kHz, sized on a sender preamble of %u symbols",
+          (unsigned long)rxDcSleepUs, (unsigned)s.sf, (double)s.bwKhz,
+          (unsigned)_rxArmPreamble);
     break;
   case RadioRxArm::Plan::ChannelUnsuitable:
     log_i("duty-cycled receive: on, but not on this channel — the %lu us sleep at SF%u/%.1f kHz "
@@ -975,11 +982,17 @@ void LoRaRadio::taskLoop() {
 // What to arm is RadioRxArm's rule, decided once per settings apply
 // (configureAirtime) rather than re-derived here. Two things about the call:
 //
-//   * the preamble goes in explicitly. Zero would make the driver substitute
-//     the configured preamble, which is the same figure — passing it is that
-//     said out loud, and it is the exact call shape Airtime's predicate claims
-//     to be valid for (Airtime.h). The minSymbols override is zero for the same
-//     reason: the driver's own per-SF default is what the prediction modelled.
+//   * the preamble goes in explicitly, and it is not this node's own. The
+//     argument is the *sender's* preamble (SX126x.h:333) — the shortest one the
+//     peers we mean to hear will transmit — so it is sized on the network's
+//     18-symbol floor rather than on radio.preamble, which an operator may set
+//     anywhere from 6 to 1000. Zero would make the driver substitute the
+//     configured preamble and sleep through a window no peer is obliged to
+//     fill. _rxArmPreamble is that figure, decided by RadioRxArm::sizingPreamble
+//     alongside the plan and used by the published prediction too, which is
+//     what makes this the exact call shape Airtime's predicate was answered
+//     about (Airtime.h). The minSymbols override is zero for the same reason:
+//     the driver's own per-SF default is what the prediction modelled.
 //   * a refusal is not survivable if it is ignored. The driver's rejection path
 //     returns before it stages any mode, so a node that treated the error as
 //     "no saving today" would be left in standby and deaf. The rule should keep
@@ -1002,7 +1015,7 @@ void LoRaRadio::armReceive() {
     // The test is the compiler's proof of that rather than a suspicion about
     // it: the mode is not on PhysicalLayer, so there is no generic call to make.
     const int16_t state = _sx1262
-        ? _sx1262->startReceiveDutyCycleAuto(_active.preamble, 0)
+        ? _sx1262->startReceiveDutyCycleAuto(_rxArmPreamble, 0)
         : RADIOLIB_ERR_UNSUPPORTED;
     accepted = (state == RADIOLIB_ERR_NONE);
     if (!accepted) {

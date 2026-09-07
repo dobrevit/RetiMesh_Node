@@ -22,7 +22,11 @@
 //   * armed being derived from the plan rather than from what the driver
 //     accepted. That is a node reporting a saving it is not making, which is
 //     the whole reason the field exists.
+//   * the sleep window sized on this node's own preamble instead of the one the
+//     network guarantees, which sleeps straight through a conforming peer's
+//     transmission while every surface reports the mode working.
 #include <unity.h>
+#include "Config.h"            // RF_PREAMBLE_SYMS — the floor the rule sizes on
 #include "RadioRxArmPolicy.h"
 
 // --- the four outcomes, one per reason --------------------------------------
@@ -140,6 +144,66 @@ static void test_the_switch_is_the_only_difference_between_the_two_read_backs() 
   }
 }
 
+// --- which preamble the window is sized on ----------------------------------
+
+// The defect this rule exists for. startReceiveDutyCycleAuto()'s first argument
+// is the *sender's* preamble, and the sleep is `sender - 2 * minSymbols`
+// symbols long. Sizing that on radio.preamble — a local setting this firmware
+// accepts from 6 to 1000 symbols — sleeps through a window no peer ever agreed
+// to fill: at 64 symbols the receiver dozes for 48 symbol times while a
+// conforming RNode-lineage peer sends 18, so its whole preamble fits inside the
+// window and the packet is never heard, on a node reporting the mode healthy.
+static void test_a_local_preamble_above_the_floor_sizes_on_the_floor() {
+  static const uint16_t kAbove[] = { 19, 24, 32, 64, 128, 516, 1000 };
+  for (size_t i = 0; i < sizeof(kAbove) / sizeof(kAbove[0]); i++) {
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(
+        RF_PREAMBLE_SYMS, RadioRxArm::sizingPreamble(kAbove[i], RF_PREAMBLE_SYMS),
+        "a longer local preamble must not lengthen the sleep: peers are only "
+        "obliged to send the floor");
+  }
+  // Exactly at the floor is the shipped node, and nothing changes for it.
+  TEST_ASSERT_EQUAL_UINT16(RF_PREAMBLE_SYMS,
+                           RadioRxArm::sizingPreamble(RF_PREAMBLE_SYMS, RF_PREAMBLE_SYMS));
+}
+
+// The other direction, and it is not symmetry for its own sake: RadioLib
+// refuses a sender preamble longer than the configured one outright
+// (RADIOLIB_ERR_INVALID_PREAMBLE_LENGTH, PhysicalLayer.cpp), so a node
+// configured below the floor cannot be handed the floor — it would arm nothing.
+// The shorter window is also the honest one to sleep for, and such a node is
+// outside the interop guarantee anyway.
+static void test_a_local_preamble_below_the_floor_sizes_on_itself() {
+  for (uint16_t cfg = 6; cfg < RF_PREAMBLE_SYMS; cfg++)
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(cfg, RadioRxArm::sizingPreamble(cfg, RF_PREAMBLE_SYMS),
+                                     "the driver refuses a sender preamble longer than the "
+                                     "configured one, so the floor cannot be used here");
+}
+
+// The two properties that make the choice safe, over the whole settings space
+// the validator accepts (SettingsRules.h: 6-1000 symbols). Never above the
+// configured preamble, or the arm call is refused and the receiver is left
+// unarmed; never above the floor, or the sleep can swallow a conforming
+// preamble.
+static void test_the_sizing_preamble_never_exceeds_either_bound() {
+  for (uint16_t cfg = 6; cfg <= 1000; cfg++) {
+    const uint16_t sized = RadioRxArm::sizingPreamble(cfg, RF_PREAMBLE_SYMS);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT16_MESSAGE(cfg, sized,
+        "a sender preamble past the configured one is refused before any arithmetic runs");
+    TEST_ASSERT_LESS_OR_EQUAL_UINT16_MESSAGE(RF_PREAMBLE_SYMS, sized,
+        "sleeping past the network floor is the missed-packet failure itself");
+  }
+}
+
+// And the floor itself, restated: RF_PREAMBLE_SYMS is RNode's
+// LORA_PREAMBLE_SYMBOLS_MIN, the number every conforming sender on this network
+// respects. Changing it changes how long every duty-cycled node sleeps, so it
+// does not get to move quietly.
+static void test_the_floor_is_the_rnode_preamble_minimum() {
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(18, (uint16_t)RF_PREAMBLE_SYMS,
+                                   "RF_PREAMBLE_SYMS is RNode's LORA_PREAMBLE_SYMBOLS_MIN "
+                                   "and the duty-cycle window is sized on it");
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -152,5 +216,9 @@ int main() {
   RUN_TEST(test_a_refused_arm_is_not_an_armed_receiver);
   RUN_TEST(test_the_continuous_plans_can_never_report_armed);
   RUN_TEST(test_the_switch_is_the_only_difference_between_the_two_read_backs);
+  RUN_TEST(test_a_local_preamble_above_the_floor_sizes_on_the_floor);
+  RUN_TEST(test_a_local_preamble_below_the_floor_sizes_on_itself);
+  RUN_TEST(test_the_sizing_preamble_never_exceeds_either_bound);
+  RUN_TEST(test_the_floor_is_the_rnode_preamble_minimum);
   return UNITY_END();
 }
