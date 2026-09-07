@@ -31,13 +31,12 @@
 namespace Diag {
 
 // Placed in RTC RAM and deliberately not zeroed at startup, so what the run
-// that just died wrote is still here: its length, and the marks a deliberate
-// restart left on its way out. A power cut or brownout drops the RTC domain
-// and leaves this as noise, which the magic detects.
-struct RtcRecord { uint32_t magic; uint32_t uptimeS; RestartMarks restart; };
-RTC_NOINIT_ATTR static RtcRecord sRtc;
-
-static const uint32_t kRtcMagic = 0x52544D32;   // "RTM2": the record grew the restart marks
+// that just died wrote is still here: its length, the marks a deliberate
+// restart left on its way out, and what it had failed to allocate. A power cut
+// or brownout drops the RTC domain and leaves this as noise, which the magic
+// detects. The layout and both decisions made about it are in BootRecord.h,
+// where the host tests can reach them.
+RTC_NOINIT_ATTR static Record sRtc;
 
 static Boot sBoot;
 
@@ -90,6 +89,23 @@ static std::atomic<uint32_t> sCaught{0};
 static uint32_t sLastAllocLogMs = 0;
 static constexpr uint32_t kAllocLogEveryMs = 5000;
 
+// Copy the live counts into the record that outlives the run. The atomics stay
+// authoritative — a count kept only in RTC memory would be incremented by every
+// task that can fail an allocation, and this has to be callable from a
+// new-handler, where taking a lock or allocating is not an option.
+//
+// Two tasks can land here at once. That is safe and deliberately not guarded:
+// each store is a single aligned 32-bit write of a value read from a
+// monotonically increasing atomic, so the worst interleaving writes a count
+// that was true a moment ago, and the next tick() corrects it. What must never
+// happen — a torn value, or a count going backwards past what the record
+// already holds — cannot, because nothing here reads the record to compute
+// what to write.
+static inline void mirrorFaults() {
+  sRtc.allocFailures = sAllocFailures.load(std::memory_order_relaxed);
+  sRtc.caught        = sCaught.load(std::memory_order_relaxed);
+}
+
 Faults faults() {
   Faults f;
   f.allocFailures = sAllocFailures.load();
@@ -100,6 +116,7 @@ Faults faults() {
 
 void noteCaught(const char* what, const char* why) {
   sCaught.fetch_add(1, std::memory_order_relaxed);
+  mirrorFaults();
   const uint32_t dram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   log_e("%s failed and was contained: %s — %lu B free / %lu B largest block of 8-bit "
         "internal RAM. That work was skipped; the node is still running",
@@ -118,6 +135,10 @@ static void onAllocationFailed() {
   sAllocFailures.fetch_add(1, std::memory_order_relaxed);
   const uint32_t now = millis();
   sAllocLastMs.store(now, std::memory_order_relaxed);
+  // Before the throw, not after: what this failure leads to may be the death
+  // that stops tick() ever running again, and then this store is the only
+  // record that the node was short of memory at all.
+  mirrorFaults();
   if (now - sLastAllocLogMs >= kAllocLogEveryMs || sAllocFailures.load() == 1) {
     sLastAllocLogMs = now;
     const uint32_t dram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -150,6 +171,9 @@ static void onTerminate() {
         (unsigned long)heap_caps_get_free_size(dram),
         (unsigned long)heap_caps_get_largest_free_block(dram),
         (unsigned long)sAllocFailures.load());
+  // The last thing this run does that the next one can read. abort() raises a
+  // panic, the panic ends the run, and RTC memory is what survives it.
+  mirrorFaults();
   Serial.flush();
   abort();
 }
@@ -171,19 +195,23 @@ void begin() {
                  r == ESP_RST_SW      || r == ESP_RST_DEEPSLEEP ||
                  r == ESP_RST_USB     || r == ESP_RST_JTAG);
 
-  if (sRtc.magic == kRtcMagic) {
-    sBoot.prevUptimeKnown = true;
-    sBoot.prevUptimeS     = sRtc.uptimeS;
-    if (sRtc.restart.entryMs) {
-      const RestartMarks m = sRtc.restart;
-      sBoot.lastRestart.toPersistMs = m.persistMs ? m.persistMs - m.entryMs : 0;
-      sBoot.lastRestart.toBootMs    = rtcMs() - (m.persistMs ? m.persistMs : m.entryMs);
-      sBoot.lastRestart.known       = true;
+  // Read before claiming: beginRun() below is what makes these unreadable, and
+  // doing it the other way round loses the evidence silently. The ordering is
+  // pinned by a host test (test_begin_run_makes_the_previous_run_unreadable).
+  const Previous prev = readPrevious(sRtc);
+  if (prev.known) {
+    sBoot.prevUptimeKnown   = true;
+    sBoot.prevUptimeS       = prev.uptimeS;
+    sBoot.prevAllocFailures = prev.allocFailures;
+    sBoot.prevCaught        = prev.caught;
+    if (prev.restartMarked) {
+      const RestartTiming t = restartTiming(prev.restart, rtcMs());
+      sBoot.lastRestart.toPersistMs = t.toPersistMs;
+      sBoot.lastRestart.toBootMs    = t.toBootMs;
+      sBoot.lastRestart.known       = t.known;
     }
   }
-  sRtc.magic   = kRtcMagic;
-  sRtc.uptimeS = 0;
-  sRtc.restart = RestartMarks{0, 0};
+  beginRun(sRtc);
 
   // One small NVS write per boot. This is the counter that tells a node which
   // has been up all week apart from one that has quietly been restarting.
@@ -213,6 +241,17 @@ void begin() {
   if (sBoot.lastRestart.known)
     log_i("last restart: %lu ms to the core's persist-restart, %lu ms from there to this boot",
           (unsigned long)sBoot.lastRestart.toPersistMs, (unsigned long)sBoot.lastRestart.toBootMs);
+
+  // The line this whole change exists to make possible. An unclean boot whose
+  // previous run had been failing allocations is a node that died of memory,
+  // and until now that could only be guessed at from a heap curve sampled
+  // minutes earlier. Said at warning level next to the reason, because it is
+  // the explanation for it; silent when the run before was clean, so the
+  // absence of this line means something too.
+  if (sBoot.prevUptimeKnown && (sBoot.prevAllocFailures || sBoot.prevCaught))
+    log_w("the run that just ended had %lu allocation failure(s) and contained %lu — "
+          "it was short of memory before it stopped",
+          (unsigned long)sBoot.prevAllocFailures, (unsigned long)sBoot.prevCaught);
 }
 
 const Boot& boot() { return sBoot; }
@@ -260,7 +299,14 @@ void cost(const char* what) {
   sCostMark = now;
 }
 
-void tick(uint32_t uptimeS) { sRtc.uptimeS = uptimeS; }
+// Every pass of the main loop, which is also the cadence the run length needs.
+// Mirroring here rather than only at the moment of failure is what covers the
+// ordinary case: a node whose allocations failed an hour before it finally died
+// of something else still reports them.
+void tick(uint32_t uptimeS) {
+  sRtc.uptimeS = uptimeS;
+  mirrorFaults();
+}
 
 RestartMarks& restartMarks() { return sRtc.restart; }
 uint32_t rtcMs() { return (uint32_t)(esp_rtc_get_time_us() / 1000); }

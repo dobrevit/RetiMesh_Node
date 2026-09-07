@@ -139,7 +139,8 @@ the ordinary reading on the shipped channel and needs no action.
   "identity": "69dd5082…", "destination": "8836929b…",
   "uptime_s": 1234, "heap_free": 180000, "heap_min_free": 178000, "psram_free": 2000000,
   "diag": { "boot": { "count": 12, "reason": 3, "reason_name": "panic or unhandled exception",
-                      "clean": false, "prev_uptime_s": 15132 },
+                      "clean": false, "prev_uptime_s": 15132,
+                      "prev_alloc_failures": 23, "prev_contained": 8 },
             "heap": { "free": 180000, "min_free": 178000, "largest_block": 110592, "psram_free": 2000000 },
             "stacks": { "loopTask": 3120, "rns": 6284, "radio": 2960, "gps": 1180 },
             "stack_lowest": 1180, "stack_lowest_task": "gps",
@@ -284,6 +285,25 @@ the evidence that the node lost power rather than crashed.
 A *present* `prev_uptime_s` of `0` means something different again: the run
 ended before the main loop ever ran, i.e. it died during startup. Repeated
 zeroes with a rising `boot.count` are a boot loop.
+
+`boot.prev_alloc_failures` and `boot.prev_contained` are how many allocations
+had already failed in the run that just ended, and how many of those failures
+were caught and contained rather than fatal. They ride across the restart in
+the same RTC record as `prev_uptime_s`, under the same rule: **absent, not
+zero**, when the rail dropped.
+
+These are the fields that explain a restart, and they exist because
+`diag.faults` cannot. `diag.faults` describes the run you are talking to now,
+so reading it after a panic tells you about the few seconds since the reboot,
+not about the hours before it — a node that died of memory exhaustion answers
+`"alloc_failures": 0` a minute later, every time. If `boot.clean` is false and
+`prev_alloc_failures` is non-zero, the node ran out of byte-addressable DRAM;
+if it is zero, the panic was something else and the coredump is the next place
+to look.
+
+`faults` is the *current* run: `alloc_failures`, `contained`, and
+`last_ms_ago` for the most recent one. Non-zero here on a node that is still
+answering is a node under pressure right now.
 
 `heap.largest_block` is the biggest single allocation still possible. The gap
 between it and `heap.free` is the fragmentation: an allocator reporting 60 KB

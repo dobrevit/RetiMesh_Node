@@ -299,6 +299,14 @@ static void doStatus() {
   const Diag::Boot& b = Diag::boot();
   dataf("STATUS", "uptime_s=%lu boot_count=%lu reset=\"%s\"", (unsigned long)(millis() / 1000),
         (unsigned long)b.count, b.reasonName);
+  // Why the run before ended, where it left anything to say. An unclean boot
+  // after a run that had been failing allocations is a node that died of
+  // memory rather than of logic, and this is the only place that answer
+  // survives the restart (Diag.h).
+  if (b.prevUptimeKnown && (b.prevAllocFailures || b.prevCaught))
+    dataf("STATUS", "prev_alloc_failures=%lu prev_contained=%lu prev_uptime_s=%lu",
+          (unsigned long)b.prevAllocFailures, (unsigned long)b.prevCaught,
+          (unsigned long)b.prevUptimeS);
   const Diag::Heap h = Diag::heap();
   dataf("STATUS", "heap_free=%lu heap_min=%lu largest_block=%lu psram_free=%lu",
         (unsigned long)h.freeInternal, (unsigned long)h.minFreeInternal,
