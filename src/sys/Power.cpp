@@ -31,12 +31,18 @@
 #include "GnssDutyPolicy.h"
 #include "Compass.h"
 #include "Imu.h"
+#include <atomic>
 
 namespace {
 Power::Profile sProfile = Power::Profile::Performance;
 // The other half of what the peripherals are told, beside the profile above.
-// False at boot because the screen is lit when begin() runs.
-bool sScreenDark = false;
+// False at boot because the screen is lit when begin() runs. Written on the
+// display task inside the section below and read from the GNSS task without
+// it; an atomic rather than a plain bool so that stays a deliberate choice
+// under link-time optimisation rather than one the compiler has been left
+// free to make differently. Relaxed: the value is the whole message, and the
+// section it is written under is there for update()'s latches, not for this.
+std::atomic<bool> sScreenDark{false};
 PeripheralPolicy sPeripherals;
 float    sVolts = 0;
 // One cadence for whichever battery reader this board has (SampleGate.h):
@@ -176,6 +182,12 @@ Profile profile() { return sProfile; }
 static_assert((uint8_t)Role::Unset     == GnssDutyPolicy::kRoleUnset,     "node role ordinals have drifted");
 static_assert((uint8_t)Role::Carried   == GnssDutyPolicy::kRoleCarried,   "node role ordinals have drifted");
 static_assert((uint8_t)Role::Transport == GnssDutyPolicy::kRoleTransport, "node role ordinals have drifted");
+// And the numbers themselves, not only that the two headers agree about them.
+// The three above catch one side moving; they say nothing about both sides
+// moving together, which is the renumbering that would keep every build green
+// while changing what a 1 already written into a deployed node's NVS means.
+static_assert((uint8_t)Role::Carried   == 1, "persisted node role ordinal");
+static_assert((uint8_t)Role::Transport == 2, "persisted node role ordinal");
 
 const char* roleName(Role r) {
   // Anything this build does not recognise reads back as "unset", which is
@@ -292,10 +304,10 @@ portMUX_TYPE sPeripheralMux = portMUX_INITIALIZER_UNLOCKED;
 
 void tellPeripherals(const bool* dark, const Power::Profile* prof) {
   taskENTER_CRITICAL(&sPeripheralMux);
-  if (dark) sScreenDark = *dark;
+  if (dark) sScreenDark.store(*dark, std::memory_order_relaxed);
   if (prof) sProfile    = *prof;
   const PeripheralPolicy::Change c [[maybe_unused]] =
-      sPeripherals.update(sScreenDark, (uint8_t)sProfile);
+      sPeripherals.update(sScreenDark.load(std::memory_order_relaxed), (uint8_t)sProfile);
   taskEXIT_CRITICAL(&sPeripheralMux);
 #if HAS_COMPASS
   if (c.compass != PeripheralPolicy::Verdict::Unchanged)
@@ -316,7 +328,7 @@ void onScreenBlank(bool dark) { tellPeripherals(&dark, nullptr); }
 // previous value one pass before the edge lands is a tenth of a second of a
 // receiver tracking, not a lost verdict — while taking the section here would
 // stop the scheduler on this core for that same reader.
-bool screenDark() { return sScreenDark; }
+bool screenDark() { return sScreenDark.load(std::memory_order_relaxed); }
 
 // How long the node waits, on its way to sleep, for the parts to stop. Twenty
 // loop passes at the drivers' own retry cadence and two hundred at the rate

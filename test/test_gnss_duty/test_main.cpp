@@ -29,6 +29,13 @@
 // What the verdict is carried out *with* is not here and is not faked: a
 // standby pin, a switched rail and a UBX message are three different pieces of
 // hardware and the only place they are proved is a bench.
+//
+// The arithmetic *around* the verdict is here, though, and the second half of
+// this file is it: which fix a resting node still reports, which fix earns the
+// next rest, when a screen's claim stops counting, and when a receiver that
+// has gone quiet is prodded. Each shipped as an expression inside the receiver
+// task, where exercising one meant sitting beside a board for five minutes and
+// watching what it said.
 #include <unity.h>
 #include <stdint.h>
 #include "../../src/sys/GnssDutyPolicy.h"
@@ -271,6 +278,195 @@ static void test_closing_a_nav_screen_earns_the_next_rest_afresh() {
 }
 
 // ---------------------------------------------------------------------------
+// What the rest does to the reported fix
+//
+// These are the driver's own arithmetic rather than the verdict — whether a
+// fix that has stopped being re-asserted is stale, and whether one counts
+// towards the next rest. They shipped as three inline expressions inside the
+// receiver task, where the only way to exercise them was to sit beside a board
+// for five minutes and watch what it reported.
+
+// The operator guarantee, stated as an assertion: a resting node reports the
+// position it last stood behind, for the whole length of the rest. The
+// receiver was told to stop talking, so its silence is evidence of nothing —
+// and a transport node's rest is thirty times the staleness timeout, so
+// without this suppression every rest would report "no fix" for twenty-nine
+// thirtieths of its length.
+static void test_a_fix_held_across_a_whole_rest_is_never_dropped() {
+  const uint32_t trackFrom = 10000;
+  const uint32_t lastFix   = 12000;            // the last sentence before the rest
+  for (uint32_t t = 0; t <= GnssDutyPolicy::kRestTransportMs; t += 100)
+    TEST_ASSERT_FALSE(GnssDutyPolicy::dropStaleFix(true, true, lastFix + t, lastFix, trackFrom));
+}
+
+// The wake gets the same grace a lost signal already gets. A receiver has to
+// be given a full timeout to say the first thing it says, or the pass after
+// every wake would throw the position away before the warm start had finished
+// — and on the boards where the wake is a rail coming back, before the module
+// has finished booting.
+static void test_a_fix_survives_the_grace_after_a_wake_with_no_new_sentence() {
+  const uint32_t woke    = 500000;
+  const uint32_t lastFix = 100000;             // long stale on its own terms
+  for (uint32_t t = 0; t < GnssDutyPolicy::kFixTimeoutMs; t += 100)
+    TEST_ASSERT_FALSE(GnssDutyPolicy::dropStaleFix(false, true, woke + t, lastFix, woke));
+}
+
+// And the other half, without which the first would be a receiver reporting an
+// hour-old position for ever: once the grace is up with nothing having
+// arrived, the fix goes.
+static void test_a_fix_stale_past_the_wake_grace_is_dropped() {
+  const uint32_t woke    = 500000;
+  const uint32_t lastFix = 100000;
+  TEST_ASSERT_TRUE(GnssDutyPolicy::dropStaleFix(
+      false, true, woke + GnssDutyPolicy::kFixTimeoutMs, lastFix, woke));
+}
+
+// A receiver that is still asserting its fix is never stale, however long the
+// node has been awake — the rule is about silence, not about age.
+static void test_a_fix_being_reasserted_is_never_stale() {
+  uint32_t now = 60000;
+  for (int i = 0; i < 1000; i++) {
+    TEST_ASSERT_FALSE(GnssDutyPolicy::dropStaleFix(false, true, now, now - 900, 0));
+    now += 1000;
+  }
+}
+
+// And nothing is dropped that was not standing in the first place: the flag is
+// the caller's, and this rule only ever clears it.
+static void test_a_fix_that_is_not_valid_is_never_dropped() {
+  TEST_ASSERT_FALSE(GnssDutyPolicy::dropStaleFix(false, false, 1000000, 0, 0));
+}
+
+static void test_the_staleness_rule_survives_the_millis_wrap() {
+  const uint32_t woke = 0xFFFFFFFFu - 2000;    // the wake lands just before zero
+  TEST_ASSERT_FALSE(GnssDutyPolicy::dropStaleFix(false, true, woke + 5000, woke, woke));
+  TEST_ASSERT_TRUE(GnssDutyPolicy::dropStaleFix(false, true, woke + 11000, woke, woke));
+}
+
+// The gate on what counts towards the *next* rest. After a rest the fix flag
+// still carries the position held through it; a stamp from before the wake
+// cannot answer whether the receiver has found the sky again, and feeding it
+// to update() would rest a receiver that has re-acquired nothing, for ever.
+static void test_only_a_fix_stamped_since_the_wake_counts_towards_the_next_rest() {
+  const uint32_t woke = 300000;
+  TEST_ASSERT_FALSE(GnssDutyPolicy::fixReacquired(true, woke - 1, woke));
+  TEST_ASSERT_TRUE(GnssDutyPolicy::fixReacquired(true, woke, woke));   // the wake instant itself
+  TEST_ASSERT_TRUE(GnssDutyPolicy::fixReacquired(true, woke + 1, woke));
+  TEST_ASSERT_FALSE(GnssDutyPolicy::fixReacquired(false, woke + 10000, woke));
+}
+
+// Across the wrap, where comparing the two stamps by order rather than by
+// difference would read every fix after the wake as one from before it — a
+// receiver that never rested again until the next wrap, seven weeks later.
+static void test_the_reacquired_gate_survives_the_millis_wrap() {
+  const uint32_t woke = 0xFFFFFFFFu - 100;
+  TEST_ASSERT_FALSE(GnssDutyPolicy::fixReacquired(true, woke - 1, woke));
+  TEST_ASSERT_TRUE(GnssDutyPolicy::fixReacquired(true, woke + 200, woke));   // past zero
+}
+
+// ---------------------------------------------------------------------------
+// The screen's claim, and when it stops counting
+
+// It expires rather than being cleared. Those screens are torn down from a
+// back arrow, the idle timer, a page walk and a shell teardown, and a flag
+// leaked by any one of them would hold the receiver awake for ever.
+static void test_a_nav_claim_expires_by_itself() {
+  const uint32_t painted = 40000;
+  TEST_ASSERT_TRUE(GnssDutyPolicy::navLit(false, painted, painted));
+  TEST_ASSERT_TRUE(GnssDutyPolicy::navLit(false, painted + GnssDutyPolicy::kNavClaimMs - 1, painted));
+  TEST_ASSERT_FALSE(GnssDutyPolicy::navLit(false, painted + GnssDutyPolicy::kNavClaimMs, painted));
+}
+
+// A dark screen says nothing however recently it painted, and a node that has
+// never painted one claims nothing at all.
+static void test_a_dark_screen_and_an_unpainted_one_claim_nothing() {
+  TEST_ASSERT_FALSE(GnssDutyPolicy::navLit(true, 40000, 40000));
+  TEST_ASSERT_FALSE(GnssDutyPolicy::navLit(false, 40000, 0));
+}
+
+// The window is bounded on both sides, and both bounds are load-bearing: it
+// has to outlive the slowest of those screens' own refresh timers — the sky
+// view repaints every two seconds — or a page still on the glass would read as
+// one that had gone, halfway between its own paints; and it has to expire
+// inside one settle, or closing a page would cost a rest.
+static void test_the_claim_outlives_a_screen_refresh_and_expires_inside_a_settle() {
+  TEST_ASSERT_TRUE(GnssDutyPolicy::kNavClaimMs > 2000);
+  TEST_ASSERT_TRUE(GnssDutyPolicy::kNavClaimMs <= GnssDutyPolicy::kSettleMs);
+}
+
+static void test_a_nav_claim_across_the_millis_wrap_still_expires() {
+  const uint32_t painted = 0xFFFFFFFFu - 1000;
+  TEST_ASSERT_TRUE(GnssDutyPolicy::navLit(false, painted + 2000, painted));
+  TEST_ASSERT_FALSE(GnssDutyPolicy::navLit(false, painted + GnssDutyPolicy::kNavClaimMs + 1, painted));
+}
+
+// ---------------------------------------------------------------------------
+// Prodding a receiver that ought to be talking
+
+// The board this exists for has no rail to power-cycle a module that missed
+// its wake, so a receiver gone quiet past the interval is prodded again — at
+// the interval, and not before it.
+static void test_a_silent_receiver_is_nudged_at_the_interval_and_not_sooner() {
+  const uint32_t heard = 100000;
+  const uint32_t kN    = GnssDutyPolicy::kNudgeMs;
+  TEST_ASSERT_FALSE(GnssDutyPolicy::nudgeDue(false, true, heard + kN - 100, heard, 0));
+  TEST_ASSERT_TRUE(GnssDutyPolicy::nudgeDue(false, true, heard + kN, heard, 0));
+}
+
+// And not twice inside one interval. The stamp of the byte just sent is the
+// second half of the rule: without it a receiver quiet for a minute would be
+// prodded on every one of the six hundred passes in it.
+static void test_a_nudge_is_not_repeated_inside_its_own_interval() {
+  const uint32_t sent = 200000;
+  const uint32_t kN   = GnssDutyPolicy::kNudgeMs;
+  TEST_ASSERT_FALSE(GnssDutyPolicy::nudgeDue(false, true, sent + kN - 100, 1000, sent));
+  TEST_ASSERT_TRUE(GnssDutyPolicy::nudgeDue(false, true, sent + kN, 1000, sent));
+}
+
+// Never while resting: that silence is the arrangement working, and a byte
+// sent into it would end the rest this node has just asked for.
+static void test_a_resting_receiver_is_never_nudged() {
+  for (uint32_t t = 0; t <= GnssDutyPolicy::kRestTransportMs; t += 1000)
+    TEST_ASSERT_FALSE(GnssDutyPolicy::nudgeDue(true, true, 100000 + t, 1000, 0));
+}
+
+// And never at all where this run has not asked a receiver to stop. This is
+// what "left unset, nothing behaves differently" actually means on the one
+// board where the ask is a message: those pins are the case's expansion
+// connector on the variant that fits no receiver, so a node that never rests
+// must not start transmitting onto them. An hour of it, since the failure this
+// guards is a byte every five seconds for ever.
+static void test_a_receiver_that_was_never_asked_to_stop_is_never_nudged() {
+  for (uint32_t t = 0; t < 3600000u; t += 5000)
+    TEST_ASSERT_FALSE(GnssDutyPolicy::nudgeDue(false, false, 100000 + t, 1000, 0));
+}
+
+// Quiet since when: the last sentence, or the wake, whichever is later. The
+// pass right after a wake must not count the rest that has just ended as
+// silence — the receiver has not had a character-time to answer in, and the
+// wake byte has only just gone out.
+static void test_the_quiet_is_measured_from_the_wake_not_from_before_the_rest() {
+  const uint32_t heardBeforeTheRest = 10000;
+  const uint32_t woke = heardBeforeTheRest + GnssDutyPolicy::kRestTransportMs;
+  TEST_ASSERT_EQUAL_UINT32(woke, GnssDutyPolicy::quietSince(heardBeforeTheRest, woke));
+  TEST_ASSERT_EQUAL_UINT32(woke, GnssDutyPolicy::quietSince(0, woke));          // nothing ever heard
+  TEST_ASSERT_EQUAL_UINT32(woke + 3000, GnssDutyPolicy::quietSince(woke + 3000, woke));
+  // Which is exactly what holds the byte back on the pass after the wake...
+  TEST_ASSERT_FALSE(GnssDutyPolicy::nudgeDue(
+      false, true, woke + 100, GnssDutyPolicy::quietSince(heardBeforeTheRest, woke), woke));
+  // ...and lets it go once the receiver has stayed silent an interval past it.
+  TEST_ASSERT_TRUE(GnssDutyPolicy::nudgeDue(
+      false, true, woke + GnssDutyPolicy::kNudgeMs,
+      GnssDutyPolicy::quietSince(heardBeforeTheRest, woke), woke));
+}
+
+static void test_the_quiet_stamp_survives_the_millis_wrap() {
+  const uint32_t woke = 0xFFFFFFFFu - 500;
+  TEST_ASSERT_EQUAL_UINT32(woke, GnssDutyPolicy::quietSince(woke - 100000, woke));
+  TEST_ASSERT_EQUAL_UINT32(woke + 800, GnssDutyPolicy::quietSince(woke + 800, woke));  // past zero
+}
+
+// ---------------------------------------------------------------------------
 // Arithmetic that has to survive the fleet running for months
 
 // millis() wraps every 49.7 days and these nodes are meant to run longer than
@@ -337,6 +533,24 @@ int main() {
   RUN_TEST(test_a_lit_nav_screen_holds_a_transport_node_tracking_too);
   RUN_TEST(test_opening_a_nav_screen_ends_a_rest_at_once);
   RUN_TEST(test_closing_a_nav_screen_earns_the_next_rest_afresh);
+  RUN_TEST(test_a_fix_held_across_a_whole_rest_is_never_dropped);
+  RUN_TEST(test_a_fix_survives_the_grace_after_a_wake_with_no_new_sentence);
+  RUN_TEST(test_a_fix_stale_past_the_wake_grace_is_dropped);
+  RUN_TEST(test_a_fix_being_reasserted_is_never_stale);
+  RUN_TEST(test_a_fix_that_is_not_valid_is_never_dropped);
+  RUN_TEST(test_the_staleness_rule_survives_the_millis_wrap);
+  RUN_TEST(test_only_a_fix_stamped_since_the_wake_counts_towards_the_next_rest);
+  RUN_TEST(test_the_reacquired_gate_survives_the_millis_wrap);
+  RUN_TEST(test_a_nav_claim_expires_by_itself);
+  RUN_TEST(test_a_dark_screen_and_an_unpainted_one_claim_nothing);
+  RUN_TEST(test_the_claim_outlives_a_screen_refresh_and_expires_inside_a_settle);
+  RUN_TEST(test_a_nav_claim_across_the_millis_wrap_still_expires);
+  RUN_TEST(test_a_silent_receiver_is_nudged_at_the_interval_and_not_sooner);
+  RUN_TEST(test_a_nudge_is_not_repeated_inside_its_own_interval);
+  RUN_TEST(test_a_resting_receiver_is_never_nudged);
+  RUN_TEST(test_a_receiver_that_was_never_asked_to_stop_is_never_nudged);
+  RUN_TEST(test_the_quiet_is_measured_from_the_wake_not_from_before_the_rest);
+  RUN_TEST(test_the_quiet_stamp_survives_the_millis_wrap);
   RUN_TEST(test_a_rest_across_the_millis_wrap_ends_on_time);
   RUN_TEST(test_a_fix_first_seen_at_time_zero_still_settles);
   RUN_TEST(test_a_day_of_a_fixed_node_is_mostly_rest);

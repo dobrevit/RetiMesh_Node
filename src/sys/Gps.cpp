@@ -19,6 +19,7 @@
 #include <freertos/semphr.h>
 #include <sys/time.h>
 #include <time.h>
+#include <atomic>
 #include "Diag.h"
 #include "Lock.h"
 #include "Watchdog.h"
@@ -28,12 +29,15 @@ namespace {
 // The longest sentence we care about is well under this. Anything longer is
 // discarded rather than truncated, so a partial line can never be parsed.
 const uint16_t NMEA_MAX      = 100;
-// A fix is reported stale rather than wrong once the receiver stops
-// reasserting it.
-const uint32_t FIX_TIMEOUT   = 10000;
 // The receiver's clock is far better than ours, but re-adopting it every
 // sentence would be pointless churn.
 const uint32_t SYNC_INTERVAL = 3600000;
+// How often a port that did not come back is re-opened. The failure this
+// serves is a UART driver that could not be installed (openPort below), which
+// is a memory condition rather than a wiring one, so retrying costs a driver
+// install every five seconds until it succeeds — not once per pass, which
+// would be a hundred a second and a log line with each.
+const uint32_t PORT_RETRY_MS = 5000;
 
 HardwareSerial   sSerial(1);
 SemaphoreHandle_t sLock = nullptr;
@@ -59,18 +63,21 @@ bool             sResting = false;
 // receiver was allowed to look again, and the reported fix is given the same
 // grace after a rest that it already gets after a lost signal.
 uint32_t         sTrackFromMs = 0;
-// When a screen whose purpose is showing position last painted.
-uint32_t         sNavViewMs = 0;
-// Longer than the slowest of those screens' refresh timers — the sky view runs
-// at two seconds — so a page still on the glass is never mistaken for one that
-// has gone; short enough that a page that has gone releases the receiver
-// inside one settle window.
-const uint32_t   NAV_CLAIM_MS = 5000;
+// When a screen whose purpose is showing position last painted. Written on the
+// display task and read on this one, so it is an atomic rather than a plain
+// word that happens to be aligned: relaxed, because nothing is published
+// alongside it — the value *is* the message — and stating that is what stops
+// a link-time optimiser hoisting the read out of the reader's loop.
+std::atomic<uint32_t> sNavViewMs{0};
+// When the port was last opened, or last tried. See openPort().
+uint32_t         sLastPortTryMs = 0;
 #if GPS_NAP == GPS_NAP_PMREQ
-// How long a receiver that ought to be talking may stay silent before it is
-// nudged again — see the nudge itself, below.
-const uint32_t   NUDGE_MS = 5000;
 uint32_t         sLastNudgeMs = 0;
+// Whether this run has actually asked the receiver to stop — which on this
+// board means a power-management request has gone out. It gates the nudge:
+// with nothing ever asked there is nothing to recover from, and a board whose
+// receiver socket is empty runs those pins out to an expansion connector.
+bool             sEverAsked = false;
 // The interval the current rest is worth, handed to the receiver as its own
 // backstop timer — see the message's own comment for why it is not zero.
 uint32_t         sRestMs = 0;
@@ -239,8 +246,40 @@ void parse(const char* s, uint16_t len) {
 // carries. 0xFF is chosen for being the start of nothing: it is neither a
 // sentence's '$' nor a UBX preamble, so a receiver that was awake all along
 // discards it without half-parsing anything.
-void wakeNudge() { sSerial.write((uint8_t)0xFF); }
+//
+// The stamp is taken here rather than at the call sites, so the interval the
+// repeat below keeps is measured from every byte this file sends and not only
+// from the repeats' own.
+void wakeNudge() {
+  sSerial.write((uint8_t)0xFF);
+  sLastNudgeMs = millis();
+}
 #endif
+
+// Opens the receiver's port, and says whether it came back.
+//
+// HardwareSerial::begin() returns void: on failure it logs inside the core,
+// leaves its uart_t null and goes on answering available() with 0 for ever —
+// a receiver that is permanently silent for a reason nothing outside the core
+// could see. operator bool() is uartIsDriverInstalled(), which is the answer
+// nothing here used to ask for. It matters most where the port is torn down
+// and rebuilt on a schedule — the switched-rail board reopens it at the end of
+// every rest, on a part with no PSRAM — because there a failed install is not
+// something the next boot comes along to fix.
+bool openPort() {
+  sLastPortTryMs = millis();
+  sSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+  const bool up = (bool)sSerial;
+  // On the way into the fault only, not once per retry. The reader tries again
+  // every five seconds for as long as the receiver is enabled, and seventeen
+  // thousand identical lines a day would bury whatever else the log had to
+  // say; the recovery announces itself at the call site.
+  if (!up && !sFix.portFault)
+    log_e("GNSS UART1 did not open (rx %d tx %d @ %d baud) — retrying every %us",
+          PIN_GPS_RX, PIN_GPS_TX, GPS_BAUD, (unsigned)(PORT_RETRY_MS / 1000));
+  sFix.portFault = !up;
+  return up;
+}
 
 // Carry a verdict to the receiver. *Which* mechanism a board gets was decided
 // once, in Config.h (GPS_NAP); this function is those answers and nothing
@@ -272,12 +311,19 @@ void applyRest(bool rest) {
   // transmit line driving high into an unpowered receiver pushes current
   // through that part's protection diodes, which is how something that is
   // supposed to be off ends up half on.
+  //
+  // Which makes the reopen a driver install on every wake — 256 B of receive
+  // ring, a twenty-entry event queue and the driver's own object, freed and
+  // reallocated once a minute on the one board here with no PSRAM. That is
+  // survivable (the same sizes are asked for each time, so the block just
+  // freed is the block taken) but it is not guaranteed, and begin() has no way
+  // to say so. openPort() asks; the reader retries what did not come back.
   if (rest) {
     sSerial.end();
     Pmu::gpsPower(false);
   } else {
     Pmu::gpsPower(true);
-    sSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+    openPort();
   }
 #elif GPS_NAP == GPS_NAP_PMREQ
   // t-deck. No enable line, no standby line, no switched rail: the receiver's
@@ -292,7 +338,13 @@ void applyRest(bool rest) {
   if (rest) {
     uint8_t frame[Ubx::kPmreqFrame];
     const size_t n = Ubx::pmreqBackup(sRestMs, Ubx::kWakeUartRx, frame, sizeof(frame));
-    if (n) sSerial.write(frame, n);
+    if (n) {
+      sSerial.write(frame, n);
+      // From here on this run has something to recover from, so the repeat
+      // below is allowed to prod a receiver that stays quiet. Before it, the
+      // port stays as silent as it was before this milestone.
+      sEverAsked = true;
+    }
   } else {
     wakeNudge();
   }
@@ -331,6 +383,19 @@ void task(void*) {
         Sys::Lock held(sLock);
         const bool on = sFix.enabled;
         if (on) {
+          // A port that did not come back reads as a receiver that has nothing
+          // to say — for ever, since available() answers 0 on a driver that
+          // was never installed and nothing else here would ever reopen it.
+          // Before the read, so a pass that succeeds here still reads on it.
+          // On its own clock rather than the pass's, which is taken after the
+          // read below: every stamp `now` is compared against is written
+          // *inside* that read, so a `now` from before it would run backwards
+          // on any pass that parsed a sentence.
+          if (sFix.portFault) {
+            const uint32_t tried = millis();
+            if (tried - sLastPortTryMs >= PORT_RETRY_MS && openPort())
+              log_i("GNSS UART1 back");
+          }
           // Bounded per pass so a chatty receiver cannot monopolise the task.
           // 9600 baud is under 1 KB/s, and this runs ten times a second.
           uint16_t budget = 256;
@@ -347,13 +412,12 @@ void task(void*) {
           }
           const uint32_t now = millis();
           // Drop a stale fix rather than reporting a position the receiver no
-          // longer stands behind — unless the silence is ours. A receiver that
-          // has been told to stop talking, or that has only just been told it
-          // may start again, is not a receiver that has lost its fix, and
-          // reporting one as the other would throw away the position that is
-          // still this node's best answer for the whole length of every rest.
-          const bool ourSilence = sResting || now - sTrackFromMs < FIX_TIMEOUT;
-          if (!ourSilence && sFix.valid && now - sLastFixMs >= FIX_TIMEOUT) sFix.valid = false;
+          // longer stands behind — unless the silence is ours. The rule, and
+          // the argument for it, are GnssDutyPolicy's: this is the schedule's
+          // own arithmetic, and it is pinned on the host with the schedule
+          // rather than being three lines that only ever run beside a board.
+          if (GnssDutyPolicy::dropStaleFix(sResting, sFix.valid, now, sLastFixMs, sTrackFromMs))
+            sFix.valid = false;
           sFix.ageMs = sFix.sentences ? now - sLastSentenceMs : 0;
 
           // Whether the receiver may stop looking (GnssDutyPolicy.h). Asked on
@@ -362,18 +426,15 @@ void task(void*) {
           // have to be locked against this one anyway.
           GnssDutyPolicy::State st;
           st.role = (uint8_t)Power::role();
-          // Not sFix.valid on its own. After a rest that flag still carries
-          // the position held before it, and the question here is whether the
-          // receiver has found itself *again* since it was allowed to look —
-          // which a fix stamped before the rest cannot answer. Without this a
-          // receiver that never re-acquires would rest for ever on the
-          // strength of a fix it held an hour ago.
-          st.fix = sFix.valid && (int32_t)(sLastFixMs - sTrackFromMs) >= 0;
-          // "Somebody is looking at where this node is": a position screen
-          // painting recently, and the glass actually lit. The screen state is
+          // Not sFix.valid on its own: the question is whether the receiver
+          // has found itself *again* since it was allowed to look.
+          st.fix = GnssDutyPolicy::fixReacquired(sFix.valid, sLastFixMs, sTrackFromMs);
+          // "Somebody is looking at where this node is". The screen state is
           // Power's — one answer to that question in the firmware — rather
-          // than a second copy kept here.
-          st.navLit = !Power::screenDark() && sNavViewMs && now - sNavViewMs < NAV_CLAIM_MS;
+          // than a second copy kept here; the claim's own expiry is the
+          // schedule's, beside the rest it defers.
+          st.navLit = GnssDutyPolicy::navLit(Power::screenDark(), now,
+                                             sNavViewMs.load(std::memory_order_relaxed));
 
           const bool rest = sDuty.update(now, st) == GnssDutyPolicy::Verdict::Rest;
           if (rest != sResting) {
@@ -394,20 +455,27 @@ void task(void*) {
           }
 #if GPS_NAP == GPS_NAP_PMREQ
           // A receiver in backup mode says nothing, and the only thing that
-          // ends that is an edge on its receive line. If a wake was missed —
-          // or if the module was left in backup by a previous run, which the
-          // processor's own reset does not undo — the node would otherwise
-          // count sentences for ever without seeing one. So a receiver that
-          // ought to be talking and is not gets nudged again: one byte every
-          // five seconds, which is also harmless on a board whose receiver
-          // socket is empty.
-          if (!sResting) {
-            const uint32_t quietSince = sLastSentenceMs ? sLastSentenceMs : sTrackFromMs;
-            if (now - quietSince >= NUDGE_MS && now - sLastNudgeMs >= NUDGE_MS) {
-              sLastNudgeMs = now;
-              wakeNudge();
-            }
-          }
+          // ends that is an edge on its receive line. If a wake was missed the
+          // node would otherwise count sentences for ever without seeing one,
+          // and this board has no rail to power-cycle it with — so a receiver
+          // that ought to be talking and is not gets prodded again, one byte
+          // every five seconds.
+          //
+          // Only where this run has actually asked one to stop. The pins are
+          // this board's Grove connector on the variant that fits no receiver,
+          // and a node whose role does not duty-cycle never asks anything to
+          // stop at all: on either of those the port must stay exactly as
+          // silent as it was before this milestone, which is what the
+          // settings page and the documentation both promise. A module left in
+          // backup by a *previous* run is covered without a byte from here —
+          // every request this firmware sends carries the rest's own duration
+          // as a backstop, so such a module is awake again within one rest
+          // interval whatever this run does (UbxFrame.h argues that at length).
+          if (GnssDutyPolicy::nudgeDue(
+                  sResting, sEverAsked, now,
+                  GnssDutyPolicy::quietSince(sLastSentenceMs, sTrackFromMs),
+                  sLastNudgeMs))
+            wakeNudge();
 #endif
         }
         held.release();
@@ -486,7 +554,7 @@ void setEnabled(bool on) {
     pinMode(PIN_GPS_RST, OUTPUT);
     digitalWrite(PIN_GPS_RST, !GPS_RST_ACTIVE);
 #endif
-    sSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+    openPort();
     sFix.enabled = true;
     // The duty cycle starts from nothing on every switch-on: a receiver that
     // has just been given its rail back has found nothing yet, whatever the
@@ -495,12 +563,15 @@ void setEnabled(bool on) {
     sResting = false;
     sTrackFromMs = millis();
 #if GPS_NAP == GPS_NAP_PMREQ
-    // And it may have been left in backup mode by a previous run — resetting
-    // the processor does not reach the receiver, and the only way out is an
-    // edge on its receive line. One byte, unconditionally, is cheaper than the
-    // alternative: a board that counts sentences for ever without seeing one.
-    sLastNudgeMs = millis();
-    wakeNudge();
+    // Nothing is sent here. This used to write one byte unconditionally, to
+    // wake a module a previous run might have left in backup — but a receiver
+    // in backup is one this firmware put there, and every request it sends
+    // carries the rest's own duration as a backstop, so such a module wakes by
+    // itself within one rest interval. Sending the byte anyway cost a node
+    // with no receiver fitted — where these pins are the case's expansion
+    // connector — a transmission onto a port it had never driven before.
+    sEverAsked = false;
+    sLastNudgeMs = 0;
 #endif
     if (sTaskHandle) xTaskNotifyGive(sTaskHandle);
     log_i("GNSS receiver on (UART1 rx %d tx %d @ %d baud)", PIN_GPS_RX, PIN_GPS_TX, GPS_BAUD);
@@ -509,6 +580,9 @@ void setEnabled(bool on) {
     sFix.enabled = false;
     sDuty = GnssDutyPolicy();
     sResting = false;
+#if GPS_NAP == GPS_NAP_PMREQ
+    sEverAsked = false;
+#endif
     resetState();
     log_i("GNSS receiver off");
   }
@@ -536,9 +610,10 @@ void navViewPainted() {
   // No lock and no read-modify-write: one 32-bit store, written on the display
   // task and read on the receiver's. A claim that lands one pass late costs a
   // tenth of a second of tracking, which is not worth a mutex on the path a
-  // screen repaints from.
+  // screen repaints from. Relaxed and not merely plain, so that stays true of
+  // a build with link-time optimisation rather than by luck.
   const uint32_t now = millis();
-  sNavViewMs = now ? now : 1;      // zero is this file's "never claimed"
+  sNavViewMs.store(now ? now : 1, std::memory_order_relaxed);   // 0 is "never"
 }
 
 size_t skyView(Sv* out, size_t max) {

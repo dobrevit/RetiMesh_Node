@@ -57,7 +57,11 @@ enum class Profile : uint8_t { Performance = 0, Balanced = 1, Battery = 2 };
 //              upgrading a fleet that never asked for any of this a no-change.
 //              It is also what an unrecognised value means — a role written by
 //              a later build and read back by an older one — so the same branch
-//              covers both.
+//              covers both. Reading, that is: SettingsRules rejects a stored
+//              role above the highest this build knows, exactly as it does the
+//              power profile, so a node downgraded while carrying a future
+//              role behaves safely but refuses every transport settings change
+//              until the role is rewritten to one this build recognises.
 //   Carried    a handheld: it moves, somebody looks at its screen, and its
 //              position is worth having reasonably fresh.
 //   Transport  a fixed installation: it does not move, usually nobody is

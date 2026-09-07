@@ -349,13 +349,18 @@ report `false` and infer presence from the voltage.
 `gps` appears on boards with a receiver:
 `{"enabled":true,"fix":true,"quality":1,"satellites":7,"sentences":1204,
 "clock_set":true,"utc":"2026-08-26 21:04:11","resting":false,
-"position_public":false}`.
+"port_fault":false,"position_public":false}`.
 Those fields say whether the receiver is working, and `clock_set` says the
 node adopted its UTC for the system clock. `resting` is true while the
 receiver has been told it may stop looking because the node holds a fix and
 its role says the answer stays good for a while — the position beside it is
 the one it last stood behind, `fix` stays true, and the age goes on counting.
 See [configuration.md](configuration.md#the-node-role-and-the-gnss-duty-cycle-transportnode_role).
+`port_fault` is true when the receiver's serial port could not be opened at
+all — a driver the ESP32 failed to install, not a receiver that has nothing to
+say. It is the difference between "enabled, zero sentences" meaning an antenna
+indoors and meaning nothing is listening; the node keeps retrying every five
+seconds and clears the flag when the port comes back.
 
 The coordinates (`latitude`, `longitude`, `altitude_m`, `hdop`, `speed_kmh`)
 are **not** public: this endpoint needs no credentials and the access point may

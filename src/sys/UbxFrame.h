@@ -79,11 +79,14 @@
 //                                  is an edge on the UART RX pin"
 //                                 bit 5 extint0, bit 6 extint1, bit 7 spics
 //
-//  Note the bit numbers: uartrx is bit **3** and extint0 is bit **5** in this
-//  generation. They are not the same as the older M8 tables, which is exactly
-//  the kind of constant this file exists to stop anyone quoting from memory.
-//  §3.3.2 also settles the reserved field: reserved elements "must be set to
-//  zero in input messages".
+//  Note the bit numbers: uartrx is bit **3** and extint0 is bit **5**, which
+//  is not the order they are listed in and is exactly the kind of constant
+//  this file exists to stop anyone quoting from memory. They are quoted from
+//  the section above and nowhere else — no contrast with another generation is
+//  offered, because there is none to draw: the same numbering appears in the
+//  M8 tables, and inventing a difference would only invite a later reader to
+//  "correct" one of them. §3.3.2 also settles the reserved field: reserved
+//  elements "must be set to zero in input messages".
 //
 //  What could not be established here, and is a bench question
 //  -----------------------------------------------------------
@@ -125,7 +128,7 @@ constexpr size_t  kPmreqFrame = kOverhead + kPmreqLen;   // 24 bytes on the wire
 constexpr uint32_t kPmreqBackup = 1u << 1;
 constexpr uint32_t kPmreqForce  = 1u << 2;
 
-// §3.16.6, wakeupSources. Bit numbering is this generation's, not M8's.
+// §3.16.6, wakeupSources, quoted from that table.
 constexpr uint32_t kWakeUartRx  = 1u << 3;
 constexpr uint32_t kWakeExtInt0 = 1u << 5;
 constexpr uint32_t kWakeExtInt1 = 1u << 6;

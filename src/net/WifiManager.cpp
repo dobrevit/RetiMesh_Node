@@ -2022,6 +2022,11 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // setting). Reported beside the fix because without it a satellite count
     // frozen for five minutes reads as a fault.
     gps["resting"]    = g.resting;
+    // And the one reading here that is a fault rather than a state: the
+    // receiver's UART could not be opened, so no sentence can arrive however
+    // long anybody waits. Without it "enabled, zero sentences" is the same
+    // report as an antenna indoors.
+    gps["port_fault"] = g.portFault;
     gps["utc"]        = g.utc;
     // Everything above says whether the receiver is working. Where the node
     // physically is says something else, and /api/status is public — on an

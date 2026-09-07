@@ -54,6 +54,15 @@
 //  no-change for the fleet, and what makes a role added by a later firmware
 //  and then downgraded away fail safe rather than fail quiet.
 //
+//  That last clause is about *reading*, and only about reading. Writing is
+//  narrower: SettingsRules rejects a stored role above the highest this build
+//  knows, exactly as it does for the power profile — so a node downgraded onto
+//  a firmware that has never heard of its role goes on behaving safely, but
+//  refuses every transport settings change until the role is rewritten to one
+//  this build recognises. That is the deliberate trade (an unknown number must
+//  not become a *different* role the day a later firmware defines it), and it
+//  is worth knowing before reading "safe to read here" as "safe".
+//
 //  The cadences, and where each number comes from
 //  ---------------------------------------------
 //  kSettleMs — how long a fix has to stand before it counts as found. Every
@@ -79,6 +88,17 @@
 //  half of that is the case the first rule already covers better: with no fix
 //  there is no rest, so a receiver that cannot see the sky simply keeps
 //  looking, and one that locks immediately pays only kSettleMs.
+//
+//  What a rest does to the rest of the driver
+//  ------------------------------------------
+//  Four more decisions hang off this schedule, and every one of them is
+//  arithmetic over scalars rather than anything to do with a port: whether a
+//  fix that has stopped being re-asserted is stale or merely quiet because we
+//  told it to be; whether a fix counts towards the *next* rest; whether
+//  anybody is actually looking at a position; and whether a receiver that
+//  ought to be talking should be prodded again. They are stated here, beside
+//  the schedule they belong to, so they are pinned on the host with it rather
+//  than only ever executed on a bench beside one board.
 //
 //  Pure — no Arduino, no driver, no port, no clock of its own: the caller
 //  passes the time in. So the schedule is pinned on the host
@@ -111,6 +131,21 @@ public:
   static constexpr uint32_t kRestCarriedMs    = 60000;
   static constexpr uint32_t kRestTransportMs  = 300000;
 
+  // A fix is reported stale rather than wrong once the receiver stops
+  // re-asserting it. Every receiver here reports at 1 Hz, so ten seconds is
+  // ten missed assertions rather than one late one.
+  static constexpr uint32_t kFixTimeoutMs     = 10000;
+  // How long one paint of a position screen holds the receiver awake. Longer
+  // than the slowest of those screens' own refresh timers — the sky view runs
+  // at two seconds — so a page still on the glass is never mistaken for one
+  // that has gone; short enough that a page that *has* gone releases the
+  // receiver inside one settle window, so closing it costs no rest.
+  static constexpr uint32_t kNavClaimMs       = 5000;
+  // How long a receiver that ought to be talking may stay silent before it is
+  // prodded again. One receiver-second of margin over the 1 Hz every part here
+  // reports at, four times over.
+  static constexpr uint32_t kNudgeMs          = 5000;
+
   // What the node's state is, whole, on every ask. The caller passes all of it
   // rather than the edge it noticed, so no input can be left holding a value
   // from a state that has since moved.
@@ -134,6 +169,80 @@ public:
     return role == kRoleTransport ? kRestTransportMs
          : role == kRoleCarried   ? kRestCarriedMs
          :                          0;
+  }
+
+  // --- what the rest does to everything around it --------------------------
+  //
+  // Every one of these is a function of the caller's scalars and nothing else,
+  // and every comparison in them is on a difference of two stamps rather than
+  // on their order, so the 49.7-day millis() wrap costs them nothing either.
+
+  // Whether the receiver's silence is this node's own doing. One that has been
+  // told to stop talking, or one that has only just been told it may start
+  // again, is not one that has lost its fix. `trackFromMs` is when the current
+  // tracking window began — the wake, or the switch-on.
+  static constexpr bool ourSilence(bool resting, uint32_t nowMs, uint32_t trackFromMs) {
+    return resting || nowMs - trackFromMs < kFixTimeoutMs;
+  }
+
+  // Whether a fix still flagged valid should now be dropped as stale. The
+  // suppression above is the whole of the operator guarantee that a resting
+  // node keeps reporting its last position instead of pretending it lost one:
+  // without it every rest longer than the timeout would report "no fix" for
+  // its whole length, which is both wrong and the opposite of what resting is
+  // for. The wake gets the same grace a lost signal already gets, so a
+  // receiver has a full timeout to say the first thing it says.
+  static constexpr bool dropStaleFix(bool resting, bool fixValid, uint32_t nowMs,
+                                     uint32_t lastFixMs, uint32_t trackFromMs) {
+    return fixValid && !ourSilence(resting, nowMs, trackFromMs) &&
+           nowMs - lastFixMs >= kFixTimeoutMs;
+  }
+
+  // Whether the receiver has found itself *again* since it was allowed to
+  // look. This, and not a valid flag on its own, is what update()'s `fix`
+  // should be fed: after a rest that flag still carries the position held
+  // before it, and a fix stamped before the rest cannot answer the question.
+  // Without it a receiver that never re-acquires would rest for ever on the
+  // strength of a fix it held an hour ago.
+  static constexpr bool fixReacquired(bool fixValid, uint32_t lastFixMs,
+                                      uint32_t trackFromMs) {
+    return fixValid && (int32_t)(lastFixMs - trackFromMs) >= 0;
+  }
+
+  // "Somebody is looking at where this node is": a position screen painted
+  // recently, and the glass actually lit. A claim that expires rather than a
+  // flag somebody has to clear — those screens are torn down four different
+  // ways and a flag leaked by any one of them would hold the receiver awake
+  // for ever. `navPaintedMs` zero is the caller's "never claimed".
+  static constexpr bool navLit(bool screenDark, uint32_t nowMs, uint32_t navPaintedMs) {
+    return !screenDark && navPaintedMs && nowMs - navPaintedMs < kNavClaimMs;
+  }
+
+  // Since when a receiver has had nothing to say: its last sentence, or the
+  // instant it was allowed to look, whichever is later — and the latter alone
+  // before it has ever said anything (`lastSentenceMs` zero). Later of the
+  // two, because a rest is silence by arrangement: measuring from the last
+  // sentence alone would have the first pass after a wake count the whole rest
+  // as a fault and prod a receiver that has not had a character-time to
+  // answer in.
+  static constexpr uint32_t quietSince(uint32_t lastSentenceMs, uint32_t trackFromMs) {
+    if (!lastSentenceMs) return trackFromMs;
+    return (int32_t)(lastSentenceMs - trackFromMs) >= 0 ? lastSentenceMs : trackFromMs;
+  }
+
+  // Whether a receiver that ought to be talking should be prodded again. On
+  // the one board where the ask is a message rather than a pin there is no
+  // rail to power-cycle a module that failed to hear its wake, so a receiver
+  // that has gone quiet past the interval is nudged — but only where this run
+  // has actually asked one to stop (`everAsked`: a power-management request
+  // has gone out since switch-on). Not asked, nothing to recover from: a node
+  // whose role does not duty-cycle, or a board with an empty receiver socket,
+  // must not transmit anything it would not have transmitted before this file
+  // existed. Never while resting, which is the silence working.
+  static constexpr bool nudgeDue(bool resting, bool everAsked, uint32_t nowMs,
+                                 uint32_t quietSinceMs, uint32_t lastNudgeMs) {
+    if (resting || !everAsked) return false;
+    return nowMs - quietSinceMs >= kNudgeMs && nowMs - lastNudgeMs >= kNudgeMs;
   }
 
   // One pass. Call it as often as is convenient — the answer is a function of

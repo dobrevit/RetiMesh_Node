@@ -1062,12 +1062,17 @@ void Display::paintRadio() {
 void Display::paintGps() {
   // The mono boards' position page, and the same claim the colour shell's
   // screens make: while this page is the one being painted the receiver keeps
-  // looking.
+  // looking. Straight to Gps rather than through the shell's Ui::navPainted(),
+  // and that is not an oversight: this painter runs only where the shell is
+  // down (see setBlank), so there is no idle clock that could be sitting over
+  // it — and paint() has already returned on a blanked panel.
   Gps::navViewPainted();
   Gps::Fix g = Gps::fix();
   char line[DisplayLayout::rowBytes()];
-  header(!g.enabled ? "GNSS off" : g.resting ? "GNSS rest"
-                                : g.valid    ? "GNSS fix" : "GNSS scan");
+  header(!g.enabled   ? "GNSS off"
+       : g.portFault  ? "GNSS fault"
+       : g.resting    ? "GNSS rest"
+       : g.valid      ? "GNSS fix" : "GNSS scan");
   if (!g.enabled) {
     _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("Receiver powered down");
     _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print("Enable on the settings");
@@ -1084,7 +1089,9 @@ void Display::paintGps() {
   } else {
     snprintf(line, sizeof(line), "%lu sentences", (unsigned long)g.sentences);
     _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
-    _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(g.sentences ? "waiting for a fix" : "no data from module");
+    _gfx->setCursor(0, DisplayLayout::rowY(2));
+    _gfx->print(g.portFault  ? "port did not open"
+              : g.sentences  ? "waiting for a fix" : "no data from module");
   }
   if (g.timeValid) { _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print(g.utc + 11); _gfx->print(g.clockSet ? " UTC sync" : " UTC"); }
   else             { _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print("no time yet"); }

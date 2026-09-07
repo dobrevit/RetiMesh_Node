@@ -183,7 +183,11 @@ Three rules bound all of that, and they are why the feature is safe to leave on:
 - **A position screen on the glass holds it tracking.** The GNSS page, the sky
   view, the bearing dial and the plot each say so while they are painting, and
   a blanked screen says nothing — so opening one of those ends a rest within a
-  screen paint, in any role.
+  screen paint, in any role. The idle clock says nothing either: it is drawn
+  *over* whichever page was open, which goes on refreshing underneath it, and a
+  page nobody can see is not a page anybody is reading. So a colour board left
+  on the GNSS page starts resting when the clock arrives rather than when the
+  panel finally blanks, four timeouts later.
 - **Every rest is earned again.** A fix has to stand for five seconds *after*
   the receiver was allowed to look again before the next rest is taken, so a
   receiver that stops re-acquiring degrades to continuous tracking rather than
@@ -199,7 +203,7 @@ with a receiver are affected at all:
 
 | Board | Receiver | Rested with |
 |---|---|---|
-| `t-deck` (Plus) | u-blox MIA-M10Q | `UBX-RXM-PMREQ` backup over the UART, woken by a byte on the same line — the only off-switch this board has: no enable line, no standby line, no switched rail. The request also carries the rest's own length as a backstop, so a module that never hears the wake byte comes back by itself rather than needing the board power-cycled |
+| `t-deck` (Plus) | u-blox MIA-M10Q | `UBX-RXM-PMREQ` backup over the UART, woken by a byte on the same line — the only off-switch this board has: no enable line, no standby line, no switched rail. The request also carries the rest's own length as a backstop, so a module that never hears the wake byte comes back by itself rather than needing the board power-cycled. A receiver that stays silent after a wake is prodded again every five seconds — but only where this run has actually asked one to stop, so an `unset` node, or the plain T-Deck whose 43/44 are the case's Grove connector rather than a receiver, drives that port exactly as it did before this setting existed |
 | `heltec-v4` | Quectel L76K (expansion kit) | the standby line (GPIO 40), which the firmware already drives high to force the receiver awake |
 | `thinknode-m9` | ATGM336H | the standby line (GPIO 10), likewise |
 | `tbeam` | u-blox NEO-6M/8M | the power-management chip's GPS rail — a real cut, and the board's own backup supply keeps the almanac so a wake is a warm start |

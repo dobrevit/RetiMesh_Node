@@ -63,6 +63,13 @@ struct Fix {
   // position beside this is the one it last stood behind and is not being
   // refreshed; ageMs goes on counting, which is the honest reading.
   bool     resting   = false;
+  // The receiver's UART could not be opened. HardwareSerial::begin() returns
+  // void and a driver it failed to install answers available() with 0 for
+  // ever, so without this the board is indistinguishable from one whose
+  // receiver has nothing to say — and the boards that reopen the port on a
+  // duty cycle would stay that way until somebody toggled the setting. The
+  // reader retries while this stands; it is a fault report, not a state.
+  bool     portFault = false;
   char     utc[20]   = "";         // "YYYY-MM-DD HH:MM:SS"
 };
 

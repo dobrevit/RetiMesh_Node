@@ -193,8 +193,11 @@ static void test_a_short_buffer_writes_nothing() {
 // §3.16.6's constants, as named here. Their being wrong is the one failure
 // that looks exactly like a receiver that does not support the message, so
 // they are asserted rather than trusted — and the bit numbers in particular:
-// uartrx is bit 3 and extint0 is bit 5 in the M10 tables, which is not what
-// the older M8 documentation says.
+// uartrx is bit 3 and extint0 is bit 5, which is neither consecutive nor the
+// order the table lists them in. Against the M10 interface description this
+// firmware was written from, and against nothing else: the M8 tables number
+// them the same way, so a test that claimed a difference would be teaching a
+// future reader something untrue.
 static void test_the_message_identifiers_and_bits_are_the_m10_ones() {
   TEST_ASSERT_EQUAL_UINT8(0x02, Ubx::kClassRxm);
   TEST_ASSERT_EQUAL_UINT8(0x41, Ubx::kIdPmreq);
