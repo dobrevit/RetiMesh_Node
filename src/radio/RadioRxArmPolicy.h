@@ -122,7 +122,7 @@ inline Plan decide(bool settingOn, bool chipCapable, bool channelEngages) {
 // is the *sender's*: "Expected preamble length of the messages to receive"
 // (SX126x.h:333), and PhysicalLayer::calculateRxDutyCycle sleeps through
 // `senderPreambleLength - 2 * minSymbols` symbols of it
-// (PhysicalLayer.cpp:600). Handing it our own setting says "every peer
+// (PhysicalLayer.cpp:611). Handing it our own setting says "every peer
 // transmits at least as long a preamble as I do", which is a claim about other
 // people's radios that nothing entitles us to make: radio.preamble is an
 // operator setting this firmware accepts anywhere from 6 to 1000 symbols
@@ -143,7 +143,7 @@ inline Plan decide(bool settingOn, bool chipCapable, bool channelEngages) {
 //   * configured below the floor — 6, say — sizes on 6. It has to: the driver
 //     refuses a sender preamble longer than the configured one with
 //     RADIOLIB_ERR_INVALID_PREAMBLE_LENGTH before it computes anything
-//     (PhysicalLayer.cpp:588-590), so passing 18 there would arm nothing. The
+//     (PhysicalLayer.cpp:589-591), so passing 18 there would arm nothing. The
 //     shorter window is also the correct one to sleep for, and at 6 symbols it
 //     floors to zero and the mode never engages at all — which is right, since
 //     a node below the floor is already outside the interop guarantee.
