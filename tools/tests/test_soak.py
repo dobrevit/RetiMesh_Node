@@ -70,15 +70,28 @@ def _mocked_node(body):
 
 class SampleReadsThePreviousRun(unittest.TestCase):
     def test_a_dropped_rtc_domain_leaves_the_columns_blank_not_zero(self):
-        # The firmware omits these keys entirely when the RTC domain did not
-        # hold. Recording 0 here would report a power cut as a clean run.
-        with _mocked_node(_status(prev_uptime_s=None)):
+        # The firmware *omits* these keys when the RTC domain did not hold —
+        # WifiManager only writes them under `if (b.prevKnown)`. The mock has to
+        # omit them too: a JSON null is a different shape, and testing against
+        # the shape the node never sends would let a regression through on the
+        # one it does. Recording 0 here reports a power cut as a clean run.
+        with _mocked_node(_status()):
             row = soak.sample("node")
-        del row["ts"]
         self.assertEqual(row["reachable"], 1)
+        self.assertNotIn("prev_uptime_s", _status()["diag"]["boot"])   # the premise
         self.assertEqual(row["prev_alloc_failures"], "")
         self.assertEqual(row["prev_contained"], "")
         self.assertNotEqual(row["prev_alloc_failures"], 0)
+
+    def test_an_explicit_null_is_not_recorded_as_zero_either(self):
+        # Not a shape this firmware emits, but the CSV must not turn one into a
+        # clean run if a future build or a proxy ever produces it.
+        with _mocked_node(_status(prev_uptime_s=None,
+                                  prev_alloc_failures=None, prev_contained=None)):
+            row = soak.sample("node")
+        for k in ("prev_uptime_s", "prev_alloc_failures", "prev_contained"):
+            self.assertIn(row[k], ("", None), f"{k} was {row[k]!r}")
+            self.assertNotEqual(row[k], 0)
 
     def test_the_figures_are_recorded_when_the_firmware_reports_them(self):
         with _mocked_node(_status(prev_uptime_s=15132,

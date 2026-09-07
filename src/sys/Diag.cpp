@@ -101,17 +101,28 @@ static constexpr uint32_t kAllocLogEveryMs = 5000;
 // happen — a torn value, or a count going backwards past what the record
 // already holds — cannot, because nothing here reads the record to compute
 // what to write.
-// Written through volatile lvalues. The plain stores were already correct in
-// practice — single aligned 32-bit writes to uncached RTC memory — but two
-// things were true only by luck: concurrent plain writes to one object are a
-// data race in the abstract machine, and nothing obliged the compiler to emit
-// the store in onTerminate() before abort(). Volatile costs nothing here and
-// turns both from observations into guarantees.
+//
+// The stores go through __atomic_store_n rather than through plain or
+// volatile lvalues. Plain stores were correct on the hardware and wrong in the
+// language: concurrent writes to one object are a data race whatever the
+// silicon does, and a race is undefined behaviour rather than a stale read.
+// Volatile does not fix that — it forbids the compiler from eliding or
+// reordering the access, which is a different guarantee, and one that leaves
+// the race exactly where it was. A relaxed atomic store is the thing that
+// actually makes concurrent writers defined, costs the same single aligned
+// instruction on both targets, and additionally obliges the compiler to emit
+// the store in onTerminate() before abort().
+//
+// The builtins are used instead of std::atomic on the members so `Record`
+// stays a trivially-constructible POD. That is not a style choice: the struct
+// is a persisted layout in RTC_NOINIT_ATTR memory, read by the *next* boot and
+// by other firmware versions, and it must have no constructor to run and no
+// representation the compiler is free to change.
 static inline void mirrorFaults() {
-  volatile uint32_t* const allocs = &sRtc.allocFailures;
-  volatile uint32_t* const caught = &sRtc.caught;
-  *allocs = sAllocFailures.load(std::memory_order_relaxed);
-  *caught = sCaught.load(std::memory_order_relaxed);
+  __atomic_store_n(&sRtc.allocFailures,
+                   sAllocFailures.load(std::memory_order_relaxed), __ATOMIC_RELAXED);
+  __atomic_store_n(&sRtc.caught,
+                   sCaught.load(std::memory_order_relaxed), __ATOMIC_RELAXED);
 }
 
 Faults faults() {
@@ -192,6 +203,12 @@ void begin() {
   // any failed allocation overwrites the dead run's counts. claimRun() reads
   // and claims in one call so the two cannot be sequenced wrongly here, and
   // doing it before the handlers exist means there is no window at all.
+  // Read and written plainly here, and that is safe for the one reason that
+  // matters: begin() is the first thing setup() calls, before any task this
+  // firmware creates exists and before the handlers that write the record are
+  // installed. There is no second writer yet, so no race for an atomic to
+  // resolve — which is also why readPrevious() can stay a pure function the
+  // host tests can reach.
   const Previous prev = claimRun(sRtc);
 
   std::set_new_handler(onAllocationFailed);
