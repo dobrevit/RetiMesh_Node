@@ -12,8 +12,8 @@ each of them is a place to get it wrong by hand:
                 invocation in this checkout needs
   the manifest  `fw_sign.py sign`, which has to be told the board, the version,
                 and the size of the slot the image will be written into
-  the bundle    `fw_sign.py bundle`, so an operator carries one file rather
-                than a manifest and an image that nothing pairs together
+  the bundle    `fw_sign.py bundle`, written as `.rmfw` because that is what
+                the portal's upload control will let an operator pick
 
 The three arguments worth automating are exactly the three that are silent when
 wrong:
@@ -285,7 +285,12 @@ def main():
             die(f"{env}: image is {size} bytes, larger than the {slot}-byte slot")
 
         manifest = out_dir / f"{env}-{version}.manifest.bin"
-        bundle = out_dir / f"{env}-{version}.ota"
+        # .rmfw, not .ota. The portal's file picker filters on it
+        # (data/settings.html: accept=".rmfw"), the node stages it under that
+        # name (OtaUpdate.h: STAGING_PATH), and fw_sign.py's own usage line
+        # writes update.rmfw. A bundle with any other suffix is correct in
+        # every byte and still cannot be selected in the browser.
+        bundle = out_dir / f"{env}-{version}.rmfw"
         run([sys.executable, str(FW_SIGN), "sign",
              "--image", str(image), "--board", env, "--version", version,
              "--key", args.key, "--delegation", args.delegation,
