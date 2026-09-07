@@ -114,10 +114,17 @@ static void test_a_blank_suspends_both() {
 // long press and the deep-sleep path, and more than one of those can arrive
 // with the panel already dark. Each re-issue would be two register writes on
 // a bus another task is using.
+//
+// A thousand of them, not a handful. The cycle test below alternates its
+// input, so it can only prove that the latches stay in step; nothing there
+// repeats an input, and a latch that decayed — or one that answered on a count
+// rather than on the value — would be caught by neither five repeats nor any
+// number of alternations. A dark node left dark is also the ordinary state of
+// a deployed one: it is the case the latch has to survive for hours.
 static void test_a_blank_while_already_blanked_re_issues_nothing() {
   PeripheralPolicy pol;
   (void)pol.update(kDark, kPerformance);
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 1000; i++) {
     const PeripheralPolicy::Change c = pol.update(kDark, kPerformance);
     TEST_ASSERT_EQUAL(Verdict::Unchanged, c.compass);
     TEST_ASSERT_EQUAL(Verdict::Unchanged, c.imu);
@@ -147,7 +154,8 @@ static void test_a_wake_while_already_lit_re_issues_nothing() {
   }
 }
 
-// A handheld does this all day.
+// A handheld does this all day. Alternating only — what a repeated input does
+// is the test above's job.
 static void test_a_hundred_cycles_stay_in_step() {
   PeripheralPolicy pol;
   for (int i = 0; i < 100; i++) {

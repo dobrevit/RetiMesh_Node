@@ -230,18 +230,40 @@ namespace {
 // The broadcast. Both things that decide what a peripheral off the data path
 // should be doing — the screen and the profile — come through here, so the
 // rule (PeripheralPolicy.h) is asked in one place and each part is told only
-// when the answer for it actually moved.
+// when the answer for it actually moved. `dark` and `prof` are whichever of
+// the two inputs this event moved; the other is passed null and left as it
+// stands, read inside the section below rather than at the call site.
 //
-// Every call below is guarded by the part's own board switch, so the seven
-// boards carrying neither compile this down to the policy's own arithmetic and
-// gain nothing to run. Both calls only record what the part is wanted to do;
-// each part's own owner writes it, and on the board that carries both the main
-// loop applies the accelerometer's first — which is the order that matters,
-// since the magnetometer reads it for gravity and must neither ask an
+// Under a critical section, because three tasks reach this and the state it
+// walks is not one flag. The display task arrives on a screen edge; the main
+// loop arrives on a settings commit from the console or from LXMF; the
+// async_tcp task arrives on a transport POST from the portal. update() is a
+// read-modify-write on its own latches, so two of those interleaved inside it
+// could hand one part a verdict and lose the other's, or issue the same
+// verdict twice — and sScreenDark is a plain bool written on one task and read
+// on another. The blast radius is small, since the next screen edge
+// re-converges, but a settings POST landing on a blank is precisely the moment
+// this milestone exists for. Same shape as recordHistory() below, and for the
+// same reason.
+//
+// The setRunning() calls stay outside it: each only stores a flag, and nothing
+// that is not this state belongs inside a section that stops the scheduler on
+// this core. Every one of them is guarded by the part's own board switch, so
+// the ten boards carrying neither compile this down to the policy's own
+// arithmetic and the section around it — 160 bytes of flash and no RAM,
+// measured on heltec-v3, which carries neither part. On the board that carries
+// both, the main loop applies the accelerometer's first — the order that
+// matters, since the magnetometer reads it for gravity and must neither ask an
 // accelerometer that has just gone away nor be woken before one.
-void tellPeripherals() {
+portMUX_TYPE sPeripheralMux = portMUX_INITIALIZER_UNLOCKED;
+
+void tellPeripherals(const bool* dark, const Power::Profile* prof) {
+  taskENTER_CRITICAL(&sPeripheralMux);
+  if (dark) sScreenDark = *dark;
+  if (prof) sProfile    = *prof;
   const PeripheralPolicy::Change c [[maybe_unused]] =
       sPeripherals.update(sScreenDark, (uint8_t)sProfile);
+  taskEXIT_CRITICAL(&sPeripheralMux);
 #if HAS_COMPASS
   if (c.compass != PeripheralPolicy::Verdict::Unchanged)
     Compass::setRunning(c.compass == PeripheralPolicy::Verdict::Run);
@@ -253,24 +275,59 @@ void tellPeripherals() {
 }
 } // namespace
 
-void onScreenBlank(bool dark) {
-  sScreenDark = dark;
-  tellPeripherals();
+void onScreenBlank(bool dark) { tellPeripherals(&dark, nullptr); }
+
+// How long the node waits, on its way to sleep, for the parts to stop. Twenty
+// loop passes at the drivers' own retry cadence and two hundred at the rate
+// the loop actually runs, so a loop that is running at all lands the verdict
+// in the first few milliseconds; the cap is there for the loop that is not.
+constexpr uint32_t kSleepSettleMs = 200;
+
+void prepareForSleep() {
+  // setBlank(true) reached the parts through onScreenBlank() above, and both
+  // of them only recorded the request: the register writes land in
+  // Compass::poll() and Imu::poll(), on the main loop. Nothing used to wait
+  // for them, and nothing had to — esp_deep_sleep_start() follows within
+  // microseconds on a board whose charger has nothing to say (HAS_BQ25896 0,
+  // which is the M9's case), so the loop task almost certainly never ran.
+  // Deep sleep then holds the pins as they stand and the peripheral rail stays
+  // up, so the magnetometer went on converting at 200 Hz with maximum
+  // oversampling through a menu item named "off".
+  //
+  // Spun on rather than signalled: running() is a flag each driver writes on
+  // its own task once its own write succeeded, so this reads no register,
+  // takes no lock either driver uses and adds nothing to the bus the loop is
+  // busy with. Both answer false while absent, so a board with neither part
+  // leaves this loop on its first test.
+  const uint32_t start = millis();
+  while ((Compass::running() || Imu::running()) && millis() - start < kSleepSettleMs)
+    vTaskDelay(pdMS_TO_TICKS(5));
+  if (Compass::running() || Imu::running())
+    log_w("power: %s%s%s still converting %u ms after the screen went dark — sleeping "
+          "anyway, and deep sleep will hold it that way",
+          Compass::running() ? "the magnetometer" : "",
+          (Compass::running() && Imu::running()) ? " and " : "",
+          Imu::running() ? "the accelerometer" : "", (unsigned)kSleepSettleMs);
+  // And the one flush that is worth a write to flash: after this the rail may
+  // not be there at all. Deliberately here and not on every blank — the screen
+  // goes dark every twenty seconds on a handheld (Compass.cpp). Ordered after
+  // the wait so the part that owns those extremes has stopped sampling them.
+  Compass::flush();
 }
 
 void apply(Profile p) {
-  sProfile = p;
+  // The profile lands inside the broadcast's critical section, because it is
+  // one of that broadcast's two inputs and three tasks reach it. It moves no
+  // sensor verdict today and the policy's test says so; it is asked anyway, so
+  // that the day a profile does move one there is no second call site to
+  // remember and no part left in the state the previous profile chose.
+  tellPeripherals(nullptr, &p);
   switch (p) {
     case Profile::Battery:  setCpuFrequencyMhz(80);  break;
     case Profile::Balanced: setCpuFrequencyMhz(160); break;
     default:                setCpuFrequencyMhz(240); break;
   }
   applyWifiSleep();
-  // The profile is the broadcast's other input. It moves no sensor verdict
-  // today and the policy's test says so; it is asked anyway, so that the day
-  // a profile does move one there is no second call site to remember and no
-  // part left in the state the previous profile chose.
-  tellPeripherals();
   log_i("power profile: %s (CPU %u MHz, Wi-Fi sleep %s)", profileName(p), (unsigned)getCpuFrequencyMhz(),
         p == Profile::Performance ? "off" : p == Profile::Battery ? "max" : "min");
 }

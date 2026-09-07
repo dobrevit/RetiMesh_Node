@@ -29,8 +29,12 @@
 //
 //  The rule for which part follows which lives here, once, and Power's
 //  broadcast (Power::onScreenBlank) asks it. Two subsystems have subscribed so
-//  far, the magnetometer and the accelerometer; both are fitted on two boards
-//  out of nine, and both calls are guarded so the other seven gain nothing.
+//  far, the magnetometer and the accelerometer, fitted between them on two of
+//  the twelve boards in boards.json; both calls are guarded, so what the other
+//  ten pay is 160 bytes of flash, no RAM at all and a spinlock taken on a
+//  screen edge — measured on heltec-v3, which carries neither part and is the
+//  tightest board here. (An earlier version of this text said nine boards and
+//  seven; both were wrong, and so was the byte figure quoted with them.)
 //
 //  The rule
 //  --------
@@ -122,6 +126,12 @@ public:
   // caller passes the whole state rather than the edge, so a broadcast raised
   // for one input re-checks the other and no subscriber can be left holding a
   // verdict from a state that has since changed.
+  //
+  // That each field is fed from its own rule is not observable by any test
+  // while compassRuns() and imuRuns() compute the same boolean: swap the two
+  // lines below and every assertion still passes. It is checked by reading,
+  // and it starts checking itself the day the two rules part company — which
+  // is the day it would begin to matter.
   Change update(bool screenDark, uint8_t profile) {
     Change c;
     const bool compass = compassRuns(screenDark, profile);

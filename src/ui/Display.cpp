@@ -195,6 +195,13 @@ void Display::displayTask(void* self) {
         // ship mode if the charger answers; the deepest sleep the chip has
         // otherwise, with the user button as the way back.
         d->setBlank(true);
+        // setBlank() only *told* the sensors, on this task; they write their
+        // registers from the main loop, and everything below here either stops
+        // that loop or freezes the pins with it. So wait for the verdicts to
+        // land — bounded, a fifth of a second at worst — and flush what the
+        // rail would otherwise take with it. Before ship mode, because ship
+        // mode opens the battery FET.
+        Power::prepareForSleep();
         Bq25896::shipMode();
         esp_sleep_enable_ext1_wakeup(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
         esp_deep_sleep_start();
@@ -207,6 +214,13 @@ void Display::displayTask(void* self) {
     {
       static uint32_t lastImuMs = 0;
       static Imu::Facing lastF = Imu::Facing::Unknown;
+      // The `!_blank` below is a shortcut, not the rule. Whether the part runs
+      // at all while the screen is dark is PeripheralPolicy's decision and
+      // PeripheralPolicy.h is where it is stated; Imu::facing() already answers
+      // Unknown for a suspended part, so this line only saves the asking. If
+      // the two ever disagree the policy wins: deleting this line costs one
+      // bus read a second and changes nothing else, deleting the policy's rule
+      // leaves the part converting for a panel nobody is looking at.
       if (!d->_blank && now - lastImuMs >= 1000) {   // a dark panel needs no orienting
         lastImuMs = now;
         const Imu::Facing f = Imu::facing();

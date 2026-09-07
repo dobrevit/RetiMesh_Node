@@ -64,13 +64,30 @@ Profile profile();
 // that has nothing to do while nobody is looking: today the magnetometer and
 // the accelerometer, on the two boards that carry them. What each part does
 // with it is that part's own decision — both record the request and write it
-// on the task that owns their bus — so this is safe from any task and costs
-// nothing on a board with neither part fitted.
+// from their own poll(), on the main loop — so this is safe from any task and
+// costs nothing on a board with neither part fitted.
+//
+// Deferred because it keeps each part's register writes on one task and the
+// drivers idempotent, not because writing from here would corrupt somebody
+// else's transaction: TwoWire locks a transaction end to end, and the window
+// the bus really leaves open is on the read side, where I2cReg drains the
+// receive buffer after the lock has gone (Imu.cpp says which boards that
+// exposes). This call itself only stores flags.
 //
 // The rule for which part follows the screen and which follows the profile
 // lives in PeripheralPolicy.h; apply() below re-asks it, so a profile change
 // and a screen change are the same broadcast rather than two.
 void onScreenBlank(bool dark);
+
+// The node is about to stop: deep sleep, or the charger's ship mode, both
+// reached from the power menu with the panel already blanked. Deep sleep holds
+// the pins as they stand, so a part still converting when it starts goes on
+// converting, off the same cell, behind a menu item named "off" — and
+// onScreenBlank() above has only recorded the request. This waits, bounded,
+// for the parts to have actually stopped, and flushes what would otherwise be
+// lost with the rail. Blocking, up to a fifth of a second; call it from the
+// task that is about to sleep the node, after the screen has gone dark.
+void prepareForSleep();
 
 const char* profileName(Profile p);
 bool profileFromName(const char* name, Profile& out);

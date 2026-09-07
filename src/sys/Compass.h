@@ -73,19 +73,42 @@ Reading read();
 // While the screen is dark nothing reads a heading, and a magnetometer left
 // converting continuously is paying for readings nobody collects.
 //
-// A request, not the write. Every I2C transaction to this part is issued from
-// the main loop — poll() here, read() from the console — and the screen state
-// that decides this arrives on the display task, on the other core, whose
-// transactions on the same bus are not ordered against these. So the wanted
-// mode is recorded from wherever, and written at the top of the next poll(),
-// which is a loop pass away. Safe from any task; idempotent; a no-op until
-// begin() has found the part.
+// A request, not the write: the wanted mode is recorded from wherever, and
+// written at the top of the next poll(), a loop pass away. Safe from any task;
+// idempotent; a no-op until begin() has found the part.
+//
+// Not because a cross-task write would corrupt a transaction — an earlier
+// draft of this comment said so and it is not true. CONFIG_DISABLE_HAL_LOCKS
+// is unset on both chips this firmware builds for, so TwoWire holds a lock
+// across a transaction: beginTransmission takes it, endTransmission(true)
+// gives it back, and endTransmission(false) deliberately keeps it through the
+// requestFrom that follows (Wire.cpp). Two tasks cannot interleave their
+// address and register bytes.
+//
+// What the bus object does not protect is the receive buffer: I2cReg::read and
+// readN drain it with bus.read() *after* requestFrom has released the lock, so
+// two tasks *reading* one bus can each take some of the other's bytes. That
+// makes reads the hazard, and the board carrying this part reads its main bus
+// from one task only — the loop — so this part is not exposed either way. The
+// deferral stands because it is strictly safe and costs one flag: it keeps
+// every register write to this part on the task that already owns its reads,
+// so the day something else on this board starts reading that bus from a task
+// of its own, nothing here has to be argued again.
 void setRunning(bool run);
 
 // Whether the part is converting. False while suspended and false while
 // absent — running() and present() together tell those two apart, which is
 // what a console line reporting no heading has to do.
 bool running();
+
+// Write the hard-iron extremes to NVS now, throttle or no throttle. For the
+// one moment there is no next chance: the node going into deep sleep or the
+// charger's ship mode, after which nothing samples again and the rail may not
+// be there at all. Writes nothing when nothing new was found, so calling it on
+// every trip to the power menu costs no flash. Not called when the screen goes
+// dark — that happens every twenty seconds on a handheld and the throttle
+// exists for exactly that (Compass.cpp).
+void flush();
 
 } // namespace Compass
 
@@ -102,5 +125,6 @@ inline void poll() {}
 inline Reading read() { return Reading{}; }
 inline void setRunning(bool) {}
 inline bool running() { return false; }
+inline void flush() {}
 } // namespace Compass
 #endif // HAS_COMPASS

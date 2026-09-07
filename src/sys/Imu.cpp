@@ -24,18 +24,31 @@
 #include <Wire.h>
 #include "I2cReg.h"
 #include "Lock.h"
+#include "SampleGate.h"
 
 namespace {
 
 uint8_t sAddr = 0;                       // 0 = nothing answered
 
-// What the part is doing, and what it has been asked to do. Unlike the
-// magnetometer this part has readers on two different tasks across the fleet —
-// the display task asks which way up the panel is held, the main loop asks
-// where level went for the compass's tilt correction — so the mode write is
-// not enough on its own: every register access here is taken under one lock,
-// so a read and a mode change on different cores cannot interleave inside the
-// Arduino bus object's own begin/end sequence.
+// What the part is doing, and what it has been asked to do. The mode write is
+// deferred to poll() and every register access here is taken under one lock —
+// but not for the reason an earlier draft of this comment gave. The Arduino
+// bus object protects its own transaction: CONFIG_DISABLE_HAL_LOCKS is unset
+// on both chips, so beginTransmission takes the bus lock, endTransmission(true)
+// gives it back, and endTransmission(false) deliberately holds it through the
+// requestFrom that follows (Wire.cpp). Two tasks cannot interleave their
+// address and register bytes, whatever they are doing.
+//
+// What is not protected is the receive buffer. I2cReg::read and readN drain it
+// with bus.read() *after* requestFrom has released the lock, so two tasks
+// *reading* one bus can each end up with some of the other's bytes. Reads are
+// the hazard, and this part is read from two tasks across the fleet: the
+// display task asks which way up the panel is held, the main loop asks where
+// level went for the compass's tilt correction. The lock below orders this
+// driver against itself, which is all a driver can do for itself — on the V4
+// the same bus also carries the charger, which Power::battery() reads from the
+// loop, from the async web task and from the Reticulum task, and ordering this
+// part's reads against those is a bus-wide question no one driver can answer.
 SemaphoreHandle_t sLock = nullptr;
 volatile bool     sWantRunning = true;   // raised from any task
 bool              sRunning     = false;  // written under the lock
@@ -171,8 +184,20 @@ void begin() {
   // 0x1e is the documented enable value for this family (the kernel's da280
   // driver uses exactly it); the first draft wrote 0x00, whose bandwidth code
   // the datasheet reserves — it ran, but on the datasheet's silence.
-  writeReg(kMode, kModeNormal);          // normal power mode, documented bandwidth
-  writeReg(0x0F, 0x00);                  // ±2g — orientation needs no more
+  //
+  // Checked, like the QMI8658's above and for the same reason: this part
+  // answers its chip id whatever state it is in, so an unchecked configuration
+  // leaves a part recorded as running that is converting in some other mode,
+  // or not at all. The panel would follow a hand that is not there. Left off
+  // instead, where present() says so and the log says why.
+  bool configured = writeReg(kMode, kModeNormal);   // normal power, documented bandwidth
+  configured = configured && writeReg(0x0F, 0x00);  // ±2g — orientation needs no more
+  if (!configured) {
+    log_w("imu: DA217 answered at 0x%02x but would not take its configuration "
+          "— left off rather than recorded as running", sAddr);
+    sAddr = 0;
+    return;
+  }
   sRunning = true;
   log_i("imu: DA217 at 0x%02x, accelerometer running", sAddr);
 #endif
@@ -184,6 +209,18 @@ bool running() { return sRunning; }
 
 void setRunning(bool run) { sWantRunning = run; }
 
+// A failed mode write leaves the want standing, so poll() tries again on the
+// next pass — and the next pass is a millisecond away. Rationed on the same
+// gate the battery readers use, and for the reason the magnetometer's is
+// (Compass.cpp): a bus held low costs TwoWire::_timeOutMillis per transaction,
+// 50 ms by default, and a retry per loop pass turns the whole main loop into a
+// 20 Hz loop while the watchdog goes on being fed. Touched only from poll(),
+// which is the main loop's alone, so these need no lock of their own.
+constexpr uint32_t kModeRetryMs       = 100;
+constexpr uint8_t  kModeComplainAfter = 10;   // a second of them, at that rate
+static SampleGate  sModeRetry(kModeRetryMs);
+static uint8_t     sModeFails = 0;
+
 void poll() {
   // Read without the lock on purpose: two aligned flags with one writer each
   // and no companion state, so the worst a torn view can do is defer the
@@ -191,18 +228,28 @@ void poll() {
   // times a second to discover there is nothing to do is the cost this guard
   // exists to avoid.
   if (!sAddr || sWantRunning == sRunning) return;
+  if (!sModeRetry.due(millis())) return;
   Sys::Lock held(sLock);
   const bool want = sWantRunning;
   if (want == sRunning) return;          // settled while we waited for the lock
 #if IMU_KIND == IMU_KIND_QMI8658
-  if (!writeReg(kCtrl7, want ? kCtrl7On : kCtrl7Off)) return;
+  const bool wrote = writeReg(kCtrl7, want ? kCtrl7On : kCtrl7Off);
 #else
-  if (!writeReg(kMode, want ? kModeNormal : kModeSuspend)) return;
+  const bool wrote = writeReg(kMode, want ? kModeNormal : kModeSuspend);
 #endif
+  if (!wrote) {
+    if (sModeFails < 255) sModeFails++;
+    if (sModeFails == kModeComplainAfter)
+      log_w("imu: the accelerometer at 0x%02x has refused %u mode writes in a row — "
+            "the part is left as it was and the retry stays on the %u ms cadence",
+            sAddr, (unsigned)kModeComplainAfter, (unsigned)kModeRetryMs);
+    return;
+  }
   // Only once the write landed. A part recorded as suspended that is still
   // converting costs power silently; one recorded as running that is not
   // reads as a board that never moves, and this driver already refuses to
-  // ship that. A failed write leaves the want standing for the next pass.
+  // ship that.
+  sModeFails = 0;
   sRunning = want;
 }
 

@@ -358,8 +358,15 @@ static void doStatus() {
         wifiManager.apStateName(), settings.wifi().apIdleOff ? "on" : "off",
         (unsigned)settings.wifi().apIdleMinutes);
 #if HAS_BQ25896 || HAS_IMU
+  // The accelerometer three ways, on the compass line's vocabulary below: "no"
+  // is a wiring question, "asleep" is the part suspended along with the screen
+  // and ends by itself the moment anything wakes the panel. Worth the extra
+  // word because this is the only software way to confirm that the suspend
+  // actually took — and on the V4, the only board here whose accelerometer is
+  // a DA217, that register value has never been exercised on hardware.
   dataf("STATUS", "parts charger=%s imu=%s",
-        Bq25896::present() ? "yes" : "no", Imu::present() ? "yes" : "no");
+        Bq25896::present() ? "yes" : "no",
+        !Imu::present() ? "no" : Imu::running() ? "yes" : "asleep");
 #endif
 #if HAS_COMPASS
   // The heading, and everything needed to judge whether to believe it. A
@@ -370,12 +377,21 @@ static void doStatus() {
   {
     const Compass::Reading c = Compass::read();
     if (!c.valid) {
-      // Two silences with nothing in common: a part that is not on the bus, and
-      // a part suspended along with the screen. The second ends by itself the
-      // moment anything wakes the panel; the first is a wiring question. An
-      // operator reading this line has to be able to tell them apart.
+      // Three silences with nothing in common, and an operator reading this
+      // line has to be able to tell them apart. A part that is not on the bus
+      // is a wiring question. A part suspended along with the screen ends by
+      // itself the moment anything wakes the panel. And a part that is present
+      // and converting and still has no reading is neither: either the tenth
+      // of a second after a wake, before the resumed part has been sampled
+      // once — applyMode() drops the stale reading and the freshness gate hands
+      // back the empty one until the next poll — or a read that keeps failing
+      // on a part that is sitting right there. A two-way ternary called both of
+      // those "absent", which sends somebody looking at the wiring of a fitted,
+      // running part, indefinitely.
       dataf("STATUS", "compass=%s",
-            (Compass::present() && !Compass::running()) ? "asleep" : "absent");
+            !Compass::present()  ? "absent"
+          : !Compass::running()  ? "asleep"
+          :                        "no-answer");
     } else {
       dataf("STATUS", "compass heading=%.1f levelled=%s tilt=%.0f field=%.1fuT cal=%u%%",
             c.headingDeg, c.levelled ? "yes" : "no", c.tiltDeg, c.fieldUt, c.calibration);

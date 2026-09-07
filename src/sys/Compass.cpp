@@ -24,6 +24,7 @@
 #include <Preferences.h>
 #include "I2cReg.h"
 #include "Imu.h"
+#include "SampleGate.h"
 
 namespace {
 
@@ -44,8 +45,13 @@ constexpr uint8_t kSoftReset = 0x80;
 // state the bench found it in before anything here had configured it — chip id
 // 0x90 answering at 0x00 with both control registers at zero. Writing it back
 // is therefore not a guess about a low-power mode, it is the mode this file's
-// begin() takes the part out of. The oversampling and range bits are not
-// touched by it, so a resume only has to restore what begin() wrote.
+// begin() takes the part out of.
+//
+// It clears more than the mode, which is why the resume writes two registers
+// and not one: CTRL1 packs the mode, the oversampling and the output rate
+// together — kCtrl1Run above is all three — so zero drops all of them. Only
+// CTRL2's range survives a suspend, and applyMode() restores both anyway, in
+// begin()'s order.
 constexpr uint8_t kCtrl1Suspend = 0x00;
 
 // Microtesla per count, from the part's scale at the range set above.
@@ -114,10 +120,19 @@ void loadOffsets() {
 }
 
 // `force` skips the throttle and not the dirty test: it is for the one moment
-// there will be no next chance — the part being suspended, after which nothing
-// samples until the screen comes back — so a node switched off while dark does
-// not lose the turn that found the extremes. It still writes nothing when
-// nothing was found, which is what keeps a blank/wake cycle off the flash.
+// there will be no next chance — flush(), on the way into deep sleep or the
+// charger's ship mode, after which the rail may not be there at all. It still
+// writes nothing when nothing was found.
+//
+// Deliberately not the screen going dark. The dirty test is enough on a
+// stationary node and is not on a carried one: twenty seconds lit at ten
+// samples a second is two hundred readings through a changing field, and most
+// such cycles find a new extreme on some axis. A handheld on the battery
+// profile blanks every DISPLAY_SLEEP_BATTERY_MS — twenty seconds — so forcing
+// there would write NVS three times faster than the minute this same file
+// justifies with flash having a finite write budget. Losing up to a minute of
+// extremes costs nearly nothing: the pair only ever widens, and the next turn
+// finds again what was lost.
 void saveOffsets(bool force = false) {
   if (!sStoreOpen || !sDirty) return;
   const uint32_t now = millis();
@@ -268,20 +283,44 @@ static Reading sample() {
 // board barely uses.
 constexpr uint32_t kPollMs = 100;
 
+// A mode write that fails leaves the want standing, so it is tried again — and
+// this is where that has to be bounded. applyMode() runs at the top of poll(),
+// ahead of the sample cadence below, and poll() runs on every loop pass, so an
+// unthrottled retry is a transaction per pass at about a kilohertz. On a bus
+// held low each of those costs TwoWire::_timeOutMillis, 50 ms by default, and
+// the main loop becomes a 20 Hz loop: Maintenance::poll, ConsoleServer::poll,
+// the Reticulum inbox and admin passes and LocalLink::poll all slow by fifty
+// times, silently, because the watchdog is still being fed. Rationed on the
+// same gate the battery readers use — the attempt is what is rationed, so a
+// write that fails still waits its turn — and said out loud once the failures
+// have stopped looking like a hiccup.
+static SampleGate sModeRetry(kPollMs);
+static uint8_t    sModeFails = 0;
+constexpr uint8_t kModeComplainAfter = 10;   // a second of them, at kPollMs
+
+static void noteModeFailure(void) {
+  if (sModeFails < 255) sModeFails++;
+  if (sModeFails == kModeComplainAfter)
+    log_w("compass: the QMC6309 at 0x%02x has refused %u mode writes in a row — the "
+          "part is left as it was and the retry stays on the %u ms cadence",
+          (uint8_t)COMPASS_ADDR, (unsigned)kModeComplainAfter, (unsigned)kPollMs);
+}
+
 // The wanted mode, written here and nowhere else — on the task that owns this
 // part, which is what keeps the screen's verdict off a bus it does not own.
-// A write that fails leaves the want standing, so the next pass tries again
-// rather than the part being recorded as something it is not.
 static void applyMode() {
   const bool want = sWantRunning;
   if (want == sRunning) return;
+  if (!sModeRetry.due(millis())) return;
   if (want) {
-    // Both control registers, in begin()'s order. Suspend is a mode and not a
-    // reset, so the range and oversampling ought to have survived it; restating
-    // them costs one transaction on a wake and removes the question of what a
-    // suspended part remembers.
-    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, kCtrl2Run)) return;
-    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Run)) return;
+    // Both control registers, in begin()'s order, and both of them are needed:
+    // the suspend write took CTRL1's oversampling and output rate down with
+    // its mode bits, since all three share that register (kCtrl1Suspend). Only
+    // CTRL2's range should have survived, and it is restated anyway — one
+    // transaction on a wake, and no question left about what a suspended part
+    // remembers.
+    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, kCtrl2Run)) { noteModeFailure(); return; }
+    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Run)) { noteModeFailure(); return; }
     // Nothing was measured while it slept, so the held sample is from before
     // the screen went dark and the output registers still hold that conversion.
     // Dropped, and the next sample left a poll interval away, which is twenty
@@ -290,18 +329,21 @@ static void applyMode() {
     sLast = Reading{};
     sLastMs = millis() ? millis() : 1;
   } else {
-    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Suspend)) return;
+    if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Suspend)) { noteModeFailure(); return; }
     sLast = Reading{};
     sLastMs = 0;
-    // The extremes found since the last write are flushed now rather than
-    // waiting out the throttle, because nothing will sample again until the
-    // screen comes back and a node switched off while dark would lose them.
-    saveOffsets(true);
+    // Nothing is flushed here. The screen goes dark every twenty seconds on a
+    // handheld and the offsets are worth a minute of waiting, not a write per
+    // blank — see saveOffsets() above. The moment there really is no next
+    // chance is the node being switched off, and that comes through flush().
   }
+  sModeFails = 0;
   sRunning = want;
 }
 
 void setRunning(bool run) { sWantRunning = run; }
+
+void flush() { saveOffsets(true); }
 
 bool running() { return sRunning; }
 
