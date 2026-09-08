@@ -36,6 +36,7 @@
 #include "Buzzer.h"
 #include "LxmfCommands.h"
 #include "Telemetry.h"
+#include "PathWait.h"
 #include "NomadNet.h"
 #include "Diag.h"
 #include "Watchdog.h"
@@ -1271,6 +1272,33 @@ struct PendingReply {
 };
 static QueueHandle_t sReplyQueue = nullptr;
 
+// One message may be held back waiting for a route. Reticulum refuses to send
+// to a destination it has no path to, and this firmware never asked — so a peer
+// whose path had expired was unreachable until it happened to announce again,
+// which on the shipped 12-hour maximum is most of the day. PathWait.h explains
+// why the wait is a decision per pass rather than the blocking loop RNS's own
+// reference uses.
+//
+// One slot, not a second queue: the reply queue is two deep and the pass that
+// drains it is the pass that must stay short. Holding the head of the queue
+// back is enough to stop a message being spent on a send that cannot leave,
+// and it keeps the ordering the outbound log already assumes.
+static PendingReply sHeld;
+static bool         sHolding = false;
+static Rns::PathWait sHeldWait;
+
+// When a path was last asked for, and for which destination — the manners floor
+// in PathWait.h needs it. One destination is enough because only one message
+// waits at a time.
+static uint8_t  sLastAskDest[16] = {0};
+static uint32_t sLastAskMs = 0;
+static bool     sLastAskValid = false;
+
+static uint32_t sinceLastAsk(const uint8_t dest[16], uint32_t nowMs) {
+  if (!sLastAskValid || memcmp(sLastAskDest, dest, 16) != 0) return Rns::kNeverRequested;
+  return (uint32_t)(nowMs - sLastAskMs);
+}
+
 // The outbound log (RnsTransport.h): written by whoever queues, stamped by
 // the RNS task, read by the display — a spinlock because every touch is a
 // short copy.
@@ -1311,6 +1339,7 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
     o.provedMs = 0;
     o.rttMs = 0;
     o.noProof = false;
+    o.failure = (uint8_t)Rns::SendFailure::None;
     sOutCount++;
     taskEXIT_CRITICAL(&sOutMux);
   }
@@ -1325,6 +1354,9 @@ bool queueLxmfTelemetry(const uint8_t destHash[16], const char* text, bool telem
     if (!o.sentMs && memcmp(o.dest, destHash, 16) == 0) {
       o.sentMs = millis() ? millis() : 1;
       o.ok = false;
+      // The queue was full, which is the node already being behind rather than
+      // anything about the destination.
+      o.failure = (uint8_t)Rns::SendFailure::Refused;
     }
     taskEXIT_CRITICAL(&sOutMux);
   }
@@ -1373,14 +1405,19 @@ static void stampProof(const uint8_t dest[16], bool delivered, uint32_t rttMs) {
 
 static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetry,
                      const Rns::Commands::Signal& signal,
-                     const uint8_t* verifiedKey = nullptr) {
-  if (!sStarted || !lxmfDest) return false;
+                     const uint8_t* verifiedKey = nullptr,
+                     Rns::SendFailure* why = nullptr) {
+  // Why it could not go, decided here and nowhere else: the glass, the console
+  // and the API all report this one answer rather than each inventing a
+  // wording for "it failed".
+  auto fail = [&](Rns::SendFailure f) { if (why) *why = f; return false; };
+  if (!sStarted || !lxmfDest) return fail(Rns::SendFailure::Refused);
   RNS::Identity peer(false);
   if (verifiedKey) peer.load_public_key(RNS::Bytes(verifiedKey, kPublicKeyLen));
   else             peer = senderKey(destHash);
   if (!peer) {
     log_w("lxmf: no key for %s; cannot answer", RNS::Bytes(destHash, 16).toHex().c_str());
-    return false;
+    return fail(Rns::SendFailure::NoKey);
   }
 
   uint8_t payload[320];
@@ -1398,7 +1435,7 @@ static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetr
   }
   const size_t plen = Rns::lxmfPayload((double)time(nullptr), "", text, payload, sizeof(payload),
                                        flen ? fields : nullptr, flen);
-  if (!plen) return false;
+  if (!plen) return fail(Rns::SendFailure::Refused);
 
   // Signed through the same spans the receiving side hashes, so the two cannot
   // disagree about the order — which is the mistake this file has already made
@@ -1411,7 +1448,7 @@ static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetr
   RNS::Bytes signedData(hashedPart);
   signedData.append(RNS::Identity::full_hash(hashedPart));
   const RNS::Bytes sig = nodeRnsIdentity.sign(signedData);
-  if (sig.size() != 64) return false;
+  if (sig.size() != 64) return fail(Rns::SendFailure::Refused);
 
   // Opportunistic, so the destination hash is left off: the destination it
   // arrives at is what says which one it was, and the sixteen bytes are worth
@@ -1419,15 +1456,18 @@ static bool sendLxmf(const uint8_t destHash[16], const char* text, bool telemetr
   uint8_t envelope[16 + 64 + sizeof(payload)];
   const size_t elen = Rns::lxmfEnvelope(destHash, selfHash.data(), sig.data(), payload, plen,
                                         envelope, sizeof(envelope), /*includeDest*/ false);
-  if (!elen) return false;
+  if (!elen) return fail(Rns::SendFailure::Refused);
 
   RNS::Destination out(peer, RNS::Type::Destination::OUT, RNS::Type::Destination::SINGLE,
                        "lxmf", "delivery");
   RNS::Packet packet(out, RNS::Bytes(envelope, elen));
   packet.send();
   const bool sent = packet.sent();
-  if (!sent) log_w("lxmf: could not send the answer to %s",
-                   RNS::Bytes(destHash, 16).toHex().c_str());
+  if (!sent) {
+    log_w("lxmf: could not send the answer to %s",
+          RNS::Bytes(destHash, 16).toHex().c_str());
+    if (why) *why = Rns::SendFailure::Refused;
+  }
 #if HAS_LVGL_UI
   if (sent && !telemetry) {
     // The proof's journey home: the receipt lives on in the transport's
@@ -1972,30 +2012,77 @@ void loop() {
     applyLogMute();
     // Answers other tasks composed, sent from here because this is the task
     // that owns the library (queueLxmfReply above).
+    // A message goes when there is a route to its destination, and waits for
+    // one when there is not. Reticulum will not send to an unknown path, and
+    // until this existed the send was simply spent: one log line, no retry, and
+    // a peer whose path had aged out was unreachable until its next announce.
+    // PathWait.h holds the decision and the reasoning; this is the plumbing.
     if (sReplyQueue) {
-      PendingReply r;
-      if (xQueueReceive(sReplyQueue, &r, 0) == pdTRUE) {
-        const bool ok = sendLxmf(r.dest, r.text, r.telemetry, r.signal,
-                                 r.haveKey ? r.key : nullptr);
-        if (!ok) log_w("lxmf: could not send an answer to %s",
-                       RNS::Bytes(r.dest, 16).toHex().c_str());
-#if HAS_LVGL_UI
-        if (!r.telemetry) {
-          // The queue is FIFO, so this send belongs to the oldest unsent
-          // log entry for the same destination.
-          taskENTER_CRITICAL(&sOutMux);
-          const uint32_t from = sOutCount > 8 ? sOutCount - 8 : 0;
-          for (uint32_t i = from; i < sOutCount; i++) {
-            OutMessage& o = sOutLog[i % 8];
-            if (!o.sentMs && memcmp(o.dest, r.dest, 16) == 0) {
-              o.sentMs = millis() ? millis() : 1;
-              o.ok = ok;
-              break;
-            }
-          }
-          taskEXIT_CRITICAL(&sOutMux);
+      const uint32_t nowMs = millis();
+      // Nothing new is taken while one is held: the pass that drains this queue
+      // is the pass that must stay short, and holding the head back preserves
+      // the FIFO order the outbound log matches against.
+      if (!sHolding && xQueueReceive(sReplyQueue, &sHeld, 0) == pdTRUE) {
+        sHolding  = true;
+        sHeldWait = Rns::PathWait{};
+        sHeldWait.startedMs = nowMs;
+      }
+      if (sHolding) {
+        const RNS::Bytes dest(sHeld.dest, 16);
+        const Rns::PathAction act =
+            Rns::pathAction(RNS::Transport::has_path(dest), sHeldWait, nowMs,
+                            sinceLastAsk(sHeld.dest, nowMs));
+        Rns::SendFailure why = Rns::SendFailure::None;
+        bool done = false, ok = false;
+        switch (act) {
+          case Rns::PathAction::Request:
+            // A broadcast every neighbour repeats, so once per message and no
+            // oftener than RNS's own floor (PathWait.h).
+            RNS::Transport::request_path(dest);
+            sHeldWait.asked   = true;
+            sHeldWait.askedMs = nowMs;
+            memcpy(sLastAskDest, sHeld.dest, 16);
+            sLastAskMs    = nowMs;
+            sLastAskValid = true;
+            log_i("lxmf: no path to %s yet; asked for one",
+                  RNS::Bytes(sHeld.dest, 16).toHex().c_str());
+            break;
+          case Rns::PathAction::Wait:
+            break;
+          case Rns::PathAction::Send:
+            ok = sendLxmf(sHeld.dest, sHeld.text, sHeld.telemetry, sHeld.signal,
+                          sHeld.haveKey ? sHeld.key : nullptr, &why);
+            done = true;
+            break;
+          case Rns::PathAction::GiveUp:
+            why  = Rns::SendFailure::NoPath;
+            done = true;
+            log_w("lxmf: gave up on %s — no path after %lu ms",
+                  RNS::Bytes(sHeld.dest, 16).toHex().c_str(),
+                  (unsigned long)(nowMs - sHeldWait.startedMs));
+            break;
         }
+        if (done) {
+#if HAS_LVGL_UI
+          if (!sHeld.telemetry) {
+            // FIFO, so this verdict belongs to the oldest unsent log entry for
+            // the same destination.
+            taskENTER_CRITICAL(&sOutMux);
+            const uint32_t from = sOutCount > 8 ? sOutCount - 8 : 0;
+            for (uint32_t i = from; i < sOutCount; i++) {
+              OutMessage& o = sOutLog[i % 8];
+              if (!o.sentMs && memcmp(o.dest, sHeld.dest, 16) == 0) {
+                o.sentMs  = millis() ? millis() : 1;
+                o.ok      = ok;
+                o.failure = (uint8_t)why;
+                break;
+              }
+            }
+            taskEXIT_CRITICAL(&sOutMux);
+          }
 #endif
+          sHolding = false;
+        }
       }
     }
     processEvents();

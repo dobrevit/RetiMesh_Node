@@ -178,6 +178,11 @@ struct OutMessage {
   uint32_t provedMs;                     // 0 until the delivery proof came back
   uint32_t rttMs;                        // meaningful once provedMs != 0
   bool     noProof;                      // the receipt gave up waiting
+  // Why it did not go, as Rns::SendFailure. Meaningful only where ok is false;
+  // "it failed" without a reason is what left an operator staring at an amber
+  // row with nothing to act on. Rns::failureName() turns it into the wording
+  // every surface uses (PathWait.h).
+  uint8_t  failure;
 };
 size_t lxmfOutbound(OutMessage* out, size_t max);   // newest first
 

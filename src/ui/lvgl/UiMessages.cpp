@@ -25,6 +25,7 @@
 #include "UiTheme.h"
 #include "LxmfInbox.h"
 #include "RnsTransport.h"
+#include "PathWait.h"
 #include "Gps.h"
 #include "RnsAnnounce.h"
 #include <LittleFS.h>
@@ -82,6 +83,7 @@ struct Bubble {
   uint32_t provedMs;
   uint32_t rttMs;
   bool     noProof;
+  uint8_t  failure;                      // ours only (Rns::SendFailure)
   uint8_t  standing;                     // theirs only (Rns::Standing*)
 };
 
@@ -111,7 +113,15 @@ void bubbleRow(lv_obj_t* col, const Bubble& b) {
   uint32_t tint = UiTheme::kInkLabel;
   if (b.ours) {
     if (!b.sentMs)      { snprintf(meta, sizeof(meta), "queued"); tint = UiTheme::kWarn; }
-    else if (!b.ok)     { snprintf(meta, sizeof(meta), "failed — no key?"); tint = UiTheme::kBad; }
+    else if (!b.ok) {
+      // It used to read "failed — no key?", a guess with a question mark,
+      // because nothing carried the reason this far. The transport decides it
+      // now and every surface says the same word (PathWait.h).
+      const char* why = Rns::failureName((Rns::SendFailure)b.failure);
+      if (*why) snprintf(meta, sizeof(meta), "failed — %s", why);
+      else      snprintf(meta, sizeof(meta), "failed");
+      tint = UiTheme::kBad;
+    }
     else if (b.provedMs) {
       // The other end proved it: the strongest thing this screen can say.
       snprintf(meta, sizeof(meta), "delivered · %lu.%lu s",
@@ -150,7 +160,7 @@ uint32_t outboundStamp() {
   uint32_t h = (uint32_t)n;
   for (size_t i = 0; i < n; i++)
     h ^= o[i].queuedMs ^ (o[i].sentMs * 31u) ^ (o[i].provedMs * 7u) ^
-         (o[i].noProof ? 0x9e37u : 0u);
+         (o[i].noProof ? 0x9e37u : 0u) ^ ((uint32_t)o[i].failure * 131u);
   return h;
 }
 
@@ -190,6 +200,7 @@ void threadRebuild() {
     x.provedMs = o[i].provedMs;
     x.rttMs = o[i].rttMs;
     x.noProof = o[i].noProof;
+    x.failure = o[i].failure;
   }
 
   // Oldest at the top, the way a conversation reads.
