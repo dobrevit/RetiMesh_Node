@@ -1762,7 +1762,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // say "unknown" instead of drawing a conclusion this node never reached.
     if (b.chargeKnown) pw["battery_charging"] = b.charging;
     else               pw["battery_charging"] = nullptr;
-    pw["pmu"] = Pmu::model();          // "AXP192" / "AXP2101" / "none"
+    // Power::chargerName(), not Pmu::model(): the V4 has no PMU and a BQ25896,
+    // so asking the PMU there reported "none" on the one board that can answer
+    // a charging question (Power.h).
+    pw["pmu"] = Power::chargerName();  // "AXP192" / "AXP2101" / "BQ25896" / "none"
     pw["battery_v"] = b.volts;
     pw["battery_pct"] = b.percent;
   }

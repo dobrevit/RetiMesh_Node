@@ -24,6 +24,7 @@
 #include "RnsAdmin.h"
 #include "Maintenance.h"
 #include "Power.h"
+#include "Pmu.h"
 #include "I2cReg.h"
 #include "Rtc.h"
 #include "Bq25896.h"
@@ -295,6 +296,58 @@ static void doVersion() {
   ok("VERSION");
 }
 
+// The cell, and what is draining it, in one line.
+//
+// It exists because of how a power measurement has to be taken here. No board
+// this firmware ships on can report its own current — an AXP2101 gives
+// voltages and no current at all, a BQ25896 gives charge current but not
+// discharge, the rest have a divider — so the measurement is the rate the cell
+// falls at, over hours, on a node running on battery. That node's Wi-Fi is
+// turned down or off by the very profile being measured, so it has to be read
+// over the mesh; and an LXMF message has an MTU that a full STATUS reply
+// already overruns (RnsAdmin.cpp). Hence one line, short on purpose.
+//
+// Every figure here is asked of the same place STATUS asks, so the two cannot
+// disagree about what the cell is doing.
+static void doPower(const Request& r) {
+  const char* name = "POWER";
+  // Assembled and sent as one DATA line, because the claim above is that it is
+  // one: a reply split across several lines is several things for a caller to
+  // reassemble, and over LXMF it is the total that has to fit, not the average.
+  char line[192];
+  size_t at = 0;
+  auto add = [&](const char* fmt, auto... args) {
+    if (at >= sizeof(line)) return;
+    const int n = snprintf(line + at, sizeof(line) - at, fmt, args...);
+    at = (n < 0) ? sizeof(line) : at + (size_t)n;   // snprintf reports what it wanted
+    if (at > sizeof(line)) at = sizeof(line);       // clamp: it wrote at most the room
+  };
+#if HAS_PMU || HAS_BATTERY_ADC
+  const Power::Battery bat = Power::battery();
+  add("volts=%.3f percent=%u %s stale=%s ",
+      (double)bat.volts, (unsigned)bat.percent,
+      bat.chargeKnown ? (bat.charging ? "charging=yes" : "charging=no")
+                      : "charging=unknown",
+      Power::readingStale() ? "yes" : "no");
+#else
+  // Said rather than omitted: a node with no cell cannot be measured this way,
+  // and a caller polling for a discharge needs to learn that from the answer
+  // instead of from an empty line it might read as a failed transfer.
+  add("battery=none ");
+#endif
+  // chargerName(), never Pmu::model(): the V4 has no PMU and a BQ25896, so
+  // asking the PMU there names "none" on the one board that can answer a
+  // charging question (Power.h). The profile is the other half of the
+  // measurement — a discharge rate without it measures nothing, because the
+  // whole question is which profile is cheaper.
+  add("pmu=%s profile=%s cpu_mhz=%u uptime_s=%lu",
+      Power::chargerName(), Power::profileName(Power::profile()),
+      (unsigned)getCpuFrequencyMhz(), (unsigned long)(millis() / 1000));
+  dataf(name, "%s", line);
+  ok(name, "");
+  (void)r;
+}
+
 static void doStatus() {
   const Diag::Boot& b = Diag::boot();
   dataf("STATUS", "uptime_s=%lu boot_count=%lu reset=\"%s\"", (unsigned long)(millis() / 1000),
@@ -532,10 +585,18 @@ static void doStatus() {
     // board. The last figure is printed beside it because it is the evidence —
     // a plausible voltage under "stale" says the divider was working and the
     // converter stopped, which is not the same fault as a cell nobody fitted.
-    dataf("STATUS", "battery=%s volts=%.3f percent=%u%s",
+    // The charger's part number belongs on this line, not only in the HTTP
+    // API: it decides what the board can be asked. An AXP192 can report its own
+    // discharge current and carries a coulomb counter; an AXP2101 reports
+    // voltages and nothing else, and a BQ25896 gives charge current but not
+    // discharge. A power measurement run has to know which of those it is
+    // standing in front of, and the console is where a board without a portal
+    // is read.
+    dataf("STATUS", "battery=%s volts=%.3f percent=%u%s pmu=%s",
           Power::readingStale() ? "stale" : (bat.present ? "present" : "not-seen"),
           (double)bat.volts, (unsigned)bat.percent,
-          bat.chargeKnown ? (bat.charging ? " charging=yes" : " charging=no") : "");
+          bat.chargeKnown ? (bat.charging ? " charging=yes" : " charging=no") : "",
+          Power::chargerName());
   }
 #endif
   // Whether the console can be reached over the network, and whether somebody
@@ -884,6 +945,7 @@ static void dispatch(const char* line) {
     case Cmd::Help:          doHelp(); break;
     case Cmd::I2c:           doI2c(r); break;
     case Cmd::Stacks:        doStacks(r); break;
+    case Cmd::Power:         doPower(r); break;
     case Cmd::Status:        doStatus(); break;
     case Cmd::Version:       doVersion(); break;
     case Cmd::UsbStatus:     doUsbStatus(); break;

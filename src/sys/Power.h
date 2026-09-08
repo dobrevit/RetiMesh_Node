@@ -143,6 +143,23 @@ bool screenDark();
 void prepareForSleep();
 
 const char* profileName(Profile p);
+
+// What is managing the cell on this board, by part number: "AXP192",
+// "AXP2101", "BQ25896" or "none".
+//
+// One accessor rather than each surface deciding, because the answer is not
+// Pmu::model() alone: the V4 has no power-management chip at all (HAS_PMU 0)
+// and a BQ25896 charger beside a plain divider, so asking the PMU there
+// returns "none" and describes the one board on this bench that *can* answer a
+// charging question as though it could not. The console and the HTTP API both
+// used to ask Pmu directly and both were wrong on that board.
+//
+// It matters beyond tidiness: which part is fitted decides what the board can
+// be *asked*. An AXP192 reports its own discharge current and carries a
+// coulomb counter; an AXP2101 reports voltages only; a BQ25896 gives charge
+// current but not discharge. A power measurement has to know which of those it
+// is standing in front of.
+const char* chargerName();
 bool profileFromName(const char* name, Profile& out);
 // What the Wi-Fi driver is actually doing about modem sleep, read back from
 // esp_wifi_get_ps() rather than assumed from the profile: the two can

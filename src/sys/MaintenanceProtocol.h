@@ -73,7 +73,7 @@ constexpr size_t MAX_ARG  = 40;
 
 enum class Cmd : uint8_t {
   Help = 0, Status, Version, Reset, Bootloader, UsbStatus, NetworkStatus, Links, Wifi, Ppp,
-  Get, Set, Auth, Messages, I2c, Stacks,
+  Get, Set, Auth, Messages, I2c, Stacks, Power,
   Unknown,
 };
 
@@ -91,6 +91,12 @@ inline const CmdInfo* commands(size_t& count) {
     { Cmd::Messages,      "MESSAGES",       "[n]",     "the last LXMF messages, newest first (default 10, up to 50)" },
     { Cmd::I2c,           "I2C",            "[0xNN]",  "scan every I2C bus now; with an address, dump that device's first 16 registers" },
     { Cmd::Stacks,        "STACKS",         "",        "bytes of stack never used, per task — the figure a soak test is run to collect" },
+    // One short line, deliberately. STATUS carries all of this and more, and is
+    // longer than an LXMF message can hold — RnsAdmin.cpp says so where it
+    // clips the reply. A node being measured is a node on battery with its
+    // Wi-Fi turned down or off by the very profile under test, so the only way
+    // to read it is over the mesh, and the answer has to fit in one message.
+    { Cmd::Power,         "POWER",          "",        "the cell and the profile draining it, short enough to travel over LXMF" },
     { Cmd::Wifi,          "WIFI",           "ON|OFF",  "enable or disable Wi-Fi (saves, restarts)" },
     { Cmd::Ppp,           "PPP",            "ON|OFF",  "enable or disable PPP on this port (saves, applies live)" },
     { Cmd::Get,           "GET",            "[key]",   "read settings: all, one section (radio), or one key (radio.sf)" },
