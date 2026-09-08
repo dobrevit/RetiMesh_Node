@@ -1291,6 +1291,15 @@ static Rns::PathWait sHeldWait;
 // blocks every ten milliseconds for as long as a message waited — on boards
 // the brief describes as running within a few KB of death.
 static RNS::Bytes   sHeldDest;
+// And the same for the message queued behind it. The overtake check below runs
+// every pass while one is held and something is waiting, and `Bytes` allocates:
+// caching it undoes the churn that fixing sHeldDest was meant to remove, which
+// this very block reintroduced. The head of the queue rarely changes during a
+// hold, so this is about one allocation per distinct message rather than one
+// per pass.
+static RNS::Bytes   sPeekDest;
+static uint8_t      sPeekRaw[16] = {0};
+static bool         sPeekValid = false;
 
 // When a path was last asked for — taken from the library, not mirrored here.
 // Transport::request_path() stamps `_path_requests` itself and Transport
@@ -1548,7 +1557,13 @@ static void deliverAndStamp(const PendingReply& r, bool doSend, Rns::SendFailure
     if (!o.sentMs && memcmp(o.dest, r.dest, 16) == 0) {
       o.sentMs  = millis() ? millis() : 1;
       o.ok      = ok;
-      o.failure = (uint8_t)why;
+      // `why` arrives holding the verdict this message was *going* to get, and
+      // sendLxmf only overwrites it on a failure path — so a send that worked
+      // would otherwise record "no path" beside ok=true. bubbleRow does not
+      // read it under ok, so nothing shows today; it would still be a false
+      // reason in the log, it perturbs the glass's redraw hash for nothing, and
+      // it is a trap for the first caller to read failure without checking ok.
+      o.failure = ok ? (uint8_t)Rns::SendFailure::None : (uint8_t)why;
       break;
     }
   }
@@ -1568,9 +1583,11 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
   // Nothing is held at the start of a run. Harmless today because begin() runs
   // once, but a stale hold with a dangling destination is precisely what a
   // future restart path would otherwise inherit.
-  sHolding  = false;
-  sHeldWait = Rns::PathWait{};
-  sHeldDest = RNS::Bytes();
+  sHolding   = false;
+  sHeldWait  = Rns::PathWait{};
+  sHeldDest  = RNS::Bytes();
+  sPeekDest  = RNS::Bytes();
+  sPeekValid = false;
   sSnapLock = xSemaphoreCreateMutex();
   // Take the room for the snapshots now. These used to be local vectors that
   // grew from empty on every refresh: a doubling cascade of allocate-and-free
@@ -2104,6 +2121,11 @@ void loop() {
         if (act == Rns::PathAction::Request) {
           // A broadcast every neighbour repeats, so once per message and no
           // oftener than RNS's own floor (PathWait.h).
+          // If this throws, the pass is abandoned with `asked` still false and
+          // the request unstamped, so the next pass asks again — and that is
+          // survivable only because the deadline runs from startedMs rather
+          // than from the request. A message whose every request fails still
+          // gives up after fifteen seconds instead of retrying for ever.
           RNS::Transport::request_path(sHeldDest);
           sHeldWait.asked   = true;
           sHeldWait.askedMs = nowMs;
@@ -2143,13 +2165,28 @@ void loop() {
       // Order is still kept where it is claimed: the log matches per
       // destination, and a held destination by definition has no path, so
       // nothing to the *same* destination can overtake it here.
+      //
+      // Only the head is examined, because a FreeRTOS queue cannot be looked
+      // past. So a second message to the *held* destination sitting at the head
+      // still blocks a reachable one behind it — the same fault one slot down,
+      // bounded by the same fifteen seconds. Draining and re-queueing to reorder
+      // would be a worse trade than the exposure on a queue two deep; the real
+      // answer is the outbound store in roadmap issue 35, which replaces this
+      // queue rather than working around it.
       if (sHolding) {
         PendingReply next;
         if (xQueuePeek(sReplyQueue, &next, 0) == pdTRUE &&
-            memcmp(next.dest, sHeld.dest, 16) != 0 &&
-            RNS::Transport::has_path(RNS::Bytes(next.dest, 16)) &&
-            xQueueReceive(sReplyQueue, &next, 0) == pdTRUE) {
-          deliverAndStamp(next, true, Rns::SendFailure::Refused);
+            memcmp(next.dest, sHeld.dest, 16) != 0) {
+          if (!sPeekValid || memcmp(sPeekRaw, next.dest, 16) != 0) {
+            sPeekDest = RNS::Bytes(next.dest, 16);
+            memcpy(sPeekRaw, next.dest, 16);
+            sPeekValid = true;
+          }
+          if (RNS::Transport::has_path(sPeekDest) &&
+              xQueueReceive(sReplyQueue, &next, 0) == pdTRUE) {
+            sPeekValid = false;                 // that message is gone
+            deliverAndStamp(next, true, Rns::SendFailure::Refused);
+          }
         }
       }
     }
