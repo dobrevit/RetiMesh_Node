@@ -19,6 +19,10 @@
 
 // ============================================================================
 //  OledPanel.cpp — see OledPanel.h
+//
+//  One file for both controllers: the rail, the stuck-bus recovery and the
+//  address probe are the same work on either part, and only the driver's own
+//  start-up call differs.
 // ============================================================================
 #include "OledPanel.h"
 
@@ -27,6 +31,18 @@
 #include "esp32-hal-periman.h"
 #include "DisplayLayout.h"
 
+// Addressed and nothing more. A zero-length write asks "is anybody there" and
+// leaves no mark, which matters on a bus where the answer might not be a panel:
+// the T-Beam Supreme has two addresses that answer this, 0x3c and 0x3d, and only
+// one of them is the glass.
+//
+// Sending a command instead — the 0x00 control byte and a NOP — was tried, on
+// the theory that a panel would take it and anything else would refuse. It does
+// not discriminate: that pair is a perfectly legal "write 0xe3 to register 0"
+// for any register chip, so both addresses took it. It also writes a byte into
+// whichever part answers first, which is a side effect on a device this code
+// has no business touching. So the probe stays a question, and the board says
+// which address is the panel (OLED_ADDR).
 bool OledPanel::ack(uint8_t addr) {
   Wire.beginTransmission(addr);
   return Wire.endTransmission() == 0;    // 0 = ACK received
@@ -89,7 +105,14 @@ bool OledPanel::begin() {
 
   const uint8_t candidates[] = { OLED_ADDR, (uint8_t)(OLED_ADDR == 0x3C ? 0x3D : 0x3C) };
   for (uint8_t a : candidates) {
-    if (ack(a)) { _addr = a; break; }
+    const bool answered = ack(a);
+    // Both answers are logged, not just the winning one: on a board where two
+    // addresses answer, which of them answered at all is the fact that
+    // explains a panel that stays dark or keeps somebody else's picture. It
+    // says "answered" because that is all the probe asks — it sends no
+    // command, so it cannot report that one was taken.
+    log_i("display: 0x%02X %s", a, answered ? "answered" : "did not answer");
+    if (answered && _addr == 0) _addr = a;
   }
   if (_addr == 0) {
     log_w("No I2C device at 0x%02X/0x%02X (SDA %d / SCL %d) — display disabled",
@@ -97,15 +120,25 @@ bool OledPanel::begin() {
     return false;
   }
 
+#if OLED_CONTROLLER == OLED_CONTROLLER_SH1106
+  // No periphBegin flag on this driver: it calls begin() on the bus itself,
+  // which the core turns into a warning and a no-op on a host that is already
+  // started ("Bus already started in Master Mode", Wire.cpp) — so the pins set
+  // above are the ones that stand. The reset argument is the panel's RST line
+  // and does nothing on a board that ties it high.
+  if (!_oled.begin(_addr, true)) {
+#else
   // periphBegin=false: Wire is already up on the board-specific pins.
   if (!_oled.begin(SSD1306_SWITCHCAPVCC, _addr, true, false)) {
-    log_w("SSD1306 at 0x%02X did not initialise — display disabled", _addr);
+#endif
+    log_w("%s at 0x%02X did not initialise — display disabled", kController, _addr);
     return false;
   }
-  log_i("SSD1306 found at 0x%02X (SDA %d / SCL %d)", _addr, PIN_OLED_SDA, PIN_OLED_SCL);
+  log_i("%s found at 0x%02X (SDA %d / SCL %d)", kController, _addr,
+        PIN_OLED_SDA, PIN_OLED_SCL);
   _oled.setRotation(OLED_ROTATION);
   _oled.clearDisplay();
-  _oled.setTextColor(SSD1306_WHITE);
+  _oled.setTextColor(kInk);
   _oled.setTextSize(1);
   // Adafruit_GFX wraps by default, so a row one character too long lands on
   // the next row and, at the bottom, under the page dots. Clip instead.

@@ -53,6 +53,7 @@ packager and the flasher never disagree about it.
 | `heltec-ws` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
 | `heltec-wb` | ESP32 | CP2102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
 | `tbeam` | ESP32 | CH9102 bridge on UART0 | `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
+| `tbeam-supreme` | ESP32-S3 | the chip's own USB (D+/D− routed), same composite device as the T3-S3s | `software_api`, **1200-baud touch**, `manual_recovery` — *not* `auto_reset_dtr_rts`: esptool cannot put this board into its downloader over that port, on the factory image or ours (both answer "No serial data received"). Opening the CDC port at 1200 baud and closing it does, after which the board appears under its `USB_JTAG_serial_debug_unit` name. `pio run -t upload` reaches the ROM by itself through the console; `uploadfs` does not, and wants the touch first | wifi-ap, wifi-sta, **usb0** |
 | `thinknode-m9` | ESP32-S3 | CH340 bridge on UART0 — the S3's own USB pins are spent on the panel and the keyboard bus, so the pad is released at boot | `software_api`, `auto_reset_dtr_rts`, `manual_recovery` | wifi-ap, wifi-sta, **ppp0** |
 
 The `heltec-v3` row is the one to read twice: it is an S3, so its firmware can

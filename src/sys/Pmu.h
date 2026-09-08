@@ -29,6 +29,15 @@
 //  chip id, which XPowersLib does for us. The GPS rail is left off: nothing
 //  reads it yet and it costs tens of milliamps.
 //
+//  *Which* regulator feeds what is the board's business and not this file's —
+//  the T-Beam Supreme carries the same AXP2101 as the T-Beam v1.2 and routes
+//  every rail differently, and it switches three the T-Beam does not have
+//  (the sensors and clock, the card slot, and the socket its radio module
+//  plugs into). The names are PMU_RAIL_* in Config.h, defaulted to the
+//  T-Beam's. The bus is the board's too: on the Supreme the PMU and the clock
+//  sit on a pair of pins of their own, which is why begin() asks I2cReg for
+//  the host rather than starting Wire itself.
+//
 //  The same chip measures the cell, so on these boards Power.cpp asks here
 //  instead of reading an ADC divider.
 // ============================================================================

@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
-"""Check that every board in boards.json describes its host connectivity.
+"""Check that the board registry, the build environments and Config.h agree.
 
-The firmware reads the "local_link" block through tools/board_caps.py; a board
-without one silently builds as "no USB, no bridge, nothing", which is a lie for
-every board in the registry. CI runs this so the omission is a failed check and
-not a node that reports it cannot be flashed.
+Three checks, each of which exists because its absence is silent.
+
+The "local_link" block: the firmware reads it through tools/board_caps.py, and a
+board without one builds as "no USB, no bridge, nothing" — a lie for every board
+in the registry, and a node that reports it cannot be flashed.
+
+An env with no entry: CI, the release matrix and the HIL run all take their
+board list from boards.json, so an env the registry does not know is built by
+nobody. It compiles on the machine of whoever added it and then quietly stops
+being compiled at all.
+
+A -DBOARD_* flag Config.h does not dispatch: the board-selection chain ends in
+an #else that includes the T3-S3's header, so a flag with no arm — a typo, or a
+header added without its line — is not a build error. It is a board that builds
+successfully, boots, and drives another board's pin map.
 """
 import configparser
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -77,6 +89,89 @@ for env, meta in boards.items():
     if f"env:{env}" not in ini:
         problems.append(f"{env}: no [env:{env}] in platformio.ini")
 
+# The other direction: an env that is a board and is not in the registry.
+# `native` is the host test env and has no board; an env that `extends` another
+# shares its board's entry, which is how board_caps.py resolves it too.
+for section in ini.sections():
+    if not section.startswith("env:"):
+        continue
+    env = section[len("env:"):]
+    if env == "native" or ini.has_option(section, "extends"):
+        continue
+    if env not in boards:
+        problems.append(f"{env}: [{section}] builds a board that boards.json does not list — "
+                        "CI, the release matrix and the HIL run all read the registry, so "
+                        "nothing would ever build it")
+
+# The board-selection chain in src/Config.h, read as what it is: a list of
+# (flag, header) pairs. Reading the flags and the headers as two separate sets
+# was the first version of this check and it missed the mistake most worth
+# catching — an arm whose header is the one above it, copied and not changed.
+# Both names then exist in the file and every set-membership test passes, and
+# the board builds on another board's pin map.
+#
+# The include has to be on the line after the #elif, which is how the chain is
+# written. A comment wedged between them drops that arm and the env's flag is
+# then reported as undispatched — wrong reason, right outcome, and loud.
+config_h = (ROOT / "src" / "Config.h").read_text()
+arms = re.findall(r'defined\((BOARD_[A-Z0-9_]+)\)\s*\)?\s*\n\s*#include\s+"boards/([a-z0-9_]+)\.h"',
+                  config_h)
+dispatched = {flag: header for flag, header in arms}
+for flag, header in arms:
+    if not (ROOT / "src" / "boards" / f"{header}.h").exists():
+        problems.append(f"src/Config.h dispatches -D{flag} to boards/{header}.h, which does not exist")
+# One header per flag and one flag per header, and both directions have to be
+# checked: the dict above keeps the last arm for a repeated flag and says
+# nothing about the one it replaced, so a duplicated selector would leave an
+# arm that can never be reached and pass silently.
+for header in {h for _, h in arms}:
+    flags = sorted(f for f, h in arms if h == header)
+    if len(flags) > 1:
+        problems.append(f"src/Config.h dispatches {' and '.join(flags)} to the same "
+                        f"boards/{header}.h — one of them is a copy that was not changed")
+for flag in {f for f, _ in arms}:
+    headers = [h for f2, h in arms if f2 == flag]
+    if len(headers) > 1:
+        problems.append(f"src/Config.h tests -D{flag} on {len(headers)} arms of the chain "
+                        f"({', '.join('boards/' + h + '.h' for h in headers)}) — the first "
+                        "wins and the rest are dead, so a board is quietly built on another "
+                        "board's pin map")
+
+# Envs that deliberately build the chain's closing #else — the T3-S3's header —
+# rather than naming a board of their own. Two of them, each for a stated
+# reason, and the list is here rather than inferred because "no flag" and
+# "forgot the flag" are indistinguishable from the outside:
+#   t3s3          the board the #else names; its own env passes no flag
+#   esp32s3-qspi  the same header with the LoRa pins overridden per wiring
+DEFAULT_HEADER_ENVS = {"t3s3", "esp32s3-qspi"}
+
+seen_flags = {}
+for section in ini.sections():
+    if not section.startswith("env:"):
+        continue
+    env = section[len("env:"):]
+    if env == "native" or ini.has_option(section, "extends"):
+        continue
+    flags = [f for f in re.findall(r"-D(BOARD_[A-Z0-9_]+)",
+                                   ini.get(section, "build_flags") if ini.has_option(section, "build_flags") else "")
+             # BOARD_HAS_PSRAM is the framework's own, not a board selector.
+             if f != "BOARD_HAS_PSRAM"]
+    for flag in flags:
+        if flag not in dispatched:
+            problems.append(f"{env}: passes -D{flag}, which src/Config.h never tests — the "
+                            "board-selection chain would fall through to the T3-S3's header "
+                            "and the build would succeed on the wrong pin map")
+        if flag in seen_flags:
+            problems.append(f"{env}: passes -D{flag}, which {seen_flags[flag]} already uses — "
+                            "two envs on one board header, so one of them builds the other "
+                            "board's pin map")
+        else:
+            seen_flags[flag] = env
+    if not flags and env not in DEFAULT_HEADER_ENVS:
+        problems.append(f"{env}: passes no -DBOARD_* flag, so src/Config.h's #else builds it "
+                        "as a T3-S3 — name the board, or add the env to DEFAULT_HEADER_ENVS "
+                        "here if that really is what it wants")
+
 ident = boards.get("_usb_identity")
 if isinstance(ident, dict):
     for key in ("vid", "pid", "manufacturer", "product", "network_interface"):
@@ -97,6 +192,7 @@ for p in problems:
     print("boards.json:", p)
 for w in warnings:
     print("boards.json: warning:", w)
-print(f"{len([k for k in boards if not k.startswith('_')])} boards checked, "
+print(f"{len([k for k in boards if not k.startswith('_')])} boards checked against "
+      f"platformio.ini and src/Config.h, "
       f"{len(problems)} problem(s), {len(warnings)} warning(s)")
 sys.exit(1 if problems else 0)

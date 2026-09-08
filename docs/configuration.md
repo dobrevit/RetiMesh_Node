@@ -207,6 +207,7 @@ with a receiver are affected at all:
 | `heltec-v4` | Quectel L76K (expansion kit) | the standby line (GPIO 40), which the firmware already drives high to force the receiver awake |
 | `thinknode-m9` | ATGM336H | the standby line (GPIO 10), likewise |
 | `tbeam` | u-blox NEO-6M/8M | the power-management chip's GPS rail — a real cut, and the board's own backup supply keeps the almanac so a wake is a warm start |
+| `tbeam-supreme` | u-blox MAX-M10S **or** Quectel L76K, depending on the unit | the power-management chip's ALDO4 rail, likewise — and the reason this board asks nothing of the receiver's own protocol: which of the two parts is fitted cannot be told from the wire, and a rail cut is the one off-switch that works on both. The L76K's wake line is wired to GPIO 7 and deliberately not used, since it does not exist on a MAX-M10S unit |
 | every other board | none fitted | nothing to do |
 
 Round 5's solar/unattended preset extends this list of roles rather than
