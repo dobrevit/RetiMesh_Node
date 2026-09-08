@@ -34,6 +34,14 @@ _TOOLS = os.path.join(_HERE, os.pardir)
 _ROOT = os.path.abspath(os.path.join(_TOOLS, os.pardir))
 _HIL = os.path.join(_TOOLS, "hil_frames.py")
 
+# Discover runs these as tools.tests.*, so the package directory is not
+# on the path by itself; running one file directly does put it there.
+# Both ways have to work, which an absolute import off sys.path gives
+# and a relative one does not.
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+import optional_deps                                        # noqa: E402
+
 _spec = importlib.util.spec_from_file_location("hil_frames", _HIL)
 hf = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hf)
@@ -789,10 +797,16 @@ class TheFrameCarriesItsOwnSequence(unittest.TestCase):
     def test_what_goes_on_the_air_is_the_payload_plus_both_headers(self):
         self.assertEqual(hf.on_air_bytes(8), 8 + 19 + 1)
 
-    @unittest.skipUnless(importlib.util.find_spec("RNS"), "RNS is not importable here")
     def test_the_rns_header_length_is_what_reticulum_actually_packs(self):
-        # Only runs where RNS is installed — the venv this harness is driven
-        # from. Elsewhere the constant stands on the comment beside it.
+        # RNS_HEADER_BYTES is not decorative: on_air_bytes() adds it to every
+        # frame, so a wrong value silently rescales every loss figure this
+        # harness reports. It is a hand-copied constant, and this is the only
+        # thing in the repository that compares it with the number Reticulum
+        # actually packs — so where RNS is installed it must run, and in CI a
+        # missing RNS is a failure rather than a green run that checked nothing.
+        optional_deps.need(self, "RNS",
+                           "the on-air frame size would stand on a hand-copied "
+                           "constant that nothing compares with Reticulum")
         import RNS
         self.assertEqual(hf.RNS_HEADER_BYTES,
                          2 + RNS.Reticulum.TRUNCATED_HASHLENGTH // 8 + 1)

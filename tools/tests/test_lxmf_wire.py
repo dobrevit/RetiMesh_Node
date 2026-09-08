@@ -29,6 +29,14 @@ import unittest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TOOLS = os.path.join(_HERE, os.pardir)
 
+# Discover runs these as tools.tests.*, so the package directory is not
+# on the path by itself; running one file directly does put it there.
+# Both ways have to work, which an absolute import off sys.path gives
+# and a relative one does not.
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+import optional_deps                                        # noqa: E402
+
 _spec = importlib.util.spec_from_file_location(
     "lxmf_wire", os.path.join(_TOOLS, "lxmf_wire.py"))
 wire = importlib.util.module_from_spec(_spec)
@@ -98,15 +106,16 @@ class TheGoldenVectorsAreWhatTheFirmwareEmitted(unittest.TestCase):
     """The transcriptions above are the bytes below, or these tests prove nothing."""
 
     def setUp(self):
+        # Skipping is fine on a bench and not fine in CI: these three are the
+        # only tests that tie the golden hex to the dictionaries every other
+        # test asserts against, so a run without them cannot see the two drift
+        # apart. RNS vendors an msgpack, so either satisfies this.
+        if not (optional_deps.installed("RNS") or optional_deps.installed("msgpack")):
+            optional_deps.need(self, "msgpack",
+                               "the golden telemetry vectors would go unchecked "
+                               "against the fixtures every other test uses")
         self.unpack = _unpacker()
         if self.unpack is None:
-            # Skipping here is fine on a bench and not fine in CI: these three
-            # are the only tests that tie the golden hex to the dictionaries
-            # every other test asserts against, so a run without them cannot
-            # see the two drift apart. CI sets this and gets a failure instead.
-            if os.environ.get("RETIMESH_REQUIRE_UNPACKER"):
-                self.fail("RETIMESH_REQUIRE_UNPACKER is set and no msgpack is "
-                          "installed: the golden vectors would go unchecked")
             self.skipTest("no msgpack available; the decoded fixtures still run")
 
     def test_the_full_document_unpacks_to_the_fixture(self):

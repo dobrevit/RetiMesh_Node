@@ -102,6 +102,31 @@ the bootloader request over ppp0, pppd exiting as the node goes down,
 esptool, the application back, ppp0 up again — and needs root for pppd, so
 it is run by hand rather than from the workflow.
 
+### Does duty-cycled receive drop anything
+`radio.rx_duty_cycle` sleeps the SX1262 between preamble samples. It ships
+defaulted off, and no power profile may arm it until there is bench evidence
+that a sleeping receiver hears what a listening one does.
+`tools/hil_frames.py` is the harness that collects that evidence: it transmits
+sequence-numbered frames through Reticulum and reads the node's LoRa receive
+counter over the console between each one, so a loss is attributed to a
+*particular* frame rather than subtracted from a total at the end. It runs the
+same frames with the setting off and on, interleaved in blocks, and compares
+the two.
+
+The comparison is the point. "Zero missed packets across 10 000 frames" asks an
+RF link for a 0.00 % raw loss rate, which no over-the-air link delivers, so a
+run that failed it could not distinguish a mis-sized sleep window from an
+ordinary afternoon. Against an interleaved control it can.
+
+It is a bench tool, not a CI job: it needs a node, an RNode and an afternoon,
+and `hil.yml` does not run it. What CI does hold is
+`tools/tests/test_hil_frames.py` — the arithmetic, the pacing against the
+sub-band's transmit allowance, the config it writes — and, because CI installs
+`rns`, the one assertion that pins its hand-copied `RNS_HEADER_BYTES` to the
+header Reticulum actually packs. See
+[optional_deps.py](../tools/tests/optional_deps.py) for why that one must never
+be allowed to skip.
+
 ## Soak testing
 A soak is only worth running if someone reads the result, and a week of JSON is
 not something anyone reads. `tools/soak.py` samples every node by its mDNS name
@@ -336,8 +361,9 @@ tools/          make_manifest.py (release bundles), build_site.py (Pages),
                 hash), board_caps.py (boards.json -> BOARD_* flags),
                 check_boards.py (boards.json consistency, CI),
                 console.py (the maintenance console over a port or a socket),
-                hil_ppp.py (PPP hardware-in-the-loop), hilreport.py (HIL
-                results as a job summary),
+                hil_ppp.py (PPP hardware-in-the-loop),
+                hil_frames.py (duty-cycled receive frame-loss harness, bench),
+                hilreport.py (HIL results as a job summary),
                 board_docs.py (boards.json -> the board matrix in docs/hardware.md, CI checks it),
                 upload_hook.py (bootloader hand-off around `-t upload`)
 boards.json     board registry used by CI, packaging, flasher and CLI
