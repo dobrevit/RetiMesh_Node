@@ -73,7 +73,12 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - run: python -m pip install --upgrade pip && python -m pip install cryptography ./tools/retimesh-flash
+      # msgpack is here for the telemetry tests only. Without an unpacker they
+      # skip, and what they skip is the check that ties the golden hex — bytes
+      # the firmware's own encoder produced — to the dictionaries the rest of
+      # the file asserts against. Skipped, drift between the two passes CI
+      # silently, which is the one thing those fixtures exist to prevent.
+      - run: python -m pip install --upgrade pip && python -m pip install cryptography msgpack ./tools/retimesh-flash
       - run: python -m py_compile tools/*.py tools/soak/*.py tools/metrics/*.py
       - uses: actions/setup-node@v7
         with:
@@ -95,6 +100,10 @@ jobs:
       # lxmf_wire.py imports no RNS — none of this is installed here, and a
       # format that can only be checked on a bench is a format nothing checks.
       - name: host tooling tests (soak, LXMF wire formats, metrics exporter)
+        # A skipped golden-vector test is a green run that checked nothing, so
+        # here a missing unpacker is a failure rather than a skip.
+        env:
+          RETIMESH_REQUIRE_UNPACKER: "1"
         run: python -m unittest discover -s tools/tests -t . -v
       - name: boards.json local_link blocks are complete
         run: python tools/check_boards.py

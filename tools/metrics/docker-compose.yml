@@ -46,7 +46,11 @@ services:
       # Keep it: the exporter's address is in here and the nodes are enrolled
       # against that address.
       - ./data/exporter:/data
-      # - ${HOME}/.reticulum:/root/.reticulum
+      # The host's own Reticulum configuration, mounted where --rns-config
+      # already points. Mounting it at /root/.reticulum does nothing: an
+      # explicit --rns-config wins, so the container would read the standalone
+      # config it wrote itself and the join would silently not happen.
+      # - ${HOME}/.reticulum:/data/cfg
     command:
       - --listen
       - ${RETIMESH_LISTEN:-127.0.0.1:9812}
@@ -58,6 +62,11 @@ services:
       - /data/rns
       - --rns-config
       - /data/cfg
+      # How many nodes nobody configured may be kept. Zero, the default, keeps
+      # none: on an open mesh anyone can send a readings map, and an unbounded
+      # store of strangers is memory this process never gives back.
+      - --accept-unsolicited
+      - "${RETIMESH_ACCEPT_UNSOLICITED:-0}"
 
   prometheus:
     image: prom/prometheus:v3.1.0

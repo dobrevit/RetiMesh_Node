@@ -50,7 +50,11 @@ services:
       # it: the collector's address is in here and the nodes are enrolled
       # against that address.
       - ./data:/data
-      # - ${HOME}/.reticulum:/root/.reticulum
+      # The host's own Reticulum configuration, mounted where --rns-config
+      # already points. Mounting it at /root/.reticulum does nothing: an
+      # explicit --rns-config wins, so the container would read the standalone
+      # config it wrote itself and the join would silently not happen.
+      # - ${HOME}/.reticulum:/data/cfg
     command:
       - --interval
       - "300"

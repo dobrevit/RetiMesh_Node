@@ -183,7 +183,15 @@ def _fixed(raw, width, scale, signed=True):
 
 
 def _entries(value):
-    """The [[label, [capacity, used]], ...] shape the three resource sensors share."""
+    """The [[label, [capacity, used]], ...] shape the three resource sensors share.
+
+    The label must be an integer, and that is not fussiness. A caller looks it
+    up in a table with `dict.get(label, ...)`, and a decoded label that is an
+    array or a map is unhashable, so the lookup raises TypeError rather than
+    missing — inside a delivery callback, on RNS's own thread, from a document
+    any stranger on the mesh can send. One malformed reading would stop the
+    collector rather than being dropped.
+    """
     out = []
     if not isinstance(value, (list, tuple)):
         return out
@@ -192,6 +200,8 @@ def _entries(value):
             label, pair = item
             capacity, used = pair
         except Exception:
+            continue
+        if not isinstance(label, int) or isinstance(label, bool):
             continue
         if _num(capacity) is None or _num(used) is None:
             continue

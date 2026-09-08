@@ -187,10 +187,31 @@ class ANodeThatGoesQuiet(unittest.TestCase):
     def test_the_name_and_board_survive_the_silence(self):
         # Without them a silent node has no board and no name on any panel that
         # joins against this — exactly when somebody is working out which board
-        # on which hill has stopped.
-        text = self.fleet.render(now=1000.0 + 901).render()
-        line = [ln for ln in text.splitlines() if ln.startswith("retimesh_node_info")][0]
-        self.assertIn('name="hilltop"', line)
+        # on which hill has stopped. Blanking them would also give the info
+        # metric a new series identity at that same moment, breaking every
+        # group_left join onto it.
+        fresh = self.fleet.render(now=1100.0).render()
+        stale = self.fleet.render(now=1000.0 + 901).render()
+        for text in (fresh, stale):
+            line = [ln for ln in text.splitlines()
+                    if ln.startswith("retimesh_node_info")][0]
+            self.assertIn('name="hilltop"', line)
+            self.assertIn('board="LilyGO T3-S3"', line)
+            self.assertIn('firmware="v0.1.0"', line)
+        # The same series, labels and all, before and after it went quiet.
+        self.assertEqual(
+            [ln for ln in fresh.splitlines() if ln.startswith("retimesh_node_info")],
+            [ln for ln in stale.splitlines() if ln.startswith("retimesh_node_info")])
+
+    def test_identity_outlives_a_reply_that_did_not_carry_it(self):
+        # A board does not stop being a T3-S3 because one reading omitted the
+        # information line.
+        bare = {k: v for k, v in READINGS.items()
+                if k not in ("board", "firmware_version", "information")}
+        self.fleet.nodes[NODE].ingest_telemetry(bare, 1100.0)
+        line = [ln for ln in self.fleet.render(now=1100.0).render().splitlines()
+                if ln.startswith("retimesh_node_info")][0]
+        self.assertIn('board="LilyGO T3-S3"', line)
 
     def test_zero_never_expires_which_is_only_right_on_a_bench(self):
         forever = state.Fleet(max_age=0)
@@ -464,6 +485,52 @@ class NodesTheExporterWasNotToldAbout(unittest.TestCase):
         self.assertEqual(samples(text, "retimesh_node_request_failures_total"),
                          {'node="%s",reason="no_path"' % NODE: 1.0})
         self.assertEqual(samples(text, "retimesh_node_up"), {'node="%s"' % NODE: 0.0})
+
+
+class StrangersOnTheMesh(unittest.TestCase):
+    """Anyone can send a readings map, so what arrives unasked must be bounded.
+
+    An unbounded store of strangers is memory the process never gives back and
+    Prometheus cardinality that never falls — a denial of service that needs no
+    more than a script and a radio.
+    """
+
+    def test_nothing_unsolicited_is_kept_by_default(self):
+        fleet = state.Fleet(max_age=900)
+        self.assertIsNone(fleet.unsolicited(OTHER, 1000.0))
+        self.assertEqual(fleet.nodes, {})
+
+    def test_a_configured_node_is_never_refused(self):
+        fleet = state.Fleet(max_age=900)
+        fleet.node(NODE, polled=True, now=0.0)
+        self.assertIsNotNone(fleet.unsolicited(NODE, 1000.0))
+
+    def test_the_bound_holds_however_many_strangers_arrive(self):
+        fleet = state.Fleet(max_age=900, max_unsolicited=3)
+        for i in range(50):
+            node = fleet.unsolicited("%032x" % i, 1000.0 + i)
+            self.assertIsNotNone(node)
+            node.ingest_telemetry(READINGS, 1000.0 + i)
+        self.assertEqual(len(fleet.nodes), 3)
+
+    def test_a_live_sender_displaces_one_that_stopped_talking(self):
+        # Not first-come-first-served: a stranger that got there first and went
+        # quiet must not lock out one that is still sending.
+        fleet = state.Fleet(max_age=900, max_unsolicited=2)
+        quiet = fleet.unsolicited("a" * 32, 1000.0)
+        quiet.ingest_telemetry(READINGS, 1000.0)
+        loud = fleet.unsolicited("b" * 32, 1000.0)
+        loud.ingest_telemetry(READINGS, 2000.0)
+        fleet.unsolicited("c" * 32, 2001.0)
+        self.assertEqual(sorted(fleet.nodes), sorted(["b" * 32, "c" * 32]))
+
+    def test_configured_nodes_are_not_evicted_to_make_room(self):
+        fleet = state.Fleet(max_age=900, max_unsolicited=1)
+        fleet.node(NODE, polled=True, now=0.0)
+        fleet.unsolicited("a" * 32, 1000.0)
+        fleet.unsolicited("b" * 32, 2000.0)
+        self.assertIn(NODE, fleet.nodes)
+        self.assertEqual(len(fleet.nodes), 2)
 
 
 class TheCallbacksLxmfFleetWillActuallyCall(unittest.TestCase):

@@ -89,11 +89,19 @@ whichever answered most recently wins where they overlap, so the same
 configuration works either side of that change. `HELP` on the console lists
 what a given build knows.
 
-**Telemetry that arrives unasked.** Sideband can be told to push its own, and a
-node enrolled against this address may too. Those nodes appear with
-`retimesh_node_polled 0`. Pass `--only-configured` to ignore them, which is
-worth doing on a public mesh: anyone can send a readings map, and a series that
-appears because a passer-by pressed a button is one nobody can explain later.
+**Telemetry that arrives unasked**, but only if you ask for it.
+`--accept-unsolicited N` keeps readings from up to N nodes nobody configured,
+which is how a Sideband client or a node told to push its own appears; they
+show with `retimesh_node_polled 0`. The default is **0 — none kept**.
+
+That default is deliberate. Anyone within radio range can send a readings map,
+and an exporter that made a permanent entry for every sender is memory the
+process never gives back and Prometheus cardinality that never falls: a denial
+of service needing no more than a script and a radio. The bound is what makes
+the feature safe to turn on at all, and at the bound the least recently heard
+is evicted, so a live sender displaces one that stopped talking rather than
+being locked out by whoever got there first. Configured nodes are never
+evicted.
 
 ## The three rules the metrics follow
 
@@ -210,6 +218,26 @@ network namespace, and a container on a bridge cannot see it however the ports
 are published. The cost is that a service on `0.0.0.0` is a service on the LAN,
 so all three default to loopback. None of them speaks TLS; put something in
 front if you want them reachable.
+
+## The identity is the fleet's administration key
+
+`data/exporter/rns/identity` is what a node's `maintenance.rns_admins` list is
+enrolled against: whoever holds it can run console commands on every node in
+the fleet. RNS writes it with an ordinary `open()`, which under the usual umask
+lands world-readable, so the exporter creates it at `0600` — created that way
+rather than created and then chmodded, since the gap matters — inside a `0700`
+directory, and tightens both on every start in case an older build or a loose
+umask left them open. `tools/fw_sign.py` treats the signing key the same way.
+
+Both images build from `tools/` as their context, because the collector and the
+exporter share their wire formats and their client. A build context is sent to
+the Docker daemon **whole**, not just the files a `COPY` names, so
+`tools/.dockerignore` is an allowlist: the six shared and per-image sources go,
+and nothing else. Without it every build would hand the daemon both stacks'
+`data/` directories and `.env` files — the fleet's keys and the deployment's
+passwords — and with a remote or rootless builder that context leaves the
+machine. `git` ignoring those paths does not help here; only the
+`.dockerignore` does.
 
 ## Restarting it
 

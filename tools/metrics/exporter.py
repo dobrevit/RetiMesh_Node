@@ -57,7 +57,8 @@ class Exporter:
         # half-updated node rendered mid-scrape is a document Prometheus
         # rejects outright rather than a slightly stale one.
         self.lock = threading.Lock()
-        self.fleet = Fleet(max_age=args.max_age, console_max_age=args.console_max_age)
+        self.fleet = Fleet(max_age=args.max_age, console_max_age=args.console_max_age,
+                           max_unsolicited=args.accept_unsolicited)
 
         for address, name in args.node:
             self.fleet.node(address, name=name, polled=True)
@@ -75,16 +76,17 @@ class Exporter:
     def on_message(self, source, telemetry, text):
         now = time.time()
         with self.lock:
-            if source not in self.fleet.nodes and not self.args.accept_unsolicited:
-                # A stranger's telemetry, and this exporter was told to watch a
-                # named fleet. Dropped rather than graphed: on a public mesh
-                # anyone can send a readings map, and a series that appears
-                # because a passer-by pressed a button is one nobody can
-                # explain later.
+            node = self.fleet.nodes.get(source) or self.fleet.unsolicited(source, now)
+            if node is None:
+                # A stranger's telemetry, and this exporter was not asked to
+                # keep any — or is already holding as many as it was allowed.
+                # Dropped rather than graphed: on an open mesh anyone can send a
+                # readings map, and a series that appears because a passer-by
+                # pressed a button is memory this process never gives back and
+                # cardinality Prometheus never sheds.
                 if self.args.verbose:
                     print("ignoring telemetry from unconfigured %s" % source, flush=True)
                 return
-            node = self.fleet.node(source)
             if telemetry is not None:
                 readings = lxmf_wire.normalise(telemetry)
                 if readings:
@@ -286,14 +288,14 @@ def main():
     p.add_argument("--listen", type=_listen, default=None, metavar="[HOST]:PORT",
                    help="where to serve /metrics (default :%d, every interface). "
                         "Defaults to RETIMESH_LISTEN" % DEFAULT_PORT)
-    p.add_argument("--accept-unsolicited", dest="accept_unsolicited",
-                   action="store_true", default=True,
-                   help="keep telemetry from nodes that were never configured, "
-                        "which is how a Sideband client or a node told to push "
-                        "its own readings appears (default)")
-    p.add_argument("--only-configured", dest="accept_unsolicited",
-                   action="store_false",
-                   help="ignore telemetry from anyone not named by --node")
+    p.add_argument("--accept-unsolicited", type=int, default=0, metavar="N",
+                   help="also keep telemetry from up to N nodes that were never "
+                        "configured, which is how a Sideband client or a node "
+                        "told to push its own readings appears. Zero, the "
+                        "default, keeps none: on an open mesh anyone can send a "
+                        "readings map, and an unbounded store of strangers is "
+                        "memory this process never gives back. Least recently "
+                        "heard is evicted at the bound")
     p.add_argument("--announce-interval", type=float, default=1800.0,
                    help="seconds between announces of this exporter's address, "
                         "so nodes pushing telemetry can still find it (default "
@@ -327,13 +329,17 @@ def main():
     if args.console_max_age is None:
         args.console_max_age = 3 * args.command_interval
 
-    # An exporter with no nodes is not an error: it still serves, and it still
-    # keeps whatever arrives unasked. It is worth saying out loud, though,
-    # because the symptom is an empty /metrics that reads as a broken build.
+    if args.accept_unsolicited < 0:
+        p.error("--accept-unsolicited takes a count, and a negative one means nothing")
+
+    # An exporter with no nodes is not an error where it was told to keep what
+    # arrives unasked. Where it was not, it would collect nothing at all, and
+    # the symptom is an empty /metrics that reads as a broken build.
     if not args.node:
         if not args.accept_unsolicited:
-            p.error("no --node and --only-configured: this would collect nothing. "
-                    "Give at least one node, or set RETIMESH_NODES")
+            p.error("no --node, and --accept-unsolicited is 0: this would collect "
+                    "nothing. Name a node, set RETIMESH_NODES, or allow some "
+                    "unsolicited senders")
         print("no nodes configured; serving only telemetry that arrives unasked",
               flush=True)
 

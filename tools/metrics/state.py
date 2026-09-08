@@ -254,6 +254,13 @@ class Node:
 
         self.readings = {}                 # lxmf_wire.normalise output
         self.readings_at = None
+        # What the node *is*, as opposed to what it is reading. Kept apart
+        # because it must outlive both silence and a reply that happened not to
+        # carry it: a board does not stop being a T3-S3 because it stopped
+        # answering, and blanking these would give retimesh_node_info a new
+        # series identity at exactly the moment somebody is trying to work out
+        # which board on which hill has gone quiet.
+        self.identity = {}
         self.console = {}                  # command -> {"at": float, "fields": {}}
         self.last_reply_at = None
 
@@ -279,6 +286,10 @@ class Node:
         """
         self.readings = dict(readings)
         self.readings_at = now
+        # Sticky, and only ever overwritten by something a node actually said.
+        for key in ("board", "firmware_version", "information"):
+            if readings.get(key):
+                self.identity[key] = readings[key]
         self.last_reply_at = now
         self.replies["telemetry"] += 1
 
@@ -319,7 +330,7 @@ class Node:
 class Fleet:
     """Every node the exporter has heard of, and the document it renders."""
 
-    def __init__(self, max_age=0.0, console_max_age=None):
+    def __init__(self, max_age=0.0, console_max_age=None, max_unsolicited=0):
         # Two windows because the two channels are asked at different rates:
         # telemetry every few minutes, the console far less often because it
         # costs a node's airtime for a longer reply. One window sized for the
@@ -328,6 +339,12 @@ class Fleet:
         # prevent. Zero means never expire, and is only right for a bench.
         self.max_age = max_age
         self.console_max_age = max_age if console_max_age is None else console_max_age
+        # How many nodes nobody configured may be held at once. Zero is none,
+        # and is the default: on an open mesh anyone can send a readings map,
+        # and a store that grows with every stranger is memory this process
+        # never gives back and Prometheus cardinality that never falls. Bounded,
+        # the worst a mesh full of strangers can do is fill this many slots.
+        self.max_unsolicited = max_unsolicited
         self.nodes = {}
 
     def node(self, address, name=None, polled=None, now=None):
@@ -348,6 +365,25 @@ class Fleet:
             n.polled = True
         return n
 
+    def unsolicited(self, address, now):
+        """Admit a node nobody configured, within the bound. None if refused.
+
+        Least-recently-heard is evicted to make room, so a live sender
+        displaces one that stopped talking rather than being turned away
+        because a stranger got there first.
+        """
+        node = self.nodes.get(address)
+        if node is not None:
+            return node
+        if self.max_unsolicited <= 0:
+            return None
+        strangers = [n for n in self.nodes.values() if not n.polled]
+        while len(strangers) >= self.max_unsolicited:
+            oldest = min(strangers, key=lambda n: n.last_reply_at or n.first_seen)
+            del self.nodes[oldest.address]
+            strangers.remove(oldest)
+        return self.node(address, now=now)
+
     def render(self, now=None, into=None):
         now = time.time() if now is None else now
         e = into if into is not None else Exposition()
@@ -360,9 +396,10 @@ class Fleet:
         readings = n.readings if n.fresh(n.readings_at, now, self.max_age) else {}
 
         # Identity first, and always — including for a node that has gone
-        # quiet. Without it a silent node has no board, no version and no name
-        # on any panel that joins against this, which is exactly when somebody
-        # is trying to work out which board on which hill has stopped.
+        # quiet. Taken from `n.identity` rather than from the freshness-filtered
+        # readings below: a silent node with no board and no version on it is
+        # useless on any panel that joins against this, which is exactly when
+        # somebody is trying to work out which board on which hill has stopped.
         # A node nobody named is labelled by the first eight characters of its
         # address rather than by an empty string, so a dashboard legend keyed on
         # `name` reads as something instead of as a gap. Naming it later changes
@@ -371,9 +408,9 @@ class Fleet:
                "The node, by every name it has. Join it onto a reading with "
                "`* on(node) group_left(board, name) retimesh_node_info`",
                dict(base, name=n.name or n.address[:8],
-                    board=readings.get("board", ""),
-                    firmware=readings.get("firmware_version", ""),
-                    information=readings.get("information", "")))
+                    board=n.identity.get("board", ""),
+                    firmware=n.identity.get("firmware_version", ""),
+                    information=n.identity.get("information", "")))
 
         # Liveness, which outlives the readings on purpose. This is the metric
         # to alert on: it stays at 0 for a node that has stopped answering,

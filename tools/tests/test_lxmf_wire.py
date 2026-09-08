@@ -100,6 +100,13 @@ class TheGoldenVectorsAreWhatTheFirmwareEmitted(unittest.TestCase):
     def setUp(self):
         self.unpack = _unpacker()
         if self.unpack is None:
+            # Skipping here is fine on a bench and not fine in CI: these three
+            # are the only tests that tie the golden hex to the dictionaries
+            # every other test asserts against, so a run without them cannot
+            # see the two drift apart. CI sets this and gets a failure instead.
+            if os.environ.get("RETIMESH_REQUIRE_UNPACKER"):
+                self.fail("RETIMESH_REQUIRE_UNPACKER is set and no msgpack is "
+                          "installed: the golden vectors would go unchecked")
             self.skipTest("no msgpack available; the decoded fixtures still run")
 
     def test_the_full_document_unpacks_to_the_fixture(self):
@@ -208,6 +215,20 @@ class ADocumentThatIsNotOne(unittest.TestCase):
         r = wire.normalise(doc)
         self.assertNotIn("latitude_degrees", r)
         self.assertIn("battery_percent", r)          # the rest of it still arrives
+
+    def test_a_storage_label_that_cannot_be_a_dict_key_is_dropped(self):
+        # The label is looked up with dict.get(), and an array or a map label is
+        # unhashable — so the lookup raises TypeError rather than missing, on
+        # RNS's delivery thread, from a document any stranger can send. One bad
+        # reading would stop the collector instead of being dropped.
+        for label in ([1, 2], {"a": 1}, "flash", None, True):
+            doc = dict(SPARSE)
+            doc[0x15] = [[label, [100, 50]]]
+            r = wire.normalise(doc)                    # must not raise
+            self.assertNotIn("storage", r)
+        good = dict(SPARSE)
+        good[0x15] = [[1, [100, 50]]]
+        self.assertEqual(sorted(wire.normalise(good)["storage"]), ["card"])
 
     def test_a_sensor_this_tool_does_not_know_is_ignored_not_guessed_at(self):
         doc = dict(SPARSE)

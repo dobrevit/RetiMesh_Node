@@ -89,6 +89,37 @@ def seed_config(config_dir, peers):
     print("wrote a starting config to %s" % path, flush=True)
 
 
+def _own_only(path, mode):
+    """Take a file or directory back to owner-only, quietly if that is not possible.
+
+    Not fatal on failure: a bind mount from a filesystem with no permission
+    bits is a real deployment, and refusing to start there would be worse than
+    the exposure. It is reported, so it is not silent.
+    """
+    try:
+        os.chmod(path, mode)
+    except OSError as e:
+        print("warning: could not restrict %s: %s" % (path, e),
+              file=sys.stderr, flush=True)
+
+
+def _write_identity(identity, path):
+    """The private key, created 0600 rather than created and then chmodded.
+
+    This key is what a node's administrator list is enrolled against: whoever
+    holds it can run console commands on the fleet. RNS writes it with an
+    ordinary open(), so under the usual umask it lands world-readable — and the
+    container that writes it runs as root over a bind mount into the operator's
+    own directory. The file is pre-created at 0600 so it never exists at 0644,
+    even for the length of the write; tools/fw_sign.py does the same thing with
+    the signing key, for the same reason.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(fd)
+    identity.to_file(path)
+    _own_only(path, 0o600)
+
+
 class Client:
     """An LXMF identity that asks nodes questions and hands back their answers.
 
@@ -112,13 +143,15 @@ class Client:
         seed_config(rns_config, peers)
         RNS.Reticulum(rns_config)
 
+        os.makedirs(storage, exist_ok=True)
+        _own_only(storage, 0o700)
         idpath = os.path.join(storage, "identity")
         if os.path.isfile(idpath):
             identity = RNS.Identity.from_file(idpath)
+            _own_only(idpath, 0o600)     # written by an older build, or a loose umask
         else:
-            os.makedirs(storage, exist_ok=True)
             identity = RNS.Identity()
-            identity.to_file(idpath)
+            _write_identity(identity, idpath)
 
         self.router = LXMF.LXMRouter(identity=identity, storagepath=storage)
         self.local = self.router.register_delivery_identity(identity, display_name=name)
