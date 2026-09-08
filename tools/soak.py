@@ -86,6 +86,19 @@ FIELDS = [
     # dropped — a power cut leaves nothing to report and must not read as a
     # clean run.
     "prev_alloc_failures", "prev_contained",
+    # The cell, and what the node was doing while it drained it. No board here
+    # can measure its own current — the T-Beam's AXP2101 reports voltages and
+    # nothing else, the V4's BQ25896 gives charge current but not discharge, and
+    # the rest have only a divider — so the only power measurement available
+    # without an instrument is how fast the cell falls. That needs the voltage
+    # logged over hours, which is what this is for.
+    #
+    # `power_profile` is not decoration: a discharge figure is meaningless
+    # without knowing which profile produced it, and comparing two runs is the
+    # entire method. `battery_charging` is the guard — a node on USB is not
+    # discharging, and its rising voltage is not a measurement.
+    "power_profile", "cpu_mhz", "pmu",
+    "battery_present", "battery_v", "battery_pct", "battery_charging",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -112,6 +125,7 @@ def sample(host, timeout=8):
     heap = diag.get("heap", {})
     tables = diag.get("tables", {})
     faults = diag.get("faults", {})
+    power  = d.get("power", {})
 
     row.update(
         uptime_s=d.get("uptime_s", ""),
@@ -156,8 +170,43 @@ def sample(host, timeout=8):
         fault_last_ms_ago=faults.get("last_ms_ago", ""),
         prev_alloc_failures=boot.get("prev_alloc_failures", ""),
         prev_contained=boot.get("prev_contained", ""),
+        power_profile=power.get("profile", ""),
+        cpu_mhz=power.get("cpu_mhz", ""),
+        pmu=power.get("pmu", ""),
+        battery_present=fmt_bool(power.get("battery_present")),
+        battery_v=power.get("battery_v", ""),
+        battery_pct=power.get("battery_pct", ""),
+        # Tri-state on purpose: a board that cannot tell whether it is charging
+        # sends null, and that is neither yes nor no. Recording it as "no" would
+        # let a run on USB be read as a discharge measurement.
+        battery_charging=fmt_bool(power.get("battery_charging")),
     )
     return row
+
+
+def fmt_bool(v):
+    """1, 0, or blank — blank meaning the node did not say, which is a third
+    answer and not a false one."""
+    if v is True:
+        return 1
+    if v is False:
+        return 0
+    return ""
+
+
+def is_true(v):
+    """Decode what fmt_bool() encoded. Paired with it deliberately: the encoding
+    is 1/0/blank and the only reader used to re-implement the decode ad hoc,
+    which missed a real Python True (str(True) == "True") and read blank —
+    "this board cannot tell" — as "no". Both halves live here so they cannot
+    disagree about the one distinction this file exists to protect."""
+    return v is not None and str(v).strip().lower() in ("1", "true", "yes")
+
+
+def is_blank(v):
+    """None counts. A column a CSV does not have is as absent as one it has and
+    left empty, and the difference must not make an old file report findings."""
+    return v is None or str(v).strip() == ""
 
 
 def missing_tasks(diag):
@@ -173,24 +222,226 @@ def missing_tasks(diag):
     return [t for t in ALWAYS_RUNNING if t not in stacks]
 
 
-def summarise(path):
+# Hoisted out of summarise() when discharge() came to need them: one definition
+# each rather than a second copy beside the first.
+def num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_ts(v):
+    try:
+        return datetime.fromisoformat(v).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _crossing(volts, level, start_at=0, confirm=2):
+    """Index and interpolated time at which the cell really fell past `level`.
+
+    "Really" is the whole point. A single sample below the level is not a
+    crossing: an 18650 sags 100-200 mV under a transmit burst and comes back,
+    and load varies constantly on a routing node — so the first sample under a
+    threshold is routinely a dip rather than the crossing. `confirm` consecutive
+    samples at or below it are required.
+
+    The time is interpolated between the bracketing samples rather than snapped
+    to the confirmed one: at a 300 s sample interval, snapping quantises each
+    edge by up to five minutes, and both edges of a short band can otherwise
+    land inside a single interval and read as zero.
+
+    Returns (index, time) or (None, None).
+    """
+    for i in range(start_at, len(volts)):
+        # `confirm` consecutive samples, except at the end of the series, where
+        # there are none left to confirm with. A run deliberately stopped once
+        # the cell reached LOW is the normal case and must not read as "never
+        # got there"; the cost is that a sag in the final sample cannot be told
+        # from a crossing, which is why the caller says so.
+        window = min(confirm, len(volts) - i)
+        if all(volts[i + k][1] <= level for k in range(window)):
+            t, v = volts[i]
+            if i == 0:
+                return i, t                       # already below at the first sample
+            pt, pv = volts[i - 1]
+            if pv == v:
+                return i, t
+            frac = (pv - level) / (pv - v)        # pv > level >= v
+            return i, pt + (t - pt) * max(0.0, min(1.0, frac))
+    return None, None
+
+
+def discharge(up, band=None):
+    """What the cell did, as lines to print.
+
+    This is the only power measurement available on this bench. No board here
+    can report its own current — the T-Beam's AXP2101 exposes voltages and
+    nothing else, the V4's BQ25896 gives charge current but not discharge — so
+    what is left is how fast the cell falls.
+
+    Read the limits before using a number from this, because it is meant to
+    choose a shipped default:
+
+    **mV/h is not proportional to draw across different voltage ranges.**
+    dV/dt = (dV/dQ)·I, and dV/dQ for a lithium cell varies by roughly three to
+    five times between the 4.2-3.9 V slope, the 3.9-3.7 V plateau and the knee
+    below 3.5 V. Two runs that start at different states of charge are not
+    comparable in mV/h at all, and whichever run sat in the plateau will look
+    like the efficient one. That is why the rate below is reported as an
+    observation and `--band` is the figure to compare.
+
+    **Even the band time only compares like with like.** It is ΔQ_band / I_avg,
+    and ΔQ_band is constant only for the same physical cell, at a similar
+    temperature (ten degrees moves capacity and internal resistance by a few
+    percent), at the same state of health — a cell cycled between runs is not
+    the same cell — and rested after charging, because surface charge makes a
+    high threshold time relaxation rather than discharge.
+
+    **And it measures the node, not the profile.** Everything the board did
+    during the run is in the figure. Two runs on a channel with different
+    traffic differ for reasons that have nothing to do with the profile, so the
+    traffic deltas are printed beside the time: if they do not match, the runs
+    were not comparable and the difference is not the profile's.
+
+    Four things make a run outright invalid rather than merely incomparable,
+    and each is reported instead of being folded into a number: the node was
+    charging, it cannot tell whether it was charging, its profile changed
+    mid-run, or it has no cell to measure.
+    """
+    out = []
+
+    # A cell the board actually reports. `battery_v` alone is not enough: an
+    # ADC board leaves the last reading in place when the converter stops, and
+    # the API publishes it regardless of `present`, so a stale divider would
+    # otherwise yield a confident rate.
+    rows = [r for r in up if is_true(r.get("battery_present"))]
+    if not rows:
+        if any(not is_blank(r.get("battery_present")) for r in up):
+            out.append("   this board reports no cell — nothing to measure this way")
+        return out                              # or a CSV predating the columns
+
+    volts = [(parse_ts(r["ts"]), num(r.get("battery_v"))) for r in rows]
+    volts = [(t, v) for t, v in volts if t and v]
+    if len(volts) < 2:
+        return out
+
+    # Asked before the run is split, because a charging node's voltage *rises*
+    # and the split below reads a rise as a recharge — which would file the
+    # whole run away as several one-sample stretches and report nothing at all,
+    # when what the operator needs is to be told they measured a charger.
+    if any(is_true(r.get("battery_charging")) for r in rows):
+        out.append("   ⚠ the node was charging during this run: this is not a "
+                   "discharge measurement")
+        return out
+
+    # One discharge, not several. The CSV is appended to by design, so a file
+    # can hold last week's run, a recharge and today's; and a restart can be a
+    # node that was replugged, which is a different draw. Split on both and
+    # measure the longest clean stretch, the way announce_segments() splits the
+    # announce counter at every boot.
+    segs, seg = [], [0]
+    for i in range(1, len(volts)):
+        recharged = volts[i][1] > volts[i - 1][1] + 0.030      # 30 mV up: not noise
+        rebooted = rows[i].get("boot_count") != rows[i - 1].get("boot_count")
+        if recharged or rebooted:
+            segs.append(seg); seg = [i]
+        else:
+            seg.append(i)
+    segs.append(seg)
+    idx = max(segs, key=lambda g: (volts[g[-1]][0] - volts[g[0]][0]) if len(g) > 1 else -1)
+    if len(idx) < 2:
+        return out
+    if len(segs) > 1:
+        out.append(f"   the file holds {len(segs)} discharge stretches (recharges or "
+                   f"restarts between them); measuring the longest")
+    volts = [volts[i] for i in idx]
+    rows = [rows[i] for i in idx]
+
+    charging = [r.get("battery_charging") for r in rows]
+    profiles = {r.get("power_profile") for r in rows if r.get("power_profile")}
+    first_t, first_v = volts[0]
+    last_t, last_v = volts[-1]
+    hours = (last_t - first_t) / 3600.0
+    prof = "/".join(sorted(profiles)) if profiles else "unknown"
+    out.append(f"   battery {first_v:.3f} V -> {last_v:.3f} V over {hours:.2f} h"
+               f"  (profile {prof})")
+
+    invalid = False
+    if all(is_blank(c) for c in charging):
+        # Blank is the third answer, not "no". Only the T-Beam and the V4 can
+        # tell; everywhere else the API sends null and a run on USB would
+        # otherwise be reported as a discharge.
+        out.append("   ⚠ this board cannot tell whether it was charging — confirm "
+                   "by hand that it was on battery before using this")
+    if len(profiles) > 1:
+        out.append(f"   ⚠ the power profile changed during this run ({prof}): this "
+                   f"measures neither profile")
+        invalid = True
+    if invalid:
+        return out
+    if hours <= 0:
+        return out
+
+    # A hole in the samples is time the node was not observed, and attributing
+    # it to the profile is how an unreachable node becomes an efficient one.
+    gaps = [volts[i][0] - volts[i - 1][0] for i in range(1, len(volts))]
+    typical = sorted(gaps)[len(gaps) // 2]
+    if gaps and max(gaps) > max(4 * typical, 900) and max(gaps) > 0.1 * (last_t - first_t):
+        out.append(f"   ⚠ the largest gap between samples is {max(gaps) / 3600.0:.2f} h "
+                   f"of a {hours:.2f} h run — the node was not observed for much of it")
+
+    drop_mv = (first_v - last_v) * 1000.0
+    if drop_mv <= 0:
+        out.append("   the cell did not fall over this run — too short, or not on battery")
+        return out
+    out.append(f"   fell {drop_mv:.0f} mV in {hours:.2f} h ({drop_mv / hours:.1f} mV/h) — "
+               f"comparable only against a run over the same voltage range")
+
+    if not band:
+        return out
+    hi, lo = band
+    if volts[0][1] <= hi:
+        out.append(f"   band {hi:.3f}-{lo:.3f} V: the run began at {volts[0][1]:.3f} V, "
+                   f"already at or below {hi:.3f} — it never entered the band")
+        return out
+    i_hi, t_hi = _crossing(volts, hi)
+    if i_hi is None:
+        out.append(f"   band {hi:.3f}-{lo:.3f} V: never fell past {hi:.3f} V")
+        return out
+    i_lo, t_lo = _crossing(volts, lo, start_at=i_hi)
+    if i_lo is None:
+        out.append(f"   band {hi:.3f}-{lo:.3f} V: not fully covered — the run ended at "
+                   f"{last_v:.3f} V")
+        return out
+    span = t_lo - t_hi
+    if span < 3 * typical:
+        out.append(f"   band {hi:.3f}-{lo:.3f} V crossed inside {span / 3600.0:.2f} h, "
+                   f"which is fewer than three sample intervals: too fast to resolve at "
+                   f"this --interval, not a measurement")
+        return out
+    out.append(f"   band {hi:.3f}-{lo:.3f} V crossed in {span / 3600.0:.2f} h "
+               f"— compare against another run of the same cell")
+    # Whether the two runs were comparable at all is not visible from the time.
+    traffic = []
+    for label, key in (("rx", "rx_packets"), ("tx", "tx_packets"),
+                       ("announces", "announces_tx")):
+        a, b = num(rows[0].get(key)), num(rows[-1].get(key))
+        if a is not None and b is not None and b >= a:
+            traffic.append(f"{label} +{b - a:.0f}")
+    if traffic:
+        out.append(f"   over that band the node did: {', '.join(traffic)} — a run with "
+                   f"different traffic is not a comparison of profiles")
+    return out
+
+
+def summarise(path, band=None):
     with open(path, newline="") as f:
         rows = [r for r in csv.DictReader(f)]
     if not rows:
         print("no samples")
         return
-
-    def num(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
-    def parse_ts(v):
-        try:
-            return datetime.fromisoformat(v).timestamp()
-        except (TypeError, ValueError):
-            return 0.0
 
     def announce_segments(rows):
         """The announce counter, split at every restart, over the samples that
@@ -335,6 +586,9 @@ def summarise(path):
             if vals and (vals[0] != vals[-1] or max(vals) != vals[-1]):
                 print(f"   {label}: {vals[0]:.0f} -> {vals[-1]:.0f} (peak {max(vals):.0f})")
 
+        for line in discharge(up, band):
+            print(line)
+
         # Losses, as deltas: totals since boot say little a week in.
         loss_keys = ("drop_ring", "drop_reasm", "drop_partial", "crc_errors",
                      "bad_length", "spurious_irq")
@@ -388,10 +642,27 @@ def main():
                     help="seconds to run for (default: a week)")
     ap.add_argument("--summarise", metavar="CSV",
                     help="print a summary of an existing file and exit")
+    ap.add_argument("--band", metavar="HIGH:LOW",
+                    help="with --summarise: time the cell's fall through this "
+                         "voltage window, e.g. 4.00:3.80. The figure to compare "
+                         "between two runs of the same cell — see the caveats "
+                         "discharge() prints, which are not optional reading")
     args = ap.parse_args()
 
+    band = None
+    if args.band:
+        try:
+            hi, lo = (float(x) for x in args.band.split(":", 1))
+        except ValueError:
+            ap.error("--band wants HIGH:LOW in volts, e.g. 4.00:3.80")
+        if hi <= lo:
+            ap.error(f"--band {args.band}: a cell falls, so HIGH must exceed LOW")
+        if not args.summarise:
+            ap.error("--band is only meaningful with --summarise")
+        band = (hi, lo)
+
     if args.summarise:
-        summarise(args.summarise)
+        summarise(args.summarise, band)
         return 0
     if not args.nodes:
         ap.error("name at least one node, or pass --summarise")

@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
+#
+# Both images here build from tools/ as their context, because the collector
+# and the exporter share their wire formats and their LXMF client. That context
+# is sent to the Docker daemon whole — every file in it, not only the ones a
+# COPY names — and tools/soak/data/ and tools/metrics/data/ hold the identities
+# the fleet's nodes are enrolled against, while the .env files hold the
+# deployment's own addresses and passwords. git ignores those; the daemon does
+# not, and with a remote or rootless builder the context leaves the machine.
+#
+# So this is an allowlist: nothing goes, except the sources the Dockerfiles
+# actually copy. A file added later is excluded until somebody says otherwise,
+# which is the right way round for a directory that holds keys.
+*
+
+!lxmf_wire.py
+!lxmf_fleet.py
+
+# Re-entering a directory takes two steps: the directory itself, then the file
+# inside it. Naming only the file leaves it unreachable behind its excluded
+# parent, and the build fails on a COPY that cannot find its source.
+!soak
+soak/*
+!soak/collector.py
+
+!metrics
+metrics/*
+!metrics/exposition.py
+!metrics/state.py
+!metrics/exporter.py

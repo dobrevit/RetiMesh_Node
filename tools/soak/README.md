@@ -8,6 +8,14 @@ asks.
 It runs as a container beside the Reticulum instance the host already has, polls
 each node on a timer, and appends every answer to newline-delimited JSON.
 
+For the same fleet on a Grafana dashboard rather than in a file, see
+[tools/metrics/](../metrics/): it asks the same questions over the same client
+and keeps only the last answer. The two share `tools/lxmf_wire.py` (what a
+reading is) and `tools/lxmf_fleet.py` (how to ask), so a sensor the firmware
+adds appears in both and a scale that moves cannot move in only one of them.
+That is why this image is built from `tools/` rather than from this directory —
+`docker compose` from here still does the right thing.
+
 ## What it collects
 
 **Telemetry**, over LXMF `FIELD_COMMANDS` (0x09) command `0x01`. Open to any

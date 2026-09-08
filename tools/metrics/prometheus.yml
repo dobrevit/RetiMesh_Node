@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
+#
+# Prometheus does not expand environment variables in this file, so the target
+# below is written out. If you change RETIMESH_LISTEN in .env, change it here
+# to match — they are the two ends of the same wire.
+global:
+  # This is how often the *exporter* is read, not how often a node is asked.
+  # The node answers every few minutes; scraping faster than that re-reads the
+  # same value, and scraping much slower makes `up` useless as an alert and
+  # leaves gaps wider than Prometheus's own staleness window. Thirty seconds is
+  # comfortably inside both.
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    fleet: retimesh
+
+scrape_configs:
+  - job_name: retimesh
+    static_configs:
+      - targets: ['127.0.0.1:9812']

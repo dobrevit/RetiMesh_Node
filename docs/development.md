@@ -135,6 +135,32 @@ missing** means the RTC domain was lost, which is what an EN-pin reset from a
 USB bridge looks like: opening the console on a CH34x board resets it, so a
 "restart" in the data may be the person watching it.
 
+
+### Watching a fleet over the air
+`tools/soak.py` reaches a node over HTTP, which needs Wi-Fi — and a node being
+measured is often a node on battery with its Wi-Fi turned down or off by the
+very profile under test, or on a hill where there is no Wi-Fi to reach. Two
+tools ask the same questions over LXMF instead, so they work wherever the mesh
+does:
+
+* [`tools/soak/`](../tools/soak/README.md) keeps every answer in
+  newline-delimited JSON. The right thing when the point is to not lose a
+  reading.
+* [`tools/metrics/`](../tools/metrics/README.md) keeps only the last answer and
+  serves it to Prometheus, with a `docker compose up` that brings a Grafana and
+  the fleet dashboard with it. The right thing when the point is to watch.
+
+Both share `tools/lxmf_wire.py` — the sensor ids, fixed-point scales and array
+positions from `src/rns/Telemetry.h`, in Python, which no compiler checks
+against the original. `tools/tests/test_lxmf_wire.py` pins it to documents the
+firmware's own encoder produced, because the way telemetry drift shows up is
+not an error: a sensor that was added is quietly missing from a dashboard, or a
+scale that moved reads as a node that walked half a degree east.
+
+Telemetry needs no enrolment. The console channel — `STACKS`, `POWER` — needs
+the collector's address in `maintenance.rns_admins`, and without it every
+request is answered `RM ERR ADMIN 403`.
+
 ## What each subsystem costs
 The boot log carries a bill. After each subsystem starts, `Diag::cost()` logs
 what it took of the RAM that decides — byte-addressable internal RAM, the kind

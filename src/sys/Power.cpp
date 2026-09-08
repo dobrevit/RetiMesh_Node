@@ -158,6 +158,15 @@ void sample() {
 
 namespace Power {
 
+const char* chargerName() {
+#if HAS_BQ25896
+  // Asked before the PMU, because a board can have both in principle and the
+  // charger is the part that answers the charging question here.
+  if (Bq25896::present()) return "BQ25896";
+#endif
+  return Pmu::model();                       // "AXP192", "AXP2101", or "none"
+}
+
 const char* profileName(Profile p) {
   switch (p) { case Profile::Balanced: return "balanced"; case Profile::Battery: return "battery"; default: return "performance"; }
 }

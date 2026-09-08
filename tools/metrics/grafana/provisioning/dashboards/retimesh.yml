@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
+apiVersion: 1
+
+providers:
+  - name: RetiMesh
+    folder: RetiMesh
+    type: file
+    # A panel can be adjusted in the browser and saved, rather than the Save
+    # button being refused. The file still wins whenever it changes, and this
+    # directory is mounted read-only, so Grafana cannot write an edit back to
+    # it: export the JSON and copy it into grafana/dashboards/ to keep one.
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

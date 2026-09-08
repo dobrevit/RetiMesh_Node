@@ -1,0 +1,4 @@
+# Empty on purpose. Mounting grafana/provisioning over Grafana's own directory
+# hides the empty plugins/ and alerting/ directories the image ships, and
+# Grafana logs an error for each one it cannot open — two alarming lines on
+# every start, about nothing.
