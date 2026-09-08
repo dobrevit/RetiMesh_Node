@@ -32,15 +32,22 @@
 //
 // Where these numbers come from
 // -----------------------------
-// Two sources that agree on every pin below, of which one is a firmware
-// running on this exact board:
+// Two sources, one of which is a firmware running on this exact board:
 //
 //   * LilyGO's own hardware documentation for the T-Beam Supreme
 //     (wiki.lilygo.cc), which names the parts and both I2C buses;
 //   * the RNode firmware's board block for it (BOARD_TBEAM_S_V1 in Boards.h,
-//     Power.h and Display.h in the ../RNode_Firmware mirror) — the radio pins,
-//     the card pins, the PMU bus and interrupt, the IMU select, the button,
-//     the panel controller and the TCXO voltage all match.
+//     Power.h and Display.h in the ../RNode_Firmware mirror).
+//
+// They agree, pin for pin, on everything that decides whether this board comes
+// up: the radio's seven lines, the card's four, the PMU's bus and interrupt,
+// the panel's bus and its controller, the accelerometer's select, the button,
+// and the TCXO voltage. Worth saying which lines have only the one source,
+// because that is where to look first if something does not answer: the GNSS
+// UART, its 1PPS output and the L76K wake line, the clock's interrupt and the
+// accelerometer's interrupt are LilyGO's numbers alone — RNode drives no
+// receiver, no clock and no accelerometer on this board, so it says nothing
+// about them either way. None of those five is on the boot path.
 //
 // The rail map is LilyGO's own reference code, copied into RNode's Power.h and
 // reproduced below. It is the part with no room for inference: this board's
@@ -167,6 +174,14 @@
 //
 // If a unit is confirmed to carry the MAX-M10S, GPS_UBX 1 is the one line that
 // changes, and it buys the UBX position and time frames rather than the nap.
+//
+// One cost to know about that rail cut: the receiver's backup domain here is
+// the AXP2101's own VBACKUP, which nothing names and nothing switches — and
+// LilyGO's reference code for this board turns it off. So unlike the T-Beam,
+// whose receiver keeps its almanac through a nap, a wake on this board should
+// be assumed to be a cold start until a bench times one. Naming VBACKUP as a
+// rail and enabling it is the fix if it matters, and it is worth a current
+// measurement rather than an assumption.
 #define HAS_GPS             1
 #define PIN_GPS_RX          9                // the S3 receives here
 #define PIN_GPS_TX          8

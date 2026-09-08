@@ -33,7 +33,7 @@ wrong:
     reports, so a node comparing the two is comparing like with like.
 
 It also refuses outright to build an OTA for a board that cannot install one.
-Seven of the twelve envs here have a single app partition; a node on one of
+Eight of the thirteen envs here have a single app partition; a node on one of
 those has nothing to write an update into (OtaInstaller.h: NoSlot) and must be
 flashed by cable. Producing a bundle for it anyway wastes a download and an
 operator's afternoon.

@@ -109,6 +109,10 @@ for section in ini.sections():
 # catching — an arm whose header is the one above it, copied and not changed.
 # Both names then exist in the file and every set-membership test passes, and
 # the board builds on another board's pin map.
+#
+# The include has to be on the line after the #elif, which is how the chain is
+# written. A comment wedged between them drops that arm and the env's flag is
+# then reported as undispatched — wrong reason, right outcome, and loud.
 config_h = (ROOT / "src" / "Config.h").read_text()
 arms = re.findall(r'defined\((BOARD_[A-Z0-9_]+)\)\s*\)?\s*\n\s*#include\s+"boards/([a-z0-9_]+)\.h"',
                   config_h)

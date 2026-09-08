@@ -298,14 +298,18 @@ void applyRest(bool rest) {
   // cold start.
   digitalWrite(PIN_GPS_STANDBY, rest ? LOW : HIGH);
 #elif GPS_NAP == GPS_NAP_RAIL
-  // tbeam. The power-management chip already has a real cut for this rail —
-  // AXP192 LDO3 / AXP2101 ALDO3, the one runtime rail switch in this firmware
-  // and the switch the operator's own GNSS setting already throws. Nothing
-  // needs adding to reach it, and it is a harder off than any message. The
-  // receiver's backup supply is not on this rail (Gps.h), so it keeps its
-  // almanac across the cut and a wake is a warm start rather than a cold one —
-  // which is the fact this cadence rests on, and the one to confirm on a
-  // bench.
+  // tbeam and tbeam-supreme. The power-management chip already has a real cut
+  // for this rail — PMU_RAIL_GPS, which each board names for itself, and the
+  // one runtime rail switch in this firmware; it is also the switch the
+  // operator's own GNSS setting already throws. Nothing needs adding to reach
+  // it, and it is a harder off than any message. The regulator is not repeated
+  // here: it is ALDO3 on one of those boards and ALDO4 on the other, and a
+  // second copy of that fact in a comment is how the two drift apart.
+  //
+  // Whether the wake is warm depends on the board keeping the receiver's
+  // backup domain alive across the cut, which is a per-board fact and only
+  // established on the T-Beam — see Gps.h. Where it is not, a nap costs a cold
+  // start, and the cadence is then paying more for a fix than this assumes.
   //
   // The port goes down with the rail, deliberately: leaving the processor's
   // transmit line driving high into an unpowered receiver pushes current

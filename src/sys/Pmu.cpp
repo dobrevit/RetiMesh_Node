@@ -49,11 +49,22 @@ bool sGpsOn = false;
 // A board that does not name a rail (PMU_RAIL_NONE) is not saying "off": it is
 // saying the chip's own power-up state is the right one and nothing here
 // should have an opinion. Config.h holds the names.
-void railTo(uint8_t ch, bool on) {
-  if (ch == PMU_RAIL_NONE) return;
-  sPmu->setPowerChannelVoltage(ch, 3300);
-  if (on) sPmu->enablePowerOutput(ch);
-  else    sPmu->disablePowerOutput(ch);
+//
+// Every one of these calls returns a bool and every one of them can be refused
+// — a protected channel, a voltage off the chip's step grid. They were being
+// discarded, which on a board whose parts all hang off these rails is the one
+// thing in begin() with no observability: the charge terms below are read back
+// and reported, and the rails that decide whether the radio exists at all were
+// not. A refused rail and an absent part read exactly the same on a bench.
+bool railTo(const char* what, uint8_t ch, bool on) {
+  if (ch == PMU_RAIL_NONE) return true;
+  const bool volt = sPmu->setPowerChannelVoltage(ch, 3300);
+  const bool sw   = on ? sPmu->enablePowerOutput(ch) : sPmu->disablePowerOutput(ch);
+  if (!volt || !sw)
+    log_w("%s: the %s rail (channel %u) did not take — voltage %s, switch %s. An "
+          "unpowered rail reads exactly like a part that is not fitted",
+          sModel, what, (unsigned)ch, volt ? "ok" : "refused", sw ? "ok" : "refused");
+  return volt && sw;
 }
 }
 
@@ -70,6 +81,16 @@ bool begin() {
   // clock have a pair to themselves and the panel is elsewhere, where starting
   // Wire on the PMU's pins — as this did — would have moved the panel onto the
   // PMU's wires and left it reading as a panel that is not fitted.
+  //
+  // One thing this changes on the T-Beam, where the two are the same pair:
+  // the bus now starts at I2C_HZ rather than at the core's 100 kHz default,
+  // which is what `Wire.begin(sda, scl)` with no frequency asked for
+  // (esp32-hal-i2c.c substitutes 100000 for a zero). Both PMUs and the panel
+  // are rated for 400 kHz, and the panel's own driver already raises the
+  // clock to that around every frame and drops it afterwards — so the bus was
+  // changing speed under the PMU regardless. It is named here because it is a
+  // change on a board that is deployed, and a NAK on that shared bus is
+  // already the known cause of charge terms not applying.
   bool busUp = false;
   TwoWire& bus = I2cReg::busFor(PIN_PMU_SDA, PIN_PMU_SCL, I2C_HZ, &busUp);
   if (!busUp) {
@@ -106,19 +127,22 @@ bool begin() {
   // so its channels come from the board header through Config.h.
   //   AXP192   LDO2 = LoRa, LDO3 = GPS, DCDC1 = OLED
   if (strcmp(sModel, "AXP192") == 0) {
-    sPmu->setPowerChannelVoltage(XPOWERS_LDO2, 3300);
-    sPmu->enablePowerOutput(XPOWERS_LDO2);              // transceiver
-    sPmu->setPowerChannelVoltage(XPOWERS_DCDC1, 3300);
-    sPmu->enablePowerOutput(XPOWERS_DCDC1);             // display
-    sPmu->setPowerChannelVoltage(XPOWERS_LDO3, 3300);
-    sPmu->disablePowerOutput(XPOWERS_LDO3);             // GPS: off for now
+    railTo("radio",   XPOWERS_LDO2,  true);
+    railTo("display", XPOWERS_DCDC1, true);
+    railTo("GNSS",    XPOWERS_LDO3,  false);            // off for now
   } else {
-    railTo(PMU_RAIL_RADIO,   true);                     // transceiver
-    railTo(PMU_RAIL_GPS,     false);                    // GPS: off for now
-    railTo(PMU_RAIL_DISPLAY, true);                     // the panel
-    railTo(PMU_RAIL_SENSORS, true);                     // I2C sensors, clock
-    railTo(PMU_RAIL_CARD,    true);                     // the card slot
-    railTo(PMU_RAIL_MODULE,  true);                     // plug-in radio socket
+    railTo("radio",   PMU_RAIL_RADIO,   true);
+    // Only where there is a receiver. PMU_RAIL_GPS keeps a real default for
+    // the boards that have one, so on a PMU board with no receiver it would
+    // name a regulator that board uses for something else — and this is the
+    // one write in this function that turns a rail off.
+#if HAS_GPS
+    railTo("GNSS",    PMU_RAIL_GPS,     false);         // off for now
+#endif
+    railTo("display", PMU_RAIL_DISPLAY, true);
+    railTo("sensors", PMU_RAIL_SENSORS, true);          // and the clock
+    railTo("card",    PMU_RAIL_CARD,    true);
+    railTo("module",  PMU_RAIL_MODULE,  true);          // plug-in radio socket
   }
   sGpsOn = false;
 

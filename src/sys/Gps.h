@@ -35,9 +35,17 @@
 //
 //  The receiver hangs off a switched PMU rail. Boards that have one start it
 //  at boot — the clock is worth more than the tens of milliamps — and the
-//  settings page powers it down for a node running on a cell. On an AXP2101
-//  the backup rail stays powered either way, so the receiver holds its almanac
-//  and warm-starts in seconds rather than cold-starting in minutes.
+//  settings page powers it down for a node running on a cell.
+//
+//  Whether cutting that rail costs a cold start is the board's business and
+//  not the chip's, which is how this was first written down. On the T-Beam the
+//  receiver's backup supply is separate and it holds its almanac, so a wake is
+//  warm — seconds rather than minutes. On the T-Beam Supreme the backup domain
+//  is the AXP2101's own VBACKUP, which this firmware does not name and
+//  therefore does not switch: LilyGO's reference code for that board turns it
+//  off, so until a bench says otherwise a nap there should be assumed to cost
+//  a cold start. A board that wants warm wakes needs that rail named and
+//  enabled, which is a change to make with a measurement beside it.
 // ============================================================================
 #pragma once
 

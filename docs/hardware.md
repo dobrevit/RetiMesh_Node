@@ -492,7 +492,12 @@ Nothing below has been run. In rough order of what blocks what:
 5. **The clock** — `PCF8563` found on the PMU's bus, holding time across a power cut and
    seeding the system clock at boot with no fix.
 6. **GNSS** — sentences arriving, a fix outdoors, and the rail cut proving out: switch the
-   receiver off and watch the current fall.
+   receiver off and watch the current fall. Then time the wake, which is the part that is
+   not inherited from the T-Beam: that board's receiver keeps its almanac through a nap
+   and comes back in seconds, and this one's backup domain is the PMU's own VBACKUP,
+   which nothing here switches and LilyGO's reference code turns off. A cold start also
+   makes the current fall, so only the time to a fix after a nap separates the two — and
+   if it is minutes, the duty cadence is paying more for a fix than it thinks.
 7. **Native USB** — the composite device enumerates, `usb0` comes up, and the port survives
    a bootloader hand-off.
 8. **Which parts are actually fitted** — `I2C` on the console, twice, once per bus: what
