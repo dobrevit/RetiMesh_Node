@@ -311,24 +311,39 @@ static void doVersion() {
 // disagree about what the cell is doing.
 static void doPower(const Request& r) {
   const char* name = "POWER";
+  // Assembled and sent as one DATA line, because the claim above is that it is
+  // one: a reply split across several lines is several things for a caller to
+  // reassemble, and over LXMF it is the total that has to fit, not the average.
+  char line[192];
+  size_t at = 0;
+  auto add = [&](const char* fmt, auto... args) {
+    if (at >= sizeof(line)) return;
+    const int n = snprintf(line + at, sizeof(line) - at, fmt, args...);
+    at = (n < 0) ? sizeof(line) : at + (size_t)n;   // snprintf reports what it wanted
+    if (at > sizeof(line)) at = sizeof(line);       // clamp: it wrote at most the room
+  };
 #if HAS_PMU || HAS_BATTERY_ADC
   const Power::Battery bat = Power::battery();
-  dataf(name, "volts=%.3f percent=%u %s stale=%s pmu=%s",
-        (double)bat.volts, (unsigned)bat.percent,
-        bat.chargeKnown ? (bat.charging ? "charging=yes" : "charging=no")
-                        : "charging=unknown",
-        Power::readingStale() ? "yes" : "no", Pmu::model());
+  add("volts=%.3f percent=%u %s stale=%s ",
+      (double)bat.volts, (unsigned)bat.percent,
+      bat.chargeKnown ? (bat.charging ? "charging=yes" : "charging=no")
+                      : "charging=unknown",
+      Power::readingStale() ? "yes" : "no");
 #else
   // Said rather than omitted: a node with no cell cannot be measured this way,
   // and a caller polling for a discharge needs to learn that from the answer
   // instead of from an empty line it might read as a failed transfer.
-  dataf(name, "battery=none pmu=%s", Power::chargerName());
+  add("battery=none ");
 #endif
-  // The profile is the other half of the measurement: a discharge rate without
-  // it measures nothing, because the whole question is which profile is cheaper.
-  dataf(name, "profile=%s cpu_mhz=%u uptime_s=%lu",
-        Power::profileName(Power::profile()), (unsigned)getCpuFrequencyMhz(),
-        (unsigned long)(millis() / 1000));
+  // chargerName(), never Pmu::model(): the V4 has no PMU and a BQ25896, so
+  // asking the PMU there names "none" on the one board that can answer a
+  // charging question (Power.h). The profile is the other half of the
+  // measurement — a discharge rate without it measures nothing, because the
+  // whole question is which profile is cheaper.
+  add("pmu=%s profile=%s cpu_mhz=%u uptime_s=%lu",
+      Power::chargerName(), Power::profileName(Power::profile()),
+      (unsigned)getCpuFrequencyMhz(), (unsigned long)(millis() / 1000));
+  dataf(name, "%s", line);
   ok(name, "");
   (void)r;
 }
