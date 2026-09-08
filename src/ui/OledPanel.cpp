@@ -31,6 +31,18 @@
 #include "esp32-hal-periman.h"
 #include "DisplayLayout.h"
 
+// Addressed and nothing more. A zero-length write asks "is anybody there" and
+// leaves no mark, which matters on a bus where the answer might not be a panel:
+// the T-Beam Supreme has two addresses that answer this, 0x3c and 0x3d, and only
+// one of them is the glass.
+//
+// Sending a command instead — the 0x00 control byte and a NOP — was tried, on
+// the theory that a panel would take it and anything else would refuse. It does
+// not discriminate: that pair is a perfectly legal "write 0xe3 to register 0"
+// for any register chip, so both addresses took it. It also writes a byte into
+// whichever part answers first, which is a side effect on a device this code
+// has no business touching. So the probe stays a question, and the board says
+// which address is the panel (OLED_ADDR).
 bool OledPanel::ack(uint8_t addr) {
   Wire.beginTransmission(addr);
   return Wire.endTransmission() == 0;    // 0 = ACK received
@@ -93,7 +105,12 @@ bool OledPanel::begin() {
 
   const uint8_t candidates[] = { OLED_ADDR, (uint8_t)(OLED_ADDR == 0x3C ? 0x3D : 0x3C) };
   for (uint8_t a : candidates) {
-    if (ack(a)) { _addr = a; break; }
+    const bool took = ack(a);
+    // Both answers are logged, not just the winning one: on a board where two
+    // addresses answer, which of them took a command is the fact that explains
+    // a panel that stays dark or keeps somebody else's picture.
+    log_i("display: 0x%02X %s", a, took ? "took a command" : "did not answer");
+    if (took && _addr == 0) _addr = a;
   }
   if (_addr == 0) {
     log_w("No I2C device at 0x%02X/0x%02X (SDA %d / SCL %d) — display disabled",

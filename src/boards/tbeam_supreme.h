@@ -129,7 +129,21 @@
 // only partly understands. See src/ui/OledPanel.h.
 #define HAS_DISPLAY         1
 #define OLED_CONTROLLER     OLED_CONTROLLER_SH1106
-#define OLED_ADDR           0x3C
+// 0x3D, measured on the bench, and stated here because nothing can work it out
+// at runtime: two addresses answer on this bus — 0x3c and 0x3d — and both take
+// a write. Taking 0x3c, which is where the default order and the RNode
+// firmware's block for this board both point, got a device that swallowed an
+// entire SH1106 initialisation and every frame after it without one NAK, while
+// the glass went on showing the picture the previous firmware had left in it.
+// The panel is the other one. What lives at 0x3c is still unidentified.
+//
+// This is the board fact that cost the most to find, so: `display: true`,
+// `input panel=yes` and a successful driver `begin()` prove only that something
+// accepted the initialisation. On a bus with two answers they do not prove the
+// glass is being driven, and no register read-back settles it either — both
+// addresses return the same bytes no matter what is written to them. The only
+// instrument that worked was looking at the screen.
+#define OLED_ADDR           0x3D
 // Reset is not wired to a GPIO on this board; the panel comes out of reset with
 // its rail.
 #define PIN_OLED_RST        -1
