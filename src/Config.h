@@ -35,6 +35,8 @@
 // ---------------------------------------------------------------------------
 #if defined(BOARD_TBEAM)
   #include "boards/tbeam.h"
+#elif defined(BOARD_TBEAM_SUPREME)
+  #include "boards/tbeam_supreme.h"
 #elif defined(BOARD_HELTEC_V3)
   #include "boards/heltec_v3.h"
 #elif defined(BOARD_HELTEC_WS)
@@ -601,6 +603,19 @@
 #define DISPLAY_KIND_TFT    3
 #ifndef DISPLAY_KIND
   #define DISPLAY_KIND      DISPLAY_KIND_OLED
+#endif
+// Which OLED controller, for a board whose DISPLAY_KIND is the OLED. Not the
+// same question as the kind: both parts here are 128x64 monochrome panels on
+// I2C at the same address, drawn with the same GFX calls, and they differ in
+// how the buffer reaches the glass. The SH1106 has 132 columns of RAM with the
+// panel wired to the middle 128 and no horizontal addressing mode, so the
+// SSD1306's driver writes it two columns out of place and wraps the rest; the
+// probe cannot tell them apart, because both acknowledge 0x3C and neither
+// reports what it is. So the board says.
+#define OLED_CONTROLLER_SSD1306 1
+#define OLED_CONTROLLER_SH1106  2
+#ifndef OLED_CONTROLLER
+  #define OLED_CONTROLLER   OLED_CONTROLLER_SSD1306
 #endif
 #ifndef PIN_OLED_SDA
   #define PIN_OLED_SDA      18
@@ -1211,6 +1226,45 @@
 // if the supply turns out to be weaker than the ceiling allows.
 #ifndef PMU_VBUS_LIMIT_MA
   #define PMU_VBUS_LIMIT_MA 500
+#endif
+
+// Which of the chip's regulators feed what. A rail is a wiring fact rather
+// than a chip fact: two boards here carry the same AXP2101 and route it
+// differently — the T-Beam hangs the transceiver off ALDO2 and the receiver
+// off ALDO3, the T-Beam Supreme hangs the transceiver off ALDO3 and the
+// receiver off ALDO4 — so applying one board's map to the other powers a
+// sensor rail and leaves the radio dark, which reads on the bench as a
+// transceiver that is not fitted. These were literals in Pmu.cpp when one
+// board had a PMU; the defaults are that board's, so it is unchanged.
+//
+// PMU_RAIL_NONE is a rail the board does not have. It is deliberately outside
+// XPowersPowerChannel_t: a rail nobody names is left exactly as the chip
+// powered up, which is the difference between "we do not switch the card's
+// supply" and "we switch it off".
+//
+// The AXP192 (T-Beam v1.1) keeps its own names in Pmu.cpp. It is a different
+// part with a different set of regulators, and one board carries it.
+#define PMU_RAIL_NONE       0xFF
+#ifndef PMU_RAIL_RADIO
+  #define PMU_RAIL_RADIO    XPOWERS_ALDO2
+#endif
+#ifndef PMU_RAIL_GPS
+  #define PMU_RAIL_GPS      XPOWERS_ALDO3
+#endif
+#ifndef PMU_RAIL_DISPLAY
+  #define PMU_RAIL_DISPLAY  XPOWERS_DCDC1
+#endif
+// The rails no board needed until one arrived with them: the I2C sensors and
+// the clock on one, the card slot on another, and the socket a plug-in radio
+// module sits in on a third. Absent unless a board names them.
+#ifndef PMU_RAIL_SENSORS
+  #define PMU_RAIL_SENSORS  PMU_RAIL_NONE
+#endif
+#ifndef PMU_RAIL_CARD
+  #define PMU_RAIL_CARD     PMU_RAIL_NONE
+#endif
+#ifndef PMU_RAIL_MODULE
+  #define PMU_RAIL_MODULE   PMU_RAIL_NONE
 #endif
 
 // Boards halve the cell into the ADC unless they say otherwise; one that

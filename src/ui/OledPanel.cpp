@@ -19,6 +19,10 @@
 
 // ============================================================================
 //  OledPanel.cpp — see OledPanel.h
+//
+//  One file for both controllers: the rail, the stuck-bus recovery and the
+//  address probe are the same work on either part, and only the driver's own
+//  start-up call differs.
 // ============================================================================
 #include "OledPanel.h"
 
@@ -97,15 +101,25 @@ bool OledPanel::begin() {
     return false;
   }
 
+#if OLED_CONTROLLER == OLED_CONTROLLER_SH1106
+  // No periphBegin flag on this driver: it calls begin() on the bus itself,
+  // which the core turns into a warning and a no-op on a host that is already
+  // started ("Bus already started in Master Mode", Wire.cpp) — so the pins set
+  // above are the ones that stand. The reset argument is the panel's RST line
+  // and does nothing on a board that ties it high.
+  if (!_oled.begin(_addr, true)) {
+#else
   // periphBegin=false: Wire is already up on the board-specific pins.
   if (!_oled.begin(SSD1306_SWITCHCAPVCC, _addr, true, false)) {
-    log_w("SSD1306 at 0x%02X did not initialise — display disabled", _addr);
+#endif
+    log_w("%s at 0x%02X did not initialise — display disabled", kController, _addr);
     return false;
   }
-  log_i("SSD1306 found at 0x%02X (SDA %d / SCL %d)", _addr, PIN_OLED_SDA, PIN_OLED_SCL);
+  log_i("%s found at 0x%02X (SDA %d / SCL %d)", kController, _addr,
+        PIN_OLED_SDA, PIN_OLED_SCL);
   _oled.setRotation(OLED_ROTATION);
   _oled.clearDisplay();
-  _oled.setTextColor(SSD1306_WHITE);
+  _oled.setTextColor(kInk);
   _oled.setTextSize(1);
   // Adafruit_GFX wraps by default, so a row one character too long lands on
   // the next row and, at the bottom, under the page dots. Clip instead.
