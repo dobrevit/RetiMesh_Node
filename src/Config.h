@@ -606,12 +606,14 @@
 #endif
 // Which OLED controller, for a board whose DISPLAY_KIND is the OLED. Not the
 // same question as the kind: both parts here are 128x64 monochrome panels on
-// I2C at the same address, drawn with the same GFX calls, and they differ in
-// how the buffer reaches the glass. The SH1106 has 132 columns of RAM with the
-// panel wired to the middle 128 and no horizontal addressing mode, so the
-// SSD1306's driver writes it two columns out of place and wraps the rest; the
-// probe cannot tell them apart, because both acknowledge 0x3C and neither
-// reports what it is. So the board says.
+// I2C, drawn with the same GFX calls, and they differ in how the buffer
+// reaches the glass. The SH1106 has 132 columns of RAM with the panel wired to
+// the middle 128 and no horizontal addressing mode, so the SSD1306's driver
+// writes it two columns out of place and wraps the rest. The probe cannot tell
+// them apart: an acknowledgement at whatever address the board names says a
+// part is there and nothing about which controller it is. So the board says —
+// both the controller here and the address in OLED_ADDR, which differs
+// between boards and, on the T-Beam Supreme, is not the usual one.
 #define OLED_CONTROLLER_SSD1306 1
 #define OLED_CONTROLLER_SH1106  2
 #ifndef OLED_CONTROLLER

@@ -120,13 +120,22 @@ dispatched = {flag: header for flag, header in arms}
 for flag, header in arms:
     if not (ROOT / "src" / "boards" / f"{header}.h").exists():
         problems.append(f"src/Config.h dispatches -D{flag} to boards/{header}.h, which does not exist")
-# One header per flag and one flag per header. Two arms including the same
-# header is the copy-paste this pairing exists to catch.
+# One header per flag and one flag per header, and both directions have to be
+# checked: the dict above keeps the last arm for a repeated flag and says
+# nothing about the one it replaced, so a duplicated selector would leave an
+# arm that can never be reached and pass silently.
 for header in {h for _, h in arms}:
     flags = sorted(f for f, h in arms if h == header)
     if len(flags) > 1:
         problems.append(f"src/Config.h dispatches {' and '.join(flags)} to the same "
                         f"boards/{header}.h — one of them is a copy that was not changed")
+for flag in {f for f, _ in arms}:
+    headers = [h for f2, h in arms if f2 == flag]
+    if len(headers) > 1:
+        problems.append(f"src/Config.h tests -D{flag} on {len(headers)} arms of the chain "
+                        f"({', '.join('boards/' + h + '.h' for h in headers)}) — the first "
+                        "wins and the rest are dead, so a board is quietly built on another "
+                        "board's pin map")
 
 # Envs that deliberately build the chain's closing #else — the T3-S3's header —
 # rather than naming a board of their own. Two of them, each for a stated

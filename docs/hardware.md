@@ -8,7 +8,7 @@
 | `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
 | `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
 | `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, 4 MB PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot** | verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board |
-| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; QMI8658 IMU, QMC6310 magnetometer and BME280 fitted but not driven | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at — two addresses answer on that bus and both take writes, so the firmware initialised the wrong one and the glass kept the previous firmware's picture while every status field reported the display fine. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here. The magnetometer LilyGO list for this board is **not fitted on this unit** — nothing answers at any QMC address — while the BME280 is, at 0x77 |
+| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; QMI8658 IMU and BME280 fitted but not driven, magnetometer optional (LilyGO list a QMC6310; none is fitted on the unit tested here) | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at — two addresses answer on that bus and both take writes, so the firmware initialised the wrong one and the glass kept the previous firmware's picture while every status field reported the display fine. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here. The magnetometer LilyGO list for this board is **not fitted on this unit** — nothing answers at any QMC address — while the BME280 is, at 0x77 |
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
@@ -420,13 +420,15 @@ to read twice — on the T-Beam it is the display's rail and gets switched on; h
 it is switching the board off.
 
 **The panel is an SH1106, not the SSD1306 every other OLED board here carries.** Same 128x64
-geometry, same address, same GFX calls, and a controller with 132 columns of RAM showing the
-middle 128 and no horizontal addressing mode. Driven by the SSD1306's code it comes up two
-columns out of place, wrapping what falls off the end, with an initialisation sequence it
-only partly understands. Nothing can be probed for — both parts acknowledge 0x3C and
-neither says what it is — so the board declares it (`OLED_CONTROLLER`) and `OledPanel`
-carries a driver type rather than a single driver. If a unit turns out to have an SSD1306
-fitted instead, that one macro is the whole change.
+geometry and the same GFX calls, and a controller with 132 columns of RAM showing the middle
+128 and no horizontal addressing mode. Driven by the SSD1306's code it comes up two columns
+out of place, wrapping what falls off the end, with an initialisation sequence it only
+partly understands. Nothing can be probed for: an acknowledgement at whatever address the
+board names says a part is there and nothing about which controller it is. So the board
+declares both — `OLED_CONTROLLER` for the part and `OLED_ADDR` for where it answers, which
+on this board is **0x3d** and not the address its siblings use. `OledPanel` carries a driver
+type rather than a single driver; if a unit turns out to have an SSD1306 fitted instead,
+that one macro is the whole change.
 
 **The receiver is a u-blox MAX-M10S or a Quectel L76K, depending on the unit.** Both come up
 at 9600 baud speaking NMEA and nothing on the wire says which is there, so the build speaks
@@ -459,7 +461,7 @@ does not reach, not after.
 | SX1262 SCK / MISO / MOSI / CS | 12 / 13 / 11 / 10 |
 | SX1262 RST / BUSY / DIO1 | 5 / 4 / 1 |
 | SX1262 antenna switch | the chip's own DIO2; TCXO on DIO3 at 1.8 V |
-| Panel I2C SDA / SCL (SH1106 @ 0x3C, BME280, magnetometer) | 17 / 18 |
+| Panel I2C SDA / SCL (SH1106 @ **0x3d**, BME280 @ 0x77; 0x3c also answers and is not the panel) | 17 / 18 |
 | PMU I2C SDA / SCL (AXP2101, PCF8563 @ 0x51) | 42 / 41 |
 | PMU IRQ (not driven) | 40 |
 | GNSS RX / TX | 9 / 8 |

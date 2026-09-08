@@ -105,12 +105,14 @@ bool OledPanel::begin() {
 
   const uint8_t candidates[] = { OLED_ADDR, (uint8_t)(OLED_ADDR == 0x3C ? 0x3D : 0x3C) };
   for (uint8_t a : candidates) {
-    const bool took = ack(a);
+    const bool answered = ack(a);
     // Both answers are logged, not just the winning one: on a board where two
-    // addresses answer, which of them took a command is the fact that explains
-    // a panel that stays dark or keeps somebody else's picture.
-    log_i("display: 0x%02X %s", a, took ? "took a command" : "did not answer");
-    if (took && _addr == 0) _addr = a;
+    // addresses answer, which of them answered at all is the fact that
+    // explains a panel that stays dark or keeps somebody else's picture. It
+    // says "answered" because that is all the probe asks — it sends no
+    // command, so it cannot report that one was taken.
+    log_i("display: 0x%02X %s", a, answered ? "answered" : "did not answer");
+    if (answered && _addr == 0) _addr = a;
   }
   if (_addr == 0) {
     log_w("No I2C device at 0x%02X/0x%02X (SDA %d / SCL %d) — display disabled",

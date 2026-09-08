@@ -28,14 +28,16 @@
 //  Two controllers, one panel driver
 //  ---------------------------------
 //  Boards here carry an SSD1306 or, on the T-Beam Supreme, an SH1106. From the
-//  page's side they are the same panel: 128x64 monochrome, I2C at 0x3C, drawn
-//  with the same GFX calls, one full-frame update costing a kilobyte on the
-//  bus. What differs is small and unforgiving — the SH1106 has 132 columns of
-//  RAM with the glass wired to the middle 128, and no horizontal addressing
-//  mode, so the SSD1306's driver writes it two columns out of place and wraps
-//  what falls off the end. And nothing can be probed for: both parts
-//  acknowledge the same address and neither says what it is, so the board
-//  declares it (OLED_CONTROLLER in Config.h).
+//  page's side they are the same panel: 128x64 monochrome on I2C, drawn with
+//  the same GFX calls, one full-frame update costing a kilobyte on the bus.
+//  What differs is small and unforgiving — the SH1106 has 132 columns of RAM
+//  with the glass wired to the middle 128, and no horizontal addressing mode,
+//  so the SSD1306's driver writes it two columns out of place and wraps what
+//  falls off the end. And nothing can be probed for: an acknowledgement at
+//  the board's configured address says a part is there and nothing about
+//  which controller it is, so the board declares it (OLED_CONTROLLER in
+//  Config.h) — as it declares the address, which is not the same on every
+//  board (OLED_ADDR).
 //
 //  Which is why this is one class with a driver type rather than two panels.
 //  Every difference between the parts is in the four lines below — the type,

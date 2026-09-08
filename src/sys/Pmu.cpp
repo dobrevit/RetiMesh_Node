@@ -244,9 +244,12 @@ void gpsPower(bool on) {
   // A board that names no receiver rail has no rail to cut, and the duty
   // policy's nap is then not this — GPS_NAP in Config.h picks what it is.
   if (rail == PMU_RAIL_NONE) return;
-  if (on) sPmu->enablePowerOutput(rail);
-  else    sPmu->disablePowerOutput(rail);
-  sGpsOn = on;
+  // Through the same helper the boot rails go through, so a refusal is logged
+  // here too — and sGpsOn records what the chip did rather than what it was
+  // asked. gpsPowered() is what the duty policy and STATUS read, and a rail
+  // that refused to switch while the flag said otherwise would have the node
+  // reporting a receiver it had not powered, or resting one it had not cut.
+  if (railTo("GNSS", rail, on)) sGpsOn = on;
 }
 
 } // namespace Pmu

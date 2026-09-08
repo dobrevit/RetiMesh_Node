@@ -57,9 +57,11 @@
 //
 // Brought up on hardware 2026-09-08 and the map held: the radio is on air both
 // ways, the card mounted, the clock was already holding the right time, the
-// receiver is talking, and the panel answers. docs/hardware.md carries what the
-// bench settled and the two things it did not — whether the image on the glass
-// sits where it should, and what a rail-cut nap costs the receiver here.
+// receiver is talking, and the panel draws its pages and steps through them on
+// the button — once it was pointed at the right address, which took a bring-up
+// of its own and is the note under OLED_ADDR below. docs/hardware.md carries
+// what the bench settled and the one thing it did not: what a rail-cut nap
+// costs the receiver here.
 
 // The PSRAM is external rather than in-package: esptool's feature list for this
 // die names 8 MB of embedded *flash* and no PSRAM at all, where an R2/R8 part
@@ -122,11 +124,12 @@
 // ---------------------------------------------------------------------------
 // Display — 1.3" SH1106, not the SSD1306 every other OLED board here carries
 // ---------------------------------------------------------------------------
-// Same 128x64 geometry and the same address, and a different controller: the
-// SH1106 has 132 columns of RAM with the panel wired to the middle 128, and no
-// horizontal addressing mode. Driven by the SSD1306 code it comes up shifted
-// by two columns, wrapping the last two, with an initialisation sequence it
-// only partly understands. See src/ui/OledPanel.h.
+// Same 128x64 geometry and the same GFX calls as every other OLED board here,
+// and a different controller: the SH1106 has 132 columns of RAM with the panel
+// wired to the middle 128, and no horizontal addressing mode. Driven by the
+// SSD1306 code it comes up shifted by two columns, wrapping the last two, with
+// an initialisation sequence it only partly understands. The address is not
+// shared — see OLED_ADDR below. See src/ui/OledPanel.h.
 #define HAS_DISPLAY         1
 #define OLED_CONTROLLER     OLED_CONTROLLER_SH1106
 // 0x3D, measured on the bench, and stated here because nothing can work it out
