@@ -1,0 +1,1435 @@
+{
+  "uid": "retimesh-fleet",
+  "title": "RetiMesh fleet",
+  "description": "A Reticulum fleet as it reports itself over LXMF. Readings arrive every few minutes at best, so every graph here is sparse on purpose and gaps are left as gaps.",
+  "tags": [
+    "retimesh",
+    "reticulum"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "templating": {
+    "list": [
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "retimesh-prometheus"
+        },
+        "definition": "label_values(retimesh_node_info, name)",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(retimesh_node_info, name)",
+          "refId": "node"
+        },
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Fleet",
+      "id": 1,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Answering",
+      "description": "Nodes that have answered inside the exporter's freshness window.",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "sum(retimesh_node_up * on(node) group_left() retimesh_node_info{name=~\"$node\"}) or vector(0)",
+          "editorMode": "code",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Silent",
+      "description": "Known nodes that have stopped answering. Their readings are withheld rather than held flat, so their graphs below simply end.",
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "sum((1 - retimesh_node_up) * on(node) group_left() retimesh_node_info{name=~\"$node\"}) or vector(0)",
+          "editorMode": "code",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Tightest stack in the fleet",
+      "description": "The least stack any task on any node has ever had left. A high-water mark: it only falls, and it is worst seen rather than worst possible.",
+      "id": 4,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "min(retimesh_node_task_stack_headroom_bytes * on(node) group_left() retimesh_node_info{name=~\"$node\"})",
+          "editorMode": "code",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 512
+              },
+              {
+                "color": "green",
+                "value": 1024
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "table",
+      "title": "Every node",
+      "id": 5,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "description": "One row per node. `Answering` is 0 for a node that is known and silent — the row stays, so a node that has stopped is visible rather than merely absent.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_up * on(node) group_left() retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_battery_percent * on(node) group_left() retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "time() - (retimesh_node_last_reply_timestamp_seconds * on(node) group_left() retimesh_node_info{name=~\"$node\"})",
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "node",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time": true,
+              "Value #A": true,
+              "information": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "fleet": true
+            },
+            "renameByName": {
+              "name": "Name",
+              "node": "Address",
+              "board": "Board",
+              "firmware": "Firmware",
+              "Value #B": "Answering",
+              "Value #C": "Battery",
+              "Value #D": "Last heard"
+            },
+            "indexByName": {
+              "name": 0,
+              "board": 1,
+              "firmware": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "node": 6
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "Name"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Battery"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last heard"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Answering"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "no",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "yes",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Power and memory",
+      "id": 6,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Battery",
+      "description": "How full each cell is, as the node reads it. A board that cannot see its charger still reports this; what it cannot report is whether the cell is taking charge.",
+      "id": 7,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_battery_percent * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cell voltage",
+      "description": "From the console's POWER, so it needs this exporter enrolled as an administrator. This is the figure a power profile is judged on: no board this firmware runs on can measure its own draw, so the comparison is how fast the cell falls through a fixed band.",
+      "id": 8,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_battery_volts * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "volt",
+          "min": 3.0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Free internal RAM",
+      "description": "Internal memory, not the total including PSRAM. On a board with 8 MB of PSRAM the total reads healthy right up until the node dies of the kind it actually needs. This is also the instantaneous figure — the console's STATUS carries the low-water mark, and the dips it catches are far below this.",
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "(retimesh_node_ram_capacity_bytes - retimesh_node_ram_used_bytes) * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Stack headroom, per task",
+      "description": "Bytes a task has never used. The measurement a soak exists to take: it only falls, so the last reading of a long run is the one that matters — and it is still worst seen, not worst possible. A stack cut to its observed peak is a crash waiting for a path nothing has taken.",
+      "id": 10,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_task_stack_headroom_bytes * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}} · {{task}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Reachability",
+      "id": 11,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Since last heard",
+      "description": "Seconds since anything arrived from each node. This one keeps going when a node falls silent — every reading above stops instead.",
+      "id": 12,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "time() - (retimesh_node_last_reply_timestamp_seconds * on(node) group_left(name) retimesh_node_info{name=~\"$node\"})",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests that never landed",
+      "description": "`no_path` means the exporter has no route and has asked for one — normal in ones and twos, a routing problem when it is every round. `delivery_failed` means the message left and was not delivered.",
+      "id": 13,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "sum by (node, reason) (rate(retimesh_node_request_failures_total[15m])) * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}} · {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Signal, as the node heard us",
+      "description": "A property of the path from this exporter to the node, not of the node. It moves when either end moves, and it is measured on whichever hop reached it last.",
+      "id": 14,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_rssi_dbm * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}} RSSI"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dBm",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Signal-to-noise",
+      "description": "",
+      "id": 15,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_snr_db * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dB",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Storage, clock and place",
+      "id": 16,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage used",
+      "description": "`flash` is the internal part and never moves; `card` is a microSD the node keeps its store on and does fill. A node reporting only flash shows a figure that cannot change.",
+      "id": 17,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "100 * (retimesh_node_storage_used_bytes / retimesh_node_storage_capacity_bytes) * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}} · {{part}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Clock error",
+      "description": "The node's own clock against this host's. A node with no GNSS fix and no RTC has no idea of the time, and a message it sends is stamped 1970 and buried at the bottom of every client's conversation — which shows up here as a value of about fifty-six years.",
+      "id": 18,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "time() - (retimesh_node_clock_timestamp_seconds * on(node) group_left(name) retimesh_node_info{name=~\"$node\"})",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "geomap",
+      "title": "Where the fleet is",
+      "id": 19,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "description": "Each node's last reported fix. A node with no receiver sends no position at all rather than a zero, so it is absent here instead of sitting in the Gulf of Guinea.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_position_latitude_degrees * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "retimesh_node_position_longitude_degrees * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "node",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true,
+              "Time 2": true,
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "fleet": true
+            },
+            "renameByName": {
+              "Value #A": "latitude",
+              "Value #B": "longitude",
+              "name": "Node"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "view": {
+          "id": "fit",
+          "lat": 0,
+          "lon": 0,
+          "zoom": 4
+        },
+        "controls": {
+          "showZoom": true,
+          "showAttribution": true,
+          "mouseWheelZoom": false
+        },
+        "basemap": {
+          "type": "default",
+          "name": "Basemap",
+          "config": {}
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "Nodes",
+            "tooltip": true,
+            "location": {
+              "mode": "coords",
+              "latitude": "latitude",
+              "longitude": "longitude"
+            },
+            "config": {
+              "style": {
+                "size": {
+                  "fixed": 8,
+                  "min": 4,
+                  "max": 15
+                },
+                "color": {
+                  "fixed": "green"
+                },
+                "opacity": 0.8,
+                "symbol": {
+                  "fixed": "img/icons/marker/circle.svg"
+                },
+                "textConfig": {
+                  "fontSize": 12,
+                  "offsetX": 0,
+                  "offsetY": 0,
+                  "textAlign": "center",
+                  "textBaseline": "middle"
+                },
+                "text": {
+                  "field": "Node",
+                  "fixed": "",
+                  "mode": "field"
+                }
+              },
+              "showLegend": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "title": "The exporter",
+      "id": 20,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Polling",
+      "description": "Whether the exporter is still asking. A fleet that goes quiet all at once is more often this than the fleet.",
+      "id": 21,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 69
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "sum by (channel) (rate(retimesh_exporter_poll_rounds_total[1h]) * 3600)",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{channel}} rounds/hour"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Console refusals",
+      "description": "A steady 403 means this exporter is not enrolled as an administrator on that node: `SET maintenance.rns_admins <address>` and `SET maintenance.rns_admin on`. Uncounted it would be indistinguishable from a node that simply never answers the console.",
+      "id": 22,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "retimesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 69
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "retimesh-prometheus"
+          },
+          "expr": "sum by (node, code) (rate(retimesh_node_console_errors_total[1h]) * 3600) * on(node) group_left(name) retimesh_node_info{name=~\"$node\"}",
+          "editorMode": "code",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{name}} · {{code}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "lineInterpolation": "linear",
+            "axisBorderShow": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}
