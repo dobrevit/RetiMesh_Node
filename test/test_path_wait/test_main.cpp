@@ -26,6 +26,7 @@
 // and a message the manners floor refuses to let ask.
 
 #include <unity.h>
+#include <string.h>
 #include "PathWait.h"
 
 using namespace Rns;
@@ -87,6 +88,14 @@ static void test_the_manners_floor_refuses_a_second_ask_too_soon() {
                     (int)pathAction(false, waiting(20000), 20000, 5000));
 }
 
+static void test_the_floor_holds_right_up_to_the_boundary() {
+  // One millisecond under: still refused. The pair with the test below is what
+  // pins `>=` rather than `>`.
+  TEST_ASSERT_EQUAL((int)PathAction::Wait,
+                    (int)pathAction(false, waiting(30000), 30000,
+                                    kPathRequestMinIntervalMs - 1));
+}
+
 static void test_the_floor_lifts_once_the_interval_has_passed() {
   TEST_ASSERT_EQUAL((int)PathAction::Request,
                     (int)pathAction(false, waiting(30000), 30000,
@@ -146,10 +155,10 @@ static void test_the_bound_still_fires_across_the_wrap() {
                     (int)pathAction(false, w, started + kPathWaitMs, 0));
 }
 
-static void test_the_manners_floor_survives_the_wrap() {
-  // sinceLastRequestMs is computed by the caller as a wrapped difference; it
-  // arrives here already correct, so a huge value must read as "long ago"
-  // rather than as an overflow to be distrusted.
+static void test_a_very_old_request_reads_as_long_ago() {
+  // The caller converts the library's own request table (seconds, a double)
+  // into milliseconds, so a large value here means exactly what it says and
+  // must not be distrusted as an overflow.
   TEST_ASSERT_EQUAL((int)PathAction::Request,
                     (int)pathAction(false, waiting(10), 10, 0xFFFFFFFEu));
 }
@@ -157,9 +166,23 @@ static void test_the_manners_floor_survives_the_wrap() {
 // --- the reason a message failed ---------------------------------------------
 
 static void test_every_failure_has_a_name_and_none_is_empty() {
-  TEST_ASSERT_EQUAL_STRING("no path", failureName(SendFailure::NoPath));
-  TEST_ASSERT_EQUAL_STRING("no key",  failureName(SendFailure::NoKey));
-  TEST_ASSERT_EQUAL_STRING("refused", failureName(SendFailure::Refused));
+  TEST_ASSERT_EQUAL_STRING("no path",         failureName(SendFailure::NoPath));
+  TEST_ASSERT_EQUAL_STRING("no key",          failureName(SendFailure::NoKey));
+  TEST_ASSERT_EQUAL_STRING("refused",         failureName(SendFailure::Refused));
+  TEST_ASSERT_EQUAL_STRING("node busy",       failureName(SendFailure::Busy));
+  TEST_ASSERT_EQUAL_STRING("could not build", failureName(SendFailure::Internal));
+}
+
+static void test_the_reasons_are_all_different() {
+  // The point of carrying one at all. "refused" once covered a full queue and
+  // a message too long to build as well as a transport refusal, which sent an
+  // operator to the network for a fault that was never there.
+  const SendFailure all[] = { SendFailure::NoPath, SendFailure::NoKey,
+                              SendFailure::Refused, SendFailure::Busy,
+                              SendFailure::Internal };
+  for (size_t i = 0; i < sizeof(all)/sizeof(all[0]); i++)
+    for (size_t j = i + 1; j < sizeof(all)/sizeof(all[0]); j++)
+      TEST_ASSERT_TRUE(strcmp(failureName(all[i]), failureName(all[j])) != 0);
 }
 
 static void test_no_failure_names_nothing() {
@@ -176,6 +199,7 @@ int main(int, char**) {
   RUN_TEST(test_a_first_message_to_an_unknown_destination_asks);
   RUN_TEST(test_it_asks_only_once_per_message);
   RUN_TEST(test_the_manners_floor_refuses_a_second_ask_too_soon);
+  RUN_TEST(test_the_floor_holds_right_up_to_the_boundary);
   RUN_TEST(test_the_floor_lifts_once_the_interval_has_passed);
   RUN_TEST(test_the_floor_is_longer_than_the_wait);
   RUN_TEST(test_never_requested_is_not_zero);
@@ -183,8 +207,9 @@ int main(int, char**) {
   RUN_TEST(test_a_message_the_floor_never_let_ask_still_gives_up);
   RUN_TEST(test_a_wait_across_the_millis_wrap_is_still_short);
   RUN_TEST(test_the_bound_still_fires_across_the_wrap);
-  RUN_TEST(test_the_manners_floor_survives_the_wrap);
+  RUN_TEST(test_a_very_old_request_reads_as_long_ago);
   RUN_TEST(test_every_failure_has_a_name_and_none_is_empty);
+  RUN_TEST(test_the_reasons_are_all_different);
   RUN_TEST(test_no_failure_names_nothing);
   return UNITY_END();
 }

@@ -104,7 +104,10 @@ struct PathWait {
 };
 
 // `sinceLastRequestMs` is the age of the last path request for *this
-// destination*, or kNeverRequested. Unsigned throughout: millis() wraps every
+// destination*, or kNeverRequested. The caller takes it from Reticulum's own
+// `Transport::path_requests()` rather than keeping a second timestamp, so the
+// floor enforced here is the one the node actually observes — the library
+// issues path requests on its own behalf too. Unsigned throughout: millis() wraps every
 // 49 days and a message in flight across the wrap must not be read as having
 // waited a month.
 //
@@ -133,21 +136,30 @@ inline PathAction pathAction(bool hasPath,
 }
 
 // Why a message that never left is being reported as failed. Kept beside the
-// policy because the outbound log, the console and the API must all give the
-// same answer, and "it failed" without one is what this feature exists to stop.
+// policy so there is one answer rather than one per surface — though today the
+// only surface that shows an outbound message at all is the glass; the console
+// and the HTTP API have no outbound view to put it on.
 enum class SendFailure : uint8_t {
   None = 0,
   NoPath,        // no route to the destination, and asking for one timed out
   NoKey,         // the destination's identity was never learned
   Refused,       // the transport would not take the packet
+  Busy,          // this node was already behind: the outbound queue was full
+  Internal,      // the message could not be built or signed here
 };
 
+// One word each, and they must stay distinguishable: "refused" pointed an
+// operator at the network for what might equally have been a message too long
+// to build or a node simply behind, which defeats the point of carrying a
+// reason at all.
 inline const char* failureName(SendFailure f) {
   switch (f) {
-    case SendFailure::NoPath:  return "no path";
-    case SendFailure::NoKey:   return "no key";
-    case SendFailure::Refused: return "refused";
-    default:                   return "";
+    case SendFailure::NoPath:   return "no path";
+    case SendFailure::NoKey:    return "no key";
+    case SendFailure::Refused:  return "refused";
+    case SendFailure::Busy:     return "node busy";
+    case SendFailure::Internal: return "could not build";
+    default:                    return "";
   }
 }
 

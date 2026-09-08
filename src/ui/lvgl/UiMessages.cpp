@@ -116,7 +116,8 @@ void bubbleRow(lv_obj_t* col, const Bubble& b) {
     else if (!b.ok) {
       // It used to read "failed — no key?", a guess with a question mark,
       // because nothing carried the reason this far. The transport decides it
-      // now and every surface says the same word (PathWait.h).
+      // now, in one place, and the glass is the only surface with an outbound
+      // view to show it on (PathWait.h).
       const char* why = Rns::failureName((Rns::SendFailure)b.failure);
       if (*why) snprintf(meta, sizeof(meta), "failed — %s", why);
       else      snprintf(meta, sizeof(meta), "failed");
@@ -184,6 +185,10 @@ void threadRebuild() {
     const size_t tn = r.textLen < 80 ? r.textLen : 80;
     memcpy(x.text, r.text, tn); x.text[tn] = 0;
     x.sentMs = 0; x.ok = false;
+    // Zeroed like its siblings even though bubbleRow only reads it under
+    // `ours`: these bubbles are reused from a static array, so an unset field
+    // would carry a previous outbound row's value into a future read.
+    x.failure = 0;
     x.standing = r.standing;
   }, &ctx);
 
