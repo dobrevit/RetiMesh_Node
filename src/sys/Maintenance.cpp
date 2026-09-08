@@ -24,6 +24,7 @@
 #include "RnsAdmin.h"
 #include "Maintenance.h"
 #include "Power.h"
+#include "Pmu.h"
 #include "I2cReg.h"
 #include "Rtc.h"
 #include "Bq25896.h"
@@ -532,10 +533,18 @@ static void doStatus() {
     // board. The last figure is printed beside it because it is the evidence —
     // a plausible voltage under "stale" says the divider was working and the
     // converter stopped, which is not the same fault as a cell nobody fitted.
-    dataf("STATUS", "battery=%s volts=%.3f percent=%u%s",
+    // The charger's part number belongs on this line, not only in the HTTP
+    // API: it decides what the board can be asked. An AXP192 can report its own
+    // discharge current and carries a coulomb counter; an AXP2101 reports
+    // voltages and nothing else, and a BQ25896 gives charge current but not
+    // discharge. A power measurement run has to know which of those it is
+    // standing in front of, and the console is where a board without a portal
+    // is read.
+    dataf("STATUS", "battery=%s volts=%.3f percent=%u%s pmu=%s",
           Power::readingStale() ? "stale" : (bat.present ? "present" : "not-seen"),
           (double)bat.volts, (unsigned)bat.percent,
-          bat.chargeKnown ? (bat.charging ? " charging=yes" : " charging=no") : "");
+          bat.chargeKnown ? (bat.charging ? " charging=yes" : " charging=no") : "",
+          Pmu::model());
   }
 #endif
   // Whether the console can be reached over the network, and whether somebody

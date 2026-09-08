@@ -86,11 +86,26 @@ FIELDS = [
     # dropped — a power cut leaves nothing to report and must not read as a
     # clean run.
     "prev_alloc_failures", "prev_contained",
+    # The cell, and what the node was doing while it drained it. No board here
+    # can measure its own current — the T-Beam's AXP2101 reports voltages and
+    # nothing else, the V4's BQ25896 gives charge current but not discharge, and
+    # the rest have only a divider — so the only power measurement available
+    # without an instrument is how fast the cell falls. That needs the voltage
+    # logged over hours, which is what this is for.
+    #
+    # `power_profile` is not decoration: a discharge figure is meaningless
+    # without knowing which profile produced it, and comparing two runs is the
+    # entire method. `battery_charging` is the guard — a node on USB is not
+    # discharging, and its rising voltage is not a measurement.
+    "power_profile", "cpu_mhz", "pmu",
+    "battery_present", "battery_v", "battery_pct", "battery_charging",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
 # never creates its own (no display, no GPS, no SD), so absence alone is not a
 # fault — but these three are on every board and their absence always is.
+BAND = None    # --band HIGH:LOW, the window to time a discharge through
+
 ALWAYS_RUNNING = ("loopTask", "radio", "rns")
 
 
@@ -112,6 +127,7 @@ def sample(host, timeout=8):
     heap = diag.get("heap", {})
     tables = diag.get("tables", {})
     faults = diag.get("faults", {})
+    power  = d.get("power", {})
 
     row.update(
         uptime_s=d.get("uptime_s", ""),
@@ -156,8 +172,28 @@ def sample(host, timeout=8):
         fault_last_ms_ago=faults.get("last_ms_ago", ""),
         prev_alloc_failures=boot.get("prev_alloc_failures", ""),
         prev_contained=boot.get("prev_contained", ""),
+        power_profile=power.get("profile", ""),
+        cpu_mhz=power.get("cpu_mhz", ""),
+        pmu=power.get("pmu", ""),
+        battery_present=fmt_bool(power.get("battery_present")),
+        battery_v=power.get("battery_v", ""),
+        battery_pct=power.get("battery_pct", ""),
+        # Tri-state on purpose: a board that cannot tell whether it is charging
+        # sends null, and that is neither yes nor no. Recording it as "no" would
+        # let a run on USB be read as a discharge measurement.
+        battery_charging=fmt_bool(power.get("battery_charging")),
     )
     return row
+
+
+def fmt_bool(v):
+    """1, 0, or blank — blank meaning the node did not say, which is a third
+    answer and not a false one."""
+    if v is True:
+        return 1
+    if v is False:
+        return 0
+    return ""
 
 
 def missing_tasks(diag):
@@ -173,24 +209,101 @@ def missing_tasks(diag):
     return [t for t in ALWAYS_RUNNING if t not in stacks]
 
 
+# Hoisted out of summarise() when discharge() came to need them: one definition
+# each rather than a second copy beside the first.
+def num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_ts(v):
+    try:
+        return datetime.fromisoformat(v).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def discharge(up, band=None):
+    """What the cell did, as lines to print.
+
+    This is the only power measurement available on this bench. No board here
+    can report its own current — the T-Beam's AXP2101 exposes voltages and
+    nothing else, the V4's BQ25896 gives charge current but not discharge — so
+    what is left is the rate the cell falls at, which is proportional to the
+    average draw. That makes two runs comparable even though neither is an
+    absolute figure, and "which profile is cheaper, and by how much" is the
+    question the power rounds actually have to answer.
+
+    Three things can invalidate it and each is reported rather than folded into
+    the number:
+
+      charging      a node on USB is not discharging; its voltage tells you
+                    about the charger, not the firmware
+      mixed profile a run whose profile changed measures neither profile
+      no cell       nothing to measure
+
+    `band` is (high_v, low_v): the time taken to fall through a fixed voltage
+    window. That is the figure to compare between runs — it needs no knowledge
+    of the cell's capacity or its curve, only that the same cell passes through
+    the same window twice.
+    """
+    out = []
+    volts = [(parse_ts(r["ts"]), num(r.get("battery_v"))) for r in up]
+    volts = [(t, v) for t, v in volts if t and v]
+    if not volts:
+        return out                                   # no cell, or a CSV without the column
+
+    # str() because a row read from a CSV carries "1" and a row built in a test
+    # or by a future caller carries 1. This decides whether a measurement is
+    # reported at all, so it must not depend on where the row came from.
+    charging = {str(r.get("battery_charging", "")) for r in up} - {""}
+    profiles = {r.get("power_profile") for r in up if r.get("power_profile")}
+
+    first_t, first_v = volts[0]
+    last_t, last_v = volts[-1]
+    hours = (last_t - first_t) / 3600.0
+
+    prof = "/".join(sorted(profiles)) if profiles else "unknown"
+    out.append(f"   battery {first_v:.3f} V -> {last_v:.3f} V over {hours:.2f} h"
+               f"  (profile {prof})")
+
+    if len(profiles) > 1:
+        out.append(f"   ⚠ the power profile changed during this run ({prof}) — "
+                   f"the discharge below measures neither profile")
+    if "1" in charging:
+        out.append("   ⚠ the node was charging during this run: this is not a "
+                   "discharge measurement")
+        return out
+    if hours <= 0:
+        return out
+
+    drop_mv = (first_v - last_v) * 1000.0
+    if drop_mv <= 0:
+        out.append("   the cell did not fall over this run — too short, or not on battery")
+        return out
+    out.append(f"   discharge {drop_mv:.0f} mV in {hours:.2f} h = {drop_mv / hours:.1f} mV/h")
+
+    if band:
+        hi, lo = band
+        t_hi = next((t for t, v in volts if v <= hi), None)
+        t_lo = next((t for t, v in volts if v <= lo), None)
+        if t_hi is None or t_lo is None:
+            out.append(f"   band {hi:.3f}-{lo:.3f} V: not fully covered by this run")
+        else:
+            out.append(f"   band {hi:.3f}-{lo:.3f} V crossed in "
+                       f"{(t_lo - t_hi) / 3600.0:.2f} h "
+                       f"— this is the number to compare between runs")
+    return out
+
+
 def summarise(path):
     with open(path, newline="") as f:
         rows = [r for r in csv.DictReader(f)]
     if not rows:
         print("no samples")
         return
-
-    def num(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
-    def parse_ts(v):
-        try:
-            return datetime.fromisoformat(v).timestamp()
-        except (TypeError, ValueError):
-            return 0.0
 
     def announce_segments(rows):
         """The announce counter, split at every restart, over the samples that
@@ -335,6 +448,9 @@ def summarise(path):
             if vals and (vals[0] != vals[-1] or max(vals) != vals[-1]):
                 print(f"   {label}: {vals[0]:.0f} -> {vals[-1]:.0f} (peak {max(vals):.0f})")
 
+        for line in discharge(up, BAND):
+            print(line)
+
         # Losses, as deltas: totals since boot say little a week in.
         loss_keys = ("drop_ring", "drop_reasm", "drop_partial", "crc_errors",
                      "bad_length", "spurious_irq")
@@ -388,7 +504,22 @@ def main():
                     help="seconds to run for (default: a week)")
     ap.add_argument("--summarise", metavar="CSV",
                     help="print a summary of an existing file and exit")
+    ap.add_argument("--band", metavar="HIGH:LOW",
+                    help="with --summarise: time the cell's fall through this "
+                         "voltage window, e.g. 4.00:3.80. The comparable figure "
+                         "between two runs, because it needs no knowledge of the "
+                         "cell's capacity or its curve")
     args = ap.parse_args()
+
+    if args.band:
+        try:
+            hi, lo = (float(x) for x in args.band.split(":", 1))
+        except ValueError:
+            sys.exit("--band wants HIGH:LOW in volts, e.g. 4.00:3.80")
+        if hi <= lo:
+            sys.exit(f"--band {args.band}: a cell falls, so HIGH must exceed LOW")
+        global BAND
+        BAND = (hi, lo)
 
     if args.summarise:
         summarise(args.summarise)

@@ -308,6 +308,14 @@ if it is zero, the panic was something else and the coredump is the next place
 to look. A non-zero `prev_contained` beside a zero `prev_alloc_failures` says
 the run was catching exceptions, not running out of memory.
 
+`power.pmu` names the charger — `AXP192`, `AXP2101`, `BQ25896` or `none` —
+and it decides what the board can be *asked*, not just what it has. An AXP192
+reports its own battery discharge current and carries a coulomb counter; an
+AXP2101 reports voltages and nothing else; a BQ25896 gives charge current but
+not discharge. No board this firmware ships on can therefore measure its own
+draw, which is why a power measurement here is a discharge *rate* — see
+`tools/soak.py --band`.
+
 `faults` is the *current* run: `alloc_failures`, `contained`, and
 `last_ms_ago` for the most recent one. Non-zero here on a node that is still
 answering is a node under pressure right now.

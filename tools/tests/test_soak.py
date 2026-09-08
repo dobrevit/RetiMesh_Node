@@ -207,10 +207,124 @@ class SummariseNamesTheDeadRun(unittest.TestCase):
         self.assertNotIn("reported no allocation failures", text)
         self.assertIn("RESTARTED during the run", text)
 
-    def test_the_new_columns_are_last_so_old_files_still_parse(self):
-        # The file's own rule: appending anywhere but the end moves every
-        # column after it out from under a CSV written before the change.
-        self.assertEqual(soak.FIELDS[-2:], ["prev_alloc_failures", "prev_contained"])
+    def test_columns_are_only_ever_appended(self):
+        # The file's own rule: appending anywhere but the end moves every column
+        # after it out from under a CSV written before the change. Pinned
+        # against a real header this project actually recorded, rather than
+        # against the names of whichever two columns happen to be last — that
+        # assertion had to be edited every time the rule was *obeyed*, which is
+        # the opposite of a regression test.
+        import csv as _csv, os as _os
+        hist = _os.path.join(_os.path.dirname(__file__), _os.pardir, _os.pardir,
+                             "roadmap", "soak-2026-09-06.csv")
+        if not _os.path.exists(hist):
+            self.skipTest("the historical CSV is not in this checkout")
+        with open(hist, newline="") as f:
+            old_header = next(_csv.reader(f))
+        self.assertEqual(soak.FIELDS[:len(old_header)], old_header,
+                         "a column was inserted or renamed, not appended")
+
+class DischargeIsTheOnlyPowerMeasurement(unittest.TestCase):
+    """No board on this bench can report its own current, so the rate the cell
+    falls at is the whole measurement. These pin the three ways it can be
+    invalid, because a number reported from an invalid run is worse than no
+    number: it would be used."""
+
+    def _rows(self, samples, profile="battery", charging=0):
+        # samples: (hours_from_start, volts)
+        out = []
+        for h, v in samples:
+            out.append(dict(
+                ts=f"2026-09-08T{int(h):02d}:{int((h % 1) * 60):02d}:00+00:00",
+                node="n", reachable=1, uptime_s=int(h * 3600), boot_count=5,
+                boot_reason="power-on", heap_free=50000, heap_min=40000,
+                heap_largest=30000, stack_lowest=2000, stack_lowest_task="rns",
+                power_profile=profile, battery_v=v, battery_present=1,
+                battery_charging=charging))
+        return out
+
+    def test_a_falling_cell_reports_a_rate(self):
+        out = soak.discharge(self._rows([(0, 4.100), (4, 3.900)]))
+        text = "\n".join(out)
+        self.assertIn("4.100 V -> 3.900 V", text)
+        self.assertIn("profile battery", text)
+        self.assertIn("200 mV in 4.00 h = 50.0 mV/h", text)
+
+    def test_a_charging_node_is_not_a_discharge_measurement(self):
+        # The guard that matters most. A node on USB has a rising voltage that
+        # says something about the charger and nothing about the firmware.
+        out = soak.discharge(self._rows([(0, 3.900), (4, 4.100)], charging=1))
+        text = "\n".join(out)
+        self.assertIn("was charging", text)
+        self.assertNotIn("mV/h", text)
+
+    def test_a_profile_change_invalidates_the_run(self):
+        rows = self._rows([(0, 4.100), (2, 4.000)], profile="battery")
+        rows += self._rows([(4, 3.900)], profile="performance")
+        text = "\n".join(soak.discharge(rows))
+        self.assertIn("power profile changed", text)
+        self.assertIn("measures neither profile", text)
+
+    def test_a_node_with_no_cell_says_nothing(self):
+        rows = self._rows([(0, 4.1), (4, 3.9)])
+        for r in rows:
+            r["battery_v"] = ""
+        self.assertEqual(soak.discharge(rows), [])
+
+    def test_a_csv_without_the_columns_says_nothing(self):
+        rows = self._rows([(0, 4.1), (4, 3.9)])
+        for r in rows:
+            del r["battery_v"]
+        self.assertEqual(soak.discharge(rows), [])
+
+    def test_a_cell_that_did_not_move_is_not_a_rate(self):
+        text = "\n".join(soak.discharge(self._rows([(0, 4.000), (1, 4.000)])))
+        self.assertIn("did not fall", text)
+        self.assertNotIn("mV/h", text)
+
+    def test_the_band_is_timed_between_its_two_crossings(self):
+        rows = self._rows([(0, 4.050), (1, 4.000), (3, 3.900), (5, 3.800)])
+        text = "\n".join(soak.discharge(rows, band=(4.000, 3.800)))
+        self.assertIn("band 4.000-3.800 V crossed in 4.00 h", text)
+
+    def test_a_band_the_run_never_reached_says_so(self):
+        rows = self._rows([(0, 4.050), (4, 3.950)])
+        text = "\n".join(soak.discharge(rows, band=(4.000, 3.500)))
+        self.assertIn("not fully covered", text)
+        self.assertNotIn("crossed in", text)
+
+
+class BatterySampling(unittest.TestCase):
+    def test_the_power_object_is_recorded(self):
+        body = _status()
+        body["power"] = {"profile": "battery", "cpu_mhz": 80, "pmu": "AXP2101",
+                         "battery_present": True, "battery_v": 3.978,
+                         "battery_pct": 61, "battery_charging": False}
+        with _mocked_node(body):
+            row = soak.sample("node")
+        self.assertEqual(row["power_profile"], "battery")
+        self.assertEqual(row["pmu"], "AXP2101")
+        self.assertEqual(row["battery_v"], 3.978)
+        self.assertEqual(row["battery_charging"], 0)
+        self.assertEqual(row["battery_present"], 1)
+
+    def test_a_board_that_cannot_tell_records_blank_not_false(self):
+        # chargeKnown false sends null. Recording that as 0 would let a run on
+        # USB be read as a discharge measurement.
+        body = _status()
+        body["power"] = {"profile": "performance", "battery_charging": None,
+                         "battery_v": 4.1}
+        with _mocked_node(body):
+            row = soak.sample("node")
+        self.assertEqual(row["battery_charging"], "")
+        self.assertNotEqual(row["battery_charging"], 0)
+
+    def test_a_board_with_no_power_object_records_blanks(self):
+        with _mocked_node(_status()):
+            row = soak.sample("node")
+        for k in ("power_profile", "pmu", "battery_v", "battery_charging"):
+            self.assertEqual(row[k], "", f"{k} was {row[k]!r}")
+
 
 
 if __name__ == "__main__":
