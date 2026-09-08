@@ -55,9 +55,16 @@
 // does, and the T-Beam's map applied here powers a sensor rail and leaves the
 // radio dark.
 //
-// Not verified on hardware yet. Everything below is documented rather than
-// measured, and docs/hardware.md carries the bench list that settles it.
+// Brought up on hardware 2026-09-08 and the map held: the radio is on air both
+// ways, the card mounted, the clock was already holding the right time, the
+// receiver is talking, and the panel answers. docs/hardware.md carries what the
+// bench settled and the two things it did not — whether the image on the glass
+// sits where it should, and what a rail-cut nap costs the receiver here.
 
+// The PSRAM is external rather than in-package: esptool's feature list for this
+// die names 8 MB of embedded *flash* and no PSRAM at all, where an R2/R8 part
+// names both. It is nonetheless there and usable — the node reports 7.9 MB of it
+// free — so the env's BOARD_HAS_PSRAM is right, and the portal can run here.
 #define BOARD_NAME          "LilyGO T-Beam Supreme"
 
 // ---------------------------------------------------------------------------
@@ -231,14 +238,17 @@
 //   * QMI8658 6-axis (chip select GPIO 34, interrupt GPIO 33) — the driver in
 //     src/sys/Imu.cpp speaks to this part over I2C, and here it is on SPI,
 //     sharing the card's bus. A transport, not a pin map.
-//   * QMC6310 or QMC6309 magnetometer on the panel's bus — src/sys/Compass.cpp
-//     is written against the QMC6309 the M9 carries, identified by a chip id of
-//     0x90 and a register map read off that part. Which of the two is fitted
-//     here, and whether its registers agree, is a bench question: `I2C` on the
-//     console enumerates the bus and `I2C <addr>` dumps the part, which is how
-//     the M9's was settled before a line of driver was written.
-//   * BME280 on the panel's bus — no environmental sensor exists anywhere in
-//     this firmware. Temperature, humidity and pressure would want a driver, a
+//   * the magnetometer LilyGO's specification lists — and which is **not fitted
+//     on the unit this was brought up on**: the bus scan covers 0x08-0x7f and
+//     nothing answers at 0x0d, 0x1c, 0x2c or 0x7c. So HAS_COMPASS 0 costs that
+//     board nothing. Should a unit turn up with one, src/sys/Compass.cpp is
+//     written against the QMC6309 the M9 carries, identified by a chip id of
+//     0x90 and a register map read off that part, and whether a QMC6310's
+//     registers agree is the bench question to settle first — `I2C <addr>` on
+//     the console dumps the part, which is how the M9's was settled.
+//   * BME280 on the panel's bus, which *is* fitted — it acknowledges 0x77 — and
+//     stays undriven because no environmental sensor exists anywhere in this
+//     firmware. Temperature, humidity and pressure would want a driver, a
 //     capability flag, and a place on the status API, the console, the display
 //     and in docs/, which is a feature rather than a board port.
 #define HAS_IMU             0

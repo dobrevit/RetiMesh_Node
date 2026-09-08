@@ -8,7 +8,7 @@
 | `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
 | `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
 | `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, 4 MB PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot** | verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board |
-| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; QMI8658 IMU, QMC6310 magnetometer and BME280 fitted but not driven | builds; documented from LilyGO's hardware notes and the RNode firmware's board block for the same board — no line of it verified on hardware yet |
+| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; QMI8658 IMU, QMC6310 magnetometer and BME280 fitted but not driven | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, SH1106 panel initialised, USB composite with usb0 ready, Wi-Fi AP and transport online. Two things the bench has not settled: whether the panel's image sits where it should (an SH1106 driven as an SSD1306 is shifted two columns, and only eyes can tell), and whether a rail-cut GNSS nap costs a cold start here. The magnetometer LilyGO list for this board is **not fitted on this unit** — nothing answers at any QMC address — while the BME280 is, at 0x77 |
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
@@ -393,11 +393,12 @@ does carry over is the shape of the problem: **nothing on this board answers unt
 has been told to power it**, so `Pmu::begin()` runs before the radio is probed, and an
 unpowered rail reads on the bench exactly like a part that is not fitted.
 
-**Everything here is documented rather than measured.** Two sources agree on every pin —
-LilyGO's own hardware notes for the board, and the RNode firmware's block for it
-(`BOARD_TBEAM_S_V1`), which runs on this hardware — and the rail map is LilyGO's reference
-code. That is a good starting point and it is not verification; the bench list below is
-what settles it.
+**Brought up on hardware 2026-09-08, and the pin map held.** It was written from two
+sources that agree on every pin — LilyGO's own hardware notes for the board, and the RNode
+firmware's block for it (`BOARD_TBEAM_S_V1`), which runs on this hardware — with the rail
+map from LilyGO's reference code. What the bench then found is at the end of this section;
+the short version is that the radio, the panel, the card, the clock and the receiver all
+came up on the first flash, and the five single-sourced pins were right.
 
 **The rail map is the part with no room for inference.** This board's AXP2101 is wired
 differently from the T-Beam's, and the T-Beam's map applied here powers a sensor rail and
@@ -473,37 +474,68 @@ The power button is the PMU's own PWRKEY and does not reach the ESP32, so it can
 as a GPIO — as on the Heltec V4's case button. Reserved: 26–32 (SPI flash and the quad
 PSRAM), and 19/20 are the USB pads this board actually uses.
 
-### What the bench has to settle
+### What the bench settled, and what it did not
 
-Nothing below has been run. In rough order of what blocks what:
+Brought up 2026-09-08 on the first flash of `tbeam-supreme`, over native USB. In the order
+things had to work:
 
-1. **The PMU answers, and on the right bus** — `STATUS` reports `AXP2101` and a battery
-   voltage. If it does not, every item after this one fails for the same reason.
-2. **The radio** — the SX1262 is found, and the boot log gives its channel; then an
-   announce accepted by another node, and one received. Worth settling here which of
-   ALDO3 and DCDC3 the module actually needs: LilyGO's reference powers both, one as
-   "the LoRa radio" and one as "the M.2 interface", and nothing says whether the
-   second is load-bearing or a leftover. Bring the board up with DCDC3 left off and
-   see whether the transceiver still answers — a rail that costs current for nothing
-   is worth knowing about on a board meant to run off an 18650.
-3. **The panel** — text where it should be rather than two columns out, which is the one
-   thing that says the SH1106 driver is the right one for the unit on the bench.
-4. **The card** — mounted, and the Reticulum store on it rather than in the filesystem.
-5. **The clock** — `PCF8563` found on the PMU's bus, holding time across a power cut and
-   seeding the system clock at boot with no fix.
-6. **GNSS** — sentences arriving, a fix outdoors, and the rail cut proving out: switch the
-   receiver off and watch the current fall. Then time the wake, which is the part that is
-   not inherited from the T-Beam: that board's receiver keeps its almanac through a nap
-   and comes back in seconds, and this one's backup domain is the PMU's own VBACKUP,
-   which nothing here switches and LilyGO's reference code turns off. A cold start also
-   makes the current fall, so only the time to a fix after a nap separates the two — and
-   if it is minutes, the duty cadence is paying more for a fix than it thinks.
-7. **Native USB** — the composite device enumerates, `usb0` comes up, and the port survives
-   a bootloader hand-off.
-8. **Which parts are actually fitted** — `I2C` on the console, twice, once per bus: what
-   answers on 17/18 settles the magnetometer question (0x0D, 0x1C, 0x2C or 0x7C for the QMC
-   family, 0x76/0x77 for the BME280) and what answers on 42/41 should be exactly the PMU
-   and the clock.
+1. **The PMU answers, on its own bus.** `STATUS` reports `pmu=AXP2101`, and the two hosts
+   read as they should: `i2c main sda=17 scl=18` with the panel and the BME280 on it, and
+   `i2c host1 sda=42 scl=41` with exactly the PMU at 0x34 and the clock at 0x51. Every rail
+   it feeds proved out by its consequence rather than by a register read — the radio
+   answered (ALDO3), the panel initialised (ALDO1), the clock answered (ALDO2) and the card
+   mounted (BLDO1).
+2. **The radio is on air both ways.** SX1262 at 869.525, SF8: 24 packets received from the
+   rest of the bench and 7 sent, rssi −34, snr 12.5, two CRC errors — ordinary LoRa. So the
+   seven radio pins, the 1.8 V TCXO and DIO2 steering the antenna are all right. **Still
+   open:** which of ALDO3 and DCDC3 the module actually needs. LilyGO's reference powers
+   both, one as "the LoRa radio" and one as "the M.2 interface", and the radio works with
+   both on — bring it up with DCDC3 off and see whether the transceiver still answers. A
+   rail that costs current for nothing is worth knowing about on a board meant to run off
+   an 18650.
+3. **The panel initialises; the image is the one thing left to eyes.** `/api/status`
+   reports `display: true`, which means the probe found it and the SH1106 driver's own
+   `begin()` succeeded — a panel that did not answer would report false. Whether the
+   picture sits where it should is what nothing here can read: an SH1106 driven as an
+   SSD1306 comes up shifted two columns and wrapping the rest, and only a look at the glass
+   separates that from a correct frame.
+4. **The card mounted and took the store.** An 8 GB SDHC on the second SPI host
+   (`36/37/35`, select 47): `state: mounted`, `store_home: sd`, the Reticulum store at
+   `/sd/rns`. So those four pins and BLDO1 are right.
+5. **The clock is holding.** The PCF8563 answers at 0x51 on the PMU's bus and `STATUS`
+   reads `rtc=holding drift=1s` — and it was already holding the right time before this
+   firmware ever wrote it, the same as the M9's. So this board knows the date indoors.
+6. **The receiver is talking.** 932 NMEA sentences and no fix, which is what indoors looks
+   like — and it settles the two GNSS pins, which had only LilyGO's word behind them, along
+   with the ALDO4 rail that has to be on before the part exists. **Still open:** a fix
+   outdoors, and the cost of a nap. That last one is not inherited from the T-Beam, whose
+   receiver keeps its almanac through a rail cut and comes back in seconds; this board's
+   backup domain is the PMU's own VBACKUP, which nothing here switches and LilyGO's
+   reference code turns off. A cold start makes the current fall too, so only the time to a
+   fix after a nap separates the two — and if it is minutes, the duty cadence is paying more
+   for a fix than it thinks.
+7. **Native USB works, and the flashing route is not the obvious one.** The composite
+   device enumerates as `RetiMesh Node` with the MAC in its serial, `usb0` reaches ready,
+   and `USB_STATUS` reports `personality=usb_otg_composite ncm=driver software_entry=yes`.
+   But **esptool cannot reset this board into its downloader over USB** — not the factory
+   Meshtastic image and not ours; both answer `No serial data received`. What does work is
+   the 1200-baud touch (`stty -F <port> 1200`), which makes the core jump to the ROM, after
+   which the board appears under its `USB_JTAG_serial_debug_unit` name and esptool is happy.
+   `pio run -t upload` gets there by itself through the console's `BOOTLOADER CONFIRM`;
+   `uploadfs` does not, and needs the touch first. See
+   `firmware-backups/tbeam-supreme-48CA435AD828.md`.
+8. **The magnetometer is not fitted on this unit.** The bus scan covers 0x08–0x7f and
+   nothing answers at any QMC address — 0x0d, 0x1c, 0x2c and 0x7c are all silent — so the
+   QMC6310 in LilyGO's specification is absent here, and the `HAS_COMPASS 0` in the board
+   header costs nothing on this board. The BME280 *is* fitted, at 0x77, and remains
+   undriven because this firmware has no environmental sensor at all. The panel also
+   acknowledges both 0x3c and 0x3d.
+
+One more thing the bring-up turned up, which is not this board's fault: **two nodes on one
+host can collide on the USB-NCM subnet.** This board came up as `usb0` at `10.64.40.1`,
+which is the address the SX1280 T3-S3 already had — both MACs end in `0x28`, and the third
+octet is derived from that last byte, so any two boards sharing it are indistinguishable by
+address on the same host. It is not a fault in this port and is not fixed here.
 
 ## T3-S3 pin map (defaults in `Config.h`)
 | Function | GPIO |
