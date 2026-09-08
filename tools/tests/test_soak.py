@@ -209,19 +209,21 @@ class SummariseNamesTheDeadRun(unittest.TestCase):
 
     def test_columns_are_only_ever_appended(self):
         # The file's own rule: appending anywhere but the end moves every column
-        # after it out from under a CSV written before the change. Pinned
-        # against a real header this project actually recorded, rather than
-        # against the names of whichever two columns happen to be last — that
-        # assertion had to be edited every time the rule was *obeyed*, which is
-        # the opposite of a regression test.
+        # after it out from under a CSV written before the change.
+        #
+        # Pinned against a checked-in fixture, not against the names of the last
+        # two columns (that assertion had to be edited every time the rule was
+        # *obeyed*) and not against a file under roadmap/, which is git-excluded
+        # — that version passed here and skipped in CI, so the rule guarding
+        # every historical CSV was enforced on one machine only.
+        #
+        # When you append a column, append it to the fixture too. That is the
+        # point: the edit is the record of what the header used to be.
         import csv as _csv, os as _os
-        hist = _os.path.join(_os.path.dirname(__file__), _os.pardir, _os.pardir,
-                             "roadmap", "soak-2026-09-06.csv")
-        if not _os.path.exists(hist):
-            self.skipTest("the historical CSV is not in this checkout")
-        with open(hist, newline="") as f:
-            old_header = next(_csv.reader(f))
-        self.assertEqual(soak.FIELDS[:len(old_header)], old_header,
+        fx = _os.path.join(_os.path.dirname(__file__), "fixtures", "soak-header.csv")
+        with open(fx, newline="") as f:
+            frozen = next(_csv.reader(f))
+        self.assertEqual(soak.FIELDS[:len(frozen)], frozen,
                          "a column was inserted or renamed, not appended")
 
 class DischargeIsTheOnlyPowerMeasurement(unittest.TestCase):
@@ -230,16 +232,16 @@ class DischargeIsTheOnlyPowerMeasurement(unittest.TestCase):
     invalid, because a number reported from an invalid run is worse than no
     number: it would be used."""
 
-    def _rows(self, samples, profile="battery", charging=0):
+    def _rows(self, samples, profile="battery", charging=0, present=1, boot=5):
         # samples: (hours_from_start, volts)
         out = []
         for h, v in samples:
             out.append(dict(
                 ts=f"2026-09-08T{int(h):02d}:{int((h % 1) * 60):02d}:00+00:00",
-                node="n", reachable=1, uptime_s=int(h * 3600), boot_count=5,
+                node="n", reachable=1, uptime_s=int(h * 3600), boot_count=boot,
                 boot_reason="power-on", heap_free=50000, heap_min=40000,
                 heap_largest=30000, stack_lowest=2000, stack_lowest_task="rns",
-                power_profile=profile, battery_v=v, battery_present=1,
+                power_profile=profile, battery_v=v, battery_present=present,
                 battery_charging=charging))
         return out
 
@@ -248,7 +250,7 @@ class DischargeIsTheOnlyPowerMeasurement(unittest.TestCase):
         text = "\n".join(out)
         self.assertIn("4.100 V -> 3.900 V", text)
         self.assertIn("profile battery", text)
-        self.assertIn("200 mV in 4.00 h = 50.0 mV/h", text)
+        self.assertIn("fell 200 mV in 4.00 h (50.0 mV/h)", text)
 
     def test_a_charging_node_is_not_a_discharge_measurement(self):
         # The guard that matters most. A node on USB has a rising voltage that
@@ -283,7 +285,11 @@ class DischargeIsTheOnlyPowerMeasurement(unittest.TestCase):
         self.assertNotIn("mV/h", text)
 
     def test_the_band_is_timed_between_its_two_crossings(self):
-        rows = self._rows([(0, 4.050), (1, 4.000), (3, 3.900), (5, 3.800)])
+        # Hourly samples: the band spans four of them, which the resolution
+        # guard accepts. The sparse version of this run is refused instead, and
+        # rightly — see test_a_band_crossed_faster_than_the_sampling_is_refused.
+        rows = self._rows([(0, 4.050), (1, 4.000), (2, 3.950), (3, 3.900),
+                           (4, 3.850), (5, 3.800), (6, 3.780)])
         text = "\n".join(soak.discharge(rows, band=(4.000, 3.800)))
         self.assertIn("band 4.000-3.800 V crossed in 4.00 h", text)
 
@@ -324,6 +330,134 @@ class BatterySampling(unittest.TestCase):
             row = soak.sample("node")
         for k in ("power_profile", "pmu", "battery_v", "battery_charging"):
             self.assertEqual(row[k], "", f"{k} was {row[k]!r}")
+
+class TheBandSurvivesARealCell(unittest.TestCase):
+    """The band time is the figure that will pick a shipped default, and every
+    case here made it print `0.00 h` — or a truncated traversal — while still
+    labelling itself comparable."""
+
+    def _rows(self, samples, profile="battery"):
+        out = []
+        for h, v in samples:
+            out.append(dict(
+                ts=f"2026-09-08T{int(h):02d}:{int(round((h % 1) * 60)):02d}:00+00:00",
+                node="n", reachable=1, uptime_s=int(h * 3600), boot_count=5,
+                boot_reason="power-on", heap_free=50000, heap_min=40000,
+                heap_largest=30000, stack_lowest=2000, stack_lowest_task="rns",
+                power_profile=profile, battery_v=v, battery_present=1,
+                battery_charging=0))
+        return out
+
+    def test_a_run_that_began_inside_the_band_is_refused(self):
+        # It never crossed HIGH, so the traversal is truncated and the time is
+        # of a partial band. Reporting it as comparable is the worst case.
+        rows = self._rows([(h, 3.900 - h * 0.025) for h in range(5)])
+        text = "\n".join(soak.discharge(rows, band=(4.00, 3.80)))
+        self.assertIn("already at or below", text)
+        self.assertNotIn("crossed in", text)
+
+    def test_a_transient_load_sag_is_not_a_crossing(self):
+        # The case that will actually happen: a TX burst sags the cell 200 mV
+        # and it recovers. One such sample used to collapse the band to 0.00 h,
+        # which reads as infinite draw.
+        samples = [(0, 4.100), (1, 3.790), (2, 4.020), (3, 4.000), (4, 3.960),
+                   (5, 3.930), (6, 3.900), (7, 3.870), (8, 3.840), (9, 3.810),
+                   (10, 3.795), (11, 3.780)]
+        text = "\n".join(soak.discharge(self._rows(samples), band=(4.00, 3.80)))
+        self.assertIn("crossed in", text)
+        hours = float(text.split("crossed in ")[1].split(" h")[0])
+        self.assertGreater(hours, 3.0, f"a sag was taken for a crossing: {text}")
+
+    def test_a_band_crossed_faster_than_the_sampling_is_refused(self):
+        # Two samples 12 h apart cannot resolve a band that fell between them.
+        rows = self._rows([(0, 4.100), (12, 3.700)])
+        text = "\n".join(soak.discharge(rows, band=(4.00, 3.80)))
+        self.assertIn("too fast to resolve", text)
+        self.assertNotIn("compare against another run", text)
+
+    def test_a_crossing_time_is_interpolated_not_snapped(self):
+        # 4.00 V falls between the samples at h=0 (4.020) and h=1 (3.980), so
+        # the crossing is halfway, not at either sample.
+        samples = [(0, 4.020), (1, 3.980), (2, 3.940), (3, 3.900), (4, 3.860),
+                   (5, 3.820), (6, 3.790), (7, 3.780)]
+        text = "\n".join(soak.discharge(self._rows(samples), band=(4.00, 3.80)))
+        hours = float(text.split("crossed in ")[1].split(" h")[0])
+        self.assertAlmostEqual(hours, 5.0, delta=0.25, msg=text)
+
+    def test_traffic_is_reported_beside_the_band(self):
+        rows = self._rows([(h, 4.050 - h * 0.030) for h in range(10)])
+        for i, r in enumerate(rows):
+            r["rx_packets"] = 100 + i * 10
+            r["tx_packets"] = 5 + i
+        text = "\n".join(soak.discharge(rows, band=(4.00, 3.85)))
+        self.assertIn("the node did:", text)
+        self.assertIn("rx +", text)
+
+
+class RunsThatAreNotOneRun(unittest.TestCase):
+    def _rows(self, samples, boot=5, profile="battery"):
+        out = []
+        for h, v in samples:
+            out.append(dict(
+                ts=f"2026-09-08T{int(h):02d}:00:00+00:00", node="n", reachable=1,
+                uptime_s=int(h * 3600), boot_count=boot, boot_reason="power-on",
+                heap_free=50000, heap_min=40000, heap_largest=30000,
+                stack_lowest=2000, stack_lowest_task="rns", power_profile=profile,
+                battery_v=v, battery_present=1, battery_charging=0))
+        return out
+
+    def test_a_recharge_splits_the_file_into_stretches(self):
+        rows = self._rows([(0, 4.100), (1, 4.050), (2, 4.000)])          # run A
+        rows += self._rows([(3, 4.180), (4, 4.120), (5, 4.060), (6, 4.000)])  # recharged
+        text = "\n".join(soak.discharge(rows))
+        self.assertIn("discharge stretches", text)
+        self.assertIn("4.180 V", text)                # the longer stretch, not run A
+
+    def test_a_restart_splits_the_run(self):
+        rows = self._rows([(0, 4.100), (1, 4.080)], boot=5)
+        rows += self._rows([(2, 4.060), (3, 4.040), (4, 4.020)], boot=6)
+        text = "\n".join(soak.discharge(rows))
+        self.assertIn("discharge stretches", text)
+
+    def test_a_stale_divider_is_not_a_measurement(self):
+        # present=0 with a plausible leftover voltage: an ADC board whose
+        # converter stopped still publishes its last reading.
+        rows = self._rows([(0, 3.100), (6, 3.050)])
+        for r in rows:
+            r["battery_present"] = 0
+        text = "\n".join(soak.discharge(rows))
+        self.assertIn("no cell", text)
+        self.assertNotIn("mV/h", text)
+
+    def test_a_long_gap_in_sampling_is_flagged(self):
+        rows = self._rows([(0, 4.100), (1, 4.090), (9, 3.900), (10, 3.890)])
+        text = "\n".join(soak.discharge(rows))
+        self.assertIn("not observed", text)
+
+    def test_a_board_that_cannot_tell_about_charging_is_warned_about(self):
+        rows = self._rows([(0, 4.100), (4, 3.900)])
+        for r in rows:
+            r["battery_charging"] = ""
+        text = "\n".join(soak.discharge(rows))
+        self.assertIn("cannot tell whether it was charging", text)
+
+    def test_a_python_true_counts_as_charging(self):
+        # str(True) == "True": the old ad-hoc decode missed it and reported a
+        # rate for a node on USB.
+        rows = self._rows([(0, 3.900), (4, 4.100)])
+        for r in rows:
+            r["battery_charging"] = True
+        text = "\n".join(soak.discharge(rows))
+        self.assertIn("was charging", text)
+        self.assertNotIn("mV/h", text)
+
+    def test_a_mixed_profile_run_reports_no_figure_at_all(self):
+        rows = self._rows([(0, 4.100), (2, 4.000)], profile="battery")
+        rows += self._rows([(3, 3.950), (4, 3.900)], profile="performance")
+        text = "\n".join(soak.discharge(rows, band=(4.05, 3.90)))
+        self.assertIn("measures neither profile", text)
+        self.assertNotIn("mV/h", text)
+        self.assertNotIn("crossed in", text)
 
 
 

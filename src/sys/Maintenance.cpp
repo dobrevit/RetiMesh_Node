@@ -296,6 +296,43 @@ static void doVersion() {
   ok("VERSION");
 }
 
+// The cell, and what is draining it, in one line.
+//
+// It exists because of how a power measurement has to be taken here. No board
+// this firmware ships on can report its own current — an AXP2101 gives
+// voltages and no current at all, a BQ25896 gives charge current but not
+// discharge, the rest have a divider — so the measurement is the rate the cell
+// falls at, over hours, on a node running on battery. That node's Wi-Fi is
+// turned down or off by the very profile being measured, so it has to be read
+// over the mesh; and an LXMF message has an MTU that a full STATUS reply
+// already overruns (RnsAdmin.cpp). Hence one line, short on purpose.
+//
+// Every figure here is asked of the same place STATUS asks, so the two cannot
+// disagree about what the cell is doing.
+static void doPower(const Request& r) {
+  const char* name = "POWER";
+#if HAS_PMU || HAS_BATTERY_ADC
+  const Power::Battery bat = Power::battery();
+  dataf(name, "volts=%.3f percent=%u %s stale=%s pmu=%s",
+        (double)bat.volts, (unsigned)bat.percent,
+        bat.chargeKnown ? (bat.charging ? "charging=yes" : "charging=no")
+                        : "charging=unknown",
+        Power::readingStale() ? "yes" : "no", Pmu::model());
+#else
+  // Said rather than omitted: a node with no cell cannot be measured this way,
+  // and a caller polling for a discharge needs to learn that from the answer
+  // instead of from an empty line it might read as a failed transfer.
+  dataf(name, "battery=none pmu=%s", Power::chargerName());
+#endif
+  // The profile is the other half of the measurement: a discharge rate without
+  // it measures nothing, because the whole question is which profile is cheaper.
+  dataf(name, "profile=%s cpu_mhz=%u uptime_s=%lu",
+        Power::profileName(Power::profile()), (unsigned)getCpuFrequencyMhz(),
+        (unsigned long)(millis() / 1000));
+  ok(name, "");
+  (void)r;
+}
+
 static void doStatus() {
   const Diag::Boot& b = Diag::boot();
   dataf("STATUS", "uptime_s=%lu boot_count=%lu reset=\"%s\"", (unsigned long)(millis() / 1000),
@@ -544,7 +581,7 @@ static void doStatus() {
           Power::readingStale() ? "stale" : (bat.present ? "present" : "not-seen"),
           (double)bat.volts, (unsigned)bat.percent,
           bat.chargeKnown ? (bat.charging ? " charging=yes" : " charging=no") : "",
-          Pmu::model());
+          Power::chargerName());
   }
 #endif
   // Whether the console can be reached over the network, and whether somebody
@@ -893,6 +930,7 @@ static void dispatch(const char* line) {
     case Cmd::Help:          doHelp(); break;
     case Cmd::I2c:           doI2c(r); break;
     case Cmd::Stacks:        doStacks(r); break;
+    case Cmd::Power:         doPower(r); break;
     case Cmd::Status:        doStatus(); break;
     case Cmd::Version:       doVersion(); break;
     case Cmd::UsbStatus:     doUsbStatus(); break;

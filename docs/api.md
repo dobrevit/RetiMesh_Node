@@ -308,14 +308,6 @@ if it is zero, the panic was something else and the coredump is the next place
 to look. A non-zero `prev_contained` beside a zero `prev_alloc_failures` says
 the run was catching exceptions, not running out of memory.
 
-`power.pmu` names the charger — `AXP192`, `AXP2101`, `BQ25896` or `none` —
-and it decides what the board can be *asked*, not just what it has. An AXP192
-reports its own battery discharge current and carries a coulomb counter; an
-AXP2101 reports voltages and nothing else; a BQ25896 gives charge current but
-not discharge. No board this firmware ships on can therefore measure its own
-draw, which is why a power measurement here is a discharge *rate* — see
-`tools/soak.py --band`.
-
 `faults` is the *current* run: `alloc_failures`, `contained`, and
 `last_ms_ago` for the most recent one. Non-zero here on a node that is still
 answering is a node under pressure right now.
@@ -377,9 +369,23 @@ when Wi-Fi is switched off. `wifi_tx_dbm` is the same kind of proof for
 quarter-dBm steps, so it can sit below the setting (ask for 9, hold 8.5);
 `null` when Wi-Fi is switched off.
 The board's make and model used to sit here too; it is `board` at the top of
-the document now, beside the firmware that runs on it. `battery_charging` and a trustworthy
-`battery_present` need a power-management chip; boards reading an ADC divider
-report `false` and infer presence from the voltage.
+the document now, beside the firmware that runs on it.
+
+`power.pmu` names the part managing the cell — `AXP192`, `AXP2101`, `BQ25896`
+or `none` — and it decides what the board can be *asked*, not merely what it
+has. An AXP192 reports its own battery discharge current and carries a coulomb
+counter; an AXP2101 reports voltages and nothing else; a BQ25896 gives charge
+current but not discharge. **No board this firmware ships on can measure its
+own draw**, which is why a power measurement here is a discharge *rate* over
+hours rather than a current — see `tools/soak.py --band`.
+
+`battery_charging` needs a part that can answer the question: a
+power-management chip, or the V4's BQ25896 beside its divider. Everywhere else
+it is **`null`** — not `false` — because a board that cannot tell is not a
+board reporting "no". `battery_present` is trustworthy on those same boards;
+a divider infers presence from the voltage and leaves the last reading in place
+when its converter stops, so treat `battery_present: false` with a plausible
+voltage as a stale reading rather than an empty holder.
 
 `gps` appears on boards with a receiver:
 `{"enabled":true,"fix":true,"quality":1,"satellites":7,"sentences":1204,
