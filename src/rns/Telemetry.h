@@ -142,7 +142,12 @@ inline size_t build(const Snapshot& s, uint8_t* out, size_t cap) {
 
   // [percent, charging, temperature]. Charging is nil where the board cannot
   // answer it, rather than a false that reads as "plugged in and not taking
-  // charge" (Power.h). No temperature sensor on any board here yet.
+  // charge" (Power.h). The third slot is Sideband's *battery* temperature and
+  // stays nil: the T-Beam Supreme's BME280 measures the air around the node,
+  // which is a different claim, and the ambient sensors have sensor ids of
+  // their own that this encoder does not carry yet. Putting a room temperature
+  // here would be a wrong reading rather than a missing one — see
+  // src/sys/Environment.h.
   if (s.haveBattery) {
     sensor(kSidBattery).array(3).real(s.batteryPercent);
     if (s.chargeKnown) w.boolean(s.charging); else w.nil();

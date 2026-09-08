@@ -24,6 +24,8 @@
 #include "QrCode.h"
 #include "Pmu.h"
 #include "Gps.h"
+#include "Environment.h"
+#include "Imu.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <memory>
@@ -2020,6 +2022,52 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     at["csma_slot_ms"]  = g_stats.csmaSlotMs;
     at["csma_band"]     = g_stats.csmaBand;
   }
+
+#if HAS_IMU
+  {
+    // The part's own readings, not just whether it is fitted. A board whose
+    // panel does not turn and whose compass is absent had no reader for these
+    // at all, which made "the API reads it" — the reason it is not suspended
+    // with the screen — untrue until this existed.
+    JsonObject imu = doc["imu"].to<JsonObject>();
+    imu["present"] = Imu::present();
+    imu["running"] = Imu::running();
+    float g[3];
+    if (Imu::present() && Imu::running() && Imu::accel(g)) {
+      JsonArray a = imu["accel_g"].to<JsonArray>();
+      for (int i = 0; i < 3; i++) a.add(roundf(g[i] * 100.0f) / 100.0f);
+      imu["facing"] = (uint8_t)Imu::facing();
+    }
+  }
+#endif
+
+#if HAS_ENV
+  {
+    const Environment::Reading e = Environment::last();
+    JsonObject env = doc["env"].to<JsonObject>();
+    // Present and valid are two facts, and a caller graphing this needs both:
+    // a fitted part that has not finished its first conversion reports present
+    // with no reading, which is a different thing from no sensor at all.
+    env["present"] = Environment::present();
+    env["valid"]   = e.valid;
+    if (e.valid) {
+      // Rounded to the part's resolution, which is finer than its accuracy:
+      // the datasheet's tolerances are +/-1 C, +/-3 % and +/-1 hPa, so the last
+      // digit here is real precision and not a real guarantee.
+      env["temp_c"]       = roundf(e.tempC * 100.0f) / 100.0f;
+      env["humidity_pct"] = roundf(e.humidityPct * 10.0f) / 10.0f;
+      env["pressure_hpa"] = roundf(e.pressureHpa * 100.0f) / 100.0f;
+      // How old the reading is, for the same reason the console prints it: one
+      // conversion every half minute, and a caller cannot tell a fresh reading
+      // from a stale one without being told.
+      env["age_s"]        = Environment::ageS(e);
+    } else if (Environment::present()) {
+      // A fitted part with no reading: how many intervals have gone by says
+      // whether this is the first thirty seconds or an hour of silence.
+      env["missed_intervals"] = Environment::missedIntervals();
+    }
+  }
+#endif
 
 #if HAS_GPS
   {

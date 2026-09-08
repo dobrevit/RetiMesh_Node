@@ -341,8 +341,11 @@ void tellPeripherals(const bool* dark, const Power::Profile* prof) {
   taskENTER_CRITICAL(&sPeripheralMux);
   if (dark) sScreenDark.store(*dark, std::memory_order_relaxed);
   if (prof) sProfile    = *prof;
+  // The board fact goes in as an argument rather than being read inside the
+  // policy, which is host code and has no board (PeripheralPolicy.h).
   const PeripheralPolicy::Change c [[maybe_unused]] =
-      sPeripherals.update(sScreenDark.load(std::memory_order_relaxed), (uint8_t)sProfile);
+      sPeripherals.update(sScreenDark.load(std::memory_order_relaxed), (uint8_t)sProfile,
+                          IMU_FOLLOWS_SCREEN);
 #if HAS_COMPASS
   if (c.compass != PeripheralPolicy::Verdict::Unchanged)
     Compass::setRunning(c.compass == PeripheralPolicy::Verdict::Run);

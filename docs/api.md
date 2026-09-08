@@ -387,6 +387,24 @@ a divider infers presence from the voltage and leaves the last reading in place
 when its converter stops, so treat `battery_present: false` with a plausible
 voltage as a stale reading rather than an empty holder.
 
+`env` appears on boards with an environmental sensor — a BME280, and so far
+only the T-Beam Supreme:
+`{"present":true,"valid":true,"temp_c":21.94,"humidity_pct":43.8,
+"pressure_hpa":1006.77,"age_s":12}`.
+
+`present` and `valid` are two facts and a caller needs both. A fitted part that
+has not finished its first conversion reports `present: true` with no readings
+at all, which is a different thing from a board with no sensor — and it lasts
+at most one sampling interval. The readings are rounded to 0.01 °C, 0.1 % and
+0.01 hPa — the part's *resolution*, which is finer than its accuracy: the
+datasheet's tolerances are ±1 °C, ±3 % and ±1 hPa, so the last digit of each is
+real precision and not a real guarantee. Do not read a 0.01 °C change between
+two samples as the air having moved. `age_s` is there because the part is read once every thirty
+seconds and sleeps in between: without it a reading taken before the node was
+moved is indistinguishable from one taken now. There is no setting — the sensor
+has no switch, because it costs a microamp asleep and about ten milliseconds of
+one bus every half minute.
+
 `gps` appears on boards with a receiver:
 `{"enabled":true,"fix":true,"quality":1,"satellites":7,"sentences":1204,
 "clock_set":true,"utc":"2026-08-26 21:04:11","resting":false,

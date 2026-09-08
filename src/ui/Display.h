@@ -84,26 +84,36 @@ private:
 #if HAS_GPS
   void paintGps();
 #endif
+#if HAS_ENV
+  void paintEnv();
+#endif
   void paintTransport();
   void pollButton();
   void header(const char* title);        // page name + the cell
   void meter(uint8_t row, const char* label, const char* value, uint8_t pct);
 
 
-  // The GNSS page exists only where there is a receiver to read, and the QR
-  // page only where a camera could read the result. On a 0.49" panel the
+  // The GNSS page exists only where there is a receiver to read, the weather
+  // page only where a BME280 is fitted, and the QR page only where a camera
+  // could read the result. On a 0.49" panel the
   // module pitch is 0.17 mm and a version-3 symbol is 5.4 mm across — below
   // what a phone lens resolves and inside its near-focus blur, so it scans as
   // a single bright blob however it is drawn. A page that cannot work costs a
   // button press to reach and another to leave, so it is not in the cycle.
 #if HAS_GPS
   enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK, GPS,
+  #if HAS_ENV
+    ENV,
+  #endif
   #if !DISPLAY_COMPACT
     QR,
   #endif
     PAGE_COUNT };
 #else
   enum Page : uint8_t { STATUS = 0, NEIGHBORS, TRANSPORT, RADIO, NETWORK,
+  #if HAS_ENV
+    ENV,
+  #endif
   #if !DISPLAY_COMPACT
     QR,
   #endif

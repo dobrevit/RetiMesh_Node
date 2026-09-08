@@ -221,11 +221,12 @@
 // ---------------------------------------------------------------------------
 // microSD — its own bus, shared with the accelerometer
 // ---------------------------------------------------------------------------
-// The card is on the second SPI host with the QMI8658's chip select beside it.
-// Nothing drives the accelerometer yet; when something does, it asks
-// SpiBus::get(SD_SPI_BUS, ...) for the same object rather than constructing
-// one of its own — two SPIClass objects on one host re-initialise the
-// peripheral under each other (src/sys/SpiBus.h).
+// The card is on the second SPI host with the QMI8658's chip select beside it,
+// and both are driven — they ask SpiBus for the same object rather than
+// constructing one each, because two SPIClass objects on one host re-initialise
+// the peripheral under each other (src/sys/SpiBus.h). BoardInit idles both
+// selects before either driver starts, since the accelerometer's begin() runs
+// first and a floating select is a device that may answer.
 #define HAS_SD              1
 #define PIN_SD_SCK          36
 #define PIN_SD_MISO         37
@@ -247,14 +248,60 @@
 #define PIN_RTC_SCL         PIN_PMU_SCL
 
 // ---------------------------------------------------------------------------
+// Accelerometer — a QMI8658, and the first one here that is not on I2C
+// ---------------------------------------------------------------------------
+// The same part the ThinkNode M9 carries, wired to the card's SPI bus with a
+// select of its own instead of to a shared I2C bus. That is a transport and
+// not a different part: every register, the chip id and the configuration are
+// the M9's, and only the three calls at the top of src/sys/Imu.cpp change
+// (IMU_TRANSPORT). The bus and its three pins default to the card's, which is
+// where they are — so the select is all this board has to name.
+//
+// Two consequences worth having written down. BoardInit idles this select
+// before any driver exists, because SdCard::begin() runs first on these wires
+// and a floating select is a device that may answer. And the part does *not*
+// follow the screen here, unlike on the two boards that had accelerometers
+// first: nothing on this board reads it for a heading or for panel rotation,
+// so its only readers are the console and the status API, which are asked with
+// the glass dark as often as not (IMU_FOLLOWS_SCREEN, PeripheralPolicy.h).
+#define HAS_IMU             1
+#define IMU_KIND            IMU_KIND_QMI8658
+#define IMU_TRANSPORT       IMU_TRANSPORT_SPI
+#define PIN_IMU_CS          34
+// The panel does not turn: 128x64 pages laid out one way, in a fixed case. So
+// the accelerometer answers the console and nothing else, and the rotation
+// path is not built (it defaults to HAS_IMU, which is now 1).
+#define DISPLAY_AUTO_ROTATE 0
+// The interrupt is on GPIO 33 and nothing reads it: this part is polled. It is
+// the pin to reach for if a motion wake is ever wanted.
+//
+// The axis signs are the defaults, which is to say unverified — how the part
+// sits relative to the case has not been measured, and nothing here depends on
+// it yet. A consumer that cares (a heading, a rotation) has to settle
+// IMU_INVERT_X/Y/Z on the bench first.
+
+// ---------------------------------------------------------------------------
+// Environment — a BME280 on the panel's bus
+// ---------------------------------------------------------------------------
+// Temperature, pressure and humidity, at 0x77: SDO is strapped high here,
+// where the same part on another board is as likely to be at 0x76. It shares
+// the panel's bus, which is why Environment::poll() is called from the main
+// loop and from nowhere else — one reader on that bus is what keeps it safe
+// (Environment.h, and issue 33 in the roadmap for the reason).
+//
+// This is the first sensor here that reports on the node's surroundings rather
+// than on the node, and the first that does not follow the screen: a gateway
+// on a pole reports the weather at the pole whether or not anybody is looking
+// at its glass.
+#define HAS_ENV             1
+#define ENV_KIND            ENV_KIND_BME280
+#define ENV_ADDR            0x77
+
+// ---------------------------------------------------------------------------
 // Fitted, not driven
 // ---------------------------------------------------------------------------
-// Three parts this board carries that this firmware does not read yet. Each is
-// off for a stated reason rather than for want of a pin:
+// One part left. It is off for a stated reason rather than for want of a pin:
 //
-//   * QMI8658 6-axis (chip select GPIO 34, interrupt GPIO 33) — the driver in
-//     src/sys/Imu.cpp speaks to this part over I2C, and here it is on SPI,
-//     sharing the card's bus. A transport, not a pin map.
 //   * the magnetometer LilyGO's specification lists — and which is **not fitted
 //     on the unit this was brought up on**: the bus scan covers 0x08-0x7f and
 //     nothing answers at 0x0d, 0x1c, 0x2c or 0x7c. So HAS_COMPASS 0 costs that
@@ -263,12 +310,6 @@
 //     0x90 and a register map read off that part, and whether a QMC6310's
 //     registers agree is the bench question to settle first — `I2C <addr>` on
 //     the console dumps the part, which is how the M9's was settled.
-//   * BME280 on the panel's bus, which *is* fitted — it acknowledges 0x77 — and
-//     stays undriven because no environmental sensor exists anywhere in this
-//     firmware. Temperature, humidity and pressure would want a driver, a
-//     capability flag, and a place on the status API, the console, the display
-//     and in docs/, which is a feature rather than a board port.
-#define HAS_IMU             0
 #define HAS_COMPASS         0
 
 // ---------------------------------------------------------------------------

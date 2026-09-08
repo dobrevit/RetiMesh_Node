@@ -8,7 +8,7 @@
 | `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
 | `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
 | `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, 4 MB PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot** | verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board |
-| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; QMI8658 IMU and BME280 fitted but not driven, magnetometer optional (LilyGO list a QMC6310; none is fitted on the unit tested here) | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at — two addresses answer on that bus and both take writes, so the firmware initialised the wrong one and the glass kept the previous firmware's picture while every status field reported the display fine. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here. The magnetometer LilyGO list for this board is **not fitted on this unit** — nothing answers at any QMC address — while the BME280 is, at 0x77 |
+| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; QMI8658 IMU on SPI and BME280 (temperature, humidity, pressure) both driven, magnetometer optional (LilyGO list a QMC6310; none is fitted on the unit tested here) | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at — two addresses answer on that bus and both take writes, so the firmware initialised the wrong one and the glass kept the previous firmware's picture while every status field reported the display fine. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here. The magnetometer LilyGO list for this board is **not fitted on this unit** — nothing answers at any QMC address — while the BME280 is, at 0x77 |
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
@@ -439,21 +439,51 @@ nothing on half the units sold instead of a rail cut that works on all of them. 
 confirmed to carry the MAX-M10S can set `GPS_UBX 1` and gain the binary position and time
 frames.
 
-**Fitted, not driven.** Three parts, each off for a stated reason rather than for want of a
-pin: the QMI8658 6-axis part is on SPI here (chip select GPIO 34, sharing the card's bus)
-where `src/sys/Imu.cpp` speaks I2C; the magnetometer is a QMC6310 or QMC6309 where
-`src/sys/Compass.cpp` is written against the M9's QMC6309 register map, which is a bench
-question — `I2C` on the console enumerates the bus and `I2C <addr>` dumps the part, which is
-how the M9's was settled; and no environmental sensor exists anywhere in this firmware, so
-the BME280 would want a driver, a capability flag and a place on the status API, the
-console, the display and in these docs.
+**The accelerometer and the BME280 are driven.** Both were on the fitted-but-not-driven list
+when this board landed, and closing that list is what the second change to it did.
 
-**One app slot.** `partitions/huge_app_8mb.csv`, as on every 8 MB board here: 3 MB of
-application and a 4.9 MB filesystem, and therefore no A/B self-update. An `ota_8mb.csv`
-would fit two 3 MB slots and still leave a filesystem larger than the T3-S3's, so this is a
-choice rather than a limit — and a partition table is a one-way door, changed only by
-writing the whole flash over a cable. Decide it before a Supreme goes somewhere a cable
-does not reach, not after.
+The QMI8658 is on SPI here — chip select GPIO 34, on the card's bus — where `src/sys/Imu.cpp`
+had only ever spoken I2C. That is a transport and not a different part: the registers, the
+chip id and the configuration are the M9's, so only the three calls at the top of that file
+change (`IMU_TRANSPORT`). Two consequences are worth knowing. `BoardInit` idles the
+accelerometer's select before any driver exists, because `SdCard::begin()` runs first on
+those wires and a floating select is a device that may answer. And this is the first board
+whose accelerometer does **not** follow the screen: nothing here reads it for a heading or
+for panel rotation, so its only readers are the console and the status API, which are asked
+with the glass dark as often as not. That rule lives in `PeripheralPolicy.h`, which had said
+since it was written that its two questions would part company one day; this is the day.
+
+The BME280 at 0x77 reports temperature, humidity and pressure on the console, `/api/status`,
+and a weather page of its own in the display cycle. One forced conversion every thirty
+seconds, the part asleep in between, and the compensation arithmetic — eleven factory
+coefficients and a polynomial per reading — in `src/sys/Bme280Math.h`, where it is unit
+tested against the datasheet's decode rules and clamps. It is read from the main loop and
+nowhere else on purpose: the panel is on the same bus, and `I2cReg` drains a read outside
+the bus lock, so one reader is what makes that bus safe.
+
+**Still fitted, not driven:** the magnetometer, which is not fitted on the unit here at all
+— the scan covers 0x08–0x7f and every QMC address is silent. `src/sys/Compass.cpp` is
+written against the M9's QMC6309 register map, so a unit that does carry one is a bench
+question first: `I2C <addr>` on the console dumps the part, which is how the M9's was
+settled.
+
+**A/B over the air, on LilyGO's own numbers.** `partitions/ota_8mb.csv`: two 3264 KiB app
+slots, a 1536 KiB filesystem and a 64 KiB coredump, closing the 8 MB part to the byte. The
+numbers are not a compromise of ours — they are the table this board arrived carrying, read
+off its factory Meshtastic image and kept in
+`firmware-backups/tbeam-supreme-48CA435AD828.md`. A vendor shipping A/B on this part is
+better evidence that it fits than any arithmetic, and it is the same kind of evidence the
+4 MB table was argued from. Today's image is 58 % of a slot, against the 4 MB board's 94 %.
+
+The filesystem is the one thing smaller than under the single-slot table it replaces —
+1536 KiB where `huge_app_8mb.csv` gives 4.9 MB — and on this board that is the right trade:
+it has a card slot, and the Reticulum store moves to the card when one is fitted. With no
+card the store lives in the filesystem, and 1536 KiB is twelve times what the T3-S3 gets for
+the same job.
+
+A partition table is a one-way door. **A Supreme already flashed with the single-slot table
+does not grow a second slot by taking an update** — it has to be written whole, once, over a
+cable, and the node's own reported layout is what says which table it is on.
 
 ### T-Beam Supreme pin map
 | Function | GPIO |
@@ -467,7 +497,7 @@ does not reach, not after.
 | GNSS RX / TX | 9 / 8 |
 | GNSS PPS / L76K wake (neither driven) | 6 / 7 |
 | microSD SCK / MISO / MOSI / CS | 36 / 37 / 35 / 47 |
-| QMI8658 chip select / interrupt (not driven) | 34 / 33 |
+| QMI8658 chip select (driven, on the card's bus) / interrupt (not driven) | 34 / 33 |
 | PCF8563 interrupt (not driven) | 14 |
 | Button (BOOT) | 0 |
 | Console | the chip's own USB (19 / 20) |
@@ -544,7 +574,28 @@ things had to work:
    undriven because this firmware has no environmental sensor at all. The panel also
    acknowledges both 0x3c and 0x3d.
 
-One more thing the bring-up turned up, which is not this board's fault: **two nodes on one
+Three items are open from the change that drove the accelerometer and the BME280, and one
+of them is a one-way door:
+
+9. **The accelerometer answers over SPI.** `STATUS` should read `imu=yes` rather than `no`,
+   and it should keep saying `yes` with the panel dark — that second part is the policy
+   change, and a `no` here is the select, the transport or the shared bus rather than the
+   part. If it reads `asleep` on this board, `IMU_FOLLOWS_SCREEN` has been derived wrongly.
+   Then confirm the card still mounts, because that is what says the two devices are sharing
+   the bus rather than fighting over it.
+10. **The BME280 reads something plausible.** A room temperature that matches a thermometer,
+    a humidity that is not 0 or 100, and a pressure that agrees with a local weather station
+    to within a couple of hPa — the last of those is the only one of the three with an
+    independent reference, and it is what would catch a transcription error in the pressure
+    polynomial that the host tests cannot see. `env=warming-up` for more than thirty seconds
+    means the conversion is being triggered and never collected.
+11. **An A/B update actually applies.** This is the one-way door: the board has to be written
+    whole once, over a cable, to move off the single-slot table — and only then can it be
+    asked to install an update into the other slot and come back on it. Until that has been
+    done once, the A/B layout is a table this firmware has never been asked to switch on this
+    board.
+
+One more thing the earlier bring-up turned up, which is not this board's fault: **two nodes on one
 host can collide on the USB-NCM subnet.** This board came up as `usb0` at `10.64.40.1`,
 which is the address the SX1280 T3-S3 already had — both MACs end in `0x28`, and the third
 octet is derived from that last byte, so any two boards sharing it are indistinguishable by
@@ -611,8 +662,8 @@ from a field nothing had written.
 
 ## OLED and button
 Pages, in cycle order: status → neighbours → transport → radio → network →
-GNSS (where a receiver is fitted) → QR, with the current one marked by the
-dots at the bottom right. Short press: next page (wakes the panel first if
+GNSS (where a receiver is fitted) → weather (where a BME280 is) → QR, with the
+current one marked by the dots at the bottom right. Short press: next page (wakes the panel first if
 asleep); long press (1.5 s): blank/wake. The panel sleeps after 60 s without a
 press, and the page returns to status after 30 s.
 

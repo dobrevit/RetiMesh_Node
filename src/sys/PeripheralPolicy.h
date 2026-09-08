@@ -38,8 +38,11 @@
 //
 //  The rule
 //  --------
-//  Both sensors run while the screen is lit and are suspended while it is
-//  dark. That is all of it, and it is the same rule in every profile:
+//  A sensor runs while the screen is lit and is suspended while it is dark —
+//  where the screen is what reads it. That qualifier used to be true of both
+//  parts on both boards that had them, and so went unsaid; the T-Beam Supreme
+//  is where it stopped being true, and imuRuns() takes it as an argument now.
+//  It is the same rule in every profile either way:
 //
 //   * the magnetometer is read for a heading on the glass and for a console
 //     line, and its hard-iron calibration is captured from a board being
@@ -117,9 +120,22 @@ public:
     (void)profile;
     return !screenDark;
   }
-  static constexpr bool imuRuns(bool screenDark, uint8_t profile) {
+  // `screenConsumes` is the board fact that decides whether the screen going
+  // dark says anything about this part at all: true where the panel turns
+  // itself from the accelerometer, or where a magnetometer beside it needs
+  // gravity for its tilt correction — and that magnetometer is suspended with
+  // the screen, so its demand for gravity goes with it.
+  //
+  // False is the T-Beam Supreme, and it is why this rule and the one above
+  // have parted company. That board has an accelerometer on the card's SPI
+  // bus, no magnetometer at all, and a fixed 1.3" panel that does not rotate.
+  // Its only readers are the console and the status API, which answer while
+  // the glass is dark and are most often asked then. Suspending the part there
+  // would have a fitted sensor report "asleep" to every caller it has — a
+  // feature switched off by a rule written for boards where it made sense.
+  static constexpr bool imuRuns(bool screenDark, uint8_t profile, bool screenConsumes) {
     (void)profile;
-    return !screenDark;
+    return screenConsumes ? !screenDark : true;
   }
 
   // One event: the node's state as it now stands, and what that moves. The
@@ -127,19 +143,20 @@ public:
   // for one input re-checks the other and no subscriber can be left holding a
   // verdict from a state that has since changed.
   //
-  // That each field is fed from its own rule is not observable by any test
-  // while compassRuns() and imuRuns() compute the same boolean: swap the two
-  // lines below and every assertion still passes. It is checked by reading,
-  // and it starts checking itself the day the two rules part company — which
-  // is the day it would begin to matter.
-  Change update(bool screenDark, uint8_t profile) {
+  // That each field is fed from its own rule was, for a while, not observable
+  // by any test: compassRuns() and imuRuns() computed the same boolean, and
+  // swapping the two lines below changed nothing. They have since parted
+  // company — imuRuns() takes a board fact the compass has no equivalent of —
+  // so a swap fails a test now, which is what the earlier note said would
+  // happen on the day it began to matter.
+  Change update(bool screenDark, uint8_t profile, bool imuScreenConsumes) {
     Change c;
     const bool compass = compassRuns(screenDark, profile);
     if (compass != _compass) {
       _compass = compass;
       c.compass = compass ? Verdict::Run : Verdict::Suspend;
     }
-    const bool imu = imuRuns(screenDark, profile);
+    const bool imu = imuRuns(screenDark, profile, imuScreenConsumes);
     if (imu != _imu) {
       _imu = imu;
       c.imu = imu ? Verdict::Run : Verdict::Suspend;

@@ -183,12 +183,19 @@ regenerates the identity does, and the card must then be formatted before it can
 be used again.
 
 ### Partition tables
-`huge_app.csv` (3 MB app, 896 KB filesystem) on 4 MB boards. The 8 MB boards use
+`huge_app.csv` (3 MB app, 896 KB filesystem) on 4 MB boards. Most 8 MB boards use
 `partitions/huge_app_8mb.csv`, which is the same up to the end of the
 application and gives the four megabytes the stock table leaves unmapped to the
 filesystem instead. That matters most where there is no SD slot, because the
 filesystem is then the only home the store has: 4900 KB of room rather than
 896 KB.
+
+The T-Beam Supreme is the exception among the 8 MB boards and the reason the
+rule is worth stating as "most": it runs `partitions/ota_8mb.csv` — two
+3264 KiB app slots and a 1536 KiB filesystem — so it can install its own
+updates. It can afford the smaller filesystem because it has a card slot, and
+the numbers are not ours: they are the table the board arrived carrying under
+its factory firmware, which is the evidence that A/B fits an 8 MB part.
 
 ## Memory (T3-S3)
 Flash 1.38 MB of the 3 MB app partition. Internal RAM is the scarce

@@ -26,10 +26,19 @@
 #include "Lock.h"
 #include "SampleGate.h"
 #include <atomic>
+#if IMU_TRANSPORT == IMU_TRANSPORT_SPI
+  #include <SPI.h>
+  #include "SpiBus.h"
+#endif
 
 namespace {
 
-uint8_t sAddr = 0;                       // 0 = nothing answered
+// The I2C address, once something has answered at it. Only the I2C transport
+// reads this — the DA217 is probed across two addresses, so it cannot be a
+// constant — and on SPI there is no address at all, which is why presence is
+// the separate flag below rather than "sAddr is nonzero" as it used to be.
+uint8_t sAddr = 0;
+bool sPresent = false;                   // answered, and took its configuration
 
 // What the part is doing, and what it has been asked to do. The mode write is
 // deferred to poll() and every register access here is taken under one lock —
@@ -65,11 +74,82 @@ SemaphoreHandle_t sLock = nullptr;
 std::atomic<bool> sWantRunning{true};    // raised from any task
 std::atomic<bool> sRunning{false};       // moved only once the write landed
 
+// The three calls the rest of this file is written in terms of, and the only
+// thing that differs between a part on I2C and the same part on SPI. Every
+// register number, the chip id, the configuration and the sign work below are
+// the part's and are shared.
+#if IMU_TRANSPORT == IMU_TRANSPORT_SPI
+
+// 4-wire SPI: the address byte carries the direction in its top bit, set to
+// read and clear to write, and the part auto-increments across a burst once
+// CTRL1's ADDR_AI bit is set — which begin() does on either transport.
+//
+// The object comes from SpiBus rather than being constructed here, because on
+// the board that wires the accelerometer this way the card is on the same host
+// and two SPIClass objects on one host re-initialise the peripheral under each
+// other (SpiBus.h). That shared object is also what makes this safe against
+// the card without a lock of this driver's own: beginTransaction takes the
+// core's per-bus mutex and holds it across the transfer, so none of the I2C
+// read-drain hazard described above applies here.
+//
+// 1 MHz because these are transfers of a few bytes and there is nothing to
+// gain by hurrying them; the card negotiates its own speed in its own
+// transactions.
+constexpr uint32_t kSpiHz = 1000000;
+
+// What the log calls the part's place. An address on a bus that has them, the
+// select pin on one that does not — because "at 0x00" on an SPI board would be
+// a fact about nothing.
+#define IMU_AT_FMT "on SPI (select GPIO %d)"
+#define IMU_AT_ARG PIN_IMU_CS
+
+inline SPIClass& spi() {
+  return SpiBus::get(IMU_SPI_BUS, PIN_IMU_SCK, PIN_IMU_MISO, PIN_IMU_MOSI);
+}
+
+bool readRegs(uint8_t reg, uint8_t* out, size_t n) {
+  SPIClass& b = spi();
+  b.beginTransaction(SPISettings(kSpiHz, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_IMU_CS, LOW);
+  b.transfer((uint8_t)(reg | 0x80));
+  for (size_t i = 0; i < n; i++) out[i] = b.transfer(0x00);
+  digitalWrite(PIN_IMU_CS, HIGH);
+  b.endTransaction();
+  return true;                           // SPI has no acknowledgement to fail
+}
+
+int readReg(uint8_t reg) {
+  uint8_t v = 0;
+  if (!readRegs(reg, &v, 1)) return -1;
+  return v;
+}
+
+bool writeReg(uint8_t reg, uint8_t val) {
+  SPIClass& b = spi();
+  b.beginTransaction(SPISettings(kSpiHz, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_IMU_CS, LOW);
+  b.transfer((uint8_t)(reg & 0x7F));
+  b.transfer(val);
+  digitalWrite(PIN_IMU_CS, HIGH);
+  b.endTransaction();
+  // Nothing on this bus says a write landed, so the caller cannot tell a
+  // refused configuration from a taken one here the way the I2C path can.
+  // begin() covers that itself: it reads the registers back.
+  return true;
+}
+
+#else
+
+#define IMU_AT_FMT "at 0x%02x"
+#define IMU_AT_ARG sAddr
+
 inline TwoWire& bus() { return I2cReg::busFor(PIN_I2C_SDA, PIN_I2C_SCL, I2C_HZ); }
 
 int  readReg(uint8_t reg)                          { return I2cReg::read(bus(), sAddr, reg); }
 bool readRegs(uint8_t reg, uint8_t* out, size_t n) { return I2cReg::readN(bus(), sAddr, reg, out, n); }
 bool writeReg(uint8_t reg, uint8_t val)            { return I2cReg::write(bus(), sAddr, reg, val); }
+
+#endif
 
 #if IMU_KIND == IMU_KIND_QMI8658
 // QST QMI8658, datasheet rev 0.9.
@@ -111,7 +191,7 @@ constexpr float   kCountsPerG = 4096.0f;
 // read failed — which on the QMI8658 includes the case that matters, since a
 // part whose auto-increment was never enabled returns one register six times.
 bool rawAxes(int16_t& x, int16_t& y, int16_t& z) {
-  if (!sAddr) return false;
+  if (!sPresent) return false;
   Sys::Lock held(sLock);
   // A suspended part still answers its address and still returns the last
   // conversion it made, which is the same trap begin() guards against: the
@@ -155,12 +235,24 @@ void begin() {
   // A null handle is not fatal — Sys::Lock treats it as no lock — so a board
   // that could not allocate one behaves exactly as this driver did before.
   if (!sLock) sLock = xSemaphoreCreateMutex();
+#if IMU_TRANSPORT == IMU_TRANSPORT_SPI
+  // This driver's own select, raised before the first transfer, for the same
+  // reason every other SPI driver here raises its own: a driver that works
+  // only because something else prepared its pin breaks when the order
+  // changes. BoardInit idles this one *and the card's* before either driver
+  // exists, which is what makes the probe below safe — on this board it is
+  // this begin() that runs first, so the card's select is the floating one to
+  // worry about.
+  pinMode(PIN_IMU_CS, OUTPUT);
+  digitalWrite(PIN_IMU_CS, HIGH);
+#endif
 #if IMU_KIND == IMU_KIND_QMI8658
   // One address, strapped by SDO and not by anything this board can change.
+  // Nothing to strap on SPI, where the select does the addressing.
   sAddr = IMU_ADDR;
   if (readReg(kWhoAmI) != 0x05) {
-    log_i("imu: no QMI8658 answers at 0x%02x — I2C on the console lists what does",
-          (uint8_t)IMU_ADDR);
+    log_i("imu: no QMI8658 answers " IMU_AT_FMT " — I2C on the console lists what does",
+          IMU_AT_ARG);
     sAddr = 0;
     return;
   }
@@ -178,14 +270,31 @@ void begin() {
   configured = configured && writeReg(kCtrl7, kCtrl7On);  // accelerometer only; the gyro
                                                          // costs milliamps and answers
                                                          // nothing asked here
+  // And then, on SPI only, the part is asked whether it took the one write
+  // worth losing. On I2C a refused write is a NAK and the flag above already
+  // has it; on SPI nothing acknowledges anything, so a write that went nowhere
+  // looks exactly like one that landed.
+  //
+  // Only on SPI, deliberately. An earlier version ran this on both buses and
+  // called it "the same standard of proof", which was wrong twice: it adds
+  // nothing on the bus that already reports refusals, and it adds a new way
+  // for a verified board to decide its accelerometer is absent. And note the
+  // read has to be checked for failure before its bits are: readReg returns
+  // -1 on a NAK, and -1 & 0x40 is 0x40, so the obvious spelling of this test
+  // passes on exactly the failure it exists to catch.
+#if IMU_TRANSPORT == IMU_TRANSPORT_SPI
+  const int ctrl1 = readReg(kCtrl1);
+  configured = configured && ctrl1 >= 0 && (ctrl1 & 0x40) != 0;
+#endif
   if (!configured) {
-    log_w("imu: QMI8658 answered at 0x%02x but would not take its configuration "
-          "— left off rather than reading the same six bytes for ever", sAddr);
+    log_w("imu: QMI8658 answered " IMU_AT_FMT " but would not take its configuration "
+          "— left off rather than reading the same six bytes for ever", IMU_AT_ARG);
     sAddr = 0;
     return;
   }
+  sPresent = true;
   sRunning.store(true, std::memory_order_relaxed);
-  log_i("imu: QMI8658 at 0x%02x, accelerometer running at +/-2 g", sAddr);
+  log_i("imu: QMI8658 " IMU_AT_FMT ", accelerometer running at +/-2 g", IMU_AT_ARG);
 #else
   for (uint8_t addr : { (uint8_t)0x26, (uint8_t)0x27 }) {
     sAddr = addr;
@@ -210,12 +319,13 @@ void begin() {
     sAddr = 0;
     return;
   }
+  sPresent = true;
   sRunning.store(true, std::memory_order_relaxed);
   log_i("imu: DA217 at 0x%02x, accelerometer running", sAddr);
 #endif
 }
 
-bool present() { return sAddr != 0; }
+bool present() { return sPresent; }
 
 bool running() { return sRunning.load(std::memory_order_relaxed); }
 
@@ -239,7 +349,7 @@ void poll() {
   // change to the next pass a millisecond later. Taking a mutex a thousand
   // times a second to discover there is nothing to do is the cost this guard
   // exists to avoid.
-  if (!sAddr || sWantRunning.load(std::memory_order_relaxed) ==
+  if (!sPresent || sWantRunning.load(std::memory_order_relaxed) ==
                 sRunning.load(std::memory_order_relaxed)) return;
   if (!sModeRetry.due(millis())) return;
   Sys::Lock held(sLock);
@@ -254,9 +364,9 @@ void poll() {
   if (!wrote) {
     if (sModeFails < 255) sModeFails++;
     if (sModeFails == kModeComplainAfter)
-      log_w("imu: the accelerometer at 0x%02x has refused %u mode writes in a row — "
+      log_w("imu: the accelerometer " IMU_AT_FMT " has refused %u mode writes in a row — "
             "the part is left as it was and the retry stays on the %u ms cadence",
-            sAddr, (unsigned)kModeComplainAfter, (unsigned)kModeRetryMs);
+            IMU_AT_ARG, (unsigned)kModeComplainAfter, (unsigned)kModeRetryMs);
     return;
   }
   // Only once the write landed. A part recorded as suspended that is still

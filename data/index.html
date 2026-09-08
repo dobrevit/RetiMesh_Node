@@ -190,6 +190,19 @@ async function refreshStatus() {
       // GNSS. The health readings are always public; the coordinates appear only
       // when the operator has published them, and the card says which it is —
       // otherwise the settings toggle has no visible effect anywhere.
+      ...(!s.env ? [] : [
+        // The same idiom as the GNSS block below: absent hardware contributes
+        // no card at all rather than a card saying nothing. `present` without
+        // `valid` is a fitted part that has not finished its first conversion,
+        // which is a different thing from a sensor that is not answering — and
+        // the age matters because the part is read once every thirty seconds.
+        card("Weather", !s.env.present ? "no sensor"
+          : !s.env.valid ? "waiting for the first reading"
+          : s.env.temp_c.toFixed(1) + " °C · " + s.env.humidity_pct.toFixed(0)
+            + "% · " + s.env.pressure_hpa.toFixed(1) + " hPa"
+            + (s.env.age_s != null ? " · " + s.env.age_s + "s ago" : ""),
+          s.env.present && s.env.valid ? "" : "offline"),
+      ]),
       ...(!s.gps ? [] : [
         card("GNSS", !s.gps.enabled ? "receiver off"
           : (s.gps.fix ? "fix" : "searching") + " · " + s.gps.satellites + " sats"
