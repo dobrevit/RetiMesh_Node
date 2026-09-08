@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
+#
+# A fleet of Reticulum nodes on a Grafana dashboard: the exporter that asks
+# them, the Prometheus that scrapes it, and the Grafana that draws it.
+#
+# All three run on the **host's network**, for one reason that only applies to
+# the first: joining the host's own Reticulum instance means reaching its
+# shared-instance socket, which is abstract and therefore lives in a network
+# namespace. An exporter on a bridge network cannot see it however the ports
+# are published. The other two follow so that they can reach the exporter and
+# each other on localhost without a second scrape configuration.
+#
+# The cost of host networking is that a service bound to 0.0.0.0 is a service
+# on the LAN, so all three default to loopback. Change them in .env, and put
+# something in front if you want them reachable — none of these speak TLS and
+# Grafana is the only one with a password at all.
+#
+# Which nodes to watch, and how to reach them, are not in this file. Those are
+# a deployment's facts rather than the source that describes one, and a compose
+# file carrying them is a compose file that commits them. They live in .env,
+# which git ignores; .env.example says what goes in it.
+services:
+  exporter:
+    # The context is tools/, not this directory: the exporter shares its wire
+    # formats and its LXMF client with tools/soak/, so that what a reading *is*
+    # has one definition rather than one per tool.
+    build:
+      context: ..
+      dockerfile: metrics/Dockerfile
+    container_name: retimesh-exporter
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Uncomment both of these together to join the host's Reticulum instance
+    # rather than run standalone, and drop RETIMESH_PEERS from .env. Matching
+    # the instance name is not enough: the shared-instance RPC is authenticated
+    # from the identity in the host's configuration directory, and without it
+    # every call is refused with "digest sent was rejected". The user line
+    # matters as much — the container is root by default, and root-owned files
+    # appearing in ~/.reticulum will break the daemon that owns it.
+    # user: "1000:1000"                      # the uid that owns ~/.reticulum
+    volumes:
+      # The identity, LXMF state and this exporter's own Reticulum config.
+      # Keep it: the exporter's address is in here and the nodes are enrolled
+      # against that address.
+      - ./data/exporter:/data
+      # - ${HOME}/.reticulum:/root/.reticulum
+    command:
+      - --listen
+      - ${RETIMESH_LISTEN:-127.0.0.1:9812}
+      - --interval
+      - "${RETIMESH_INTERVAL:-300}"
+      - --command-interval
+      - "${RETIMESH_COMMAND_INTERVAL:-900}"
+      - --storage
+      - /data/rns
+      - --rns-config
+      - /data/cfg
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: retimesh-prometheus
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - exporter
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # A named volume rather than a bind mount: Prometheus runs as nobody, and
+      # a host directory it cannot write is a container that restarts forever
+      # with one line about permissions.
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Months rather than the fifteen-day default. The measurements this
+      # collects — stack headroom, a discharge curve, a slow heap leak — are
+      # only visible over weeks, which is the whole reason for keeping them.
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-90d}
+      - --web.listen-address=${PROMETHEUS_LISTEN:-127.0.0.1:9090}
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: retimesh-grafana
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SERVER_HTTP_ADDR: ${GRAFANA_ADDR:-127.0.0.1}
+      GF_SERVER_HTTP_PORT: ${GRAFANA_PORT:-3000}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Nothing here is worth telephoning home about, and a node on a hill is
+      # often behind a link that is metered.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  prometheus-data:
+  grafana-data:

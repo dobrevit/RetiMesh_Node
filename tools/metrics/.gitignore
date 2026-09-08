@@ -1,0 +1,11 @@
+# The exporter's identity and LXMF state, and everything Prometheus and Grafana
+# keep. Not in git: the identity is what the nodes are enrolled against, so
+# committing it would publish the key that authorises administration of the
+# fleet.
+data/
+
+# The deployment's own facts — which nodes exist, and the passwords.
+.env
+
+# Byte-compiled modules, from running the exporter outside the container.
+__pycache__/

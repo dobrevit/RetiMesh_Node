@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Dobrev IT Ltd — part of RetiMesh Node, see LICENSE.
+#
+# The uid is fixed and the dashboard refers to it by that name, so a dashboard
+# exported from one of these stacks imports into another without the "select a
+# data source" dance.
+apiVersion: 1
+
+datasources:
+  - name: RetiMesh Prometheus
+    uid: retimesh-prometheus
+    type: prometheus
+    access: proxy
+    # Everything runs on the host's network, so Prometheus is on localhost.
+    url: http://127.0.0.1:9090
+    isDefault: true
+    jsonData:
+      # Matches prometheus.yml. Grafana uses it to pick sensible step sizes
+      # rather than asking for more points than exist.
+      timeInterval: 30s

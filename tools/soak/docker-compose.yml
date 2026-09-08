@@ -27,7 +27,13 @@
 # what goes in it.
 services:
   soak-collector:
-    build: .
+    # The context is tools/, not this directory: the collector shares its wire
+    # formats and its LXMF client with tools/metrics/, and both images need
+    # them. Run `docker compose` from here as before — compose resolves the
+    # context relative to this file.
+    build:
+      context: ..
+      dockerfile: soak/Dockerfile
     container_name: retimesh-soak
     # The host's network, so a peer on the LAN is reachable and so a shared
     # instance's socket — abstract, and therefore in the network namespace —

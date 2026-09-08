@@ -18,7 +18,13 @@ FROM python:3.12-slim
 RUN pip install --no-cache-dir rns==1.5.0 lxmf==1.1.1
 
 WORKDIR /app
-COPY collector.py /app/collector.py
+# Built from tools/ rather than from this directory, because the wire formats
+# and the LXMF client are shared with the metrics exporter (tools/metrics/).
+# One definition of what a reading is, rather than one per tool: a sensor the
+# firmware adds shows up in both, and a scale that moves cannot move in only
+# one of them.
+COPY lxmf_wire.py lxmf_fleet.py /app/
+COPY soak/collector.py /app/collector.py
 
 # Identities, LXMF state and the output all live here, so a restart of the
 # container is not a new collector with a new address the nodes have never
