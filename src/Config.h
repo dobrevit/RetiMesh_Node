@@ -1006,6 +1006,51 @@
 #ifndef IMU_ADDR
   #define IMU_ADDR          0x6B          // the QMI8658's, SDO high; the DA217 is probed
 #endif
+// Which wires the part is on. The same QMI8658 turns up on I2C on one board
+// and on SPI on the next — the T-Beam Supreme puts it on the card's bus with a
+// select of its own — and that is a wiring fact, not a different part: the
+// registers, the chip id and the configuration are identical either way, so
+// only the three transport calls in Imu.cpp change.
+#define IMU_TRANSPORT_I2C   1
+#define IMU_TRANSPORT_SPI   2
+#ifndef IMU_TRANSPORT
+  #define IMU_TRANSPORT     IMU_TRANSPORT_I2C
+#endif
+// The select, and the bus it is on. The defaults are the card's because the
+// one board that wires an SPI accelerometer shares the card's host with it —
+// which is also why BoardInit idles this select before either driver starts. A
+// board that wires them apart names its own three pins here, the way the
+// shared-bus boards name the panel's and the card's (boards/tdeck.h).
+#ifndef PIN_IMU_CS
+  #define PIN_IMU_CS        -1
+#endif
+#ifndef IMU_SPI_BUS
+  #define IMU_SPI_BUS       SD_SPI_BUS
+#endif
+#ifndef PIN_IMU_SCK
+  #define PIN_IMU_SCK       PIN_SD_SCK
+#endif
+#ifndef PIN_IMU_MISO
+  #define PIN_IMU_MISO      PIN_SD_MISO
+#endif
+#ifndef PIN_IMU_MOSI
+  #define PIN_IMU_MOSI      PIN_SD_MOSI
+#endif
+// A select is the only thing that addresses a part on SPI, so a board that
+// names the transport and not the pin has said nothing at all.
+#if HAS_IMU && IMU_TRANSPORT == IMU_TRANSPORT_SPI && \
+    (PIN_IMU_SCK < 0 || PIN_IMU_MISO < 0 || PIN_IMU_MOSI < 0)
+  #error "an SPI accelerometer needs its three bus pins: the defaults are the card's, and this board has no card to borrow them from"
+#endif
+#if HAS_IMU && IMU_TRANSPORT == IMU_TRANSPORT_SPI && PIN_IMU_CS < 0
+  #error "an SPI accelerometer needs PIN_IMU_CS — the select is what addresses it"
+#endif
+// The DA217 has no SPI interface at all, so this pairing is a board header
+// that says two things which cannot both be true; caught here rather than in
+// a driver that would quietly talk to nothing.
+#if HAS_IMU && IMU_KIND == IMU_KIND_DA217 && IMU_TRANSPORT == IMU_TRANSPORT_SPI
+  #error "the DA217 is an I2C part: IMU_KIND_DA217 with IMU_TRANSPORT_SPI cannot be right"
+#endif
 // How the part is soldered down relative to the panel. A board says this, not
 // the driver: the same part turns up rotated or flipped on the next board, and
 // a sign hidden in the driver would then be wrong for one of them with nothing
@@ -1037,6 +1082,98 @@
 #endif
 #ifndef COMPASS_ADDR
   #define COMPASS_ADDR      0x7C          // the QMC6309's, inside the reserved block
+#endif
+// Which of QST's magnetometers it is. They share a register map and disagree
+// about the bits inside it and about the counts per microtesla, so the driver
+// is one file and the numbers are two sets (src/sys/QmcMag.h). The default is
+// the QMC6309, because that is the part the first board here carried and a
+// board that says nothing should keep behaving as it did.
+#define COMPASS_KIND_QMC6309 0
+#define COMPASS_KIND_QMC6310 1
+#ifndef COMPASS_KIND
+  #define COMPASS_KIND      COMPASS_KIND_QMC6309
+#endif
+#if HAS_COMPASS && COMPASS_KIND != COMPASS_KIND_QMC6309 && \
+                   COMPASS_KIND != COMPASS_KIND_QMC6310
+  #error "COMPASS_KIND must be COMPASS_KIND_QMC6309 or COMPASS_KIND_QMC6310"
+#endif
+// Whether this board suspends its magnetometer when the glass goes dark.
+//
+// Stated as the behaviour and not as a claim about consumers, because the
+// obvious claim would be false: **no board here displays a bearing.** Nothing
+// in src/ui reads the compass, and its only readers on every board are the
+// console and the status API. So the honest reading of the two values is:
+//
+//   1  the part sleeps with the screen. The ThinkNode M9's value, and it is
+//      there because that is what the M9 has always done — a handheld on a
+//      cell, blanking every twenty seconds, whose standby current with a
+//      magnetometer converting at 200 Hz has never been measured. Changing it
+//      is a power question with a bench answer, not a tidy-up, and a caller
+//      polling /api/status on a dark M9 is told "asleep" (docs/api.md says so).
+//   0  the part runs whatever the screen is doing. The T-Beam Supreme's value:
+//      a mains-or-solar gateway with a fixed panel, where suspending would
+//      hand "asleep" to every caller the compass has.
+//
+// Defaults to 1, so a board that says nothing keeps the shipped behaviour.
+// PeripheralPolicy.h holds the rule this feeds; nothing in this file decides
+// anything with it.
+#ifndef COMPASS_FOLLOWS_SCREEN
+  #define COMPASS_FOLLOWS_SCREEN 1
+#endif
+// A board with no glass cannot have a page that reads the heading, so the
+// default would suspend its magnetometer for whatever the screen state of a
+// screenless node is taken to be — and leave it there. Caught here rather than
+// discovered as a compass that reports "asleep" for ever.
+#if HAS_COMPASS && COMPASS_FOLLOWS_SCREEN && !HAS_DISPLAY
+  #error "COMPASS_FOLLOWS_SCREEN on a board with no display: no page can read a \
+heading there, so say COMPASS_FOLLOWS_SCREEN 0 and let the console and the API have it"
+#endif
+
+// The air around the node rather than the node: temperature, pressure and
+// humidity from a BME280 where a board carries one. Named ENV rather than
+// BME280 because the capability is the reading and not the part, the way
+// HAS_IMU is; ENV_KIND names the part, and there is one.
+//
+// The address is strappable by SDO and both values are in the wild: 0x76 with
+// it low, 0x77 with it high, and the T-Beam Supreme's is high. Not probed
+// across the pair the way the accelerometer's is, because on that board 0x77
+// is what the bus scan found and a probe that guesses is a probe that can pick
+// a neighbour — this bus has three parts on it.
+#define ENV_KIND_BME280     1
+#ifndef HAS_ENV
+  #define HAS_ENV           0
+#endif
+#ifndef ENV_KIND
+  #define ENV_KIND          ENV_KIND_BME280
+#endif
+#ifndef ENV_ADDR
+  #define ENV_ADDR          0x76
+#endif
+#ifndef PIN_ENV_SDA
+  #define PIN_ENV_SDA       PIN_I2C_SDA
+#endif
+#ifndef PIN_ENV_SCL
+  #define PIN_ENV_SCL       PIN_I2C_SCL
+#endif
+// One conversion every half minute. The air does not move faster than that in
+// any way this reports on, the part sleeps in between, and the cadence is what
+// keeps a shared bus quiet: the panel is on it, and the reading is worth
+// nothing measured against a frame that did not draw.
+#ifndef ENV_SAMPLE_MS
+  #define ENV_SAMPLE_MS     30000
+#endif
+
+// Whether this board suspends its accelerometer when the glass goes dark, in
+// the same shape as COMPASS_FOLLOWS_SCREEN above. Two things make it worth
+// doing: a panel that turns itself from the part, and a magnetometer that
+// needs gravity to level a heading *and is itself suspended with the screen* —
+// that second clause is what makes the demand for gravity go dark too. A
+// compass that keeps running with the glass off wants gravity with the glass
+// off, so it holds the accelerometer up with it, which is why the derivation
+// below reads the compass's fact rather than merely HAS_COMPASS.
+#ifndef IMU_FOLLOWS_SCREEN
+  #define IMU_FOLLOWS_SCREEN (DISPLAY_AUTO_ROTATE || \
+                              (HAS_COMPASS && COMPASS_FOLLOWS_SCREEN))
 #endif
 // The LVGL shell on colour boards: set by the env, because it is a build
 // decision (the toolkit is a library dependency), not a board fact.

@@ -30,25 +30,39 @@
 //  The rule for which part follows which lives here, once, and Power's
 //  broadcast (Power::onScreenBlank) asks it. Two subsystems have subscribed so
 //  far, the magnetometer and the accelerometer, fitted between them on two of
-//  the twelve boards in boards.json; both calls are guarded, so what the other
-//  ten pay is 160 bytes of flash, no RAM at all and a spinlock taken on a
-//  screen edge — measured on heltec-v3, which carries neither part and is the
-//  tightest board here. (An earlier version of this text said nine boards and
-//  seven; both were wrong, and so was the byte figure quoted with them.)
+//  the thirteen boards in boards.json; both calls are guarded, so what the
+//  other eleven pay is 160 bytes of flash, no RAM at all and a spinlock taken
+//  on a screen edge — measured on heltec-v3, which carries neither part and is
+//  the tightest board here. (An earlier version of this text said nine boards
+//  and seven, then twelve and ten; the figure that matters is that a board
+//  with neither part pays nothing measurable.)
 //
 //  The rule
 //  --------
-//  Both sensors run while the screen is lit and are suspended while it is
-//  dark. That is all of it, and it is the same rule in every profile:
+//  A sensor runs while the screen is lit and is suspended while it is dark —
+//  *on the boards that say so*. That qualifier used to be no qualifier at all:
+//  both parts on both boards that had them behaved this way, so the rule was
+//  written as if the screen were their only consumer. It is not, and on one
+//  board it never was:
 //
-//   * the magnetometer is read for a heading on the glass and for a console
-//     line, and its hard-iron calibration is captured from a board being
-//     turned by hand — which is something a person does while looking at it.
-//     Dark, it converts continuously for nobody;
-//   * the accelerometer answers two questions and each board asks only one.
+//   * a heading is read by the console and the status API, and by no page on
+//     any board here — nothing in src/ui asks for one. Its hard-iron
+//     calibration is captured from a board being turned by hand, which is
+//     something a person does while looking at the node, but that is an
+//     argument about calibration and not about who reads the number;
+//   * the accelerometer answers two questions and each board asks at most one.
 //     Which way up the panel is being held, which a dark panel does not care
-//     about; or where level went, for the magnetometer's tilt correction,
-//     which is suspended alongside it. Either consumer is the lit screen.
+//     about; or where level went, for a magnetometer's tilt correction — and
+//     that one holds only while the magnetometer is itself suspended with the
+//     screen, because a compass that keeps converting in the dark keeps
+//     wanting gravity.
+//
+//  So each part takes its board's answer as an argument, and the answer is a
+//  power decision rather than a claim about consumers: the M9 suspends both
+//  because it is a handheld on a cell that blanks every twenty seconds and has
+//  always done so; the T-Beam Supreme suspends neither because it is a gateway
+//  whose readers are asked of a dark node (Config.h states both, with the
+//  standby current the M9's value is really waiting on).
 //
 //  Why the profile moves neither
 //  -----------------------------
@@ -108,38 +122,78 @@ public:
     Verdict imu     = Verdict::Unchanged;
   };
 
-  // The rule itself, as two pure questions over the node's state. `profile`
-  // is Power::Profile's ordinal, passed rather than interpreted — see why the
-  // profile moves neither, above. Two functions and not one because they are
-  // two different questions that happen to share an answer today, and the day
-  // one of them parts company there is no call site to go hunting for.
-  static constexpr bool compassRuns(bool screenDark, uint8_t profile) {
-    (void)profile;
-    return !screenDark;
+  // The rule itself, as two pure questions over the node's state, and it is
+  // one sentence: a part follows the screen only where the screen is what
+  // reads it. `profile` is Power::Profile's ordinal, passed rather than
+  // interpreted — see why the profile moves neither, above.
+  //
+  // `screenConsumes` is the board fact each question turns on, and it is a
+  // different fact for each part, which is why there are two functions and not
+  // one. For the accelerometer it is true where the panel turns itself from
+  // the part, or where a magnetometer beside it needs gravity to level a
+  // heading *and is itself suspended with the screen* — that last clause is
+  // what makes the demand for gravity go dark with the glass. For the
+  // magnetometer it is true where a page shows a bearing.
+  //
+  // False for both is the T-Beam Supreme. That board puts its accelerometer on
+  // the card's SPI bus, drives a magnetometer no page displays, and has a
+  // fixed 1.3" panel that does not rotate. The readers are the console and the
+  // status API, which answer while the glass is dark and are most often asked
+  // then, so suspending either part there would hand "asleep" to every caller
+  // it has — a feature switched off by a rule written for boards where it made
+  // sense.
+  //
+  // The two facts are not independent, and Config.h is where that is said
+  // once: a compass that keeps running in the dark holds the accelerometer up
+  // with it, because it still wants gravity. Nothing in here knows which board
+  // it is; a call site that passed the compass's fact to the accelerometer's
+  // question would compile and be wrong, which is what the tests below are
+  // for.
+  // One rule, asked twice. The two questions keep their own names because they
+  // are asked of different parts with different board facts; what they share
+  // is the sentence, and it is written once so that a change to it cannot land
+  // on one part and not the other.
+  static constexpr bool followsScreen(bool screenDark, bool screenConsumes) {
+    return screenConsumes ? !screenDark : true;
   }
-  static constexpr bool imuRuns(bool screenDark, uint8_t profile) {
+  static constexpr bool compassRuns(bool screenDark, uint8_t profile,
+                                    bool screenConsumes) {
     (void)profile;
-    return !screenDark;
+    return followsScreen(screenDark, screenConsumes);
   }
+  static constexpr bool imuRuns(bool screenDark, uint8_t profile, bool screenConsumes) {
+    (void)profile;
+    return followsScreen(screenDark, screenConsumes);
+  }
+
+  // The two board facts, as two types rather than two bools. They are adjacent
+  // arguments of the same type with different meanings, there is one call site,
+  // and on both boards that exist today they happen to be equal — so a swap
+  // would change nothing observable and no test could catch it. An earlier
+  // version of this comment claimed the tests held the pairing. They cannot;
+  // these do, because swapping them does not compile.
+  struct ImuFollowsScreen     { bool value; };
+  struct CompassFollowsScreen { bool value; };
 
   // One event: the node's state as it now stands, and what that moves. The
   // caller passes the whole state rather than the edge, so a broadcast raised
   // for one input re-checks the other and no subscriber can be left holding a
   // verdict from a state that has since changed.
   //
-  // That each field is fed from its own rule is not observable by any test
-  // while compassRuns() and imuRuns() compute the same boolean: swap the two
-  // lines below and every assertion still passes. It is checked by reading,
-  // and it starts checking itself the day the two rules part company — which
-  // is the day it would begin to matter.
-  Change update(bool screenDark, uint8_t profile) {
+  // Each field is fed from its own rule with its own board fact. Getting the
+  // two the wrong way round would suspend a compass on a node whose only
+  // readers are dark, or keep an accelerometer awake for a heading nobody
+  // displays — both silent, which is why the facts arrive as the two types
+  // above rather than as two bools.
+  Change update(bool screenDark, uint8_t profile, ImuFollowsScreen imuFollows,
+                CompassFollowsScreen compassFollows) {
     Change c;
-    const bool compass = compassRuns(screenDark, profile);
+    const bool compass = compassRuns(screenDark, profile, compassFollows.value);
     if (compass != _compass) {
       _compass = compass;
       c.compass = compass ? Verdict::Run : Verdict::Suspend;
     }
-    const bool imu = imuRuns(screenDark, profile);
+    const bool imu = imuRuns(screenDark, profile, imuFollows.value);
     if (imu != _imu) {
       _imu = imu;
       c.imu = imu ? Verdict::Run : Verdict::Suspend;

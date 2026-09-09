@@ -56,6 +56,27 @@ void begin() {
         BOARD_POWER_ACTIVE == HIGH ? "high" : "low");
 #endif
 
+#if HAS_IMU && IMU_TRANSPORT == IMU_TRANSPORT_SPI
+  // The accelerometer shares the card's wires on the board that puts it there,
+  // so **both** selects are idled here, before either driver exists. Which of
+  // the two starts first is not the point and must not be relied on: an
+  // earlier version of this idled only the accelerometer's, on the stated
+  // premise that the card's driver ran first — and in setup() it is the other
+  // way round (Imu::begin() precedes sdCard.begin()), so the protection was
+  // pointing the wrong way and the accelerometer probed a bus with the card's
+  // select floating. A floating select is a device that may answer.
+  //
+  // Kept separate from SPI_BUS_SHARED because that flag is about the radio's
+  // bus — the three-device boards — and widening it to mean "some bus here has
+  // two devices" would change what it says on the two boards that set it.
+  idleSelect(PIN_IMU_CS);
+  #if HAS_SD
+    idleSelect(PIN_SD_CS);
+  #endif
+  log_i("shared card bus: selects idled (accelerometer %d, card %d)",
+        PIN_IMU_CS, HAS_SD ? PIN_SD_CS : -1);
+#endif
+
 #if SPI_BUS_SHARED
   // Three devices, one set of wires. Each driver raises its own select in its
   // own begin(), which is correct and happens too late: whichever starts first

@@ -24,6 +24,9 @@
 #include "QrCode.h"
 #include "Pmu.h"
 #include "Gps.h"
+#include "Compass.h"
+#include "Environment.h"
+#include "Imu.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <memory>
@@ -2020,6 +2023,101 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     at["csma_slot_ms"]  = g_stats.csmaSlotMs;
     at["csma_band"]     = g_stats.csmaBand;
   }
+
+#if HAS_COMPASS
+  {
+    // The heading, and the three facts that decide whether to believe it —
+    // the same set the console prints, because a caller graphing a bearing
+    // needs to know it was taken level, away from iron, and after the board
+    // had been turned at least once. Without them a number that means nothing
+    // is indistinguishable from one that does.
+    //
+    // And this is a reader the part is kept awake for: on a board where no
+    // page shows a bearing, this API and the console are the only consumers,
+    // which is what COMPASS_FOLLOWS_SCREEN 0 asserts (PeripheralPolicy.h). It
+    // would be a poor thing to justify keeping a sensor running by an API that
+    // did not report it — the accelerometer's block below was added for
+    // exactly that reason.
+    JsonObject c = doc["compass"].to<JsonObject>();
+    c["present"] = Compass::present();
+    c["running"] = Compass::running();
+    const Compass::Reading r = Compass::read();
+    c["valid"]   = r.valid;
+    if (r.valid) {
+      // A tenth of a degree on the heading and the tilt, which is finer than
+      // either is accurate and coarse enough not to jitter in a graph; the
+      // field to a tenth of a microtesla, which is what says something
+      // magnetic is sitting next to the node.
+      c["heading_deg"]  = roundf(r.headingDeg * 10.0f) / 10.0f;
+      c["levelled"]     = r.levelled;
+      c["tilt_deg"]     = roundf(r.tiltDeg * 10.0f) / 10.0f;
+      c["field_ut"]     = roundf(r.fieldUt * 10.0f) / 10.0f;
+      c["calibration"]  = r.calibration;
+      JsonArray m = c["mag_ut"].to<JsonArray>();
+      for (int i = 0; i < 3; i++) m.add(roundf(r.magUt[i] * 10.0f) / 10.0f);
+      // How old it is, for the same reason the env block prints it: a caller
+      // cannot tell a fresh reading from one taken before the node moved
+      // without being told. It is never more than a few tenths of a second —
+      // past that the reading stops being offered at all (Compass.h).
+      c["age_s"] = Compass::ageS(r);
+    }
+  }
+#endif
+
+#if HAS_IMU
+  {
+    // The part's own readings, not just whether it is fitted. A board whose
+    // panel does not turn and whose compass is absent had no reader for these
+    // at all, which made "the API reads it" — the reason it is not suspended
+    // with the screen — untrue until this existed.
+    JsonObject imu = doc["imu"].to<JsonObject>();
+    imu["present"] = Imu::present();
+    imu["running"] = Imu::running();
+    float g[3];
+    if (Imu::present() && Imu::running() && Imu::accel(g)) {
+      JsonArray a = imu["accel_g"].to<JsonArray>();
+      for (int i = 0; i < 3; i++) a.add(roundf(g[i] * 100.0f) / 100.0f);
+      imu["facing"] = (uint8_t)Imu::facing();
+    }
+  }
+#endif
+
+#if HAS_ENV
+  {
+    const Environment::Reading e = Environment::last();
+    JsonObject env = doc["env"].to<JsonObject>();
+    // Present and valid are two facts, and a caller graphing this needs both:
+    // a fitted part that has not finished its first conversion reports present
+    // with no reading, which is a different thing from no sensor at all.
+    env["present"] = Environment::present();
+    env["valid"]   = e.valid;
+    if (e.valid) {
+      // Rounded to the part's resolution, which is finer than its accuracy:
+      // the datasheet's tolerances are +/-1 C, +/-3 % and +/-1 hPa, so the last
+      // digit here is real precision and not a real guarantee.
+      env["temp_c"]       = roundf(e.tempC * 100.0f) / 100.0f;
+      env["humidity_pct"] = roundf(e.humidityPct * 10.0f) / 10.0f;
+      env["pressure_hpa"] = roundf(e.pressureHpa * 100.0f) / 100.0f;
+      // How old the reading is, for the same reason the console prints it: one
+      // conversion every half minute, and a caller cannot tell a fresh reading
+      // from a stale one without being told.
+      env["age_s"]        = Environment::ageS(e);
+    }
+    // And the failure count whenever there is one, beside a reading or instead
+    // of it. This used to appear only when `valid` was false, which meant it
+    // never appeared at all on a part that had ever worked: this driver keeps
+    // its last conversion deliberately — a stale temperature is still the best
+    // answer available and `age_s` says how stale (Environment.h) — so a part
+    // that answered at boot and then stopped went on presenting that reading
+    // with nothing to say it had. Now `valid` means "a conversion has landed
+    // at some point", `age_s` says when, and this says how many intervals have
+    // produced nothing since.
+    if (Environment::present()) {
+      const uint32_t missed = Environment::missedIntervals();
+      if (missed) env["missed_intervals"] = missed;
+    }
+  }
+#endif
 
 #if HAS_GPS
   {

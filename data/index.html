@@ -190,6 +190,53 @@ async function refreshStatus() {
       // GNSS. The health readings are always public; the coordinates appear only
       // when the operator has published them, and the card says which it is —
       // otherwise the settings toggle has no visible effect anywhere.
+      ...(!s.env ? [] : [
+        // The same idiom as the GNSS block below: absent hardware contributes
+        // no card at all rather than a card saying nothing. `present` without
+        // `valid` is a fitted part that has not finished its first conversion,
+        // which is a different thing from a sensor that is not answering — and
+        // the age matters because the part is read once every thirty seconds.
+        card("Weather", !s.env.present ? "no sensor"
+          // A part with no reading is two situations and this has to tell them
+          // apart, as the console and the glass already do: the first half
+          // minute after boot, or a fitted part that has stopped answering.
+          // The interval count is what separates them, and without it this
+          // card said "waiting for the first reading" for as long as the fault
+          // lasted.
+          : !s.env.valid ? (s.env.missed_intervals >= 2
+              ? "no reading after " + s.env.missed_intervals + " tries"
+              : "waiting for the first reading")
+          : s.env.temp_c.toFixed(1) + " °C · " + s.env.humidity_pct.toFixed(0)
+            + "% · " + s.env.pressure_hpa.toFixed(1) + " hPa"
+            + (s.env.age_s != null ? " · " + s.env.age_s + "s ago" : "")
+            // A reading and a fault at once: the driver keeps its last
+            // conversion on purpose, so figures can be here and hours old.
+            // The age says so; this says so in words.
+            + (s.env.missed_intervals ? " · stopped answering, "
+                 + s.env.missed_intervals + " intervals ago" : ""),
+          s.env.present && s.env.valid && !s.env.missed_intervals ? "" : "offline"),
+      ]),
+      ...(!s.compass ? [] : [
+        // Absent hardware contributes no card, the same idiom as the two
+        // blocks either side. When it is there, the three qualifiers travel
+        // with the number: a heading taken with the board on its side, or
+        // before it has ever been turned around, is a number that looks right
+        // and is not — so the card says so instead of leaving a reader to
+        // trust it.
+        card("Heading", !s.compass.present ? "no sensor"
+          : !s.compass.valid ? (s.compass.running ? "no reading yet" : "asleep")
+          : s.compass.heading_deg.toFixed(1) + "°"
+            + (s.compass.calibration < 50
+                 ? " · turn the node around to calibrate (" + s.compass.calibration + "%)"
+                 : " · calibration " + s.compass.calibration + "%")
+            + (s.compass.levelled ? "" : " · not levelled")
+            + " · " + s.compass.field_ut.toFixed(1) + " µT",
+          // "offline" is for a subsystem that is down, and a valid heading at
+          // 49 % calibration is not down — it is a heading with a warning
+          // beside it, which the text above gives. Only an absent, sleeping or
+          // silent part greys out here.
+          s.compass.present && s.compass.valid ? "" : "offline"),
+      ]),
       ...(!s.gps ? [] : [
         card("GNSS", !s.gps.enabled ? "receiver off"
           : (s.gps.fix ? "fix" : "searching") + " · " + s.gps.satellites + " sats"

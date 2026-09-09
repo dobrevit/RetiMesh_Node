@@ -67,6 +67,17 @@
 // source and it agrees with the bench.
 #define HAS_DISPLAY         1
 #define DISPLAY_KIND        DISPLAY_KIND_EINK
+// The framework's variant for this chip — heltec_wifi_lora_32_V3's
+// pins_arduino.h, which the Wireless Paper builds against — defines these two
+// for the OLED that board has and this one does not, so they are undefined
+// before being said again rather than redefined over the top. That is not
+// tidiness: a redefinition warns once per translation unit that includes this
+// header, so the count grew by two every time a new .cpp was added anywhere in
+// the tree, and it was 126 lines of noise standing in front of any real
+// warning this board might produce. The values below are the panel that is
+// actually fitted.
+#undef DISPLAY_WIDTH
+#undef DISPLAY_HEIGHT
 #define DISPLAY_WIDTH       250
 #define DISPLAY_HEIGHT      122
 #define PIN_EPD_MOSI        2

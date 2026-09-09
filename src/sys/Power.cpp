@@ -341,8 +341,15 @@ void tellPeripherals(const bool* dark, const Power::Profile* prof) {
   taskENTER_CRITICAL(&sPeripheralMux);
   if (dark) sScreenDark.store(*dark, std::memory_order_relaxed);
   if (prof) sProfile    = *prof;
+  // The board facts go in as arguments rather than being read inside the
+  // policy, which is host code and has no board (PeripheralPolicy.h). Two of
+  // them, one per part, and they differ: the Supreme displays neither a
+  // bearing nor a rotation and keeps both parts up, the M9 shows a heading and
+  // suspends both with the glass.
   const PeripheralPolicy::Change c [[maybe_unused]] =
-      sPeripherals.update(sScreenDark.load(std::memory_order_relaxed), (uint8_t)sProfile);
+      sPeripherals.update(sScreenDark.load(std::memory_order_relaxed), (uint8_t)sProfile,
+                          PeripheralPolicy::ImuFollowsScreen{IMU_FOLLOWS_SCREEN},
+                          PeripheralPolicy::CompassFollowsScreen{COMPASS_FOLLOWS_SCREEN});
 #if HAS_COMPASS
   if (c.compass != PeripheralPolicy::Verdict::Unchanged)
     Compass::setRunning(c.compass == PeripheralPolicy::Verdict::Run);
@@ -387,6 +394,16 @@ void prepareForSleep() {
   // takes no lock either driver uses and adds nothing to the bus the loop is
   // busy with. Both answer false while absent, so a board with neither part
   // leaves this loop on its first test.
+  //
+  // And the suspend is asked for here rather than assumed to have happened,
+  // because going to sleep is not the same fact as the screen going dark. On a
+  // board whose parts do not follow the screen — the T-Beam Supreme, where the
+  // readers are a console and an API that are asked of a dark node — the
+  // screen's verdict never suspends anything, so this wait could only ever
+  // time out and then warn about a part it had never asked to stop. Asking
+  // twice costs nothing: both requests are idempotent and land on the loop.
+  Compass::setRunning(false);
+  Imu::setRunning(false);
   const uint32_t start = millis();
   while ((Compass::running() || Imu::running()) && millis() - start < kSleepSettleMs)
     vTaskDelay(pdMS_TO_TICKS(5));

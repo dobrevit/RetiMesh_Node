@@ -216,6 +216,11 @@
 // rather than flipped again on another guess.
 #define HAS_COMPASS         1
 #define COMPASS_ADDR        0x7C
+// Stated rather than inherited from Config.h's default. Which part a board
+// carries is a board fact, and the two QST magnetometers this driver speaks
+// disagree about their control registers and their scale — so a header that
+// leaves it out is a header that has not said what is fitted.
+#define COMPASS_KIND        COMPASS_KIND_QMC6309
 #define HAS_PMU             0
 
 // A PCF8563 at 0x51, confirmed answering on this bus rather than taken from the

@@ -138,7 +138,9 @@
 // firmware's block for this board both point, got a device that swallowed an
 // entire SH1106 initialisation and every frame after it without one NAK, while
 // the glass went on showing the picture the previous firmware had left in it.
-// The panel is the other one. What lives at 0x3c is still unidentified.
+// The panel is the other one. What lives at 0x3c is the magnetometer — see the
+// section on it below — which explains why it took the writes: a register file
+// accepts any address you send it.
 //
 // This is the board fact that cost the most to find, so: `display: true`,
 // `input panel=yes` and a successful driver `begin()` prove only that something
@@ -168,6 +170,14 @@
 // DCDC1 is the system rail this chip is powering the ESP32 from, so it is left
 // alone: on the T-Beam it is the display's rail and gets switched on, and here
 // switching it is switching the board off.
+//
+// LilyGO's pin poster (assets/image/T-BEAM-S3-Supreme.jpg) has the next two
+// the other way round — "PMU SDA: IO41, SCL: IO42" — and it is wrong, which
+// is worth writing down because it is the kind of error that cannot be half
+// right: SDA and SCL are not interchangeable, and the AXP2101 and the clock
+// both answer with them this way round. The same poster puts the RTC on the
+// panel's bus at 17/18; the PCF8563 answers at 0x51 on this one. Take that
+// poster for the parts list and this header for the wiring.
 #define HAS_PMU             1
 #define PIN_PMU_SDA         42
 #define PIN_PMU_SCL         41
@@ -198,6 +208,11 @@
 //
 // If a unit is confirmed to carry the MAX-M10S, GPS_UBX 1 is the one line that
 // changes, and it buys the UBX position and time frames rather than the nap.
+// The unit this was brought up on *is* a MAX-M10S, confirmed the only way that
+// counts: LilyGO's own example probes for an L76K, fails, and reports "UBlox
+// GNSS init succeeded, using UBlox GNSS Module". That is a fact about one
+// board and not about the model, which is exactly why the default here stays
+// NMEA — a UBX default would break every L76K unit sold.
 //
 // One cost to know about that rail cut: the receiver's backup domain here is
 // the AXP2101's own VBACKUP, which nothing names and nothing switches — and
@@ -221,11 +236,12 @@
 // ---------------------------------------------------------------------------
 // microSD — its own bus, shared with the accelerometer
 // ---------------------------------------------------------------------------
-// The card is on the second SPI host with the QMI8658's chip select beside it.
-// Nothing drives the accelerometer yet; when something does, it asks
-// SpiBus::get(SD_SPI_BUS, ...) for the same object rather than constructing
-// one of its own — two SPIClass objects on one host re-initialise the
-// peripheral under each other (src/sys/SpiBus.h).
+// The card is on the second SPI host with the QMI8658's chip select beside it,
+// and both are driven — they ask SpiBus for the same object rather than
+// constructing one each, because two SPIClass objects on one host re-initialise
+// the peripheral under each other (src/sys/SpiBus.h). BoardInit idles both
+// selects before either driver starts, since the accelerometer's begin() runs
+// first and a floating select is a device that may answer.
 #define HAS_SD              1
 #define PIN_SD_SCK          36
 #define PIN_SD_MISO         37
@@ -247,29 +263,162 @@
 #define PIN_RTC_SCL         PIN_PMU_SCL
 
 // ---------------------------------------------------------------------------
-// Fitted, not driven
+// Accelerometer — a QMI8658, and the first one here that is not on I2C
 // ---------------------------------------------------------------------------
-// Three parts this board carries that this firmware does not read yet. Each is
-// off for a stated reason rather than for want of a pin:
+// The same part the ThinkNode M9 carries, wired to the card's SPI bus with a
+// select of its own instead of to a shared I2C bus. That is a transport and
+// not a different part: every register, the chip id and the configuration are
+// the M9's, and only the three calls at the top of src/sys/Imu.cpp change
+// (IMU_TRANSPORT). The bus and its three pins default to the card's, which is
+// where they are — so the select is all this board has to name.
 //
-//   * QMI8658 6-axis (chip select GPIO 34, interrupt GPIO 33) — the driver in
-//     src/sys/Imu.cpp speaks to this part over I2C, and here it is on SPI,
-//     sharing the card's bus. A transport, not a pin map.
-//   * the magnetometer LilyGO's specification lists — and which is **not fitted
-//     on the unit this was brought up on**: the bus scan covers 0x08-0x7f and
-//     nothing answers at 0x0d, 0x1c, 0x2c or 0x7c. So HAS_COMPASS 0 costs that
-//     board nothing. Should a unit turn up with one, src/sys/Compass.cpp is
-//     written against the QMC6309 the M9 carries, identified by a chip id of
-//     0x90 and a register map read off that part, and whether a QMC6310's
-//     registers agree is the bench question to settle first — `I2C <addr>` on
-//     the console dumps the part, which is how the M9's was settled.
-//   * BME280 on the panel's bus, which *is* fitted — it acknowledges 0x77 — and
-//     stays undriven because no environmental sensor exists anywhere in this
-//     firmware. Temperature, humidity and pressure would want a driver, a
-//     capability flag, and a place on the status API, the console, the display
-//     and in docs/, which is a feature rather than a board port.
-#define HAS_IMU             0
-#define HAS_COMPASS         0
+// Two consequences worth having written down. BoardInit idles this select
+// *and the card's* before either driver exists, and depends on neither of them
+// going first: a floating select is a device that may answer, and which
+// begin() gets there first is a thing to get wrong rather than a thing to rely
+// on — as an earlier draft of this comment did, naming the card, when
+// main.cpp has Imu::begin() at 267 and sdCard.begin() at 277. And the part
+// does *not* follow the screen here, unlike on the board that had one first:
+// nothing on this board reads it for panel rotation, and the magnetometer that
+// would want gravity from it is not suspended with the glass either, so its
+// only readers are the console and the status API — which are asked with the
+// glass dark as often as not. A derivation rather than a board opinion:
+// IMU_FOLLOWS_SCREEN is DISPLAY_AUTO_ROTATE || (HAS_COMPASS &&
+// COMPASS_FOLLOWS_SCREEN), and the pair below sets the second half to 0
+// (Config.h, PeripheralPolicy.h). Turn COMPASS_FOLLOWS_SCREEN on and this
+// follows it, which is the point of deriving it rather than stating it.
+//
+// **The part is fitted on the unit this was brought up on and does not answer
+// over SPI.** Read that carefully, because two earlier versions of this
+// comment got it wrong in opposite directions. The part is there: LilyGO's
+// silkscreen names it, a chip sits under the name, and their wiki and pin
+// poster both put a QMI8658 on the card's SPI bus at select 34. What it will
+// not do is talk.
+//
+// What was measured, so nobody has to take it on trust:
+//
+//   * the select works — GPIO 34 reads back what it is driven to, and it is
+//     the *only* pin that changes anything: 33, 48, 21 and 14 each leave MISO
+//     at its pull-up;
+//   * something is selected by it — MISO carries a stiff external pull-up and
+//     reads a hard 1 against an internal pull-down, and goes to a hard 0 the
+//     moment 34 is asserted, so a part is there and driving the line;
+//   * and it reads as zeroes. Every register in 0x00-0x0f, the status bytes,
+//     the temperature and 0x4d come back 0x00, but for a fixed 0x3e at the
+//     register-0 frame and 0x24 at the 0x0a frame — the same bits in all four
+//     SPI modes, at 1 MHz and at 100 kHz, and identical when the clock is
+//     bit-banged by hand instead of by the peripheral;
+//   * no write lands: CTRL1 written 0x40 reads back 0x00, and the vendor's own
+//     reset — 0xb0 into 0x60, then poll 0x4d for 0x80 — never completes;
+//   * and it is not power. Every AXP2101 rail was read back on the bench and
+//     then every one of them switched on, including the three LilyGO's init
+//     brings up and this firmware does not (BLDO2, DCDC4, DCDC5), and
+//     including their cold-boot power-cycle of the sensor rails. Not one byte
+//     changed.
+//
+// The framing is not the difference either: SensorLib's SPI transport sends
+// `reg | 0x80` with the select low around it, which is this driver byte for
+// byte, and their board init opens the same host on the same three pins with
+// no enable line of its own.
+//
+// And that test has now been run. LilyGO's own QMI8658_GetDataExample, built
+// from their repository with their board definition, their vendored SensorLib
+// and their rail init — which power-cycles the sensor rails and brings up
+// BLDO2, DCDC4 and DCDC5 — prints:
+//
+//     Found QMC6310N MAG Sensor at address 0x3C
+//     Found OLED display at address 0x3D
+//     Found BME280 Sensor at address 0x77
+//     Sd Card init succeeded, The current available capacity is 7.44 GB
+//     UBlox GNSS init succeeded, using UBlox GNSS Module
+//     Failed to find QMI8658 - check your wiring!
+//
+// Everything else on the board, found. The 6-axis part, not. So this is a
+// hardware fault on this unit — the part or its joints — and not something a
+// firmware change can reach. HAS_IMU stays 1 because the *board* carries the
+// part and another unit's will answer; this driver reports the absence
+// honestly, with the byte it read, which is all it can do.
+#define HAS_IMU             1
+#define IMU_KIND            IMU_KIND_QMI8658
+#define IMU_TRANSPORT       IMU_TRANSPORT_SPI
+#define PIN_IMU_CS          34
+// The panel does not turn: 128x64 pages laid out one way, in a fixed case. So
+// the accelerometer answers the console and nothing else, and the rotation
+// path is not built (it defaults to HAS_IMU, which is now 1).
+#define DISPLAY_AUTO_ROTATE 0
+// The interrupt is on GPIO 33 and nothing reads it: this part is polled. It is
+// the pin to reach for if a motion wake is ever wanted.
+//
+// The axis signs are the defaults, which is to say unverified — how the part
+// sits relative to the case has not been measured, and nothing here depends on
+// it yet. A consumer that cares (a heading, a rotation) has to settle
+// IMU_INVERT_X/Y/Z on the bench first.
+
+// ---------------------------------------------------------------------------
+// Environment — a BME280 on the panel's bus
+// ---------------------------------------------------------------------------
+// Temperature, pressure and humidity, at 0x77: SDO is strapped high here,
+// where the same part on another board is as likely to be at 0x76. It shares
+// the panel's bus, which is why Environment::poll() is called from the main
+// loop and from nowhere else — one reader on that bus is what keeps it safe
+// (Environment.h, and issue 33 in the roadmap for the reason).
+//
+// This is the first sensor here that reports on the node's surroundings rather
+// than on the node, and the first that does not follow the screen: a gateway
+// on a pole reports the weather at the pole whether or not anybody is looking
+// at its glass.
+#define HAS_ENV             1
+#define ENV_KIND            ENV_KIND_BME280
+#define ENV_ADDR            0x77
+
+// ---------------------------------------------------------------------------
+// Magnetometer — a QMC6310N, and it took some finding
+// ---------------------------------------------------------------------------
+// It is at **0x3c**, on the panel's bus, and it reports chip id 0x80 in
+// register 0 — a QMC6310, not the QMC6309 the M9 carries and not at any of the
+// addresses that part uses. An earlier version of this header declared it
+// absent on the strength of a scan that found nothing at 0x0d, 0x1c, 0x2c or
+// 0x7c, which was the wrong conclusion from the right data: nobody had asked
+// what the *third* answer on the panel's bus was.
+//
+// It is also, and this is worth writing down once, the device that made the
+// panel look broken. Two addresses answered on that bus; 0x3c was taken for
+// the panel, accepted an entire SH1106 initialisation and every frame after it
+// without complaint — because a magnetometer's registers will take any write
+// — while the glass, at 0x3d, kept the previous firmware's picture.
+//
+// It is driven, and the numbers it is driven with are not guesses. The part is
+// known good on this unit before any of this firmware touched it: LilyGO's own
+// QMC63xx_GetDataExample read it here and streamed sensible fields — about
+// 123 uT total with a large offset on Z, which is what their calibration
+// example exists for — in continuous mode at 200 Hz, 8 G, no oversampling.
+// Those are the register values src/sys/QmcMag.h calls verified, and the
+// counts that example printed beside its microtesla are the test vectors that
+// pin this board's scale (test/test_qmc_mag).
+//
+// Two things about the reading on this board specifically.
+//
+// It is not levelled, and it says so. Tilt correction wants gravity from the
+// accelerometer, and the 6-axis part above is faulty on this unit — so every
+// reading here comes back with `levelled=false` and a heading computed as if
+// the board were flat, which for a gateway bolted to a pole it very nearly is.
+// A unit whose accelerometer answers gets the corrected heading with no change
+// here.
+//
+// And it does not follow the screen. Nothing on this board's 128x64 pages
+// shows a bearing: the readers are the console and the status API, which are
+// asked of a dark node as often as not, so suspending the part with the glass
+// would hand "asleep" to every caller it has. That is the same argument the
+// accelerometer's own rule turns on, and it is stated once as a board fact
+// rather than twice as a rule (COMPASS_FOLLOWS_SCREEN, PeripheralPolicy.h) —
+// which also keeps IMU_FOLLOWS_SCREEN honest, since a compass that runs in the
+// dark would otherwise hold up an accelerometer that had gone to sleep.
+#define HAS_COMPASS         1
+#define COMPASS_KIND        COMPASS_KIND_QMC6310
+// Recorded so the next reader does not repeat the scan: 0x3c is the
+// magnetometer, 0x3d is the panel, 0x77 is the BME280.
+#define COMPASS_ADDR        0x3C
+#define COMPASS_FOLLOWS_SCREEN 0
 
 // ---------------------------------------------------------------------------
 // Button

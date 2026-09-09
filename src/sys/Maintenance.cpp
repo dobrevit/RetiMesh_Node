@@ -30,6 +30,7 @@
 #include "Bq25896.h"
 #include "Imu.h"
 #include "Compass.h"
+#include "Environment.h"
 #include "Display.h"
 #include "TouchInput.h"
 #include "LvglUi.h"
@@ -438,6 +439,22 @@ static void doStatus() {
   dataf("STATUS", "parts charger=%s imu=%s",
         Bq25896::present() ? "yes" : "no",
         !Imu::present() ? "no" : Imu::running() ? "yes" : "asleep");
+#if HAS_IMU
+  // And what it actually reads, which until now nothing asked for on a board
+  // whose panel does not turn and whose compass is absent. Two booleans were
+  // the whole of this part's output there — so it was kept converting for the
+  // life of the node to make one word say "yes", which is standing current on
+  // a battery board bought for nothing. The axes are in g, unfiltered, as the
+  // driver hands them over.
+  if (Imu::present() && Imu::running()) {
+    float g[3];
+    if (Imu::accel(g))
+      dataf("STATUS", "imu accel=%.2f,%.2f,%.2f g facing=%u",
+            g[0], g[1], g[2], (unsigned)Imu::facing());
+    else
+      dataf("STATUS", "imu accel=no-answer");
+  }
+#endif
 #endif
 #if HAS_COMPASS
   // The heading, and everything needed to judge whether to believe it. A
@@ -456,17 +473,58 @@ static void doStatus() {
       // of a second after a wake, before the resumed part has been sampled
       // once — applyMode() drops the stale reading and the freshness gate hands
       // back the empty one until the next poll — or a read that keeps failing
-      // on a part that is sitting right there. A two-way ternary called both of
-      // those "absent", which sends somebody looking at the wiring of a fitted,
-      // running part, indefinitely.
+      // on a part that is sitting right there, which now includes a part that
+      // answered until a moment ago and has stopped: a reading more than a few
+      // poll intervals old stops being offered rather than going stale
+      // (Compass.h), so this line says "no-answer" where it used to have
+      // printed the last heading that worked, for ever. A two-way ternary
+      // called both of those "absent", which sends somebody looking at the
+      // wiring of a fitted, running part, indefinitely.
       dataf("STATUS", "compass=%s",
             !Compass::present()  ? "absent"
           : !Compass::running()  ? "asleep"
           :                        "no-answer");
     } else {
-      dataf("STATUS", "compass heading=%.1f levelled=%s tilt=%.0f field=%.1fuT cal=%u%%",
-            c.headingDeg, c.levelled ? "yes" : "no", c.tiltDeg, c.fieldUt, c.calibration);
+      dataf("STATUS", "compass heading=%.1f levelled=%s tilt=%.0f field=%.1fuT cal=%u%% age=%us",
+            c.headingDeg, c.levelled ? "yes" : "no", c.tiltDeg, c.fieldUt,
+            c.calibration, (unsigned)Compass::ageS(c));
       dataf("STATUS", "compass mag=%.1f,%.1f,%.1f uT", c.magUt[0], c.magUt[1], c.magUt[2]);
+    }
+  }
+#endif
+#if HAS_ENV
+  // The air, and how long ago it was measured. The age is not decoration: the
+  // part is read once every half minute and reports nothing at all until the
+  // first conversion lands, so a reading with no age beside it cannot be told
+  // from one taken while the node was somewhere else half an hour ago.
+  {
+    const Environment::Reading e = Environment::last();
+    if (!e.valid) {
+      // Three silences now, and the third is the one that used to lie. A part
+      // that is not on the bus is a wiring question. A part that is there and
+      // has not finished its first conversion is a matter of waiting one
+      // interval. And a part that has been asked several times and produced
+      // nothing is neither — it answered at boot, so saying "warming up" for
+      // the next hour would send somebody to wait rather than to look.
+      const uint32_t missed = Environment::missedIntervals();
+      dataf("STATUS", "env=%s%s",
+            !Environment::present() ? "absent"
+          : missed >= 2             ? "no-reading" : "warming-up",
+            missed >= 2 ? "" : "");
+      if (missed >= 2)
+        dataf("STATUS", "env missed_intervals=%u", (unsigned)missed);
+    } else {
+      dataf("STATUS", "env temp=%.2fC humidity=%.1f%% pressure=%.2fhPa age=%us",
+            e.tempC, e.humidityPct, e.pressureHpa,
+            (unsigned)Environment::ageS(e));
+      // A reading *and* a fault, which is a state this part can be in for as
+      // long as the node runs: it keeps its last conversion on purpose, so a
+      // sensor that stopped answering an hour ago still prints a temperature.
+      // The age says so to anybody who thinks about it; this says so to
+      // everybody.
+      if (const uint32_t missed = Environment::missedIntervals())
+        dataf("STATUS", "env stopped answering — %u intervals with no reading, "
+                        "the figures above are that old", (unsigned)missed);
     }
   }
 #endif

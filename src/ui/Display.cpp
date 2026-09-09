@@ -21,6 +21,7 @@
 // ============================================================================
 #include "Diag.h"
 #include "Display.h"
+#include "Environment.h"
 #include "DisplayLayout.h"
 #include "BacklightLadder.h"
 #include "DisplayPace.h"
@@ -542,6 +543,9 @@ void Display::paint() {
     case NETWORK:    paintNetwork();   break;
 #if HAS_GPS
     case GPS:        paintGps();       break;
+#endif
+#if HAS_ENV
+    case ENV:        paintEnv();       break;
 #endif
   #if !DISPLAY_COMPACT
     case QR:         paintQr();        break;
@@ -1071,6 +1075,7 @@ void Display::paintRadio() {
 #if HAS_GPS
 // What the receiver can see. Before a fix the satellite count is the useful
 // number — it is what tells you whether the antenna has a view of the sky.
+
 void Display::paintGps() {
   // The mono boards' position page, and the same claim the colour shell's
   // screens make: while this page is the one being painted the receiver keeps
@@ -1107,6 +1112,45 @@ void Display::paintGps() {
   }
   if (g.timeValid) { _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print(g.utc + 11); _gfx->print(g.clockSet ? " UTC sync" : " UTC"); }
   else             { _gfx->setCursor(0, DisplayLayout::rowY(4)); _gfx->print("no time yet"); }
+}
+#endif
+
+#if HAS_ENV
+// The weather at the node. Four rows and no meters: a temperature is a number
+// a person reads, and a bar beside it would be a bar against a scale nobody
+// agreed on — which is the same argument the status page makes about signal
+// strength.
+void Display::paintEnv() {
+  const Environment::Reading e = Environment::last();
+  header(e.valid ? "Weather" : Environment::present() ? "Weather wait" : "Weather n/a");
+  char line[DisplayLayout::rowBytes()];
+  if (!Environment::present()) {
+    _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("No sensor on this bus");
+    return;
+  }
+  if (!e.valid) {
+    // The first conversion is triggered on the first pass of the loop, so this
+    // page is only ever seen with "waiting" on it for a few milliseconds — and
+    // then only if somebody is looking at that moment. What it must not say is
+    // how long the wait will be: a part that never becomes ready would show a
+    // countdown that never runs out. The interval count is the honest version.
+    const uint32_t missed = Environment::missedIntervals();
+    if (missed >= 2) snprintf(line, sizeof(line), "no reading, %u tries", (unsigned)missed);
+    else             snprintf(line, sizeof(line), "waiting for a reading");
+    _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
+    return;
+  }
+  snprintf(line, sizeof(line), "%.1f C", (double)e.tempC);
+  _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(line);
+  snprintf(line, sizeof(line), "%.0f%% humidity", (double)e.humidityPct);
+  _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
+  snprintf(line, sizeof(line), "%.1f hPa", (double)e.pressureHpa);
+  _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(line);
+  // The age, because every other surface prints it and for the same reason:
+  // half a minute between conversions, and a page that looks live while
+  // showing a reading from before the node was moved is a page that lies.
+  snprintf(line, sizeof(line), "measured %us ago", (unsigned)Environment::ageS(e));
+  _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print(line);
 }
 #endif
 

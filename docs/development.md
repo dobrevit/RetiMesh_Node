@@ -352,7 +352,8 @@ src/            firmware (single PlatformIO project, Arduino framework)
 data/           web app → LittleFS image
 web/            GitHub Pages web flasher (ESP Web Tools)
 test/           host-side unit tests (see above)
-partitions/     huge_app_8mb.csv, for the 8 MB boards with no SD slot
+partitions/     app and A/B layouts per flash size (ota_4mb, ota_8mb, ota_16mb,
+                huge_app_8mb); each file carries its own arithmetic
 tools/          make_manifest.py (release bundles), build_site.py (Pages),
                 bump_deps.py (PlatformIO dependency PRs), retimesh-flash/ (CLI
                 and the shared device/bootloader module), hil.py and

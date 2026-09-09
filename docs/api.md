@@ -387,6 +387,81 @@ a divider infers presence from the voltage and leaves the last reading in place
 when its converter stops, so treat `battery_present: false` with a plausible
 voltage as a stale reading rather than an empty holder.
 
+`env` appears on boards with an environmental sensor — a BME280, and so far
+only the T-Beam Supreme:
+`{"present":true,"valid":true,"temp_c":21.94,"humidity_pct":43.8,
+"pressure_hpa":1006.77,"age_s":12}`.
+
+`present` and `valid` are two facts and a caller needs both. A fitted part that
+has not finished its first conversion reports `present: true` with no readings
+at all, which is a different thing from a board with no sensor.
+
+`valid` means **a conversion has landed at some point**, not that the figures
+are current — this driver keeps its last reading on purpose, because a stale
+temperature is still the best answer available and the caller is the one who
+knows how stale is too stale. So `valid: false` is only ever the first half
+minute after boot (or a part that has never worked), and two other fields carry
+the freshness:
+
+* `age_s` — how many seconds ago the reading was taken. One conversion every
+  thirty seconds, so 0-30 is healthy.
+* `missed_intervals` — how many sampling intervals have produced nothing. It is
+  **absent while the sensor is answering** and appears as soon as it stops, with
+  or without a reading beside it: a part that answered at boot and then failed
+  reports `valid: true` with hour-old figures, an `age_s` to match, and this
+  field saying how long it has been like that. A client wanting only fresh data
+  should treat any `missed_intervals` as a fault and `age_s` as its age; a
+  client graphing weather can keep plotting the last point and mark it.
+
+Before this existed the field appeared only alongside `valid: false`, which
+meant it never appeared at all on a sensor that had ever worked. The readings are rounded to 0.01 °C, 0.1 % and
+0.01 hPa — the part's *resolution*, which is finer than its accuracy: the
+datasheet's tolerances are ±1 °C, ±3 % and ±1 hPa, so the last digit of each is
+real precision and not a real guarantee. Do not read a 0.01 °C change between
+two samples as the air having moved. `age_s` is there because the part is read once every thirty
+seconds and sleeps in between: without it a reading taken before the node was
+moved is indistinguishable from one taken now. There is no setting — the sensor
+has no switch, because it costs a microamp asleep and about ten milliseconds of
+one bus every half minute.
+
+`compass` appears on boards with a magnetometer — the ThinkNode M9's QMC6309
+and the T-Beam Supreme's QMC6310N:
+`{"present":true,"running":true,"valid":true,"heading_deg":271.4,
+"levelled":false,"tilt_deg":0.0,"field_ut":123.5,"calibration":38,
+"mag_ut":[2.6,-34.1,-118.7],"age_s":0}`.
+
+Read the qualifiers before the heading, because a magnetometer reports a number
+under every condition including the ones where the number is meaningless.
+`calibration` is 0-100 and says how much of a turn the hard-iron offsets have
+seen: a magnetometer measures the Earth's field plus the board's own, and the
+board's own is removed by watching the extremes each axis reaches, which needs
+the node turned around at least once. Below about 50 the heading is not worth
+plotting. `levelled` says whether gravity was available to project the field
+onto the horizontal plane — **false** where there is no accelerometer to ask,
+and the heading is then computed as if the board were flat, which for a
+pole-mounted gateway it nearly is and for anything held in a hand it is not.
+`tilt_deg` is how far off flat the board is, and is 0 whenever `levelled` is
+false rather than a measurement of nothing. `field_ut` is the magnitude as
+measured, hard iron included: the Earth's is 25-65 µT, so a much larger figure
+means something magnetic is close — the Supreme's own board reads about 120 µT.
+`mag_ut` is the raw vector in the board's own axes.
+
+`present` and `running` are separate facts, as with `imu`: a part suspended
+along with the screen reports `present: true, running: false` and no reading,
+which is not the same as a part that is not fitted. **Which boards suspend it
+is a board decision** (`COMPASS_FOLLOWS_SCREEN`): the T-Beam Supreme does not,
+so its compass answers whenever the node is up; the ThinkNode M9 does, so a
+poll of a dark M9 returns `running: false` and no heading, and loading this API
+does not wake its screen. A reading also stops being offered once it is a few
+poll intervals old — `valid` goes false rather than a bearing going stale —
+so a part that stops answering reads as no heading rather than a heading that
+never moves.
+
+The heading is **magnetic**, not true north. The difference is declination, up
+to tens of degrees depending where the node is, and correcting it needs a world
+model this firmware does not carry — so it is left to the caller rather than
+quietly folded in wrong.
+
 `gps` appears on boards with a receiver:
 `{"enabled":true,"fix":true,"quality":1,"satellites":7,"sentences":1204,
 "clock_set":true,"utc":"2026-08-26 21:04:11","resting":false,

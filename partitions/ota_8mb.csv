@@ -1,0 +1,57 @@
+# A/B over-the-air updates on the 8 MB part.
+#
+# The same shape as ota_4mb.csv and ota_16mb.csv and for the same reason — a
+# node that cannot be reached by cable has to write a new firmware while
+# running the old one, and fall back when the new one does not come up. Equal
+# slots, no bespoke installer in the boot path. See ota_4mb.csv for the full
+# argument; this table only records what 8 MB changes.
+#
+# What it changes is that the numbers are not a compromise and are not ours:
+# they are the ones LilyGO ship on the T-Beam Supreme. That board arrived
+# carrying Meshtastic on exactly this layout — two 3264 KiB app slots, a
+# 1536 KiB filesystem and a 64 KiB coredump, closing the 8 MB part to the byte
+# — which is read off the board itself and kept in
+# firmware-backups/tbeam-supreme-48CA435AD828.md. A vendor shipping A/B on this
+# part is better evidence that it fits than any arithmetic of ours, and it is
+# the same kind of evidence the 4 MB table was argued from.
+#
+# 3264 KiB against an image that is 1901 KiB today: 58 % of the slot used, with
+# 1363 KiB free, where the 4 MB board runs at 93.8 % of its slot and has been
+# the standing worry ever since. Both figures are "share of the slot", because
+# quoting one as a share and the other as a multiple of the image is how this
+# project has misread its own headroom before. Nothing here is thin.
+#
+# The filesystem is the one thing that gets smaller than the single-slot table
+# it replaces — 1536 KiB where huge_app_8mb.csv gives 4.9 MB — and on this
+# board that is the right trade. It has a card slot, and the Reticulum store
+# goes to the card when one is fitted (StoreHome.cpp). With no card the store
+# lives here, and 1536 KiB is twelve times what the T3-S3 gets for the same
+# job. The web assets are about 70 KiB packed.
+#
+# App slots are 64 KiB aligned because the bootloader requires it. The
+# filesystem partition is named spiffs even though it holds LittleFS:
+# LittleFS.begin() looks the partition up by that label, and a name it cannot
+# find fails the mount without formatting anything — the node then runs with no
+# filesystem at all while the flash still holds every file.
+#
+# A partition table is a one-way door: it can only be changed by writing the
+# whole flash over a cable. A board already flashed with huge_app_8mb.csv does
+# not grow a second slot by taking an update — it has to be written whole,
+# once, and the node's own reported layout is what says which table it is on.
+#
+# What that write costs, exactly, because "the whole flash" sounds worse than
+# it is: the filesystem moves from 0x310000 to 0x670000, so the internal
+# LittleFS is destroyed and its contents — the web assets, and the Reticulum
+# store on a board with no card — are gone. Settings and the node's identity
+# both live in nvs at 0x9000, which does not move, so they survive; and on a
+# board with a card the store is on the card, which is not touched. The web
+# assets are rewritten by `-t uploadfs` in the same session. So the loss is a
+# rebuildable cache, not an identity.
+#
+# Name,     Type, SubType,  Offset,   Size,
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+ota_0,      app,  ota_0,    0x10000,  0x330000,
+ota_1,      app,  ota_1,    0x340000, 0x330000,
+spiffs,     data, spiffs,   0x670000, 0x180000,
+coredump,   data, coredump, 0x7f0000, 0x10000,
