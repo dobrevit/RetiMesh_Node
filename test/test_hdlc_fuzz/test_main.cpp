@@ -356,7 +356,8 @@ public:
       // second FLAG this deframer has ever seen. A tick on the first one means
       // bytes that were never inside a frame were counted as a dropped frame.
       FUZZ_ASSERT(flagsFed_ >= 2,
-                  "oversized() ticked on FLAG number %u, before a frame could have opened",
+                  "oversized() ticked on FLAG %u since the parser was last reset, "
+                  "before a frame could have opened",
                   flagsFed_);
       // (4) The drop and the delivery are the two arms of one test on the same
       // closing FLAG. Doing both means an oversized frame was truncated to
@@ -366,11 +367,18 @@ public:
   }
 
   // (5) reset() clears the parser and deliberately keeps the lifetime drop
-  // count; flagsFed_ is a lifetime count for the same reason, so it stays too.
+  // count. flagsFed_ does not keep pace with it: that counter exists only to
+  // prove a tick had two FLAGs behind it, and reset() puts the parser back
+  // outside any frame, so the two FLAGs a legitimate tick needs must be fed
+  // again. Carrying the pre-reset total over would satisfy the guard
+  // vacuously — a reset() that kept overflow set would tick on the very next
+  // FLAG and still read as legitimate, because the FLAGs that made it look so
+  // were fed to a parser state that no longer exists.
   void reset() {
     const uint32_t before = g_.d.oversized();
     g_.d.reset();
     FUZZ_ASSERT(g_.d.oversized() == before, "reset() moved the oversized() counter");
+    flagsFed_ = 0;
   }
 
 private:

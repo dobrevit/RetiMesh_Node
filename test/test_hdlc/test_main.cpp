@@ -540,6 +540,26 @@ void test_reset_does_not_clear_the_oversized_counter() {
   TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, d.oversized(), "counter changed after reset and recovery");
 }
 
+// The other half of that contract. Every oversized case above closes its frame,
+// and the closing FLAG clears overflow on its way through — so at the moment
+// those tests call reset(), there is no overflow left to clear, and a reset()
+// that kept it would be indistinguishable from one that cleared it. Here the
+// oversized frame is never closed, so overflow is still live when reset()
+// runs. If it survives, the recovery frame's opening FLAG counts a drop that
+// never happened; the frame itself still arrives intact, so the counter is the
+// only place it shows.
+void test_reset_discards_an_active_overflow() {
+  const std::vector<uint8_t> partial = oversizedFrame();       // never closed
+  HDLC::Deframer d;
+  std::vector<std::vector<uint8_t>> out;
+  feedInto(d, partial.data(), partial.size(), out);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, d.oversized(), "an unclosed frame was counted early");
+  d.reset();
+  assertRecovers(d, out, "reset with a live overflow");
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+      0, d.oversized(), "reset() left overflow set: the next FLAG counted a frame that never was");
+}
+
 // What feed()'s !inFrame early return actually protects is this counter, not
 // the payload: delivery is gated on inFrame separately, so deleting the return
 // changes nothing a frame-content test can see. It changes this. Without it, a
@@ -613,6 +633,7 @@ int main(int, char**) {
   RUN_TEST(test_exactly_mtu_payload_is_delivered_and_not_counted);
   RUN_TEST(test_one_byte_over_mtu_is_dropped_and_counted_once);
   RUN_TEST(test_reset_does_not_clear_the_oversized_counter);
+  RUN_TEST(test_reset_discards_an_active_overflow);
   RUN_TEST(test_long_garbage_before_the_first_flag_does_not_count_as_oversized);
   RUN_TEST(test_long_garbage_after_a_reset_does_not_count_as_oversized);
   return UNITY_END();
