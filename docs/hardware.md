@@ -8,7 +8,7 @@
 | `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
 | `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
 | `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, 4 MB PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot** | verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board |
-| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; BME280 driven (temperature, humidity, pressure); QMI8658 IMU on SPI — fitted, driven, and silent on the unit tested here (select and drive proven, every register reads zero); QMC6310 magnetometer fitted at 0x3c and undriven — src/sys/Compass.cpp is written for the QMC6309's register map | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button, and the BME280 reading 27.7 C, 60 % and 1012.7 hPa. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at: 0x3c is the QMC6310 magnetometer, which took an entire SH1106 initialisation without complaint because a register file accepts any write, while the glass kept the previous firmware's picture and every status field reported the display fine. The three parts on that bus are now each identified by asking them — 0x3c magnetometer, 0x3d panel, 0x77 BME280 — The 6-axis part is fitted and does not answer: its select works and something drives MISO when it is asserted, but every register reads zero, no write lands, the vendor's reset never completes, and none of it changes across all four SPI modes, two clock rates, a hand-clocked control, or every rail the AXP2101 has. LilyGO's own example against this board is the outstanding test. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here |
+| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; BME280 driven (temperature, humidity, pressure); QMI8658 IMU on SPI — driven, and faulty on the unit tested here: LilyGO's own example finds every other part on the board and cannot find this one either; QMC6310 magnetometer fitted at 0x3c and undriven — src/sys/Compass.cpp is written for the QMC6309's register map | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button, and the BME280 reading 27.7 C, 60 % and 1012.7 hPa. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at: 0x3c is the QMC6310 magnetometer, which took an entire SH1106 initialisation without complaint because a register file accepts any write, while the glass kept the previous firmware's picture and every status field reported the display fine. The three parts on that bus are now each identified by asking them — 0x3c magnetometer, 0x3d panel, 0x77 BME280 — The 6-axis part is fitted and does not answer: its select works and something drives MISO when it is asserted, but every register reads zero, no write lands, the vendor's reset never completes, and none of it changes across all four SPI modes, two clock rates, a hand-clocked control, or every rail the AXP2101 has. LilyGO's own QMI8658 example, built from their repository with their board definition and rail init, finds the magnetometer, panel, BME280, card and GNSS and then reports "Failed to find QMI8658 - check your wiring!" — so it is a hardware fault on this unit rather than anything a firmware change reaches. Their magnetometer example does read the QMC6310N here, and their GNSS probe identifies this unit's receiver as the u-blox MAX-M10S. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here |
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
@@ -473,7 +473,7 @@ answer there and each one has now been identified by asking it:
 
 | Address | What it is | How it was told |
 |---|---|---|
-| 0x3c | **QMC6310 magnetometer** | chip id 0x80 in register 0, behind a real register file |
+| 0x3c | **QMC6310N magnetometer** | chip id 0x80 in register 0, behind a real register file — and LilyGO's own scanner names it QMC6310N at this address |
 | 0x3d | the SH1106 panel | the same byte from every register, and bit 6 of it tracks the display being blanked |
 | 0x77 | the BME280 | it answers with readings |
 
@@ -508,11 +508,33 @@ The framing is not the difference either: SensorLib's SPI transport sends `reg |
 the select low around it, which is `src/sys/Imu.cpp` byte for byte, and LilyGO's own board
 init opens the same host on the same three pins with no enable line of its own.
 
-So the driver stays enabled and honest — it reads for the chip id, does not find one, and
-reports the byte it got instead. The one test not yet run is LilyGO's own example against
-this board, which is what would separate a defective part from something still wrong on our
-side; it needs their board definition and it overwrites this firmware and its partition
-table, so it is a bench decision rather than a build one.
+That test has since been run, and it is the one that ends the argument. LilyGO's own
+`QMI8658_GetDataExample`, built from their repository with their board definition, their
+vendored SensorLib and their rail init — which power-cycles the sensor rails and raises
+BLDO2, DCDC4 and DCDC5 — reports:
+
+```
+Found QMC6310N MAG Sensor at address 0x3C
+Found OLED display at address 0x3D
+Found BME280 Sensor at address 0x77
+Sd Card init succeeded, The current available capacity is 7.44 GB
+UBlox GNSS init succeeded, using UBlox GNSS Module
+Failed to find QMI8658 - check your wiring!
+```
+
+Everything else on the board, found; the 6-axis part, not. **So it is a hardware fault on
+this unit** — the part or its joints — and not something a firmware change can reach.
+`HAS_IMU` stays 1 because the board carries the part and another unit's will answer; the
+driver reports the absence honestly, with the byte it read.
+
+Two things that run confirmed in passing. The **magnetometer is known good**, not merely
+present: their `QMC63xx_GetDataExample` streams sensible fields from it on this unit (about
+123 µT total, a steady heading, and a large Z offset, which is what their calibration
+example is for). So driving it here is porting a register map known to fit the part —
+`SensorQMC6310.hpp` is the reference — rather than finding out whether it works. And this
+unit is a **MAX-M10S**: their code probes for an L76K, fails, and says "UBlox GNSS init
+succeeded". That is a fact about one board rather than the model, which is why `GPS_UBX`
+stays 0 here — a UBX default would break every L76K unit sold.
 
 **A/B over the air, on LilyGO's own numbers.** `partitions/ota_8mb.csv`: two 3264 KiB app
 slots, a 1536 KiB filesystem and a 64 KiB coredump, closing the 8 MB part to the byte. The
@@ -636,11 +658,11 @@ one of them was a one-way door:
    missing part: the table above is the bench work that settled the select, the drive on
    MISO, the modes, the clock rates, the hand-clocked control, the writes and every rail.
    The card mounts on those same wires in the same boot, so the bus, the pins and the
-   shared-host arrangement are all good. **Next on the bench:** LilyGO's own
-   `QMI8658_GetDataExample` on this board — the only test that separates a defective part
-   from a fault still on our side. It overwrites this firmware and its partition table, so
-   plan the re-flash with it. And on a unit whose part does answer, the thing to check is
-   that `imu=yes` survives the panel going dark; a reading of `asleep` would mean
+   shared-host arrangement are all good. **Closed by LilyGO's own example**, which finds
+   every other part on the board and then says `Failed to find QMI8658 - check your
+   wiring!` — so the fault is the part or its joints on this unit, and nothing a firmware
+   change reaches. What is still open belongs to a unit whose part answers: that `imu=yes`
+   survives the panel going dark, because a reading of `asleep` would mean
    `IMU_FOLLOWS_SCREEN` was derived wrongly.
 10. **The BME280 reads plausibly — done.** 27.74 °C, 60.2 % and 1012.69 hPa on the first
     boot that had it. Still open, and the only one of the three with an independent

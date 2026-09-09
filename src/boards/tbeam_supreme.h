@@ -208,6 +208,11 @@
 //
 // If a unit is confirmed to carry the MAX-M10S, GPS_UBX 1 is the one line that
 // changes, and it buys the UBX position and time frames rather than the nap.
+// The unit this was brought up on *is* a MAX-M10S, confirmed the only way that
+// counts: LilyGO's own example probes for an L76K, fails, and reports "UBlox
+// GNSS init succeeded, using UBlox GNSS Module". That is a fact about one
+// board and not about the model, which is exactly why the default here stays
+// NMEA — a UBX default would break every L76K unit sold.
 //
 // One cost to know about that rail cut: the receiver's backup domain here is
 // the AXP2101's own VBACKUP, which nothing names and nothing switches — and
@@ -314,12 +319,23 @@
 // byte, and their board init opens the same host on the same three pins with
 // no enable line of its own.
 //
-// So the driver stays enabled and honest: it reads for the chip id, does not
-// find one, and says which byte it got instead. What has not been done is to
-// run LilyGO's own example against it, which is the one test that would
-// separate a defective part from something still wrong on our side — it needs
-// their board definition and it overwrites this firmware and its partition
-// table, so it is the bench's call, not the build's.
+// And that test has now been run. LilyGO's own QMI8658_GetDataExample, built
+// from their repository with their board definition, their vendored SensorLib
+// and their rail init — which power-cycles the sensor rails and brings up
+// BLDO2, DCDC4 and DCDC5 — prints:
+//
+//     Found QMC6310N MAG Sensor at address 0x3C
+//     Found OLED display at address 0x3D
+//     Found BME280 Sensor at address 0x77
+//     Sd Card init succeeded, The current available capacity is 7.44 GB
+//     UBlox GNSS init succeeded, using UBlox GNSS Module
+//     Failed to find QMI8658 - check your wiring!
+//
+// Everything else on the board, found. The 6-axis part, not. So this is a
+// hardware fault on this unit — the part or its joints — and not something a
+// firmware change can reach. HAS_IMU stays 1 because the *board* carries the
+// part and another unit's will answer; this driver reports the absence
+// honestly, with the byte it read, which is all it can do.
 #define HAS_IMU             1
 #define IMU_KIND            IMU_KIND_QMI8658
 #define IMU_TRANSPORT       IMU_TRANSPORT_SPI
@@ -374,6 +390,13 @@
 // registers out differently, so turning this on wants that map established
 // first — `I2C 0x3c` on the console dumps it, which is how the M9's was
 // settled. Which makes this a specified piece of work rather than an unknown.
+//
+// And the part is known good, not merely present: LilyGO's own
+// QMC63xx_GetDataExample reads it on this unit and streams sensible fields
+// (about 123 uT total, a steady heading, a large Z offset that is what their
+// calibration example exists for). So the work is porting a register map that
+// is known to fit this part — SensorLib's SensorQMC6310.hpp is the reference —
+// rather than finding out whether the part works.
 #define HAS_COMPASS         0
 // Recorded so the next reader does not repeat the scan: 0x3c is the
 // magnetometer, 0x3d is the panel, 0x77 is the BME280.
