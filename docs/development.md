@@ -270,7 +270,8 @@ them on every push.
 
 | Suite | Covers |
 |---|---|
-| `test_hdlc` | RNS TCP framing |
+| `test_hdlc` | RNS TCP framing, mostly its malformed half — truncation, dangling escapes, garbage, the MTU boundary — each corruption case ending by proving the next valid frame still decodes |
+| `test_hdlc_fuzz` | the same deframer against a seeded corpus nobody chose, held to properties rather than to expected bytes (see below) |
 | `test_airtime` | duty cycle, dwell budget, CSMA accounting |
 | `test_radio_plan` | per-chip radio limits, regional regimes, node naming |
 | `test_store_home` | where the Reticulum store belongs, card ownership, what a move does |
@@ -288,6 +289,94 @@ them on every push.
 | `test_lxmf_commands` | what the node says back to a ping, an echo and a signal report, and that nothing a stranger sends can overrun the reply |
 | `test_telemetry` | what the node says about itself: sensor shapes, msgpack str against bin, and that a document too big is not sent half-written |
 | `test_nomadnet` | the node's own page: what it says, what it refuses to claim, and that a page never overruns the buffer a stranger asked it to fill |
+
+### HDLC fuzzing and the sanitizer gate
+
+`test_hdlc` names its corruptions: every case in it is there because somebody
+thought of it. `test_hdlc_fuzz` is for the ones nobody thought of. Port 4242 is
+reachable by anything on the network, so the deframer does not get to choose its
+input. The suite generates streams from a splitmix32 seeded at `kDefaultSeed`
+(`0x7E7D5E5D`) and asserts properties rather than bytes: recovery after any
+prefix at all, the MTU bound in both directions, what `oversized()` may and may
+not count, that one byte never both delivers a frame and counts a drop, and what
+`reset()` clears against what it deliberately keeps.
+
+Nothing in it reads a clock or asks for entropy. Each stream is seeded from
+(seed, generator, iteration), so iteration 4711 is the same bytes whatever
+budget the run uses, and every failure prints the seed, generator and iteration
+that reproduce it exactly.
+
+CI pays for `kDefaultIterations` — 15 000 streams per generator. The fuzz binary
+itself runs in about 1.8 seconds; PlatformIO reports the whole `test_hdlc_fuzz`
+step at about three, and that is the number to budget CI time against. The
+budget and the seed are `argv[1]` and `argv[2]`, so a local run goes far past
+CI's without editing anything:
+
+```sh
+pio test -e native -f test_hdlc_fuzz                            # the CI budget
+pio test -e native -f test_hdlc_fuzz --program-arg 500000       # 500k per generator
+pio test -e native -f test_hdlc_fuzz --program-arg 500000 --program-arg 0xC0FFEE01
+```
+
+Changing `kDefaultSeed` moves the corpus for everyone, so that is a reviewable
+edit rather than something to try locally.
+
+The acceptance criterion is that no input reaches memory outside the parser, and
+the guard bands the harness puts either side of the deframer cannot show that on
+their own. The overflow a regression here would produce writes one past the end
+of `Deframer::buf`, which lands in the object's own alignment padding — still
+inside the object — so no band moves and no ASan redzone is crossed either:
+**ASan issues no memory-error report for it.**
+
+That is not to say such a regression reaches CI. A parser that writes one byte
+too many also *delivers* one byte too many, and the fuzz suite's own MTU oracle
+refuses the 501-byte frame, so plain `pio test -e native` fails on it — in all
+three stream generators:
+
+```
+test/test_hdlc_fuzz/test_main.cpp:<line>:test_fuzz_uniform_random_bytes:FAIL: the
+deframer emitted a frame of 501 bytes, over the MTU  [seed=0x7E7D5E5D
+gen=0(random-bytes) iter=47 byte=2246]  reproduce: run this test binary with
+args '15000 0x7E7D5E5D'
+```
+
+`<line>` stands where the tool prints a source position, elided here and in the
+sanitizer sample below because nothing regenerates these transcripts: a line
+number written into one goes stale the first time anything above it moves. The
+rest of each is the tool's own output, the first wrapped here to fit.
+
+What the oracle cannot do is name the write. It sees the frame that came out,
+not the byte that went in, and it only sees anything at all when the overrun
+reaches a delivered frame. **UBSan's `array-bounds` is what names the write
+itself**, which is why the gate is address *and* undefined. The
+`native_sanitize` environment extends `native` with
+`-fsanitize=address,undefined -fno-sanitize-recover=all` and
+`test_filter = test_hdlc*`, so it covers both HDLC suites and nothing else:
+
+```sh
+pio test -e native_sanitize -v
+```
+
+Use `-v`. PlatformIO's Unity reader drops every line it cannot parse as a test
+result, so without it a sanitizer abort reads only as `Program received signal
+SIGHUP`, with no reason attached. With it, the reason. A regressed bounds check
+would report:
+
+```
+src/net/HDLC.h:<line>:<col>: runtime error: index 500 out of bounds for type 'unsigned char [500]'
+```
+
+That line is the whole of the program's output: `-fno-sanitize-recover=all`
+aborts at the write, before the first frame is emitted and before Unity's
+results are flushed. The write is what gets named here, not the frame it would
+have gone on to produce.
+
+It is deliberately not wired into CI: the `tests` job runs plain
+`pio test -e native`, which already fails on a regressed bounds check as above,
+and a sanitizer step failing on a runner for toolchain reasons would cost more
+than this gate is worth. What the sanitizer run adds is the write's own name,
+and cover for an overrun whose bytes never reach a frame the oracles could
+refuse. Run it by hand whenever `HDLC.h` changes.
 
 ### LXMF vectors
 
