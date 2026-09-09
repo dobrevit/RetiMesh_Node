@@ -41,6 +41,14 @@
 static constexpr bool kScreenReadsImu = true;
 static constexpr bool kScreenDoesNot  = false;
 
+// The magnetometer's own board fact, which is a different question: does a
+// page show a bearing. True on the boards that had a compass first; false on
+// the T-Beam Supreme, whose 128x64 pages show none and whose readers are the
+// console and the status API. Named separately from the accelerometer's fact
+// because passing one where the other belongs is the mistake these tests are
+// here to fail on.
+static constexpr bool kScreenReadsCompass = true;
+
 // Power::Profile's ordinals. Written out rather than included, because
 // Power.h is Arduino code and this test is not — and because a renumbering
 // there ought to be a diff that has to be read twice.
@@ -55,6 +63,12 @@ static constexpr bool kScreens[] = { kLit, kDark };
 
 using Verdict = PeripheralPolicy::Verdict;
 
+// The two board facts arrive at update() as two types rather than two bools,
+// so that swapping them does not compile — see PeripheralPolicy.h. These
+// aliases keep the call sites below readable.
+using ImuFact     = PeripheralPolicy::ImuFollowsScreen;
+using CompassFact = PeripheralPolicy::CompassFollowsScreen;
+
 // ---------------------------------------------------------------------------
 // The rule, as pure arithmetic
 
@@ -64,9 +78,9 @@ using Verdict = PeripheralPolicy::Verdict;
 // that small. What a board whose screen reads neither gets is two tests down.
 static void test_the_rule_is_the_screen_and_only_the_screen() {
   for (uint8_t p : kProfiles) {
-    TEST_ASSERT_TRUE(PeripheralPolicy::compassRuns(kLit, p));
+    TEST_ASSERT_TRUE(PeripheralPolicy::compassRuns(kLit, p, kScreenReadsCompass));
     TEST_ASSERT_TRUE(PeripheralPolicy::imuRuns(kLit, p, kScreenReadsImu));
-    TEST_ASSERT_FALSE(PeripheralPolicy::compassRuns(kDark, p));
+    TEST_ASSERT_FALSE(PeripheralPolicy::compassRuns(kDark, p, kScreenReadsCompass));
     TEST_ASSERT_FALSE(PeripheralPolicy::imuRuns(kDark, p, kScreenReadsImu));
   }
 }
@@ -78,14 +92,16 @@ static void test_the_rule_is_the_screen_and_only_the_screen() {
 static void test_the_profile_moves_neither_part() {
   for (bool dark : kScreens) {
     for (uint8_t p : kProfiles) {
-      TEST_ASSERT_EQUAL(PeripheralPolicy::compassRuns(dark, kPerformance),
-                        PeripheralPolicy::compassRuns(dark, p));
+      TEST_ASSERT_EQUAL(PeripheralPolicy::compassRuns(dark, kPerformance, kScreenReadsCompass),
+                        PeripheralPolicy::compassRuns(dark, p, kScreenReadsCompass));
       TEST_ASSERT_EQUAL(PeripheralPolicy::imuRuns(dark, kPerformance, kScreenReadsImu),
                         PeripheralPolicy::imuRuns(dark, p, kScreenReadsImu));
-      // and with the other board fact, so a profile cannot smuggle in a
-      // difference on the boards where the screen reads nothing either
+      // and with the other board fact for each part, so a profile cannot
+      // smuggle in a difference on the boards where the screen reads nothing
       TEST_ASSERT_EQUAL(PeripheralPolicy::imuRuns(dark, kPerformance, kScreenDoesNot),
                         PeripheralPolicy::imuRuns(dark, p, kScreenDoesNot));
+      TEST_ASSERT_EQUAL(PeripheralPolicy::compassRuns(dark, kPerformance, kScreenDoesNot),
+                        PeripheralPolicy::compassRuns(dark, p, kScreenDoesNot));
     }
   }
 }
@@ -99,7 +115,7 @@ static void test_the_profile_moves_neither_part() {
 static void test_both_parts_answer_alike_where_the_screen_reads_the_imu() {
   for (bool dark : kScreens)
     for (uint8_t p : kProfiles)
-      TEST_ASSERT_EQUAL(PeripheralPolicy::compassRuns(dark, p),
+      TEST_ASSERT_EQUAL(PeripheralPolicy::compassRuns(dark, p, kScreenReadsCompass),
                         PeripheralPolicy::imuRuns(dark, p, kScreenReadsImu));
 }
 
@@ -111,16 +127,47 @@ static void test_the_imu_ignores_the_screen_where_the_screen_does_not_read_it() 
   for (bool dark : kScreens)
     for (uint8_t p : kProfiles) {
       TEST_ASSERT_TRUE(PeripheralPolicy::imuRuns(dark, p, kScreenDoesNot));
-      // the compass is unaffected by the new axis: it has no such consumer
-      TEST_ASSERT_EQUAL(!dark, PeripheralPolicy::compassRuns(dark, p));
+      // and each part answers on its own fact: the compass still follows the
+      // screen while a page shows a bearing, whatever the accelerometer's
+      // consumer does
+      TEST_ASSERT_EQUAL(!dark, PeripheralPolicy::compassRuns(dark, p, kScreenReadsCompass));
     }
+}
+
+// The same freedom for the magnetometer, which is what this board needed: a
+// compass whose readers are a console and an API must not go dark with the
+// glass. Before the fact existed the rule said !screenDark and there was
+// nothing a board could do about it.
+static void test_the_compass_ignores_the_screen_where_no_page_shows_a_bearing() {
+  for (bool dark : kScreens)
+    for (uint8_t p : kProfiles) {
+      TEST_ASSERT_TRUE(PeripheralPolicy::compassRuns(dark, p, kScreenDoesNot));
+      TEST_ASSERT_EQUAL(!dark, PeripheralPolicy::imuRuns(dark, p, kScreenReadsImu));
+    }
+}
+
+// The two facts are separate arguments and are not interchangeable. A caller
+// that passed the accelerometer's fact to the magnetometer's question — or
+// passed one of them twice, which is the shape of the mistake — gets a
+// different answer here, on the mixed combination that the T-Beam Supreme is
+// not and some future board might be.
+static void test_the_two_facts_are_not_interchangeable() {
+  for (uint8_t p : kProfiles) {
+    // a board that displays a bearing but does not turn its panel from the
+    // accelerometer: the compass sleeps with the glass, the accelerometer does
+    // not — and swapping the arguments swaps exactly these two answers
+    TEST_ASSERT_FALSE(PeripheralPolicy::compassRuns(kDark, p, kScreenReadsCompass));
+    TEST_ASSERT_TRUE(PeripheralPolicy::imuRuns(kDark, p, kScreenDoesNot));
+    TEST_ASSERT_TRUE(PeripheralPolicy::compassRuns(kDark, p, kScreenDoesNot));
+    TEST_ASSERT_FALSE(PeripheralPolicy::imuRuns(kDark, p, kScreenReadsImu));
+  }
 }
 
 // The whole point of the change, at the level the drivers see: a dark screen
 // must not suspend a part whose only readers are the console and the API.
 static void test_a_blank_leaves_that_imu_running_and_still_suspends_the_compass() {
   PeripheralPolicy pol;
-  const PeripheralPolicy::Change c = pol.update(kDark, kPerformance, kScreenDoesNot);
+  const PeripheralPolicy::Change c = pol.update(kDark, kPerformance, ImuFact{kScreenDoesNot}, CompassFact{kScreenReadsCompass});
   TEST_ASSERT_EQUAL(Verdict::Suspend, c.compass);
   TEST_ASSERT_EQUAL(Verdict::Unchanged, c.imu);
   TEST_ASSERT_FALSE(pol.compassRunning());
@@ -133,10 +180,10 @@ static void test_a_blank_leaves_that_imu_running_and_still_suspends_the_compass(
 static void test_that_imu_survives_a_hundred_cycles_of_the_screen() {
   PeripheralPolicy pol;
   for (int i = 0; i < 100; i++) {
-    const PeripheralPolicy::Change dk = pol.update(kDark, kPerformance, kScreenDoesNot);
+    const PeripheralPolicy::Change dk = pol.update(kDark, kPerformance, ImuFact{kScreenDoesNot}, CompassFact{kScreenReadsCompass});
     TEST_ASSERT_EQUAL(Verdict::Unchanged, dk.imu);
     TEST_ASSERT_TRUE(pol.imuRunning());
-    const PeripheralPolicy::Change lt = pol.update(kLit, kPerformance, kScreenDoesNot);
+    const PeripheralPolicy::Change lt = pol.update(kLit, kPerformance, ImuFact{kScreenDoesNot}, CompassFact{kScreenReadsCompass});
     TEST_ASSERT_EQUAL(Verdict::Unchanged, lt.imu);
     TEST_ASSERT_TRUE(pol.imuRunning());
   }
@@ -152,14 +199,14 @@ static void test_boot_says_nothing() {
   PeripheralPolicy pol;
   TEST_ASSERT_TRUE(pol.compassRunning());
   TEST_ASSERT_TRUE(pol.imuRunning());
-  const PeripheralPolicy::Change c = pol.update(kLit, kPerformance, kScreenReadsImu);
+  const PeripheralPolicy::Change c = pol.update(kLit, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
   TEST_ASSERT_EQUAL(Verdict::Unchanged, c.compass);
   TEST_ASSERT_EQUAL(Verdict::Unchanged, c.imu);
 }
 
 static void test_a_blank_suspends_both() {
   PeripheralPolicy pol;
-  const PeripheralPolicy::Change c = pol.update(kDark, kPerformance, kScreenReadsImu);
+  const PeripheralPolicy::Change c = pol.update(kDark, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
   TEST_ASSERT_EQUAL(Verdict::Suspend, c.compass);
   TEST_ASSERT_EQUAL(Verdict::Suspend, c.imu);
   TEST_ASSERT_FALSE(pol.compassRunning());
@@ -179,9 +226,9 @@ static void test_a_blank_suspends_both() {
 // a deployed one: it is the case the latch has to survive for hours.
 static void test_a_blank_while_already_blanked_re_issues_nothing() {
   PeripheralPolicy pol;
-  (void)pol.update(kDark, kPerformance, kScreenReadsImu);
+  (void)pol.update(kDark, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
   for (int i = 0; i < 1000; i++) {
-    const PeripheralPolicy::Change c = pol.update(kDark, kPerformance, kScreenReadsImu);
+    const PeripheralPolicy::Change c = pol.update(kDark, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
     TEST_ASSERT_EQUAL(Verdict::Unchanged, c.compass);
     TEST_ASSERT_EQUAL(Verdict::Unchanged, c.imu);
   }
@@ -191,8 +238,8 @@ static void test_a_blank_while_already_blanked_re_issues_nothing() {
 
 static void test_unblank_restores_both() {
   PeripheralPolicy pol;
-  (void)pol.update(kDark, kPerformance, kScreenReadsImu);
-  const PeripheralPolicy::Change c = pol.update(kLit, kPerformance, kScreenReadsImu);
+  (void)pol.update(kDark, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
+  const PeripheralPolicy::Change c = pol.update(kLit, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
   TEST_ASSERT_EQUAL(Verdict::Run, c.compass);
   TEST_ASSERT_EQUAL(Verdict::Run, c.imu);
   TEST_ASSERT_TRUE(pol.compassRunning());
@@ -201,10 +248,10 @@ static void test_unblank_restores_both() {
 
 static void test_a_wake_while_already_lit_re_issues_nothing() {
   PeripheralPolicy pol;
-  (void)pol.update(kDark, kPerformance, kScreenReadsImu);
-  (void)pol.update(kLit, kPerformance, kScreenReadsImu);
+  (void)pol.update(kDark, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
+  (void)pol.update(kLit, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
   for (int i = 0; i < 5; i++) {
-    const PeripheralPolicy::Change c = pol.update(kLit, kPerformance, kScreenReadsImu);
+    const PeripheralPolicy::Change c = pol.update(kLit, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
     TEST_ASSERT_EQUAL(Verdict::Unchanged, c.compass);
     TEST_ASSERT_EQUAL(Verdict::Unchanged, c.imu);
   }
@@ -215,10 +262,10 @@ static void test_a_wake_while_already_lit_re_issues_nothing() {
 static void test_a_hundred_cycles_stay_in_step() {
   PeripheralPolicy pol;
   for (int i = 0; i < 100; i++) {
-    PeripheralPolicy::Change c = pol.update(kDark, kBattery, kScreenReadsImu);
+    PeripheralPolicy::Change c = pol.update(kDark, kBattery, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
     TEST_ASSERT_EQUAL(Verdict::Suspend, c.compass);
     TEST_ASSERT_EQUAL(Verdict::Suspend, c.imu);
-    c = pol.update(kLit, kBattery, kScreenReadsImu);
+    c = pol.update(kLit, kBattery, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
     TEST_ASSERT_EQUAL(Verdict::Run, c.compass);
     TEST_ASSERT_EQUAL(Verdict::Run, c.imu);
   }
@@ -234,9 +281,9 @@ static void test_a_hundred_cycles_stay_in_step() {
 static void test_a_profile_change_moves_nothing_either_way() {
   for (bool dark : kScreens) {
     PeripheralPolicy pol;
-    (void)pol.update(dark, kPerformance, kScreenReadsImu);
+    (void)pol.update(dark, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
     for (uint8_t p : kProfiles) {
-      const PeripheralPolicy::Change c = pol.update(dark, p, kScreenReadsImu);
+      const PeripheralPolicy::Change c = pol.update(dark, p, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
       TEST_ASSERT_EQUAL(Verdict::Unchanged, c.compass);
       TEST_ASSERT_EQUAL(Verdict::Unchanged, c.imu);
     }
@@ -250,14 +297,14 @@ static void test_a_profile_change_moves_nothing_either_way() {
 // after it must still bring them back exactly once.
 static void test_a_profile_change_while_dark_does_not_lose_the_state() {
   PeripheralPolicy pol;
-  (void)pol.update(kDark, kPerformance, kScreenReadsImu);
-  (void)pol.update(kDark, kBattery, kScreenReadsImu);
+  (void)pol.update(kDark, kPerformance, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
+  (void)pol.update(kDark, kBattery, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
   TEST_ASSERT_FALSE(pol.compassRunning());
   TEST_ASSERT_FALSE(pol.imuRunning());
-  PeripheralPolicy::Change c = pol.update(kLit, kBattery, kScreenReadsImu);
+  PeripheralPolicy::Change c = pol.update(kLit, kBattery, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
   TEST_ASSERT_EQUAL(Verdict::Run, c.compass);
   TEST_ASSERT_EQUAL(Verdict::Run, c.imu);
-  c = pol.update(kLit, kBattery, kScreenReadsImu);
+  c = pol.update(kLit, kBattery, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
   TEST_ASSERT_EQUAL(Verdict::Unchanged, c.compass);
   TEST_ASSERT_EQUAL(Verdict::Unchanged, c.imu);
 }
@@ -269,14 +316,14 @@ static void test_every_ordering_of_the_two_inputs() {
   for (uint8_t first : kProfiles) {
     for (uint8_t second : kProfiles) {
       PeripheralPolicy pol;
-      (void)pol.update(kLit, first, kScreenReadsImu);
-      PeripheralPolicy::Change c = pol.update(kDark, first, kScreenReadsImu);
+      (void)pol.update(kLit, first, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
+      PeripheralPolicy::Change c = pol.update(kDark, first, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
       TEST_ASSERT_EQUAL(Verdict::Suspend, c.compass);
       TEST_ASSERT_EQUAL(Verdict::Suspend, c.imu);
-      c = pol.update(kDark, second, kScreenReadsImu);
+      c = pol.update(kDark, second, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
       TEST_ASSERT_EQUAL(Verdict::Unchanged, c.compass);
       TEST_ASSERT_EQUAL(Verdict::Unchanged, c.imu);
-      c = pol.update(kLit, second, kScreenReadsImu);
+      c = pol.update(kLit, second, ImuFact{kScreenReadsImu}, CompassFact{kScreenReadsCompass});
       TEST_ASSERT_EQUAL(Verdict::Run, c.compass);
       TEST_ASSERT_EQUAL(Verdict::Run, c.imu);
     }
@@ -292,6 +339,8 @@ int main() {
   RUN_TEST(test_the_profile_moves_neither_part);
   RUN_TEST(test_both_parts_answer_alike_where_the_screen_reads_the_imu);
   RUN_TEST(test_the_imu_ignores_the_screen_where_the_screen_does_not_read_it);
+  RUN_TEST(test_the_compass_ignores_the_screen_where_no_page_shows_a_bearing);
+  RUN_TEST(test_the_two_facts_are_not_interchangeable);
   RUN_TEST(test_a_blank_leaves_that_imu_running_and_still_suspends_the_compass);
   RUN_TEST(test_that_imu_survives_a_hundred_cycles_of_the_screen);
   RUN_TEST(test_boot_says_nothing);

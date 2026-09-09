@@ -43,13 +43,18 @@
 namespace Compass {
 
 struct Reading {
-  bool    valid       = false;   // the magnetometer answered
-  bool    levelled    = false;   // ...and the accelerometer did, so tilt was removed
-  float   headingDeg  = 0.0f;    // 0-360 from magnetic north, clockwise
-  float   tiltDeg     = 0.0f;    // how far off level the board is held
-  float   magUt[3]    = {0,0,0}; // the field as measured, hard iron included
-  float   fieldUt     = 0.0f;    // its magnitude; wildly off means something magnetic is near
-  uint8_t calibration = 0;       // 0-100: how much of a turn the offsets have seen
+  bool     valid       = false;   // the magnetometer answered
+  bool     levelled    = false;   // ...and the accelerometer did, so tilt was removed
+  float    headingDeg  = 0.0f;    // 0-360 from magnetic north, clockwise
+  float    tiltDeg     = 0.0f;    // how far off level the board is held
+  float    magUt[3]    = {0,0,0}; // the field as measured, hard iron included
+  float    fieldUt     = 0.0f;    // its magnitude; wildly off means something magnetic is near
+  uint8_t  calibration = 0;       // 0-100: how much of a turn the offsets have seen
+  // When it was taken. In the struct rather than beside it so that a reader on
+  // another task gets the reading and its age out of one critical section: a
+  // heading from one sample with an age from another is exactly the pair that
+  // would let a stale bearing look current.
+  uint32_t atMs        = 0;
 };
 
 void begin();
@@ -64,10 +69,24 @@ bool present();
 // moved. Call it from the loop; it is one short transaction.
 void poll();
 
-// The most recent sample, taken now if the last one is stale. Nothing at all
-// while the part is suspended: a heading from before the screen went dark is
-// the one answer a navigator must never be handed as a current one.
+// The most recent sample the poller took. Never a sample of its own — the bus
+// belongs to the loop (see setRunning below) — and never an old one: a reading
+// the poller has not been able to refresh for a few intervals comes back
+// invalid rather than as a heading, because the whole failure mode worth
+// guarding against here is a bearing that is steady, plausible and hours old.
+// Nothing at all while the part is suspended, for the same reason.
+//
+// So a caller gets one of three answers, and they are distinguishable: no part
+// (present() false), a suspended part (running() false), or a part that is
+// there and not answering (valid false with both of those true).
 Reading read();
+
+// How old that reading is, in seconds, or 0 when there is none. Here rather
+// than at each surface because the console and the status API both print it,
+// and "millis() minus atMs over a thousand" written twice is the one rule this
+// part would otherwise repeat per surface — the same shape as
+// Environment::ageS().
+uint32_t ageS(const Reading& r);
 
 // Put the part into measure mode, or into the suspend state it powers up in.
 // While the screen is dark nothing reads a heading, and a magnetometer left
@@ -87,13 +106,12 @@ Reading read();
 //
 // What the bus object does not protect is the receive buffer: I2cReg::read and
 // readN drain it with bus.read() *after* requestFrom has released the lock, so
-// two tasks *reading* one bus can each take some of the other's bytes. That
-// makes reads the hazard, and the board carrying this part reads its main bus
-// from one task only — the loop — so this part is not exposed either way. The
-// deferral stands because it is strictly safe and costs one flag: it keeps
-// every register write to this part on the task that already owns its reads,
-// so the day something else on this board starts reading that bus from a task
-// of its own, nothing here has to be argued again.
+// two tasks *reading* one bus can each take some of the other's bytes. Reads
+// are the hazard, and that day has arrived: the T-Beam Supreme puts this part
+// on the panel's bus beside a BME280 that the loop reads every thirty seconds,
+// which is three parts and one safe reader. So the rule is now load-bearing
+// rather than prudent — every access to this part, read or write, happens on
+// the loop, and read() hands other tasks the copy the loop already took.
 void setRunning(bool run);
 
 // Whether the part is converting. False while suspended and false while
@@ -115,9 +133,10 @@ void flush();
 #else
 namespace Compass {
 struct Reading {
-  bool    valid = false, levelled = false;
-  float   headingDeg = 0.0f, tiltDeg = 0.0f, magUt[3] = {0,0,0}, fieldUt = 0.0f;
-  uint8_t calibration = 0;
+  bool     valid = false, levelled = false;
+  float    headingDeg = 0.0f, tiltDeg = 0.0f, magUt[3] = {0,0,0}, fieldUt = 0.0f;
+  uint8_t  calibration = 0;
+  uint32_t atMs = 0;
 };
 inline void begin() {}
 inline bool present() { return false; }
@@ -125,6 +144,7 @@ inline void poll() {}
 inline Reading read() { return Reading{}; }
 inline void setRunning(bool) {}
 inline bool running() { return false; }
+inline uint32_t ageS(const Reading&) { return 0; }
 inline void flush() {}
 } // namespace Compass
 #endif // HAS_COMPASS

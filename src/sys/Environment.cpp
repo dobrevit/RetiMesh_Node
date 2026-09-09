@@ -9,6 +9,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <atomic>
 #include "Bme280Math.h"
 #include "EnvPollPolicy.h"
 #include "I2cReg.h"
@@ -56,7 +57,15 @@ bool sPresent = false;
 // accelerometer's refused-mode-write counter: complain once at a threshold
 // rather than every interval, and let the surfaces say what is actually
 // happening instead of "waiting for the first reading" for an hour.
-uint32_t sMissed = 0;
+//
+// Atomic because it leaves this task. poll() is the only writer and it runs on
+// the loop, but missedIntervals() is read by the console, the async web task
+// and the display — and a plain uint32_t shared between tasks is a data race
+// whatever its width happens to make of it on this chip. Relaxed, because the
+// whole message is the value and there is no companion state to order it
+// against: the same reasoning, and the same spelling, as this driver's
+// neighbours (Compass.cpp, Imu.cpp).
+std::atomic<uint32_t> sMissed{0};
 constexpr uint32_t kComplainAfter = 3;
 SampleGate sGate(ENV_SAMPLE_MS);
 // Which of the two passes a reading is, and what a refused trigger means.
@@ -133,9 +142,21 @@ void begin() {
   // A part whose t1 is zero has not given up a real calibration whatever the
   // transfer said: t1 is a large unsigned constant on every real device, and
   // zero is what a block of zeroes decodes to.
-  if (sCalib.t1 == 0) {
-    log_w("env: BME280 at 0x%02x returned an empty calibration (t1 = 0) — left "
-          "off", (uint8_t)ENV_ADDR);
+  //
+  // And the same test on p1 and h1, for the same reason and one that is worse.
+  // All three are unsigned in the datasheet's table and none is zero on any
+  // real part, so a zero is a transfer that half worked — but where a zero t1
+  // would give a floor temperature, a zero p1 is the *divisor* in the pressure
+  // polynomial (Bme280Math.h): the guard there returns the 300 hPa clamp, and
+  // this driver would then publish that as a valid reading for as long as the
+  // node ran. A sensor reporting the lowest pressure ever recorded, steadily,
+  // is worse than a sensor reporting nothing, because only one of them makes
+  // anybody look at it.
+  if (sCalib.t1 == 0 || sCalib.p1 == 0 || sCalib.h1 == 0) {
+    log_w("env: BME280 at 0x%02x returned an incomplete calibration "
+          "(t1=%u p1=%u h1=%u — none can be zero on a real part) — left off "
+          "rather than publishing a clamp as a reading", (uint8_t)ENV_ADDR,
+          (unsigned)sCalib.t1, (unsigned)sCalib.p1, (unsigned)sCalib.h1);
     return;
   }
 
@@ -156,7 +177,7 @@ uint32_t ageS(const Reading& r) {
   return r.valid ? (uint32_t)((millis() - r.atMs) / 1000) : 0;
 }
 
-uint32_t missedIntervals() { return sMissed; }
+uint32_t missedIntervals() { return sMissed.load(std::memory_order_relaxed); }
 
 Reading last() {
   Reading r;
@@ -187,10 +208,10 @@ void poll() {
     case EnvPollPolicy::Action::Trigger: {
       const bool ok = trigger();
       sSequence.triggered(now, ok);
-      if (!ok && ++sMissed == kComplainAfter)
+      if (!ok && sMissed.fetch_add(1, std::memory_order_relaxed) + 1 == kComplainAfter)
         log_w("env: BME280 has refused to start a conversion %u times running "
               "— it answered at boot, so this is the bus or the part rather "
-              "than the wiring", (unsigned)sMissed);
+              "than the wiring", (unsigned)kComplainAfter);
       return;
     }
     case EnvPollPolicy::Action::Collect:
@@ -204,9 +225,9 @@ void poll() {
     // Still converting after its whole window. Counted rather than ignored:
     // a part stuck busy for ever is a sensor that never reports, and the only
     // way anybody would know was a surface saying "waiting" indefinitely.
-    if (++sMissed == kComplainAfter)
+    if (sMissed.fetch_add(1, std::memory_order_relaxed) + 1 == kComplainAfter)
       log_w("env: BME280 has been busy past its conversion window %u times "
-            "running — no reading is being produced", (unsigned)sMissed);
+            "running — no reading is being produced", (unsigned)kComplainAfter);
     return;
   }
 
@@ -214,12 +235,12 @@ void poll() {
   if (!readRegs(kRegData, d, sizeof(d))) {
     // Once at the threshold, not every interval: this is on a bus the panel
     // shares and a log line per half minute for hours is its own problem.
-    if (++sMissed == kComplainAfter)
+    if (sMissed.fetch_add(1, std::memory_order_relaxed) + 1 == kComplainAfter)
       log_w("env: BME280 finishes its conversions and its data will not read "
-            "— %u intervals with no reading", (unsigned)sMissed);
+            "— %u intervals with no reading", (unsigned)kComplainAfter);
     return;
   }
-  sMissed = 0;
+  sMissed.store(0, std::memory_order_relaxed);
   const Bme280::Raw raw = Bme280::decodeRaw(d);
   // All three from one t_fine, because pressure and humidity are functions of
   // the temperature at the moment of the conversion — three readings computed

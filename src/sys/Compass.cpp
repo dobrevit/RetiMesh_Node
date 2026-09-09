@@ -4,15 +4,25 @@
 // ============================================================================
 //  Compass.cpp — see Compass.h
 //
-//  The QMC6309's register map is from QST's part and from a reading of the part
-//  itself: `I2C 0x7c` on the console answered chip id 0x90 at register 0, with
-//  both control registers at zero — which is this part saying it is suspended
-//  and nobody has configured it. That is the state begin() takes it out of.
+//  Two parts, one driver. QST's QMC6309 and QMC6310 share a register map —
+//  chip id at 0x00, six little-endian output bytes at 0x01, status at 0x09,
+//  mode in CTRL1 and range in CTRL2 — and disagree about the fields inside
+//  those two registers and about the microtesla a count is worth. So this file
+//  is the conversation and src/sys/QmcMag.h is the numbers, chosen by
+//  COMPASS_KIND, and everything below this line is the same for both.
 //
-//  Note the address. 0x7c is inside the block the I2C specification reserves
+//  The QMC6309's map is from QST's part and from a reading of the part itself:
+//  `I2C 0x7c` on the console answered chip id 0x90 at register 0, with both
+//  control registers at zero — which is this part saying it is suspended and
+//  nobody has configured it. That is the state begin() takes it out of.
+//
+//  Note that address. 0x7c is inside the block the I2C specification reserves
 //  for ten-bit addressing, which is why the bus scan had to be widened past the
 //  conventional 0x77 to see this part at all. QST put it there; the scan works
-//  around it (I2cReg.h).
+//  around it (I2cReg.h). The QMC6310N sits at 0x3c instead, in ordinary space
+//  and one address below a common OLED panel's — which on the T-Beam Supreme
+//  is exactly where the panel's driver went looking, initialised a
+//  magnetometer, and left the glass showing the previous firmware's picture.
 // ============================================================================
 #include "Compass.h"
 
@@ -24,23 +34,47 @@
 #include <Preferences.h>
 #include "I2cReg.h"
 #include "Imu.h"
+#include "MagHeading.h"
+#include "QmcMag.h"
 #include "SampleGate.h"
 #include <atomic>
 
 namespace {
 
-constexpr uint8_t kChipId   = 0x00;      // 0x90
-constexpr uint8_t kDataX    = 0x01;      // six bytes, little-endian x, y, z
-constexpr uint8_t kStatus   = 0x09;
-constexpr uint8_t kCtrl1    = 0x0A;
-constexpr uint8_t kCtrl2    = 0x0B;
+constexpr uint8_t kChipId   = QmcMag::kRegChipId;
+constexpr uint8_t kDataX    = QmcMag::kRegDataX;   // six bytes, little-endian x, y, z
+constexpr uint8_t kStatus   = QmcMag::kRegStatus;
+constexpr uint8_t kCtrl1    = QmcMag::kRegCtrl1;
+constexpr uint8_t kCtrl2    = QmcMag::kRegCtrl2;
+constexpr uint8_t kSoftReset = QmcMag::kSoftReset;
 
-// Continuous mode, the part's fastest oversampling, 200 Hz. Faster than this
-// file samples it, deliberately: the part averages internally, so what a
-// sample picks up is already settled rather than one noisy conversion.
-constexpr uint8_t kCtrl1Run = 0xD3;
-constexpr uint8_t kCtrl2Run = 0x03;
-constexpr uint8_t kSoftReset = 0x80;
+// Which part, and therefore which numbers. Both run continuously at 200 Hz —
+// faster than this file samples them, deliberately: the part is always holding
+// a conversion that finished milliseconds ago, so a sample never waits and
+// never catches one half-made. They differ in what else that byte carries,
+// which is QmcMag.h's business and not this file's.
+#if COMPASS_KIND == COMPASS_KIND_QMC6310
+constexpr uint8_t kWantChipId = QmcMag::kChipIdQmc6310;
+constexpr uint8_t kCtrl1Run   = QmcMag::kQmc6310Ctrl1Run;
+constexpr uint8_t kCtrl2Run   = QmcMag::kQmc6310Ctrl2Run;
+constexpr float   kUtPerCount = QmcMag::kQmc6310UtPerCount;
+constexpr const char* kPartName = "QMC6310";
+// This part's data-ready bit is read before a sample is believed. Only on this
+// part: the 6309 has shipped for months without it and a new gate on a
+// verified board is a new way for a working compass to report nothing. Here it
+// earns its transaction — the part powers up suspended, and its output
+// registers before the first conversion are zeroes that would otherwise be
+// taken for a reading, feed the hard-iron extremes a false centre, and pull
+// every heading afterwards towards it.
+constexpr bool kCheckDataReady = true;
+#else
+constexpr uint8_t kWantChipId = QmcMag::kChipIdQmc6309;
+constexpr uint8_t kCtrl1Run   = QmcMag::kQmc6309Ctrl1Run;
+constexpr uint8_t kCtrl2Run   = QmcMag::kQmc6309Ctrl2Run;
+constexpr float   kUtPerCount = QmcMag::kQmc6309UtPerCount;
+constexpr const char* kPartName = "QMC6309";
+constexpr bool kCheckDataReady = false;
+#endif
 
 // Mode bits clear: the state the part is in when it is first powered, and the
 // state the bench found it in before anything here had configured it — chip id
@@ -53,10 +87,7 @@ constexpr uint8_t kSoftReset = 0x80;
 // together — kCtrl1Run above is all three — so zero drops all of them. Only
 // CTRL2's range survives a suspend, and applyMode() restores both anyway, in
 // begin()'s order.
-constexpr uint8_t kCtrl1Suspend = 0x00;
-
-// Microtesla per count, from the part's scale at the range set above.
-constexpr float kUtPerCount = 0.0488f;
+constexpr uint8_t kCtrl1Suspend = QmcMag::kCtrl1Suspend;
 
 bool sUp = false;
 
@@ -167,9 +198,10 @@ void begin() {
   if (!up) { log_w("compass: bus would not start"); return; }
 
   const int id = I2cReg::read(bus(), COMPASS_ADDR, kChipId);
-  if (id != 0x90) {
-    log_i("compass: no QMC6309 at 0x%02x (chip id read %d, wanted 0x90) — "
-          "I2C on the console lists what answered", (uint8_t)COMPASS_ADDR, id);
+  if (id != (int)kWantChipId) {
+    log_i("compass: no %s at 0x%02x (chip id read %d, wanted 0x%02x) — "
+          "I2C on the console lists what answered", kPartName,
+          (uint8_t)COMPASS_ADDR, id, (unsigned)kWantChipId);
     return;
   }
 
@@ -191,9 +223,9 @@ void begin() {
   configured = configured && I2cReg::write(bus(), COMPASS_ADDR, kCtrl2, kCtrl2Run);
   configured = configured && I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Run);
   if (!configured) {
-    log_w("compass: QMC6309 answered at 0x%02x but would not take its configuration "
+    log_w("compass: %s answered at 0x%02x but would not take its configuration "
           "— left off rather than reporting a heading that cannot change",
-          (uint8_t)COMPASS_ADDR);
+          kPartName, (uint8_t)COMPASS_ADDR);
     return;
   }
   delay(10);
@@ -201,89 +233,129 @@ void begin() {
   sUp = true;
   sRunning.store(true, std::memory_order_relaxed);   // configured into measure mode, above
   loadOffsets();
-  log_i("compass: QMC6309 at 0x%02x, continuous; heading needs the board turned "
-        "around once before the hard-iron offsets mean anything", (uint8_t)COMPASS_ADDR);
+  log_i("compass: %s at 0x%02x, continuous; heading needs the board turned "
+        "around once before the hard-iron offsets mean anything", kPartName,
+        (uint8_t)COMPASS_ADDR);
 }
 
 // The last sample and when it was taken. Kept so that a caller asking for the
 // heading gets the work the poller has already done, and so that two callers in
 // the same pass do not each pay for a transaction.
+//
+// Written on the loop and read from the console task and the async web task,
+// so the copy is taken under a lock: this is forty bytes of struct, and a
+// reader that catches it half-written gets a heading from one sample with a
+// calibration and a field strength from another. A spinlock rather than a
+// mutex because the critical section is the copy itself and no reader may
+// block on a bus — the same shape and the same reasoning as Power's history
+// and Environment's reading on this very bus.
+static portMUX_TYPE sLastMux = portMUX_INITIALIZER_UNLOCKED;
 static Reading  sLast;
-static uint32_t sLastMs = 0;
+
+static void storeLast(const Reading& r) {
+  taskENTER_CRITICAL(&sLastMux);
+  sLast = r;
+  taskEXIT_CRITICAL(&sLastMux);
+}
+
+static Reading loadLast() {
+  Reading r;
+  taskENTER_CRITICAL(&sLastMux);
+  r = sLast;
+  taskEXIT_CRITICAL(&sLastMux);
+  return r;
+}
+
+// When a sample was last *attempted*, which is not when one last succeeded.
+// The cadence has to run off this one: keyed on the success instead, a part
+// that stops answering leaves the interval permanently expired and sample()
+// runs on every pass of a loop that turns over about a thousand times a second
+// — two I2C transactions each on the part that has its data-ready bit read,
+// and fifty milliseconds each of TwoWire timeout on a bus held low. That is
+// the same "the main loop becomes a 20 Hz loop" failure the mode-write retry
+// above is rationed to avoid, and the data-ready gate below makes it far
+// likelier: a part that is present, acknowledging and simply not converting
+// hits it, where before it took a broken bus.
+static uint32_t sLastTryMs = 0;
+
+// Consecutive samples that produced nothing, and one line when they add up.
+// A part that answers its address and never a reading is the failure this
+// driver's begin() calls worse than a dead one, so it is said out loud once
+// rather than left to be inferred from a heading that stopped moving.
+static uint32_t sMisses = 0;
+constexpr uint32_t kMissComplainAfter = 20;      // two seconds, at kPollMs
+
+static void noteMiss() {
+  if (sMisses < 0xFFFFFFFFu) sMisses++;
+  if (sMisses == kMissComplainAfter)
+    log_w("compass: the %s at 0x%02x has answered its address but produced no "
+          "reading %u times running — no heading is being reported, which is "
+          "what a caller now sees rather than the last one that worked",
+          kPartName, (uint8_t)COMPASS_ADDR, (unsigned)kMissComplainAfter);
+}
 
 static Reading sample() {
   Reading r;
   if (!sUp) return r;
 
+  // On the part that powers up suspended, ask whether there is a conversion to
+  // read before reading one. Its output registers hold zeroes until the first
+  // one lands, and a zero triple is not an absent reading — it is a reading at
+  // the origin, which would widen the hard-iron extremes towards a centre the
+  // field never had and pull every heading afterwards with it.
+  if (kCheckDataReady) {
+    const int st = I2cReg::read(bus(), COMPASS_ADDR, kStatus);
+    if (st < 0 || (st & QmcMag::kStatusDataReady) == 0) { noteMiss(); return r; }
+    // The overflow bit, while the byte is in hand. A clipped axis is the
+    // failure QmcMag.h names for choosing an 8 G range: it does not saturate
+    // visibly, it locks the heading, so it is worth a line rather than a
+    // silently wrong bearing. Throttled on the same counter as a miss, since a
+    // field strong enough to clip does not go away between samples.
+    if ((st & QmcMag::kStatusOverflow) != 0 && (sMisses % kMissComplainAfter) == 0)
+      log_w("compass: the %s reports an axis over its full scale — the heading "
+            "will lock rather than swing; something magnetic is against the board",
+            kPartName);
+  }
+
   uint8_t d[6];
-  if (!I2cReg::readN(bus(), COMPASS_ADDR, kDataX, d, sizeof(d))) return r;
+  if (!I2cReg::readN(bus(), COMPASS_ADDR, kDataX, d, sizeof(d))) { noteMiss(); return r; }
 
   float raw[3];
   for (int i = 0; i < 3; i++) {
-    const int16_t v = (int16_t)(d[i * 2] | (d[i * 2 + 1] << 8));
+    const int16_t v = QmcMag::axisCounts(d[i * 2], d[i * 2 + 1]);
     raw[i] = (float)v * kUtPerCount;
     r.magUt[i] = raw[i];
     if (raw[i] < sMin[i]) { sMin[i] = raw[i]; sDirty = true; }
     if (raw[i] > sMax[i]) { sMax[i] = raw[i]; sDirty = true; }
   }
   r.valid = true;
-  r.fieldUt = sqrtf(raw[0]*raw[0] + raw[1]*raw[1] + raw[2]*raw[2]);
+  r.fieldUt = MagHeading::magnitude(raw);
 
-  // The centre of the readings seen so far, subtracted. Before the board has
-  // been turned this is close to the readings themselves and the corrected
-  // values are near zero, which is why calibration is reported beside the
-  // heading rather than left for the caller to infer from a wrong answer.
-  float c[3], spread[3];
-  for (int i = 0; i < 3; i++) {
-    const float lo = sMin[i], hi = sMax[i];
-    c[i] = raw[i] - (hi + lo) * 0.5f;
-    spread[i] = hi - lo;
-  }
-  // Scored on the *worse* of the two axes the heading turns on, not the best of
-  // all three. The best of three flatters: tipping the board end over end swings
-  // Z through the whole field and would report a calibrated compass while X and
-  // Y — the pair the bearing is actually computed from — had never moved. The
-  // conservative reading is the one worth printing, because the number exists to
-  // say whether to believe the heading.
-  //
-  // Earth's field is 25-65 uT, so turning an axis right around swings it by
-  // twice the local horizontal component. Fifty microtesla of spread is what a
-  // full turn on a level surface reaches here, and what a board sitting still
-  // never approaches.
-  const float weakest = spread[0] < spread[1] ? spread[0] : spread[1];
-  const float scored = weakest / 50.0f * 100.0f;
-  r.calibration = (uint8_t)(scored > 100.0f ? 100.0f : (scored < 0.0f ? 0.0f : scored));
+  // The board's own field removed, and how much of a turn the extremes have
+  // seen. Both are arithmetic and both live in MagHeading.h, where a host can
+  // check them against a vector worked out by hand — the calibration score in
+  // particular, whose whole job is to say whether to believe the heading, and
+  // which scores the worse of the two axes a bearing turns on rather than the
+  // flattering best of three.
+  float c[3];
+  MagHeading::removeHardIron(raw, sMin, sMax, c);
+  r.calibration = MagHeading::calibrationScore(sMin, sMax);
 
   // Gravity says where level went. Without it the horizontal plane is assumed
-  // to be the board's own, which is true only while it is held flat.
+  // to be the board's own, which is true only while it is held flat — and on
+  // the T-Beam Supreme it is the only case, because that unit's accelerometer
+  // is faulty and never answers.
   float g[3];
-  if (Imu::present() && Imu::accel(g)) {
-    const float gm = sqrtf(g[0]*g[0] + g[1]*g[1] + g[2]*g[2]);
-    if (gm > 0.1f) {
-      const float ax = g[0] / gm, ay = g[1] / gm, az = g[2] / gm;
-      // Roll and pitch from gravity, then the field rotated back into the
-      // horizontal plane by them. The standard tilt-compensated form.
-      const float roll  = atan2f(ay, az);
-      const float pitch = atan2f(-ax, sqrtf(ay*ay + az*az));
-      const float sr = sinf(roll),  cr = cosf(roll);
-      const float sp = sinf(pitch), cp = cosf(pitch);
-      const float xh = c[0]*cp + c[1]*sr*sp + c[2]*cr*sp;
-      const float yh = c[1]*cr - c[2]*sr;
-      r.headingDeg = atan2f(-yh, xh) * 57.29577951f;
-      r.levelled = true;
-      // How far from flat, for a caller that wants to say "hold it level".
-      // From the magnitude of the vertical component, not its signed value:
-      // which way up the board is does not change how level it is, and this
-      // part reads -1 g on Z lying face up, so the signed form called a board
-      // flat on the bench 178 degrees tilted.
-      const float vertical = az < 0.0f ? -az : az;
-      r.tiltDeg = acosf(vertical > 1.0f ? 1.0f : vertical) * 57.29577951f;
-    }
-  }
-  if (!r.levelled) r.headingDeg = atan2f(-c[1], c[0]) * 57.29577951f;
-  if (r.headingDeg < 0.0f) r.headingDeg += 360.0f;
-  sLast = r;
-  sLastMs = millis() ? millis() : 1;
+  const MagHeading::Bearing b = (Imu::present() && Imu::accel(g))
+                              ? MagHeading::tilted(c, g)
+                              : MagHeading::flat(c);
+  r.headingDeg = b.headingDeg;
+  r.tiltDeg    = b.tiltDeg;
+  r.levelled   = b.levelled;
+  const uint32_t at = millis();
+  r.atMs = at ? at : 1;
+  sMisses = 0;
+  storeLast(r);
   return r;
 }
 
@@ -311,9 +383,10 @@ constexpr uint8_t kModeComplainAfter = 10;   // a second of them, at kPollMs
 static void noteModeFailure(void) {
   if (sModeFails < 255) sModeFails++;
   if (sModeFails == kModeComplainAfter)
-    log_w("compass: the QMC6309 at 0x%02x has refused %u mode writes in a row — the "
+    log_w("compass: the %s at 0x%02x has refused %u mode writes in a row — the "
           "part is left as it was and the retry stays on the %u ms cadence",
-          (uint8_t)COMPASS_ADDR, (unsigned)kModeComplainAfter, (unsigned)kPollMs);
+          kPartName, (uint8_t)COMPASS_ADDR, (unsigned)kModeComplainAfter,
+          (unsigned)kPollMs);
 }
 
 // The wanted mode, written here and nowhere else — on the task that owns this
@@ -336,12 +409,10 @@ static void applyMode() {
     // Dropped, and the next sample left a poll interval away, which is twenty
     // conversions at the rate above: a reader in that window is told there is
     // no heading yet, which is true, rather than one from a minute ago.
-    sLast = Reading{};
-    sLastMs = millis() ? millis() : 1;
+    storeLast(Reading{});
   } else {
     if (!I2cReg::write(bus(), COMPASS_ADDR, kCtrl1, kCtrl1Suspend)) { noteModeFailure(); return; }
-    sLast = Reading{};
-    sLastMs = 0;
+    storeLast(Reading{});
     // Nothing is flushed here. The screen goes dark every twenty seconds on a
     // handheld and the offsets are worth a minute of waiting, not a write per
     // blank — see saveOffsets() above. The moment there really is no next
@@ -362,18 +433,48 @@ void poll() {
   applyMode();                           // the screen's verdict, on this task
   if (!sRunning.load(std::memory_order_relaxed)) return;   // suspended: nothing to sample
   const uint32_t now = millis();
-  if (sLastMs && now - sLastMs < kPollMs) return;
+  // Rationed on the attempt, not on the success — see sLastTryMs.
+  if (sLastTryMs && now - sLastTryMs < kPollMs) return;
+  sLastTryMs = now ? now : 1;
   sample();
   saveOffsets();
 }
 
+// How long a reading may go unrefreshed before it stops being an answer. Five
+// intervals: long enough that a loop pass held up by something else does not
+// make the heading flicker, short enough that nobody is ever shown a bearing
+// from a part that has gone quiet.
+constexpr uint32_t kStaleMs = 5 * kPollMs;
+
 Reading read() {
   if (!sUp || !sRunning.load(std::memory_order_relaxed)) return Reading{};
-  // Fresh enough is the poller's last sample; otherwise take one now, so a
-  // caller is never handed a heading from a minute ago because the loop was
-  // busy.
-  if (sLastMs && millis() - sLastMs < kPollMs) return sLast;
-  return sample();
+  // The poller's copy, and never a sample of its own — which is a change, and
+  // the reason is the bus rather than this part. This used to take a reading
+  // when the last one was stale, on whichever task asked: the console, and now
+  // the status API. I2cReg drains a read outside the bus lock (issue 33), so
+  // two tasks *reading* one bus can each end up with some of the other's
+  // bytes, and on the T-Beam Supreme this part shares a bus with a BME280 that
+  // the main loop reads every thirty seconds. One reader is what makes that
+  // bus safe, and it is the loop.
+  //
+  // And the copy is only handed over while it is current. An earlier version
+  // of this returned it unconditionally, on the reasoning that a part which
+  // stops answering "stops updating sLast" — which is true and was exactly
+  // backwards: not updating it is what leaves the last good heading standing.
+  // sample() returns early on every failure path, so a part that resets into
+  // its suspend state, or a bus that stops carrying, would have left a
+  // plausible bearing in place for as long as the node ran, with present,
+  // running and valid all reporting health. That is the outcome begin() calls
+  // worse than a dead compass, arrived at by way of a comment that argued for
+  // it.
+  const Reading r = loadLast();
+  if (!r.valid) return Reading{};
+  if (millis() - r.atMs > kStaleMs) return Reading{};
+  return r;
+}
+
+uint32_t ageS(const Reading& r) {
+  return r.valid ? (uint32_t)((millis() - r.atMs) / 1000) : 0;
 }
 
 } // namespace Compass

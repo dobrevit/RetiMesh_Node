@@ -24,6 +24,7 @@
 #include "QrCode.h"
 #include "Pmu.h"
 #include "Gps.h"
+#include "Compass.h"
 #include "Environment.h"
 #include "Imu.h"
 #include <LittleFS.h>
@@ -2022,6 +2023,46 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     at["csma_slot_ms"]  = g_stats.csmaSlotMs;
     at["csma_band"]     = g_stats.csmaBand;
   }
+
+#if HAS_COMPASS
+  {
+    // The heading, and the three facts that decide whether to believe it —
+    // the same set the console prints, because a caller graphing a bearing
+    // needs to know it was taken level, away from iron, and after the board
+    // had been turned at least once. Without them a number that means nothing
+    // is indistinguishable from one that does.
+    //
+    // And this is a reader the part is kept awake for: on a board where no
+    // page shows a bearing, this API and the console are the only consumers,
+    // which is what COMPASS_FOLLOWS_SCREEN 0 asserts (PeripheralPolicy.h). It
+    // would be a poor thing to justify keeping a sensor running by an API that
+    // did not report it — the accelerometer's block below was added for
+    // exactly that reason.
+    JsonObject c = doc["compass"].to<JsonObject>();
+    c["present"] = Compass::present();
+    c["running"] = Compass::running();
+    const Compass::Reading r = Compass::read();
+    c["valid"]   = r.valid;
+    if (r.valid) {
+      // A tenth of a degree on the heading and the tilt, which is finer than
+      // either is accurate and coarse enough not to jitter in a graph; the
+      // field to a tenth of a microtesla, which is what says something
+      // magnetic is sitting next to the node.
+      c["heading_deg"]  = roundf(r.headingDeg * 10.0f) / 10.0f;
+      c["levelled"]     = r.levelled;
+      c["tilt_deg"]     = roundf(r.tiltDeg * 10.0f) / 10.0f;
+      c["field_ut"]     = roundf(r.fieldUt * 10.0f) / 10.0f;
+      c["calibration"]  = r.calibration;
+      JsonArray m = c["mag_ut"].to<JsonArray>();
+      for (int i = 0; i < 3; i++) m.add(roundf(r.magUt[i] * 10.0f) / 10.0f);
+      // How old it is, for the same reason the env block prints it: a caller
+      // cannot tell a fresh reading from one taken before the node moved
+      // without being told. It is never more than a few tenths of a second —
+      // past that the reading stops being offered at all (Compass.h).
+      c["age_s"] = Compass::ageS(r);
+    }
+  }
+#endif
 
 #if HAS_IMU
   {

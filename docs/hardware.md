@@ -8,7 +8,7 @@
 | `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
 | `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
 | `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, 4 MB PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot** | verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board |
-| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; BME280 driven (temperature, humidity, pressure); QMI8658 IMU on SPI — driven, and faulty on the unit tested here: LilyGO's own example finds every other part on the board and cannot find this one either; QMC6310 magnetometer fitted at 0x3c and undriven — src/sys/Compass.cpp is written for the QMC6309's register map | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button, and the BME280 reading 27.7 C, 60 % and 1012.7 hPa. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at: 0x3c is the QMC6310 magnetometer, which took an entire SH1106 initialisation without complaint because a register file accepts any write, while the glass kept the previous firmware's picture and every status field reported the display fine. The three parts on that bus are now each identified by asking them — 0x3c magnetometer, 0x3d panel, 0x77 BME280 — The 6-axis part is fitted and does not answer: its select works and something drives MISO when it is asserted, but every register reads zero, no write lands, the vendor's reset never completes, and none of it changes across all four SPI modes, two clock rates, a hand-clocked control, or every rail the AXP2101 has. LilyGO's own QMI8658 example, built from their repository with their board definition and rail init, finds the magnetometer, panel, BME280, card and GNSS and then reports "Failed to find QMI8658 - check your wiring!" — so it is a hardware fault on this unit rather than anything a firmware change reaches. Their magnetometer example does read the QMC6310N here, and their GNSS probe identifies this unit's receiver as the u-blox MAX-M10S. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here |
+| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; BME280 driven (temperature, humidity, pressure); QMI8658 IMU on SPI — driven, and faulty on the unit tested here: LilyGO's own example finds every other part on the board and cannot find this one either; QMC6310N magnetometer driven at 0x3c (heading, field strength and hard-iron calibration; uncorrected for tilt on this unit, whose accelerometer is faulty) | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button, and the BME280 reading 27.7 C, 60 % and 1012.7 hPa. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at: 0x3c is the QMC6310 magnetometer, which took an entire SH1106 initialisation without complaint because a register file accepts any write, while the glass kept the previous firmware's picture and every status field reported the display fine. The three parts on that bus are now each identified by asking them — 0x3c magnetometer, 0x3d panel, 0x77 BME280 — The 6-axis part is fitted and does not answer: its select works and something drives MISO when it is asserted, but every register reads zero, no write lands, the vendor's reset never completes, and none of it changes across all four SPI modes, two clock rates, a hand-clocked control, or every rail the AXP2101 has. LilyGO's own QMI8658 example, built from their repository with their board definition and rail init, finds the magnetometer, panel, BME280, card and GNSS and then reports "Failed to find QMI8658 - check your wiring!" — so it is a hardware fault on this unit rather than anything a firmware change reaches. Their magnetometer example does read the QMC6310N here, which is what made driving it a port rather than a research task — it is now driven by this firmware, whose register values and scale are the ones that example was running. Their GNSS probe identifies this unit's receiver as the u-blox MAX-M10S. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here |
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
@@ -17,7 +17,7 @@
 | `heltec-wp` | Heltec Wireless Paper | ESP32-S3: 8 MB flash, no PSRAM | SX1262 (TCXO, DIO2 drives the RF switch) | 2.13" e-ink (250x122, E0213A367), driven | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board |
 | `heltec-v4` | Heltec V4 (TFT) | ESP32-S3: 16 MB flash, 2 MB PSRAM in package | SX1262 (TCXO, DIO2 drives the RF switch) behind a GC1109 or KCT8103L front end | 2.4" 240x320 ST7789 with a CHSC6X touch layer | two buttons + case power button (charger /QON), DA217 accelerometer, BQ25896-ready charging state, battery ADC, GNSS on the expansion header; expansion slots for sounder/sensors (no SD) | verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder silent — possibly not fitted. The DA217 accelerometer is suspended while the screen is dark and comes back with it — a dark panel needs no orienting — and `STATUS` reports it as `imu=asleep`; the suspend register value is the kernel da280 driver's and has not yet been exercised on this board, so that line is what confirms it took |
 | `t-deck` | LilyGO T-Deck | ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package | SX1262 (TCXO at 1.8 V, DIO2 drives the RF switch), no amplifier | 2.8" 320x240 ST7789 with a GT911 touch layer | physical keyboard on its own microcontroller (I2C), trackball with a click on the BOOT pin, microSD, battery ADC, speaker on a MAX98357A over I2S (driven: the boot and message chimes), microphone on an ES7210 (not driven — it costs GPIO 0, which is the trackball's click); GNSS on the Plus only | verified on hardware: SX1262 on air (receiving announces from another node), Reticulum transport, panel with correct colours and text, its stepped backlight, touch landing where the finger is, keyboard, trackball, microSD on the shared bus, GNSS fix and clock, Wi-Fi AP, portal and console, and the speaker — the boot chime was heard on the bench. The speaker costs about 5.4 KB of internal RAM for its task and I2S DMA, on a board that has little to spare, and its task now carries the tightest stack of any on the board. This is a Plus — a plain T-Deck has neither the receiver nor the touch layer. The battery divider reads the system rail on USB and so reports no cell; unverified on battery |
-| `thinknode-m9` | Elecrow ThinkNode M9 | ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package | Semtech LR1110 (TCXO at 3.3 V, the chip drives its own antenna switch from DIO5/DIO6) | 2.4" 320x240 ST7789, no touch layer | full keyboard on its own microcontroller (I2C, register-addressed) with six shortcut keys wired to the shell's screens, ATGM336H GNSS, microSD, sounder, PCF8563 RTC, QMI8658 IMU, QMC6309 magnetometer, 2300 mAh cell behind an LGS4056 charger; PPP over the CH340 bridge | verified on hardware: LR1110 online and on air (boot self-test TxDone in 7 ms through the chip's own antenna switch, and a packet received), panel, keyboard, microSD on the shared bus (15.6 GB SDHC, Reticulum store on the card), GNSS talking (308 sentences, no fix indoors), Wi-Fi AP, mDNS, portal and Reticulum transport. Two caveats: the transceiver's own firmware is 0x0303, old enough that RadioLib has to skip a command for it (see the env's RadioLib pin) and old enough to predate Semtech's security fixes; and the panel's rotation and the battery divider are taken from the sources rather than measured. The PCF8563 clock is driven: it was already holding correct UTC before this firmware ever wrote it, seeds the system clock at boot, and is re-seeded from the receiver — so this board's time is right indoors with no fix, where every other board here counts from 1970 until the sky clears. The QMI8658 accelerometer and QMC6309 magnetometer are driven — both identified by register dump before a driver was written (WHO_AM_I 0x05, chip id 0x90) — and report a tilt-compensated heading on the console. The heading's hard-iron offsets need the board turned around once before they mean anything, which STATUS reports as cal=; the board's own field is about 385 uT, several times the Earth's and almost all of it perpendicular to the panel, so that correction is not optional here — measured to be the board's rather than the bench's by moving it off a laptop it was resting on, which changed the reading by under a microtesla. The offsets are kept in NVS across restarts for the same reason. Both parts are suspended while the screen is dark and come back with it — nothing reads a heading or a tilt off a blanked panel — so `STATUS` on a node whose display has timed out reports `compass=asleep` rather than a bearing, and any key or button press brings it back within a poll |
+| `thinknode-m9` | Elecrow ThinkNode M9 | ESP32-S3: 16 MB flash, 8 MB octal PSRAM in package | Semtech LR1110 (TCXO at 3.3 V, the chip drives its own antenna switch from DIO5/DIO6) | 2.4" 320x240 ST7789, no touch layer | full keyboard on its own microcontroller (I2C, register-addressed) with six shortcut keys wired to the shell's screens, ATGM336H GNSS, microSD, sounder, PCF8563 RTC, QMI8658 IMU, QMC6309 magnetometer, 2300 mAh cell behind an LGS4056 charger; PPP over the CH340 bridge | verified on hardware: LR1110 online and on air (boot self-test TxDone in 7 ms through the chip's own antenna switch, and a packet received), panel, keyboard, microSD on the shared bus (15.6 GB SDHC, Reticulum store on the card), GNSS talking (308 sentences, no fix indoors), Wi-Fi AP, mDNS, portal and Reticulum transport. Two caveats: the transceiver's own firmware is 0x0303, old enough that RadioLib has to skip a command for it (see the env's RadioLib pin) and old enough to predate Semtech's security fixes; and the panel's rotation and the battery divider are taken from the sources rather than measured. The PCF8563 clock is driven: it was already holding correct UTC before this firmware ever wrote it, seeds the system clock at boot, and is re-seeded from the receiver — so this board's time is right indoors with no fix, where every other board here counts from 1970 until the sky clears. The QMI8658 accelerometer and QMC6309 magnetometer are driven — both identified by register dump before a driver was written (WHO_AM_I 0x05, chip id 0x90) — and report a tilt-compensated heading on the console. **That heading changed direction** when the T-Beam Supreme's magnetometer was driven: the tilt correction had gravity's sign convention wrong and returned a bearing reflected about north for a board lying flat — steady, turning with the board, and mirrored. It is fixed and pinned by test_mag_heading, and this board's heading wants re-checking against a known bearing. The heading's hard-iron offsets need the board turned around once before they mean anything, which STATUS reports as cal=; the board's own field is about 385 uT, several times the Earth's and almost all of it perpendicular to the panel, so that correction is not optional here — measured to be the board's rather than the bench's by moving it off a laptop it was resting on, which changed the reading by under a microtesla. The offsets are kept in NVS across restarts for the same reason. Both parts are suspended while the screen is dark and come back with it — so `STATUS` on a node whose display has timed out reports `compass=asleep` rather than a bearing, and any key or button press brings it back within a poll. That is this board's own setting (COMPASS_FOLLOWS_SCREEN 1) rather than a rule about consumers: no page here shows a bearing either, and the reason the M9 sleeps its parts is that it is a handheld on a cell whose standby current with a magnetometer converting at 200 Hz has never been measured. A caller polling /api/status on a dark M9 is told asleep, and loading a web page does not wake the glass |
 <!-- boards.json:end -->
 
 ### The Wireless Stick's memory
@@ -485,10 +485,37 @@ phantom when the panel turned out to be at 0x3d, was never a phantom: it was thi
 magnetometer, which accepted an entire SH1106 initialisation and a kilobyte of framebuffer
 per refresh without complaint, because a register file will take any write you send it.
 
-It stays undriven, but it is now a specified job rather than an unknown: `src/sys/Compass.cpp`
-is written against the QMC6309 — chip id 0x90, and a register map read off that part — and a
-QMC6310 answers 0x80 with a different layout. `I2C 0x3c` on the console dumps it, which is
-how the M9's map was established.
+**And it is driven — which turned up a defect in the heading itself.** Driving a second part
+meant lifting the bearing arithmetic out of the driver into `src/sys/MagHeading.h`, where a
+host can check it, and the first test written against the stated convention failed: the tilt
+compensation had gravity's sign convention backwards. The standard form is derived for an
+accelerometer reading +1 g on the axis pointing down, these parts read −1 g lying face up,
+and fed that the rotation returned a bearing **reflected about north** — 315° where the same
+field read flat gives 45°. Steady, turning with the board, and wrong. It had shipped that way
+on the ThinkNode M9 since its compass was written, because nothing compared the corrected and
+uncorrected paths in the one case where they must agree. The Supreme never hit it (no working
+accelerometer, so it always takes the flat path), the M9 always did, and `test_mag_heading`
+now pins the agreement all the way round the compass. **The M9's heading therefore changes
+direction with this branch and wants re-checking against a known bearing.**
+
+`src/sys/Compass.cpp` had been written against the QMC6309 — chip id
+0x90 and that part's field layout — so the two parts are now one driver and two sets of
+numbers in `src/sys/QmcMag.h`, chosen by `COMPASS_KIND`. The 6310's fields are QST's, taken
+from the driver LilyGO ship for this board, and the configuration is the one their example
+was running when it read this very part: continuous at 200 Hz, 8 G, no oversampling. The
+counts that example printed beside its microtesla — 96 → 2.56 µT, −1280 → −34.13,
+−4450 → −118.67 — are the vectors `test/test_qmc_mag` pins the scale against, so a range
+field one value off fails on a host instead of quietly scaling every reading by four.
+
+Two things are specific to this board. The heading is **not levelled**: tilt correction wants
+gravity from the accelerometer, and this unit's is faulty, so every reading reports
+`levelled=false` and a heading computed as if the board were flat — which for a pole-mounted
+gateway it nearly is. And the part **does not follow the screen**: no page here shows a
+bearing, so its readers are the console and the status API, which are asked of a dark node as
+often as not (`COMPASS_FOLLOWS_SCREEN 0`). That is the same argument the accelerometer's rule
+turns on, and it is now one board fact feeding one rule rather than two rules that happen to
+agree — a compass left running in the dark also keeps the accelerometer up, because it still
+wants gravity, which is why `IMU_FOLLOWS_SCREEN` is derived from it.
 
 **And the accelerometer is fitted and does not answer.** Two earlier versions of this page
 got that wrong in opposite directions, so here is what was measured rather than concluded.
@@ -530,8 +557,8 @@ driver reports the absence honestly, with the byte it read.
 Two things that run confirmed in passing. The **magnetometer is known good**, not merely
 present: their `QMC63xx_GetDataExample` streams sensible fields from it on this unit (about
 123 µT total, a steady heading, and a large Z offset, which is what their calibration
-example is for). So driving it here is porting a register map known to fit the part —
-`SensorQMC6310.hpp` is the reference — rather than finding out whether it works. And this
+example is for). That is what made driving it a port rather than a research task, and it is
+now driven — see the magnetometer section above. And this
 unit is a **MAX-M10S**: their code probes for an L76K, fails, and says "UBlox GNSS init
 succeeded". That is a fact about one board rather than the model, which is why `GPS_UBX`
 stays 0 here — a UBX default would break every L76K unit sold.
@@ -650,8 +677,8 @@ things had to work:
    for it again. The lesson is the cheap one: three parts answered and only two had been
    asked what they were.
 
-Three more items come from the change that drove the accelerometer and the BME280, and
-one of them was a one-way door:
+Four more items come from the changes that drove the accelerometer, the BME280 and the
+magnetometer, and one of them was a one-way door:
 
 9. **The accelerometer — fitted, selected, silent, and still open.** `STATUS` reads
    `imu=no` and the boot log says `WHO_AM_I read 0x3e, wanted 0x05`. What that is *not* is a
@@ -664,12 +691,28 @@ one of them was a one-way door:
    change reaches. What is still open belongs to a unit whose part answers: that `imu=yes`
    survives the panel going dark, because a reading of `asleep` would mean
    `IMU_FOLLOWS_SCREEN` was derived wrongly.
-10. **The BME280 reads plausibly — done.** 27.74 °C, 60.2 % and 1012.69 hPa on the first
+10. **The magnetometer reads a heading — new, and unproven by this firmware.** LilyGO's
+    example read this part before ours did, so the part and the numbers are known; what has
+    never run on hardware is *our* driver against it. `STATUS` should show
+    `compass heading=… levelled=no tilt=0 field=…uT cal=…%` and `/api/status` a matching
+    `compass` object. Then: turn the node slowly through a full circle and watch `cal=`
+    climb — it scores the worse of the two axes a bearing is computed from, so end-over-end
+    tipping will not fill it. Turning the node **clockwise should make the heading
+    increase**; if it decreases, the axis signs need register 0x29 (SIGN), which LilyGO's
+    own driver declares and never writes. Field strength will read far above the Earth's
+    25-65 µT until the offsets are learned — this board's own iron is about 120 µT of it.
+    Two more: `compass=asleep` should **never** appear on this board (it does not follow the
+    screen), and a restart should keep the calibration, since the extremes are held in NVS.
+    And one that is easiest to check by *not* seeing it: a reading more than half a second
+    old stops being offered, so if the part ever stops answering the console must say
+    `compass=no-answer` rather than going on printing the last heading that worked. `age=`
+    on that line should read 0 the whole time it is healthy.
+11. **The BME280 reads plausibly — done.** 27.74 °C, 60.2 % and 1012.69 hPa on the first
     boot that had it. Still open, and the only one of the three with an independent
     reference: agreeing that pressure with a local weather station to within a couple of hPa,
     which is what would catch a transcription error in the polynomial that no host test can
     see.
-11. **The A/B layout is installed — the update itself is not yet proved.** The board has been
+12. **The A/B layout is installed — the update itself is not yet proved.** The board has been
     written whole over a cable and is running `partitions/ota_8mb.csv`, so the one-way door
     has been walked through. What has still never happened on this board is an update being
     installed into the other slot and booted from it, which is the half of A/B that matters.

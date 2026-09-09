@@ -102,6 +102,14 @@ constexpr uint32_t kSpiHz = 1000000;
 // a fact about nothing.
 #define IMU_AT_FMT "on SPI (select GPIO %d)"
 #define IMU_AT_ARG PIN_IMU_CS
+// Where to look next, and it is not the I2C scanner: nothing on this bus has an
+// address, so the console's scan cannot see this part however hard it looks.
+// What is worth checking is named instead — and the card is the control,
+// because it is on these same three wires, so a card that mounts says the bus,
+// the pins and the shared host are all good and leaves the select and the part.
+#define IMU_HINT "the console's I2C scan cannot see an SPI part — check the " \
+                 "select and the part; if the card on these same wires mounts, " \
+                 "the bus and the pins are not the problem"
 
 inline SPIClass& spi() {
   return SpiBus::get(IMU_SPI_BUS, PIN_IMU_SCK, PIN_IMU_MISO, PIN_IMU_MOSI);
@@ -142,6 +150,7 @@ bool writeReg(uint8_t reg, uint8_t val) {
 
 #define IMU_AT_FMT "at 0x%02x"
 #define IMU_AT_ARG sAddr
+#define IMU_HINT "I2C on the console lists what answers there"
 
 inline TwoWire& bus() { return I2cReg::busFor(PIN_I2C_SDA, PIN_I2C_SCL, I2C_HZ); }
 
@@ -256,8 +265,7 @@ void begin() {
     // is a part that is not there or not selected; anything else is a part
     // that is talking and being misread, and those want different work.
     log_i("imu: no QMI8658 answers " IMU_AT_FMT " — WHO_AM_I read 0x%02x, wanted 0x05; "
-          "I2C on the console lists what answers there",
-          IMU_AT_ARG, (unsigned)(who & 0xFF));
+          IMU_HINT, IMU_AT_ARG, (unsigned)(who & 0xFF));
     sAddr = 0;
     return;
   }

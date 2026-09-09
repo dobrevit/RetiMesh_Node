@@ -1083,6 +1083,51 @@
 #ifndef COMPASS_ADDR
   #define COMPASS_ADDR      0x7C          // the QMC6309's, inside the reserved block
 #endif
+// Which of QST's magnetometers it is. They share a register map and disagree
+// about the bits inside it and about the counts per microtesla, so the driver
+// is one file and the numbers are two sets (src/sys/QmcMag.h). The default is
+// the QMC6309, because that is the part the first board here carried and a
+// board that says nothing should keep behaving as it did.
+#define COMPASS_KIND_QMC6309 0
+#define COMPASS_KIND_QMC6310 1
+#ifndef COMPASS_KIND
+  #define COMPASS_KIND      COMPASS_KIND_QMC6309
+#endif
+#if HAS_COMPASS && COMPASS_KIND != COMPASS_KIND_QMC6309 && \
+                   COMPASS_KIND != COMPASS_KIND_QMC6310
+  #error "COMPASS_KIND must be COMPASS_KIND_QMC6309 or COMPASS_KIND_QMC6310"
+#endif
+// Whether this board suspends its magnetometer when the glass goes dark.
+//
+// Stated as the behaviour and not as a claim about consumers, because the
+// obvious claim would be false: **no board here displays a bearing.** Nothing
+// in src/ui reads the compass, and its only readers on every board are the
+// console and the status API. So the honest reading of the two values is:
+//
+//   1  the part sleeps with the screen. The ThinkNode M9's value, and it is
+//      there because that is what the M9 has always done — a handheld on a
+//      cell, blanking every twenty seconds, whose standby current with a
+//      magnetometer converting at 200 Hz has never been measured. Changing it
+//      is a power question with a bench answer, not a tidy-up, and a caller
+//      polling /api/status on a dark M9 is told "asleep" (docs/api.md says so).
+//   0  the part runs whatever the screen is doing. The T-Beam Supreme's value:
+//      a mains-or-solar gateway with a fixed panel, where suspending would
+//      hand "asleep" to every caller the compass has.
+//
+// Defaults to 1, so a board that says nothing keeps the shipped behaviour.
+// PeripheralPolicy.h holds the rule this feeds; nothing in this file decides
+// anything with it.
+#ifndef COMPASS_FOLLOWS_SCREEN
+  #define COMPASS_FOLLOWS_SCREEN 1
+#endif
+// A board with no glass cannot have a page that reads the heading, so the
+// default would suspend its magnetometer for whatever the screen state of a
+// screenless node is taken to be — and leave it there. Caught here rather than
+// discovered as a compass that reports "asleep" for ever.
+#if HAS_COMPASS && COMPASS_FOLLOWS_SCREEN && !HAS_DISPLAY
+  #error "COMPASS_FOLLOWS_SCREEN on a board with no display: no page can read a \
+heading there, so say COMPASS_FOLLOWS_SCREEN 0 and let the console and the API have it"
+#endif
 
 // The air around the node rather than the node: temperature, pressure and
 // humidity from a BME280 where a board carries one. Named ENV rather than
@@ -1118,15 +1163,17 @@
   #define ENV_SAMPLE_MS     30000
 #endif
 
-// Whether the screen is what reads the accelerometer, which is what decides
-// whether suspending it with the screen costs anything (PeripheralPolicy.h).
-// Two consumers make it true: a panel that turns itself from the part, and a
-// magnetometer that needs gravity to level a heading — and that magnetometer
-// is suspended with the screen itself, so its demand goes dark with it. A
-// board with neither reads the part from the console and the status API, which
-// are asked with the glass dark as often as not.
+// Whether this board suspends its accelerometer when the glass goes dark, in
+// the same shape as COMPASS_FOLLOWS_SCREEN above. Two things make it worth
+// doing: a panel that turns itself from the part, and a magnetometer that
+// needs gravity to level a heading *and is itself suspended with the screen* —
+// that second clause is what makes the demand for gravity go dark too. A
+// compass that keeps running with the glass off wants gravity with the glass
+// off, so it holds the accelerometer up with it, which is why the derivation
+// below reads the compass's fact rather than merely HAS_COMPASS.
 #ifndef IMU_FOLLOWS_SCREEN
-  #define IMU_FOLLOWS_SCREEN (DISPLAY_AUTO_ROTATE || HAS_COMPASS)
+  #define IMU_FOLLOWS_SCREEN (DISPLAY_AUTO_ROTATE || \
+                              (HAS_COMPASS && COMPASS_FOLLOWS_SCREEN))
 #endif
 // The LVGL shell on colour boards: set by the env, because it is a build
 // decision (the toolkit is a library dependency), not a board fact.

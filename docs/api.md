@@ -394,8 +394,16 @@ only the T-Beam Supreme:
 
 `present` and `valid` are two facts and a caller needs both. A fitted part that
 has not finished its first conversion reports `present: true` with no readings
-at all, which is a different thing from a board with no sensor — and it lasts
-at most one sampling interval. The readings are rounded to 0.01 °C, 0.1 % and
+at all, which is a different thing from a board with no sensor.
+
+That state is **not** limited to one sampling interval, and a client must not
+render it as "starting up". A part that answered at boot and then stops — a
+refused trigger, a conversion that never finishes, a data read that keeps
+failing — reports `present: true, valid: false` for as long as the fault lasts,
+and the response then carries `missed_intervals`: the number of sampling
+intervals that have produced no reading. Zero or one is the first half minute;
+anything more is a fault, and the field exists so that a caller can say which
+without waiting to find out. It is absent once a reading lands. The readings are rounded to 0.01 °C, 0.1 % and
 0.01 hPa — the part's *resolution*, which is finer than its accuracy: the
 datasheet's tolerances are ±1 °C, ±3 % and ±1 hPa, so the last digit of each is
 real precision and not a real guarantee. Do not read a 0.01 °C change between
@@ -404,6 +412,44 @@ seconds and sleeps in between: without it a reading taken before the node was
 moved is indistinguishable from one taken now. There is no setting — the sensor
 has no switch, because it costs a microamp asleep and about ten milliseconds of
 one bus every half minute.
+
+`compass` appears on boards with a magnetometer — the ThinkNode M9's QMC6309
+and the T-Beam Supreme's QMC6310N:
+`{"present":true,"running":true,"valid":true,"heading_deg":271.4,
+"levelled":false,"tilt_deg":0.0,"field_ut":123.5,"calibration":38,
+"mag_ut":[2.6,-34.1,-118.7],"age_s":0}`.
+
+Read the qualifiers before the heading, because a magnetometer reports a number
+under every condition including the ones where the number is meaningless.
+`calibration` is 0-100 and says how much of a turn the hard-iron offsets have
+seen: a magnetometer measures the Earth's field plus the board's own, and the
+board's own is removed by watching the extremes each axis reaches, which needs
+the node turned around at least once. Below about 50 the heading is not worth
+plotting. `levelled` says whether gravity was available to project the field
+onto the horizontal plane — **false** where there is no accelerometer to ask,
+and the heading is then computed as if the board were flat, which for a
+pole-mounted gateway it nearly is and for anything held in a hand it is not.
+`tilt_deg` is how far off flat the board is, and is 0 whenever `levelled` is
+false rather than a measurement of nothing. `field_ut` is the magnitude as
+measured, hard iron included: the Earth's is 25-65 µT, so a much larger figure
+means something magnetic is close — the Supreme's own board reads about 120 µT.
+`mag_ut` is the raw vector in the board's own axes.
+
+`present` and `running` are separate facts, as with `imu`: a part suspended
+along with the screen reports `present: true, running: false` and no reading,
+which is not the same as a part that is not fitted. **Which boards suspend it
+is a board decision** (`COMPASS_FOLLOWS_SCREEN`): the T-Beam Supreme does not,
+so its compass answers whenever the node is up; the ThinkNode M9 does, so a
+poll of a dark M9 returns `running: false` and no heading, and loading this API
+does not wake its screen. A reading also stops being offered once it is a few
+poll intervals old — `valid` goes false rather than a bearing going stale —
+so a part that stops answering reads as no heading rather than a heading that
+never moves.
+
+The heading is **magnetic**, not true north. The difference is declination, up
+to tens of degrees depending where the node is, and correcting it needs a world
+model this firmware does not carry — so it is left to the caller rather than
+quietly folded in wrong.
 
 `gps` appears on boards with a receiver:
 `{"enabled":true,"fix":true,"quality":1,"satellites":7,"sentences":1204,

@@ -278,13 +278,15 @@
 // begin() gets there first is a thing to get wrong rather than a thing to rely
 // on — as an earlier draft of this comment did, naming the card, when
 // main.cpp has Imu::begin() at 267 and sdCard.begin() at 277. And the part
-// does *not* follow the screen here, unlike on the two boards that had
-// accelerometers first: nothing on this board reads it for a heading or for
-// panel rotation, so its only readers are the console and the status API,
-// which are asked with the glass dark as often as not — a derivation, not a
-// board opinion: IMU_FOLLOWS_SCREEN is DISPLAY_AUTO_ROTATE || HAS_COMPASS, and
-// both are 0 here (PeripheralPolicy.h). The magnetometer below is what would
-// change that, and it would change it by itself.
+// does *not* follow the screen here, unlike on the board that had one first:
+// nothing on this board reads it for panel rotation, and the magnetometer that
+// would want gravity from it is not suspended with the glass either, so its
+// only readers are the console and the status API — which are asked with the
+// glass dark as often as not. A derivation rather than a board opinion:
+// IMU_FOLLOWS_SCREEN is DISPLAY_AUTO_ROTATE || (HAS_COMPASS &&
+// COMPASS_FOLLOWS_SCREEN), and the pair below sets the second half to 0
+// (Config.h, PeripheralPolicy.h). Turn COMPASS_FOLLOWS_SCREEN on and this
+// follows it, which is the point of deriving it rather than stating it.
 //
 // **The part is fitted on the unit this was brought up on and does not answer
 // over SPI.** Read that carefully, because two earlier versions of this
@@ -370,7 +372,7 @@
 #define ENV_ADDR            0x77
 
 // ---------------------------------------------------------------------------
-// Fitted, not driven: the magnetometer, and it took some finding
+// Magnetometer — a QMC6310N, and it took some finding
 // ---------------------------------------------------------------------------
 // It is at **0x3c**, on the panel's bus, and it reports chip id 0x80 in
 // register 0 — a QMC6310, not the QMC6309 the M9 carries and not at any of the
@@ -385,22 +387,38 @@
 // without complaint — because a magnetometer's registers will take any write
 // — while the glass, at 0x3d, kept the previous firmware's picture.
 //
-// Off because src/sys/Compass.cpp is written against the QMC6309: chip id 0x90
-// and a register map read off that part. A QMC6310 answers 0x80 and lays its
-// registers out differently, so turning this on wants that map established
-// first — `I2C 0x3c` on the console dumps it, which is how the M9's was
-// settled. Which makes this a specified piece of work rather than an unknown.
+// It is driven, and the numbers it is driven with are not guesses. The part is
+// known good on this unit before any of this firmware touched it: LilyGO's own
+// QMC63xx_GetDataExample read it here and streamed sensible fields — about
+// 123 uT total with a large offset on Z, which is what their calibration
+// example exists for — in continuous mode at 200 Hz, 8 G, no oversampling.
+// Those are the register values src/sys/QmcMag.h calls verified, and the
+// counts that example printed beside its microtesla are the test vectors that
+// pin this board's scale (test/test_qmc_mag).
 //
-// And the part is known good, not merely present: LilyGO's own
-// QMC63xx_GetDataExample reads it on this unit and streams sensible fields
-// (about 123 uT total, a steady heading, a large Z offset that is what their
-// calibration example exists for). So the work is porting a register map that
-// is known to fit this part — SensorLib's SensorQMC6310.hpp is the reference —
-// rather than finding out whether the part works.
-#define HAS_COMPASS         0
+// Two things about the reading on this board specifically.
+//
+// It is not levelled, and it says so. Tilt correction wants gravity from the
+// accelerometer, and the 6-axis part above is faulty on this unit — so every
+// reading here comes back with `levelled=false` and a heading computed as if
+// the board were flat, which for a gateway bolted to a pole it very nearly is.
+// A unit whose accelerometer answers gets the corrected heading with no change
+// here.
+//
+// And it does not follow the screen. Nothing on this board's 128x64 pages
+// shows a bearing: the readers are the console and the status API, which are
+// asked of a dark node as often as not, so suspending the part with the glass
+// would hand "asleep" to every caller it has. That is the same argument the
+// accelerometer's own rule turns on, and it is stated once as a board fact
+// rather than twice as a rule (COMPASS_FOLLOWS_SCREEN, PeripheralPolicy.h) —
+// which also keeps IMU_FOLLOWS_SCREEN honest, since a compass that runs in the
+// dark would otherwise hold up an accelerometer that had gone to sleep.
+#define HAS_COMPASS         1
+#define COMPASS_KIND        COMPASS_KIND_QMC6310
 // Recorded so the next reader does not repeat the scan: 0x3c is the
 // magnetometer, 0x3d is the panel, 0x77 is the BME280.
 #define COMPASS_ADDR        0x3C
+#define COMPASS_FOLLOWS_SCREEN 0
 
 // ---------------------------------------------------------------------------
 // Button

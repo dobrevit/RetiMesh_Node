@@ -473,16 +473,21 @@ static void doStatus() {
       // of a second after a wake, before the resumed part has been sampled
       // once — applyMode() drops the stale reading and the freshness gate hands
       // back the empty one until the next poll — or a read that keeps failing
-      // on a part that is sitting right there. A two-way ternary called both of
-      // those "absent", which sends somebody looking at the wiring of a fitted,
-      // running part, indefinitely.
+      // on a part that is sitting right there, which now includes a part that
+      // answered until a moment ago and has stopped: a reading more than a few
+      // poll intervals old stops being offered rather than going stale
+      // (Compass.h), so this line says "no-answer" where it used to have
+      // printed the last heading that worked, for ever. A two-way ternary
+      // called both of those "absent", which sends somebody looking at the
+      // wiring of a fitted, running part, indefinitely.
       dataf("STATUS", "compass=%s",
             !Compass::present()  ? "absent"
           : !Compass::running()  ? "asleep"
           :                        "no-answer");
     } else {
-      dataf("STATUS", "compass heading=%.1f levelled=%s tilt=%.0f field=%.1fuT cal=%u%%",
-            c.headingDeg, c.levelled ? "yes" : "no", c.tiltDeg, c.fieldUt, c.calibration);
+      dataf("STATUS", "compass heading=%.1f levelled=%s tilt=%.0f field=%.1fuT cal=%u%% age=%us",
+            c.headingDeg, c.levelled ? "yes" : "no", c.tiltDeg, c.fieldUt,
+            c.calibration, (unsigned)Compass::ageS(c));
       dataf("STATUS", "compass mag=%.1f,%.1f,%.1f uT", c.magUt[0], c.magUt[1], c.magUt[2]);
     }
   }
