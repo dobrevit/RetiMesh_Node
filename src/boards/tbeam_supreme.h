@@ -170,6 +170,14 @@
 // DCDC1 is the system rail this chip is powering the ESP32 from, so it is left
 // alone: on the T-Beam it is the display's rail and gets switched on, and here
 // switching it is switching the board off.
+//
+// LilyGO's pin poster (assets/image/T-BEAM-S3-Supreme.jpg) has the next two
+// the other way round — "PMU SDA: IO41, SCL: IO42" — and it is wrong, which
+// is worth writing down because it is the kind of error that cannot be half
+// right: SDA and SCL are not interchangeable, and the AXP2101 and the clock
+// both answer with them this way round. The same poster puts the RTC on the
+// panel's bus at 17/18; the PCF8563 answers at 0x51 on this one. Take that
+// poster for the parts list and this header for the wiring.
 #define HAS_PMU             1
 #define PIN_PMU_SDA         42
 #define PIN_PMU_SCL         41
@@ -273,17 +281,45 @@
 // both are 0 here (PeripheralPolicy.h). The magnetometer below is what would
 // change that, and it would change it by itself.
 //
-// **Not fitted on the unit this was brought up on.** Nothing answers at the
-// select on SPI — the probe reads a floating MISO, a byte that changes with
-// the clock phase and repeats, rather than a device — and nothing answers at
-// the QMI8658's I2C addresses either, which the bus scan would have found: it
-// covers 0x08-0x7f and the census on the panel's bus is the magnetometer, the
-// panel and the BME280, with only the PMU and the clock on the other. So this
-// board ships in variants and this one came without the 6-axis part.
+// **The part is fitted on the unit this was brought up on and does not answer
+// over SPI.** Read that carefully, because two earlier versions of this
+// comment got it wrong in opposite directions. The part is there: LilyGO's
+// silkscreen names it, a chip sits under the name, and their wiki and pin
+// poster both put a QMI8658 on the card's SPI bus at select 34. What it will
+// not do is talk.
 //
-// Left enabled all the same, because that is what the driver is for: it reads
-// the chip id, does not find one, says so with the value it read, and costs
-// nothing further. A unit that has the part needs no change here.
+// What was measured, so nobody has to take it on trust:
+//
+//   * the select works — GPIO 34 reads back what it is driven to, and it is
+//     the *only* pin that changes anything: 33, 48, 21 and 14 each leave MISO
+//     at its pull-up;
+//   * something is selected by it — MISO carries a stiff external pull-up and
+//     reads a hard 1 against an internal pull-down, and goes to a hard 0 the
+//     moment 34 is asserted, so a part is there and driving the line;
+//   * and it reads as zeroes. Every register in 0x00-0x0f, the status bytes,
+//     the temperature and 0x4d come back 0x00, but for a fixed 0x3e at the
+//     register-0 frame and 0x24 at the 0x0a frame — the same bits in all four
+//     SPI modes, at 1 MHz and at 100 kHz, and identical when the clock is
+//     bit-banged by hand instead of by the peripheral;
+//   * no write lands: CTRL1 written 0x40 reads back 0x00, and the vendor's own
+//     reset — 0xb0 into 0x60, then poll 0x4d for 0x80 — never completes;
+//   * and it is not power. Every AXP2101 rail was read back on the bench and
+//     then every one of them switched on, including the three LilyGO's init
+//     brings up and this firmware does not (BLDO2, DCDC4, DCDC5), and
+//     including their cold-boot power-cycle of the sensor rails. Not one byte
+//     changed.
+//
+// The framing is not the difference either: SensorLib's SPI transport sends
+// `reg | 0x80` with the select low around it, which is this driver byte for
+// byte, and their board init opens the same host on the same three pins with
+// no enable line of its own.
+//
+// So the driver stays enabled and honest: it reads for the chip id, does not
+// find one, and says which byte it got instead. What has not been done is to
+// run LilyGO's own example against it, which is the one test that would
+// separate a defective part from something still wrong on our side — it needs
+// their board definition and it overwrites this firmware and its partition
+// table, so it is the bench's call, not the build's.
 #define HAS_IMU             1
 #define IMU_KIND            IMU_KIND_QMI8658
 #define IMU_TRANSPORT       IMU_TRANSPORT_SPI

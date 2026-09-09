@@ -8,7 +8,7 @@
 | `t3s3` | LilyGO T3-S3 v1.2/v1.3 (SX1262 or SX1276/78) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1276/78 **or** SX1262 — detected at boot | 0.96" SSD1306 (I²C) | microSD, battery ADC | verified (SX1276), SX1262 expected |
 | `esp32s3-qspi` | Generic ESP32-S3 DevKitC-1 + SX1262 module | ESP32-S3: 8 MB flash, quad PSRAM | SX1262 | optional SSD1306 | — | builds; wire per flags |
 | `tbeam` | LilyGO T-Beam v1.1/v1.2 (SX1276 or SX1262) | ESP32: 4 MB flash, 4 MB PSRAM | SX1276 (v1.1) **or** SX1262 (v1.2) — detected at boot | 0.96" SSD1306 (I²C) | 18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot** | verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board |
-| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; BME280 driven (temperature, humidity, pressure); QMI8658 IMU supported on SPI but **not fitted on the unit tested here**; QMC6310 magnetometer fitted at 0x3c and undriven — src/sys/Compass.cpp is written for the QMC6309's register map | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button, and the BME280 reading 27.7 C, 60 % and 1012.7 hPa. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at: 0x3c is the QMC6310 magnetometer, which took an entire SH1106 initialisation without complaint because a register file accepts any write, while the glass kept the previous firmware's picture and every status field reported the display fine. The three parts on that bus are now each identified by asking them — 0x3c magnetometer, 0x3d panel, 0x77 BME280 — and the 6-axis part LilyGO list is absent on this unit, answering on neither SPI nor I2C. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here |
+| `tbeam-supreme` | LilyGO T-Beam Supreme | ESP32-S3FN8: 8 MB flash, 8 MB quad PSRAM | SX1262 in a socketed module (TCXO at 1.8 V, DIO2 drives the RF switch) | 1.3" 128x64 SH1106 (I²C) — not the SSD1306 the other OLED boards carry | 18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; BME280 driven (temperature, humidity, pressure); QMI8658 IMU on SPI — fitted, driven, and silent on the unit tested here (select and drive proven, every register reads zero); QMC6310 magnetometer fitted at 0x3c and undriven — src/sys/Compass.cpp is written for the QMC6309's register map | verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive — radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button, and the BME280 reading 27.7 C, 60 % and 1012.7 hPa. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at: 0x3c is the QMC6310 magnetometer, which took an entire SH1106 initialisation without complaint because a register file accepts any write, while the glass kept the previous firmware's picture and every status field reported the display fine. The three parts on that bus are now each identified by asking them — 0x3c magnetometer, 0x3d panel, 0x77 BME280 — The 6-axis part is fitted and does not answer: its select works and something drives MISO when it is asserted, but every register reads zero, no write lands, the vendor's reset never completes, and none of it changes across all four SPI modes, two clock rates, a hand-clocked control, or every rail the AXP2101 has. LilyGO's own example against this board is the outstanding test. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here |
 | `t3s3-sx1280` | LilyGO T3-S3 with SX1280 (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 | 0.96" SSD1306 | microSD, battery ADC | verified on hardware |
 | `t3s3-sx1280-pa` | LilyGO T3-S3 with SX1280 + PA (2.4 GHz) | ESP32-S3FH4R2: 4 MB flash, 2 MB PSRAM | SX1280 + PA | 0.96" SSD1306 | microSD, battery ADC | **builds only — never run on hardware**, see below |
 | `heltec-ws` | Heltec Wireless Stick V2/V2.1 | ESP32: 8 MB flash | SX1276 | 0.49" 64x32 SSD1306 on Vext | PPP over the CP2102 bridge (no SD, no GNSS) | verified on hardware; PPP built, not yet run on this board |
@@ -439,9 +439,10 @@ nothing on half the units sold instead of a rail cut that works on all of them. 
 confirmed to carry the MAX-M10S can set `GPS_UBX 1` and gain the binary position and time
 frames.
 
-**The BME280 is driven, and so is the accelerometer this board is specified with — which
-turned out not to be on it.** Both were on the fitted-but-not-driven list when this board
-landed; the second change to it wrote both drivers, and only one of them found a part.
+**The BME280 and the accelerometer are both driven, and only one of them answers.** Both
+were on the fitted-but-not-driven list when this board landed; the second change to it wrote
+both drivers, and the accelerometer — fitted, selected, and silent — is its own section
+below.
 
 The QMI8658 is on SPI here — chip select GPIO 34, on the card's bus — where `src/sys/Imu.cpp`
 had only ever spoken I2C. That is a transport and not a different part: the registers, the
@@ -489,12 +490,29 @@ is written against the QMC6309 — chip id 0x90, and a register map read off tha
 QMC6310 answers 0x80 with a different layout. `I2C 0x3c` on the console dumps it, which is
 how the M9's map was established.
 
-**And the accelerometer is not fitted on this unit.** Nothing answers at the select on SPI —
-the probe reads a value that changes with the clock phase and repeats, which is a floating
-MISO being sampled rather than a part — and nothing answers at the QMI8658's I2C addresses
-either, which that same scan would have found. The driver is left enabled because that is
-what it is for: it reads for a chip id, does not find one, and says so with the value it
-read. A unit that has the part needs no change to support it.
+**And the accelerometer is fitted and does not answer.** Two earlier versions of this page
+got that wrong in opposite directions, so here is what was measured rather than concluded.
+The part is there: LilyGO's silkscreen names it, a chip sits under the name, and both their
+wiki and their pin poster put a QMI8658 on the card's SPI bus at select 34.
+
+| Question | What the bench says |
+|---|---|
+| Does the select work? | Yes — GPIO 34 reads back what it is driven to, and it is the only pin that changes anything: 33, 48, 21 and 14 each leave MISO at its pull-up |
+| Is a part selected by it? | Yes — MISO has a stiff external pull-up and reads a hard 1 against an internal pull-down, then a hard 0 the moment 34 is asserted |
+| What does it say? | Zeroes. Registers 0x00–0x0f, the status bytes, the temperature and 0x4d all read 0x00, but for a fixed 0x3e at the register-0 frame and 0x24 at the 0x0a frame |
+| Is it the SPI mode or the clock? | No — the same bits in all four modes, at 1 MHz and 100 kHz, and identical when the clock is bit-banged by hand instead of by the peripheral |
+| Do writes land? | No — CTRL1 written 0x40 reads back 0x00, and the vendor's reset (0xb0 into 0x60, then poll 0x4d for 0x80) never completes |
+| Is it power? | No — every AXP2101 rail was read back and then every one switched on, including the three LilyGO's init raises and this firmware does not (BLDO2, DCDC4, DCDC5), and including their cold-boot power-cycle of the sensor rails. Not one byte changed |
+
+The framing is not the difference either: SensorLib's SPI transport sends `reg | 0x80` with
+the select low around it, which is `src/sys/Imu.cpp` byte for byte, and LilyGO's own board
+init opens the same host on the same three pins with no enable line of its own.
+
+So the driver stays enabled and honest — it reads for the chip id, does not find one, and
+reports the byte it got instead. The one test not yet run is LilyGO's own example against
+this board, which is what would separate a defective part from something still wrong on our
+side; it needs their board definition and it overwrites this firmware and its partition
+table, so it is a bench decision rather than a build one.
 
 **A/B over the air, on LilyGO's own numbers.** `partitions/ota_8mb.csv`: two 3264 KiB app
 slots, a 1536 KiB filesystem and a 64 KiB coredump, closing the 8 MB part to the byte. The
@@ -521,12 +539,12 @@ cable, and the node's own reported layout is what says which table it is on.
 | SX1262 RST / BUSY / DIO1 | 5 / 4 / 1 |
 | SX1262 antenna switch | the chip's own DIO2; TCXO on DIO3 at 1.8 V |
 | Panel I2C SDA / SCL (SH1106 @ **0x3d**, QMC6310 @ 0x3c, BME280 @ 0x77) | 17 / 18 |
-| PMU I2C SDA / SCL (AXP2101, PCF8563 @ 0x51) | 42 / 41 |
+| PMU I2C SDA / SCL (AXP2101, PCF8563 @ 0x51) — LilyGO's poster has these swapped | 42 / 41 |
 | PMU IRQ (not driven) | 40 |
 | GNSS RX / TX | 9 / 8 |
 | GNSS PPS / L76K wake (neither driven) | 6 / 7 |
 | microSD SCK / MISO / MOSI / CS | 36 / 37 / 35 / 47 |
-| QMI8658 chip select (driven; no part fitted on the unit here) / interrupt (not driven) | 34 / 33 |
+| QMI8658 chip select (driven; the part is fitted and does not answer) / interrupt (not driven) | 34 / 33 |
 | PCF8563 interrupt (not driven) | 14 |
 | Button (BOOT) | 0 |
 | Console | the chip's own USB (19 / 20) |
@@ -613,13 +631,17 @@ things had to work:
 Three more items come from the change that drove the accelerometer and the BME280, and
 one of them was a one-way door:
 
-9. **The accelerometer — settled, and the answer is that there is not one.** `STATUS` reads
-   `imu=no`, the boot log says `WHO_AM_I read 0x3e, wanted 0x05`, and a sweep of all four SPI
-   modes returned a different repeated byte per mode: a floating MISO, not a part. The card
-   mounts on those same wires in the same boot, so the bus, the pins and the shared-host
-   arrangement are all good. On a unit that *does* carry the part this is the item to redo,
-   and then the thing to check is that `imu=yes` survives the panel going dark — a reading of
-   `asleep` there would mean `IMU_FOLLOWS_SCREEN` was derived wrongly.
+9. **The accelerometer — fitted, selected, silent, and still open.** `STATUS` reads
+   `imu=no` and the boot log says `WHO_AM_I read 0x3e, wanted 0x05`. What that is *not* is a
+   missing part: the table above is the bench work that settled the select, the drive on
+   MISO, the modes, the clock rates, the hand-clocked control, the writes and every rail.
+   The card mounts on those same wires in the same boot, so the bus, the pins and the
+   shared-host arrangement are all good. **Next on the bench:** LilyGO's own
+   `QMI8658_GetDataExample` on this board — the only test that separates a defective part
+   from a fault still on our side. It overwrites this firmware and its partition table, so
+   plan the re-flash with it. And on a unit whose part does answer, the thing to check is
+   that `imu=yes` survives the panel going dark; a reading of `asleep` would mean
+   `IMU_FOLLOWS_SCREEN` was derived wrongly.
 10. **The BME280 reads plausibly — done.** 27.74 °C, 60.2 % and 1012.69 hPa on the first
     boot that had it. Still open, and the only one of the three with an independent
     reference: agreeing that pressure with a local weather station to within a couple of hPa,
