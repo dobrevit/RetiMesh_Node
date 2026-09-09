@@ -250,9 +250,14 @@ void begin() {
   // One address, strapped by SDO and not by anything this board can change.
   // Nothing to strap on SPI, where the select does the addressing.
   sAddr = IMU_ADDR;
-  if (readReg(kWhoAmI) != 0x05) {
-    log_i("imu: no QMI8658 answers " IMU_AT_FMT " — I2C on the console lists what does",
-          IMU_AT_ARG);
+  const int who = readReg(kWhoAmI);
+  if (who != 0x05) {
+    // The value, not just the disappointment. 0xff or 0x00 from every register
+    // is a part that is not there or not selected; anything else is a part
+    // that is talking and being misread, and those want different work.
+    log_i("imu: no QMI8658 answers " IMU_AT_FMT " — WHO_AM_I read 0x%02x, wanted 0x05; "
+          "I2C on the console lists what answers there",
+          IMU_AT_ARG, (unsigned)(who & 0xFF));
     sAddr = 0;
     return;
   }

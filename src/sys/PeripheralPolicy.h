@@ -127,12 +127,19 @@ public:
   // the screen, so its demand for gravity goes with it.
   //
   // False is the T-Beam Supreme, and it is why this rule and the one above
-  // have parted company. That board has an accelerometer on the card's SPI
-  // bus, no magnetometer at all, and a fixed 1.3" panel that does not rotate.
-  // Its only readers are the console and the status API, which answer while
-  // the glass is dark and are most often asked then. Suspending the part there
-  // would have a fitted sensor report "asleep" to every caller it has — a
-  // feature switched off by a rule written for boards where it made sense.
+  // have parted company. That board puts its accelerometer on the card's SPI
+  // bus, drives no magnetometer, and has a fixed 1.3" panel that does not
+  // rotate. Its only readers are the console and the status API, which answer
+  // while the glass is dark and are most often asked then. Suspending the part
+  // there would have a fitted sensor report "asleep" to every caller it has —
+  // a feature switched off by a rule written for boards where it made sense.
+  //
+  // "Drives no magnetometer" rather than "has none": one is fitted on that
+  // board and left off for want of its register map. So the day that map lands
+  // HAS_COMPASS goes to 1, IMU_FOLLOWS_SCREEN is derived from it and follows,
+  // and the board arrives at the other branch without a line of this file
+  // changing — which is why the fact comes in as an argument rather than the
+  // board being named in here.
   static constexpr bool imuRuns(bool screenDark, uint8_t profile, bool screenConsumes) {
     (void)profile;
     return screenConsumes ? !screenDark : true;

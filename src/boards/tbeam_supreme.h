@@ -138,7 +138,9 @@
 // firmware's block for this board both point, got a device that swallowed an
 // entire SH1106 initialisation and every frame after it without one NAK, while
 // the glass went on showing the picture the previous firmware had left in it.
-// The panel is the other one. What lives at 0x3c is still unidentified.
+// The panel is the other one. What lives at 0x3c is the magnetometer — see the
+// section on it below — which explains why it took the writes: a register file
+// accepts any address you send it.
 //
 // This is the board fact that cost the most to find, so: `display: true`,
 // `input panel=yes` and a successful driver `begin()` prove only that something
@@ -258,12 +260,30 @@
 // where they are — so the select is all this board has to name.
 //
 // Two consequences worth having written down. BoardInit idles this select
-// before any driver exists, because SdCard::begin() runs first on these wires
-// and a floating select is a device that may answer. And the part does *not*
-// follow the screen here, unlike on the two boards that had accelerometers
-// first: nothing on this board reads it for a heading or for panel rotation,
-// so its only readers are the console and the status API, which are asked with
-// the glass dark as often as not (IMU_FOLLOWS_SCREEN, PeripheralPolicy.h).
+// *and the card's* before either driver exists, and depends on neither of them
+// going first: a floating select is a device that may answer, and which
+// begin() gets there first is a thing to get wrong rather than a thing to rely
+// on — as an earlier draft of this comment did, naming the card, when
+// main.cpp has Imu::begin() at 267 and sdCard.begin() at 277. And the part
+// does *not* follow the screen here, unlike on the two boards that had
+// accelerometers first: nothing on this board reads it for a heading or for
+// panel rotation, so its only readers are the console and the status API,
+// which are asked with the glass dark as often as not — a derivation, not a
+// board opinion: IMU_FOLLOWS_SCREEN is DISPLAY_AUTO_ROTATE || HAS_COMPASS, and
+// both are 0 here (PeripheralPolicy.h). The magnetometer below is what would
+// change that, and it would change it by itself.
+//
+// **Not fitted on the unit this was brought up on.** Nothing answers at the
+// select on SPI — the probe reads a floating MISO, a byte that changes with
+// the clock phase and repeats, rather than a device — and nothing answers at
+// the QMI8658's I2C addresses either, which the bus scan would have found: it
+// covers 0x08-0x7f and the census on the panel's bus is the magnetometer, the
+// panel and the BME280, with only the PMU and the clock on the other. So this
+// board ships in variants and this one came without the 6-axis part.
+//
+// Left enabled all the same, because that is what the driver is for: it reads
+// the chip id, does not find one, says so with the value it read, and costs
+// nothing further. A unit that has the part needs no change here.
 #define HAS_IMU             1
 #define IMU_KIND            IMU_KIND_QMI8658
 #define IMU_TRANSPORT       IMU_TRANSPORT_SPI
@@ -298,19 +318,30 @@
 #define ENV_ADDR            0x77
 
 // ---------------------------------------------------------------------------
-// Fitted, not driven
+// Fitted, not driven: the magnetometer, and it took some finding
 // ---------------------------------------------------------------------------
-// One part left. It is off for a stated reason rather than for want of a pin:
+// It is at **0x3c**, on the panel's bus, and it reports chip id 0x80 in
+// register 0 — a QMC6310, not the QMC6309 the M9 carries and not at any of the
+// addresses that part uses. An earlier version of this header declared it
+// absent on the strength of a scan that found nothing at 0x0d, 0x1c, 0x2c or
+// 0x7c, which was the wrong conclusion from the right data: nobody had asked
+// what the *third* answer on the panel's bus was.
 //
-//   * the magnetometer LilyGO's specification lists — and which is **not fitted
-//     on the unit this was brought up on**: the bus scan covers 0x08-0x7f and
-//     nothing answers at 0x0d, 0x1c, 0x2c or 0x7c. So HAS_COMPASS 0 costs that
-//     board nothing. Should a unit turn up with one, src/sys/Compass.cpp is
-//     written against the QMC6309 the M9 carries, identified by a chip id of
-//     0x90 and a register map read off that part, and whether a QMC6310's
-//     registers agree is the bench question to settle first — `I2C <addr>` on
-//     the console dumps the part, which is how the M9's was settled.
+// It is also, and this is worth writing down once, the device that made the
+// panel look broken. Two addresses answered on that bus; 0x3c was taken for
+// the panel, accepted an entire SH1106 initialisation and every frame after it
+// without complaint — because a magnetometer's registers will take any write
+// — while the glass, at 0x3d, kept the previous firmware's picture.
+//
+// Off because src/sys/Compass.cpp is written against the QMC6309: chip id 0x90
+// and a register map read off that part. A QMC6310 answers 0x80 and lays its
+// registers out differently, so turning this on wants that map established
+// first — `I2C 0x3c` on the console dumps it, which is how the M9's was
+// settled. Which makes this a specified piece of work rather than an unknown.
 #define HAS_COMPASS         0
+// Recorded so the next reader does not repeat the scan: 0x3c is the
+// magnetometer, 0x3d is the panel, 0x77 is the BME280.
+#define COMPASS_ADDR        0x3C
 
 // ---------------------------------------------------------------------------
 // Button
