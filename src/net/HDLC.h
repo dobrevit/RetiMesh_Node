@@ -83,7 +83,10 @@ public:
       len      = 0;
       return;
     }
-    if (!inFrame) return;              // garbage between frames
+    // Outside any frame: before the first FLAG, or after reset(). Bytes
+    // between two frames are not this case — the closing FLAG opens the
+    // next one, so that garbage becomes a frame of its own.
+    if (!inFrame) return;
     if (b == ESC) { escaped = true; return; }
     if (escaped)  { b ^= ESC_MASK; escaped = false; }
     if (len >= sizeof(buf)) { overflow = true; return; }
