@@ -2102,10 +2102,19 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
       // conversion every half minute, and a caller cannot tell a fresh reading
       // from a stale one without being told.
       env["age_s"]        = Environment::ageS(e);
-    } else if (Environment::present()) {
-      // A fitted part with no reading: how many intervals have gone by says
-      // whether this is the first thirty seconds or an hour of silence.
-      env["missed_intervals"] = Environment::missedIntervals();
+    }
+    // And the failure count whenever there is one, beside a reading or instead
+    // of it. This used to appear only when `valid` was false, which meant it
+    // never appeared at all on a part that had ever worked: this driver keeps
+    // its last conversion deliberately — a stale temperature is still the best
+    // answer available and `age_s` says how stale (Environment.h) — so a part
+    // that answered at boot and then stopped went on presenting that reading
+    // with nothing to say it had. Now `valid` means "a conversion has landed
+    // at some point", `age_s` says when, and this says how many intervals have
+    // produced nothing since.
+    if (Environment::present()) {
+      const uint32_t missed = Environment::missedIntervals();
+      if (missed) env["missed_intervals"] = missed;
     }
   }
 #endif

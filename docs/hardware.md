@@ -457,8 +457,10 @@ here reads it for a heading or for panel rotation, so its only readers are the c
 the status API, which are asked with the glass dark as often as not. That rule lives in
 `PeripheralPolicy.h`, which had said since it was written that its two questions would part
 company one day; this is the day — and it is derived rather than declared:
-`IMU_FOLLOWS_SCREEN` is `DISPLAY_AUTO_ROTATE || HAS_COMPASS`, so the day the magnetometer
-below gains a register map, this board changes branch on its own.
+`IMU_FOLLOWS_SCREEN` is `DISPLAY_AUTO_ROTATE || (HAS_COMPASS && COMPASS_FOLLOWS_SCREEN)`.
+Both halves are 0 here, and the second half is why: the magnetometer below *is* driven, and
+it does not follow the screen either, so it does not hold the accelerometer up. Turn
+`COMPASS_FOLLOWS_SCREEN` on and this follows it, which is the point of deriving it.
 
 The BME280 at 0x77 reports temperature, humidity and pressure on the console, `/api/status`,
 and a weather page of its own in the display cycle. One forced conversion every thirty
@@ -689,8 +691,10 @@ magnetometer, and one of them was a one-way door:
    every other part on the board and then says `Failed to find QMI8658 - check your
    wiring!` — so the fault is the part or its joints on this unit, and nothing a firmware
    change reaches. What is still open belongs to a unit whose part answers: that `imu=yes`
-   survives the panel going dark, because a reading of `asleep` would mean
-   `IMU_FOLLOWS_SCREEN` was derived wrongly.
+   survives the panel going dark. A reading of `asleep` there would mean
+   `IMU_FOLLOWS_SCREEN` — `DISPLAY_AUTO_ROTATE || (HAS_COMPASS && COMPASS_FOLLOWS_SCREEN)`
+   — had been derived wrongly, which on this board means the magnetometer had been made to
+   follow the screen and taken the accelerometer with it.
 10. **The magnetometer reads a heading — new, and unproven by this firmware.** LilyGO's
     example read this part before ours did, so the part and the numbers are known; what has
     never run on hardware is *our* driver against it. `STATUS` should show

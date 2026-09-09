@@ -396,14 +396,25 @@ only the T-Beam Supreme:
 has not finished its first conversion reports `present: true` with no readings
 at all, which is a different thing from a board with no sensor.
 
-That state is **not** limited to one sampling interval, and a client must not
-render it as "starting up". A part that answered at boot and then stops — a
-refused trigger, a conversion that never finishes, a data read that keeps
-failing — reports `present: true, valid: false` for as long as the fault lasts,
-and the response then carries `missed_intervals`: the number of sampling
-intervals that have produced no reading. Zero or one is the first half minute;
-anything more is a fault, and the field exists so that a caller can say which
-without waiting to find out. It is absent once a reading lands. The readings are rounded to 0.01 °C, 0.1 % and
+`valid` means **a conversion has landed at some point**, not that the figures
+are current — this driver keeps its last reading on purpose, because a stale
+temperature is still the best answer available and the caller is the one who
+knows how stale is too stale. So `valid: false` is only ever the first half
+minute after boot (or a part that has never worked), and two other fields carry
+the freshness:
+
+* `age_s` — how many seconds ago the reading was taken. One conversion every
+  thirty seconds, so 0-30 is healthy.
+* `missed_intervals` — how many sampling intervals have produced nothing. It is
+  **absent while the sensor is answering** and appears as soon as it stops, with
+  or without a reading beside it: a part that answered at boot and then failed
+  reports `valid: true` with hour-old figures, an `age_s` to match, and this
+  field saying how long it has been like that. A client wanting only fresh data
+  should treat any `missed_intervals` as a fault and `age_s` as its age; a
+  client graphing weather can keep plotting the last point and mark it.
+
+Before this existed the field appeared only alongside `valid: false`, which
+meant it never appeared at all on a sensor that had ever worked. The readings are rounded to 0.01 °C, 0.1 % and
 0.01 hPa — the part's *resolution*, which is finer than its accuracy: the
 datasheet's tolerances are ±1 °C, ±3 % and ±1 hPa, so the last digit of each is
 real precision and not a real guarantee. Do not read a 0.01 °C change between

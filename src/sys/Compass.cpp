@@ -294,6 +294,23 @@ static void noteMiss() {
           kPartName, (uint8_t)COMPASS_ADDR, (unsigned)kMissComplainAfter);
 }
 
+// Samples arriving with an axis over full scale, counted separately from the
+// misses above. Its own counter because it has its own life: a clean sample
+// clears the miss count, so throttling this on that count logged on every
+// poll — ten lines a second — for a part that was answering perfectly and
+// merely clipping.
+static uint32_t sOverflows = 0;
+
+static void noteOverflow() {
+  if (sOverflows < 0xFFFFFFFFu) sOverflows++;
+  if (sOverflows == kMissComplainAfter)
+    log_w("compass: the %s reports an axis over its full scale, %u samples "
+          "running — the heading locks rather than swinging, and the readings "
+          "are dropped rather than added to the hard-iron extremes. Something "
+          "magnetic is against the board",
+          kPartName, (unsigned)kMissComplainAfter);
+}
+
 static Reading sample() {
   Reading r;
   if (!sUp) return r;
@@ -306,15 +323,22 @@ static Reading sample() {
   if (kCheckDataReady) {
     const int st = I2cReg::read(bus(), COMPASS_ADDR, kStatus);
     if (st < 0 || (st & QmcMag::kStatusDataReady) == 0) { noteMiss(); return r; }
-    // The overflow bit, while the byte is in hand. A clipped axis is the
-    // failure QmcMag.h names for choosing an 8 G range: it does not saturate
-    // visibly, it locks the heading, so it is worth a line rather than a
-    // silently wrong bearing. Throttled on the same counter as a miss, since a
-    // field strong enough to clip does not go away between samples.
-    if ((st & QmcMag::kStatusOverflow) != 0 && (sMisses % kMissComplainAfter) == 0)
-      log_w("compass: the %s reports an axis over its full scale — the heading "
-            "will lock rather than swing; something magnetic is against the board",
-            kPartName);
+    // The overflow bit, while the byte is in hand, and a clipped sample is
+    // *rejected* rather than reported. A clipped axis is the failure QmcMag.h
+    // names for choosing an 8 G range: it does not saturate visibly, it locks
+    // the heading — and worse than the wrong bearing is what it would do to
+    // the calibration, because a saturated value taken as an extreme moves the
+    // hard-iron centre permanently and every later heading with it.
+    //
+    // The data registers are still drained: on this part a read is what clears
+    // the data-ready bit, so skipping it would leave the same clipped sample
+    // presenting itself as fresh on every poll from here on.
+    if ((st & QmcMag::kStatusOverflow) != 0) {
+      uint8_t discard[6];
+      (void)I2cReg::readN(bus(), COMPASS_ADDR, kDataX, discard, sizeof(discard));
+      noteOverflow();
+      return r;
+    }
   }
 
   uint8_t d[6];
@@ -355,6 +379,7 @@ static Reading sample() {
   const uint32_t at = millis();
   r.atMs = at ? at : 1;
   sMisses = 0;
+  sOverflows = 0;
   storeLast(r);
   return r;
 }

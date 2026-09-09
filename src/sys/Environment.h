@@ -58,6 +58,13 @@ namespace Environment {
 // stays true afterwards with `atMs` saying how old it is — a stale reading is
 // still the best answer available, and the caller is the one that knows how
 // stale is too stale.
+//
+// Which means `valid` is not a health flag and must not be read as one: a part
+// that answered at boot and has since stopped reports a valid reading, an age
+// that keeps growing, and a non-zero missedIntervals(). Every surface prints
+// all three for that reason (docs/api.md says the same to a caller), because
+// an earlier version of the status API sent the count only when `valid` was
+// false — which is to say never, on any part that had ever worked.
 struct Reading {
   bool     valid       = false;
   float    tempC       = 0.0f;

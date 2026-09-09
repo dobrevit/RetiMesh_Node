@@ -208,8 +208,13 @@ async function refreshStatus() {
               : "waiting for the first reading")
           : s.env.temp_c.toFixed(1) + " °C · " + s.env.humidity_pct.toFixed(0)
             + "% · " + s.env.pressure_hpa.toFixed(1) + " hPa"
-            + (s.env.age_s != null ? " · " + s.env.age_s + "s ago" : ""),
-          s.env.present && s.env.valid ? "" : "offline"),
+            + (s.env.age_s != null ? " · " + s.env.age_s + "s ago" : "")
+            // A reading and a fault at once: the driver keeps its last
+            // conversion on purpose, so figures can be here and hours old.
+            // The age says so; this says so in words.
+            + (s.env.missed_intervals ? " · stopped answering, "
+                 + s.env.missed_intervals + " intervals ago" : ""),
+          s.env.present && s.env.valid && !s.env.missed_intervals ? "" : "offline"),
       ]),
       ...(!s.compass ? [] : [
         // Absent hardware contributes no card, the same idiom as the two

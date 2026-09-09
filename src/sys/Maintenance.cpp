@@ -517,6 +517,14 @@ static void doStatus() {
       dataf("STATUS", "env temp=%.2fC humidity=%.1f%% pressure=%.2fhPa age=%us",
             e.tempC, e.humidityPct, e.pressureHpa,
             (unsigned)Environment::ageS(e));
+      // A reading *and* a fault, which is a state this part can be in for as
+      // long as the node runs: it keeps its last conversion on purpose, so a
+      // sensor that stopped answering an hour ago still prints a temperature.
+      // The age says so to anybody who thinks about it; this says so to
+      // everybody.
+      if (const uint32_t missed = Environment::missedIntervals())
+        dataf("STATUS", "env stopped answering — %u intervals with no reading, "
+                        "the figures above are that old", (unsigned)missed);
     }
   }
 #endif

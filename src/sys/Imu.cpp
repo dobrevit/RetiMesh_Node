@@ -356,23 +356,134 @@ constexpr uint8_t  kModeComplainAfter = 10;   // a second of them, at that rate
 static SampleGate  sModeRetry(kModeRetryMs);
 static uint8_t     sModeFails = 0;
 
+// The last axes this part gave up, and when. Every reader outside the main
+// loop gets this copy rather than a transaction of its own, which is the same
+// rule the magnetometer and the environmental sensor follow and for the same
+// reason: I2cReg drains a read *after* requestFrom has released the bus lock
+// (issue 33), so two tasks reading one bus can each take some of the other's
+// bytes. This part has three readers besides the loop — the console, the
+// status API and, where a panel turns itself, the display task — and on the
+// board where it sits on I2C that bus also carries the magnetometer the loop
+// reads ten times a second. One reader is what makes such a bus safe, and it
+// is the loop.
+//
+// It costs nothing in traffic. The compass already asked this part for gravity
+// on every one of its samples, so the read happens at the same rate it always
+// did; what changes is that the other three readers now cost nothing at all.
+// The cadence is whatever the board's fastest reader wanted, so that moving
+// the read into this loop costs no board more bus traffic than it already
+// paid:
+//
+//   * where there is a magnetometer, the compass asked this part for gravity on
+//     every one of its own samples — ten a second — so that is the rate, and
+//     it is exactly what these boards did before;
+//   * everywhere else the only consumer is a panel that turns itself, and
+//     Display.cpp asks once a second and wants two agreeing answers a second
+//     apart before it turns anything. A read per second is what that board was
+//     doing on demand, so it is what it does now.
+//
+// The console and the status API are then free on both, where before each of
+// their reads was a transaction on a bus they do not own.
+#if HAS_COMPASS
+constexpr uint32_t kSampleMs = 100;
+#else
+constexpr uint32_t kSampleMs = 1000;
+#endif
+static SampleGate  sSampleGate(kSampleMs);
+static portMUX_TYPE sAxesMux = portMUX_INITIALIZER_UNLOCKED;
+static bool     sAxesValid = false;
+static int16_t  sAxes[3]   = {0, 0, 0};
+static uint32_t sAxesAtMs  = 0;
+
+// Five intervals, the magnetometer's bound and for the same reason: long
+// enough that a busy loop pass does not make a reading flicker, short enough
+// that nobody is handed axes from a part that has stopped answering. A board
+// that has not moved since the node booted must not be indistinguishable from
+// a part that fell off the bus. Half a second where the compass sets the rate,
+// five where the panel does — which is still well inside the second the
+// rotation logic waits out before it turns anything.
+constexpr uint32_t kAxesStaleMs = 5 * kSampleMs;
+
+static void storeAxes(bool valid, int16_t x, int16_t y, int16_t z) {
+  const uint32_t at = millis();
+  taskENTER_CRITICAL(&sAxesMux);
+  sAxesValid = valid;
+  sAxes[0] = x; sAxes[1] = y; sAxes[2] = z;
+  sAxesAtMs = at ? at : 1;
+  taskEXIT_CRITICAL(&sAxesMux);
+}
+
+// True with the axes filled in, false with them untouched. The freshness test
+// is inside the lock with the copy, so a reader cannot pair one sample's axes
+// with another's age.
+static bool loadAxes(int16_t& x, int16_t& y, int16_t& z) {
+  const uint32_t now = millis();
+  bool ok = false;
+  taskENTER_CRITICAL(&sAxesMux);
+  if (sAxesValid && now - sAxesAtMs <= kAxesStaleMs) {
+    x = sAxes[0]; y = sAxes[1]; z = sAxes[2];
+    ok = true;
+  }
+  taskEXIT_CRITICAL(&sAxesMux);
+  return ok;
+}
+
+// The part's own reading, taken here and nowhere else. Called from poll()
+// below, which is the main loop's alone.
+static void sampleAxes() {
+  int16_t x = 0, y = 0, z = 0;
+  if (rawAxes(x, y, z)) storeAxes(true, x, y, z);
+  // A failed read is deliberately not stored as invalid: the freshness bound
+  // in loadAxes() already turns a part that has stopped answering into no
+  // reading within half a second, and clearing it here would make one dropped
+  // transaction look the same as a part that fell off the bus.
+}
+
 void poll() {
+  if (!sPresent) return;
+
+  // The reading first, on its own cadence and only while the part is meant to
+  // be converting. rawAxes() itself refuses while suspended — a suspended part
+  // answers its address and returns the conversion it made before it stopped,
+  // which would read as a board that has not moved since the screen went dark.
+  if (sRunning.load(std::memory_order_relaxed) && sSampleGate.due(millis()))
+    sampleAxes();
+
   // Read without the lock on purpose: two atomic flags with one writer each
   // and no companion state, so the worst a stale view can do is defer the
   // change to the next pass a millisecond later. Taking a mutex a thousand
   // times a second to discover there is nothing to do is the cost this guard
   // exists to avoid.
-  if (!sPresent || sWantRunning.load(std::memory_order_relaxed) ==
-                sRunning.load(std::memory_order_relaxed)) return;
+  if (sWantRunning.load(std::memory_order_relaxed) ==
+      sRunning.load(std::memory_order_relaxed)) return;
   if (!sModeRetry.due(millis())) return;
   Sys::Lock held(sLock);
   const bool want = sWantRunning.load(std::memory_order_relaxed);
   // Settled while we waited for the lock.
   if (want == sRunning.load(std::memory_order_relaxed)) return;
 #if IMU_KIND == IMU_KIND_QMI8658
-  const bool wrote = writeReg(kCtrl7, want ? kCtrl7On : kCtrl7Off);
+  const uint8_t modeReg = kCtrl7, modeVal = want ? kCtrl7On : kCtrl7Off;
 #else
-  const bool wrote = writeReg(kMode, want ? kModeNormal : kModeSuspend);
+  const uint8_t modeReg = kMode, modeVal = want ? kModeNormal : kModeSuspend;
+#endif
+  bool wrote = writeReg(modeReg, modeVal);
+#if IMU_TRANSPORT == IMU_TRANSPORT_SPI
+  // And on SPI, read it back, because nothing else can say the write landed:
+  // writeReg() returns true unconditionally there (no acknowledgement exists
+  // on this bus), so without this the flag below would flip on a write that
+  // went nowhere. A part recorded as suspended that is still converting is
+  // what prepareForSleep() waits for and would then stop waiting for — deep
+  // sleep holds the pins as they stand, so the part would convert through a
+  // menu item named "off". begin() already reads CTRL1 back for the same
+  // reason and this is the same proof applied to the same bus.
+  //
+  // SPI only, deliberately: the I2C path has a NAK and already reports a
+  // refusal, and a new gate on a verified board is a new way for a working
+  // accelerometer to be declared stuck.
+  if (wrote) {
+    const int back = readReg(modeReg);
+    wrote = back >= 0 && (uint8_t)back == modeVal;
+  }
 #endif
   if (!wrote) {
     if (sModeFails < 255) sModeFails++;
@@ -388,11 +499,17 @@ void poll() {
   // ship that.
   sModeFails = 0;
   sRunning.store(want, std::memory_order_relaxed);
+  // A suspended part keeps answering its address and keeps returning the last
+  // conversion it made, so the copy it left behind has to go with it: held, it
+  // would read as a board that has not moved since the screen went dark, which
+  // is the one answer this driver refuses to give. The freshness bound would
+  // catch it half a second later anyway; this catches it now.
+  if (!want) storeAxes(false, 0, 0, 0);
 }
 
 bool accel(float g[3]) {
   int16_t x, y, z;
-  if (!rawAxes(x, y, z)) return false;
+  if (!loadAxes(x, y, z)) return false;
   g[0] = (float)x / kCountsPerG;
   g[1] = (float)y / kCountsPerG;
   g[2] = (float)z / kCountsPerG;
@@ -401,7 +518,7 @@ bool accel(float g[3]) {
 
 Facing facing() {
   int16_t ax, ay, az;
-  if (!rawAxes(ax, ay, az)) return Facing::Unknown;
+  if (!loadAxes(ax, ay, az)) return Facing::Unknown;
   // Only the axes' ratios matter here, so the exact scale is deliberately not
   // chased — every axis is scaled alike whichever part answered.
   const int32_t mx = ax < 0 ? -ax : ax, my = ay < 0 ? -ay : ay, mz = az < 0 ? -az : az;
