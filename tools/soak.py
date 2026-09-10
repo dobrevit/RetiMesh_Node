@@ -122,6 +122,13 @@ FIELDS = [
     # fmt_bool(): a firmware too old to serve it did not say "no". Appended, per
     # the rule above.
     "snap_walk_max_ms", "snap_walk_pos", "snap_budget_stops", "snap_rows_whole",
+    # How often a pass happens at all. 5000 on any ordinary node; more where the
+    # node measured a pass costing more than a quarter of its window and gave
+    # itself room. Recorded because it is what makes the columns above readable:
+    # at anything above 5000 the readings in a row are older than the sampling
+    # interval suggests, and a table that looks like it stopped growing may only
+    # be being read less often. Appended, per the rule above.
+    "snap_interval_ms",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -178,6 +185,7 @@ def sample(host, timeout=8):
         snap_walk_max_ms=tables.get("snap_walk_max_ms", ""),
         snap_walk_pos=tables.get("snap_walk_pos", ""),
         snap_budget_stops=tables.get("snap_budget_stops", ""),
+        snap_interval_ms=tables.get("snap_interval_ms", ""),
         # Tri-state, like battery_charging: blank is a firmware that does not
         # serve the field, which must not be read as "the list is a prefix".
         snap_rows_whole=fmt_bool(tables.get("snap_rows_whole")),
@@ -722,6 +730,22 @@ def summarise(path, band=None):
         if walk and max(walk) > 0:
             print(f"   snap_walk_max_ms: peak {max(walk):.0f} ms — the worst single pass "
                   f"the Reticulum task spent reading the path table instead of forwarding")
+        # And whether the node has backed its own passes off, which is the one
+        # thing here that makes every other reading older than it looks.
+        #
+        # Read as a change rather than against 5000, so this file does not carry
+        # a second copy of the firmware's SNAPSHOT_INTERVAL_MS: the scheduler
+        # only ever raises the interval above the configured one, so a run in
+        # which the figure moved at all is a run in which it happened. What that
+        # misses is a node already backed off before the first sample and still
+        # backed off at the last — for which snap_walk_max_ms above is the tell,
+        # and it is printed whenever it is non-zero.
+        gaps = [v for v in (num(r.get("snap_interval_ms")) for r in up) if v is not None]
+        if gaps and max(gaps) != min(gaps):
+            print(f"   ⚠ snap_interval_ms up to {max(gaps):.0f} ms (from {min(gaps):.0f}) — this "
+                  f"node measured a pass costing more than a quarter of its window and put "
+                  f"the next one further out; every reading above is that much older than "
+                  f"the sample interval suggests (docs/api.md)")
         # The one reading here that is a warning. `paths` is the table's own
         # size and is exact on every pass, so a node can report hundreds of
         # paths while the list it serves and renders is empty: false here beside

@@ -605,19 +605,23 @@ void loop() {
     // Reticulum's tables are the other thing that grows with traffic, and the
     // one a heap figure alone will not explain.
     RnsTransport::Tables t = RnsTransport::tables();
-    // The four snapshot figures travel together on purpose. The worst pass on
+    // The five snapshot figures travel together on purpose. The worst pass on
     // its own cannot tell a node that finished its table in 380 ms from one cut
     // off at 400: `pos` against `paths` says how far the last pass actually
-    // got, `stops` says how often the budget has ended one, and `rows` says
-    // whether what /api/status and the panels are showing is a whole list or a
-    // node that has never managed to build one (RnsTransport.h).
+    // got, `stops` says how often the budget has ended one, `rows` says whether
+    // what /api/status and the panels are showing is a whole list or a node
+    // that has never managed to build one, and `every` is how often a pass
+    // happens at all — 5000 ms until a pass costs enough to buy itself room,
+    // and the only figure here that explains the rest going stale
+    // (RnsTransport.h).
     log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu "
-          "snap %lums pos %lu stops %lu rows %s",
+          "snap %lums pos %lu stops %lu rows %s every %lums",
           (unsigned long)t.paths, (unsigned long)t.links, (unsigned long)t.activeLinks,
           (unsigned long)t.pendingLinks, (unsigned long)t.destinations,
           (unsigned long)t.announces, (unsigned long)t.heldAnnounces, (unsigned long)t.rates,
           (unsigned long)t.snapWalkMaxMs, (unsigned long)t.snapWalkPos,
-          (unsigned long)t.snapBudgetStops, t.snapRowsWhole ? "whole" : "partial");
+          (unsigned long)t.snapBudgetStops, t.snapRowsWhole ? "whole" : "partial",
+          (unsigned long)t.snapIntervalMs);
     #if HAS_GPS
       // The satellite count is the number that tells you whether the antenna
       // has a view of the sky; the sentence count tells you the receiver is

@@ -1968,9 +1968,22 @@ static const uint32_t kStaleSweepMs = 60000;
 static_assert(Rns::walkBudgetFitsInterval(SNAPSHOT_INTERVAL_MS),
               "the walk's budget must stay well inside SNAPSHOT_INTERVAL_MS, or "
               "snapshot passes run back to back and starve loopTask");
+// The ceiling on the gap the measured pass cost may buy itself, and the reason
+// it is this figure: kStaleSweepMs is the slowest clock a pass carries, so
+// passes have to come round at least that often or the minute between sweep
+// cycles is not a minute (Rns::nextIntervalMs). A ceiling below the interval
+// would be a misconfiguration, and the guard for it costs nothing here.
+static_assert(kStaleSweepMs >= SNAPSHOT_INTERVAL_MS,
+              "the scheduler's ceiling cannot be shorter than the interval it "
+              "is a ceiling over");
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
 static uint32_t sSnapWalkMaxMs = 0;      // worst snapshot walk since boot; see Tables
 static uint32_t sSnapBudgetStops = 0;    // passes the budget ended; see Tables
+// What the last pass's cost bought: SNAPSHOT_INTERVAL_MS on any node whose
+// passes cost less than a quarter of it, which is every node at every
+// per-record figure this tree has measured, and more than that on one where a
+// pass has come to cost more (Rns::nextIntervalMs, where the arithmetic is).
+static uint32_t sSnapIntervalMs = SNAPSHOT_INTERVAL_MS;
 static size_t   sIfaceCount = 0;         // likewise, so a capped list still counts true
 static Tables   sTables = {};            // table sizes, for soak monitoring
 
@@ -1978,7 +1991,12 @@ static void refreshSnapshots(bool allowSweep) {
   // Walking the path table reads every record back through microStore
   // (LittleFS or the SD card), so refresh it slowly and keep the list short —
   // the count is free, the rows are not.
-  if (millis() - sSnapAtMs < SNAPSHOT_INTERVAL_MS) return;
+  // Against the interval the last pass earned rather than the configured one.
+  // They are the same figure until a pass costs more than a quarter of it, at
+  // which point the gate is the only thing that can keep passes from running
+  // back to back — the budget bounds what this file chooses and not what a pass
+  // comes to (Rns::nextIntervalMs).
+  if (millis() - sSnapAtMs < sSnapIntervalMs) return;
   // Stamped on the way in, so a pass that throws does not come straight back
   // on the next 10 ms tick and spend the node's remaining memory logging about
   // it. What it must not do is imply the reading is current: sSnapOkMs, set
@@ -2036,6 +2054,14 @@ static void refreshSnapshots(bool allowSweep) {
   // ever reached. Row collection now has a cursor of its own, resumed by the
   // same two rules the sweep's is (Rns::resumeCursor, Rns::nextCursor), and a
   // list reaches sPaths only when a cycle has been all the way round.
+  //
+  // And the two halves share the budget rather than the rows taking it and the
+  // sweep getting the remainder. Rows go back to the front of the table when
+  // their cycle closes and the sweep does not, so every pass afterwards spent
+  // its whole budget re-reading the front and stopped before it reached the
+  // sweep's cursor — which then moved only in the one pass per row cycle where
+  // the rows caught up to it, and on one arrangement of costs did not move at
+  // all. Rns::rowShareSpent() is the rule and carries the figures.
   //
   // What is deliberately not here: any cap on the table itself. Nothing bounds
   // it — path_table_maxsize() is never called from src/, so microStore's
@@ -2137,10 +2163,19 @@ static void refreshSnapshots(bool allowSweep) {
   const bool sweeping = allowSweep &&
                         (sSweepPos != 0 || (uint32_t)(millis() - sSweptMs) >= kStaleSweepMs);
   const uint32_t walkStartMs = millis();
-  size_t   pos = 0;         // position in the table, for both cursors
+  size_t   pos = 0;         // position in the table, and where the *sweep* stopped
   size_t   reads = 0;       // records dereferenced this pass; see Rns::passMayStop
   uint32_t lastYieldMs = 0; // walk time at the last yield, for the yield clock
   bool     ranOut = false;  // budget ended the walk before the table did
+  // Row collection's own two, which used to be `pos` and `ranOut` as well. They
+  // are not the same figures any more: once the rows have spent their share of
+  // a sweeping pass the walk carries on to the sweep's cursor without them
+  // (Rns::rowShareSpent), so `pos` is where the *sweep* stopped and this is
+  // where the rows did. Writing `pos` into the row cursor there would skip
+  // every position between the two, which is the whole table's worth of rows on
+  // a node whose sweep is far ahead.
+  size_t   rowStopPos = 0;      // one past the last position the rows were served at
+  bool     rowsCut    = false;  // the share ended the row half before the list did
   Watchdog::feed();
   for (auto it = pathTable.begin(); it != pathTable.end(); ++it, ++pos) {
     // Incrementing reads the in-memory index and nothing else; only the
@@ -2168,6 +2203,11 @@ static void refreshSnapshots(bool allowSweep) {
     const Rns::WalkStep step = Rns::walkStep(w);
     if (step == Rns::WalkStep::StopRowsFull) break;      // nothing else needs the rest
     if (step == Rns::WalkStep::StopBudget) { ranOut = true; break; }
+    // Before the step-over below, because a position the share denied the rows
+    // comes back as a Skip when the sweep does not want it either — which is
+    // every position between the two cursors once the share is spent.
+    if (step == Rns::WalkStep::Row)      rowStopPos = pos + 1;
+    else if (Rns::rowShareDenied(w))     rowsCut    = true;
     if (step == Rns::WalkStep::Skip) continue;           // neither half wants this one
     // No feed inside the loop, and that is a deliberate removal rather than an
     // omission. This walk used to feed every Sys::RingDrain::kFeedEvery records
@@ -2244,8 +2284,13 @@ static void refreshSnapshots(bool allowSweep) {
   // a prefix is kept in staging for the next pass rather than published
   // (SnapshotWalk.h). The cursor follows the same two rules the sweep's does:
   // forwards only within a cycle, back to the front when the cycle closes.
-  const bool rowsDone = Rns::rowCycleDone(p.size(), SNAPSHOT_MAX_PATHS, ranOut);
-  sRowPos = rowsDone ? 0 : Rns::nextCursor(sRowPos, pos, ranOut);
+  //
+  // Both figures are the row half's own: what cut the cycle short is the budget
+  // or the share, and where it stopped is where the rows stopped, not where the
+  // walk did.
+  const bool rowsShort = ranOut || rowsCut;
+  const bool rowsDone  = Rns::rowCycleDone(p.size(), SNAPSHOT_MAX_PATHS, rowsShort);
+  sRowPos = rowsDone ? 0 : Rns::nextCursor(sRowPos, rowStopPos, rowsShort);
   sRowPassClean = true;                 // list and cursor agree again
   if (sweeping) {
     // Reaching the end closes the cycle and puts the next one a minute out;
@@ -2339,6 +2384,26 @@ static void refreshSnapshots(bool allowSweep) {
   // that had gone on to spend an unmeasured amount more.
   const uint32_t walkMs = millis() - walkStartMs;
   if (walkMs > sSnapWalkMaxMs) sSnapWalkMaxMs = walkMs;
+  // And the next pass is scheduled against it. On every node this tree has
+  // measured this hands back SNAPSHOT_INTERVAL_MS unchanged; it is the pass
+  // that has come to cost more than a quarter of the window it runs in that
+  // this exists for, and the gate above is where it takes effect.
+  const uint32_t nextGapMs =
+      Rns::nextIntervalMs(walkMs, SNAPSHOT_INTERVAL_MS, kStaleSweepMs);
+  // Once when it starts and once when it stops, not once per pass: a node whose
+  // cost sits on the threshold would otherwise say this every five seconds. The
+  // reading itself is served as snap_interval_ms, which is what an operator
+  // watching a node go stale needs — the log is for the one who has a log.
+  if ((nextGapMs > SNAPSHOT_INTERVAL_MS) != (sSnapIntervalMs > SNAPSHOT_INTERVAL_MS)) {
+    if (nextGapMs > SNAPSHOT_INTERVAL_MS)
+      log_w("snapshot pass cost %u ms of the %u ms between passes; backing off to "
+            "one every %u ms (%u paths)", (unsigned)walkMs, (unsigned)SNAPSHOT_INTERVAL_MS,
+            (unsigned)nextGapMs, (unsigned)pathTable.size());
+    else
+      log_i("snapshot pass back to %u ms; one every %u ms again",
+            (unsigned)walkMs, (unsigned)nextGapMs);
+  }
+  sSnapIntervalMs = nextGapMs;
   // Counted into locals and published below with the lists they describe. As
   // members they were written here, outside the lock every reader takes, and
   // sIfaceCount was zeroed and counted back up mid-scan — so a panel or a
@@ -2375,6 +2440,7 @@ static void refreshSnapshots(bool allowSweep) {
   t.snapWalkPos     = (uint32_t)pos;
   t.snapBudgetStops = sSnapBudgetStops;
   t.snapRowsWhole   = sRowsWhole || rowsDone;
+  t.snapIntervalMs  = sSnapIntervalMs;
 
   // Sys::Lock, not a hand-written pair. Lock.h states the rule: this whole
   // function now runs under Diag::guard, so there is a way out of the scope

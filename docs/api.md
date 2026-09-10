@@ -147,7 +147,8 @@ the ordinary reading on the shipped channel and needs no action.
             "tables": { "paths": 3, "links": 1, "links_active": 1, "links_pending": 0,
                         "destinations": 2, "announces": 0, "announces_held": 0, "rates": 4,
                         "snap_walk_max_ms": 62, "snap_walk_pos": 3,
-                        "snap_budget_stops": 0, "snap_rows_whole": true } },
+                        "snap_budget_stops": 0, "snap_rows_whole": true,
+                        "snap_interval_ms": 5000 } },
   "radio": { "online": true, "model": "SX1276", "freq_mhz": 868.1, "bw_khz": 125,
              "sf": 8, "cr": 5, "tx_dbm": 7, "sync_word": 18, "preamble": 18,
              "announce_interval": 600, "beacon_interval": 0, "callsign": "retimesh-8249CC",
@@ -398,10 +399,10 @@ SD card) are omitted rather than reported as zero.
 climbs and never falls is where a week-long run runs out of memory, and it is
 the part a heap figure alone will not explain.
 
-The four `snap_*` fields beside them describe the pass that reads the path
-table, because on a large table that pass no longer sees all of it at once. It
-runs every five seconds under a budget, reading path records back off the
-filesystem, and carries a cursor from one pass to the next.
+The `snap_*` fields beside them describe the pass that reads the path table,
+because on a large table that pass no longer sees all of it at once. It runs
+every five seconds under a budget, reading path records back off the filesystem,
+and carries a cursor from one pass to the next.
 
 - `snap_walk_max_ms` — the longest one pass has taken since boot, the walk plus
   the removal of dead entries that follows it. Tens of milliseconds is ordinary.
@@ -430,6 +431,18 @@ filesystem, and carries a cursor from one pass to the next.
   any node that has finished a cycle at least once. `false` beside a non-zero
   `paths` means the node has never got all the way round its own table — the
   count is still exact, the list is empty rather than misleading.
+- `snap_interval_ms` — how long the node is currently leaving between two
+  passes, and the only field here that explains the others going stale. `5000`
+  on any node whose last pass cost less than a quarter of that, which is every
+  node under any cost this firmware has been measured at. A larger figure is the
+  node having measured its own pass and given itself room: a pass costing more
+  than a quarter of its window is scheduled four times its own cost out, up to a
+  ceiling of 60 s — the minute between dead-path sweeps, which is the slowest
+  clock a pass carries and so the least often passes may come. Read it before
+  concluding a reading is fresh: at anything above `5000`, `snapshot_age_s` and
+  the path rows are older than the five seconds they would otherwise imply, and
+  the node is telling you a pass has become expensive. `snap_walk_max_ms` beside
+  it says how expensive.
 
 `tables.paths` and `transport.path_count` are the whole table on every pass
 whatever the walk did: they are the table's own size and are never truncated.

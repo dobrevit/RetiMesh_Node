@@ -1851,10 +1851,17 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     // against `paths` is how far the last one got, snap_budget_stops counts the
     // passes the budget ended, and snap_rows_whole says whether the `paths`
     // list this API serves is a complete cycle (RnsTransport.h).
+    //
+    // snap_interval_ms is the one that explains the others going stale: 5000 on
+    // any ordinary node, and more where the node measured a pass costing more
+    // than a quarter of its window and scheduled itself accordingly. Without it
+    // a reader has no way to know the age of everything above is not the five
+    // seconds it assumes.
     tb["snap_walk_max_ms"]   = t.snapWalkMaxMs;
     tb["snap_walk_pos"]      = t.snapWalkPos;
     tb["snap_budget_stops"]  = t.snapBudgetStops;
     tb["snap_rows_whole"]    = t.snapRowsWhole;
+    tb["snap_interval_ms"]   = t.snapIntervalMs;
   }
 
   JsonObject radio    = doc["radio"].to<JsonObject>();

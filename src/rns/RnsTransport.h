@@ -142,6 +142,20 @@ struct Tables {
   // until the first cycle closes — or for ever, on a node that cannot finish
   // one, which beside a non-zero `paths` is the reading that says so.
   bool     snapRowsWhole;
+  // How long the node is currently leaving between two passes.
+  //
+  // SNAPSHOT_INTERVAL_MS — 5000 ms — on any node whose last pass cost less than
+  // a quarter of it, which is every node at every per-record cost this tree has
+  // measured. A larger figure is the node having measured its own pass and
+  // given itself room: a pass that costs more than a quarter of its window is
+  // scheduled four times its own cost out, up to a ceiling of the minute
+  // between sweep cycles (Rns::nextIntervalMs).
+  //
+  // Reported because it is the only field that explains the others going stale.
+  // Everything else here describes a pass; this says how often one happens, and
+  // on a node that has backed itself off, snapshot_age_s and the path rows are
+  // older than the five seconds a reader would otherwise assume.
+  uint32_t snapIntervalMs;
 };
 Tables tables();
 

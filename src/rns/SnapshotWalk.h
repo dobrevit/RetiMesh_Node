@@ -261,6 +261,17 @@ constexpr uint32_t kWalkYieldMs = 100;
 static_assert(kWalkYieldMs > 0 && kWalkYieldMs * 2 < kWalkBudgetMs,
               "the yield cadence must fire more than once inside one budget");
 
+// The share of the gap between two pass starts that the pass itself may take.
+//
+// One rule, asked two ways. walkBudgetFitsInterval() below applies it to the
+// figure this file *chooses* — the budget — and nextIntervalMs() applies it to
+// the figure only the node can *measure*, what a pass actually cost. They are
+// the same statement about the same thing: a task that spends more than a
+// quarter of its window in this function is a task that has stopped forwarding
+// for the other three quarters, and at the limit stops leaving any window at
+// all.
+constexpr uint32_t kPassShareDiv = 4;
+
 // The relation the paragraph above rests on, for the caller to assert: a walk
 // has to end well inside the interval its pass is gated on, or passes run back
 // to back and the RNS task never reaches the sleep that is what lets loopTask
@@ -277,7 +288,78 @@ static_assert(kWalkYieldMs > 0 && kWalkYieldMs * 2 < kWalkBudgetMs,
 // of integers that does not overflow, and only one of them stays that way: an
 // absurd budget makes kWalkBudgetMs * 4 wrap and the guard answer "fits".
 constexpr bool walkBudgetFitsInterval(uint32_t intervalMs) {
-  return kWalkBudgetMs <= intervalMs / 4;
+  return kWalkBudgetMs <= intervalMs / kPassShareDiv;
+}
+
+// How long to wait before the next pass, given what this one cost.
+//
+// What this is for, since the guard above looks like it covers it
+// -------------------------------------------------------------
+// walkBudgetFitsInterval() bounds the part of a pass this file chooses: the
+// budget, static_asserted at the call site in every environment, so no build
+// ships a budget that could fill its own window. What it cannot bound is what
+// a pass *costs*, and the two are not the same number:
+//
+//   * The budget is consulted between records and never inside one, so a pass
+//     costs the budget plus the record in hand. At the worst per-record figure
+//     anywhere in this tree — 162 ms, microStore's own measurement on a
+//     200-record store (FileStore.h) — that is 562 ms against a 1250 ms
+//     quarter. Comfortable, and this function returns the configured interval
+//     unchanged for it.
+//   * passMayStop() may not end a pass that has dereferenced nothing. That is
+//     the forward-progress guarantee, and its price is stated where it is
+//     defined: a pass costs the prefix it steps over plus one record, not the
+//     budget, if stepping ever stops being free. Stepping is free today and
+//     test_typed_store_iterator pins it against the microStore this build
+//     resolves — but it is a promise of a dependency pinned to a branch, and
+//     the abandoned branch fix/snapshot-walk-starves-loop ran on a microStore
+//     where stepping *did* load. A 50-position prefix at 30 ms a record is
+//     1530 ms; the 87-path T-Beam at 162 ms is seconds.
+//
+// So the missing half is the measured one, and this is it. Nothing else in the
+// pass watches what the pass came to, and the gate it feeds — "has
+// SNAPSHOT_INTERVAL_MS passed since the *start* of the last pass" — becomes a
+// no-op the moment a pass outlasts the interval: the gate is already open when
+// the pass returns, the next one begins at once, and that is exactly the shape
+// that took a T-Beam down at 7.5 s a walk.
+//
+// The rule
+// --------
+// A pass gets at most a quarter of the gap between two pass starts, the same
+// quarter the budget is held to. Under that it changes nothing, which is the
+// ordinary node; over it, the next pass is put kPassShareDiv times the
+// measured cost out. Measured on the *last* pass rather than the worst since
+// boot, so a node that recovers returns to its configured interval instead of
+// carrying its worst moment for ever.
+//
+// The ceiling
+// -----------
+// `ceilingMs` is not decoration and the version of this idea on the abandoned
+// branch did not have one: `max(walkMs * 4, SNAPSHOT_INTERVAL_MS)` would put a
+// node whose passes cost a minute onto a four-minute interval, and a node that
+// slow needs its cleanup more often than that, not less. The caller passes the
+// slowest clock inside a pass — kStaleSweepMs, the minute between one dead-path
+// sweep cycle and the next — because a pass carrying a minute's clock has to
+// come round at least once a minute or that clock is not honoured at all.
+//
+// The trade the ceiling makes is worth stating: up to it, the gap is at least
+// four times the pass; at it, a pass costing a quarter of the ceiling or more
+// gets less than that, and one costing the whole ceiling is back to back
+// again. That is not a bound this function can win — a node spending a minute
+// per pass is broken in a way scheduling cannot fix — and the ceiling is where
+// it stops making the node's cleanup worse in exchange for a margin it has
+// already lost.
+//
+// Written as three comparisons rather than one min/max chain so that the
+// multiply is only ever reached below the ceiling's own quarter, where it
+// cannot overflow: the same reason walkBudgetFitsInterval() divides rather
+// than multiplies.
+constexpr uint32_t nextIntervalMs(uint32_t passCostMs, uint32_t intervalMs,
+                                  uint32_t ceilingMs) {
+  return ceilingMs < intervalMs                    ? intervalMs
+       : passCostMs <= intervalMs / kPassShareDiv  ? intervalMs
+       : passCostMs >= ceilingMs / kPassShareDiv   ? ceilingMs
+                                                   : passCostMs * kPassShareDiv;
 }
 
 // Whether a pass that has spent its budget may stop here.
@@ -335,6 +417,75 @@ struct WalkState {
   bool     readAny       = false;  // a record has been dereferenced this pass
 };
 
+// How much of a pass's budget the rows may spend before the sweep gets the
+// rest.
+//
+// Half each, and half is chosen because nothing measured says otherwise: the
+// two halves of the walk are two unrelated jobs sharing one clock, and there is
+// no figure in this tree that makes one worth more than the other. Expressed as
+// a fraction of the budget rather than a constant of its own so that retuning
+// kWalkBudgetMs moves it.
+constexpr uint32_t rowShareMs(uint32_t budgetMs) { return budgetMs / 2; }
+
+// Whether the rows have spent their share and the rest of this pass belongs to
+// the sweep.
+//
+// Why the sweep needs a share at all
+// ----------------------------------
+// The walk serves positions in one order — the table's — so whichever cursor
+// is in front is served first, and the budget is spent by the time the walk
+// reaches the other. That is fine while the two cursors travel together, which
+// they do for as long as both are ratcheting forward at the same stop position.
+// It stops being fine the moment the row cycle closes: rows go back to the
+// front of the table (a finished cycle returns their cursor to 0) and the sweep
+// does not, so every pass afterwards spends its whole budget re-reading the
+// front for rows and stops before it reaches the sweep's cursor, which then
+// advances only in the one pass per row cycle where the rows catch up to it.
+//
+// On the synthetic 200-entry table at 30 ms a record — half of it dead entries,
+// which is what the sweep is for — the cursor sat at 70 for five passes, then
+// 76 for five, then 82: the first dead entry was reached on pass 35 and the
+// cycle closed on pass 115, which is nine and a half minutes at five seconds a
+// pass. With a share it is pass 10 and pass 23. And there is a knife edge
+// inside the old behaviour: where reads per pass divide SNAPSHOT_MAX_PATHS
+// exactly — sixteen of them, at 25 ms a record — the row half fills the cap
+// precisely as the budget runs out, and the cursor stopped at 64 and stayed
+// there until the per-record cost happened to jitter. A cleanup that never runs
+// is not a slow cleanup. All of those figures are driven in test_snapshot_walk
+// rather than reasoned about here.
+//
+// The condition
+// -------------
+// Only when the sweep's cursor is *ahead* of the row cursor, because that is
+// the only arrangement in which serving the rows first can leave the sweep
+// nothing. With the sweep behind or level, the walk reaches its cursor first or
+// at the same position and it is served by the same reads — taking half the
+// budget off the rows there would slow both halves and fix nothing.
+//
+// What it guarantees, exactly: the sweep cursor advances on every sweeping
+// pass, because once the share is spent every position below the sweep's cursor
+// is stepped over for free and the budget is only half gone. The one exception
+// is a single record that costs the whole budget by itself, which no share can
+// legislate against — the same "checked between records, never inside one" the
+// budget itself is subject to.
+inline bool rowShareSpent(const WalkState& w) {
+  return w.sweeping && w.sweepPos > w.rowPos &&
+         w.elapsedMs >= rowShareMs(w.budgetMs);
+}
+
+// Whether this position is one the row half wanted and the share denied it.
+//
+// The caller needs this and cannot infer it from the step: a denied position
+// comes back as Skip or Examine, which are also what a position before the row
+// cursor comes back as. It matters because a cycle the share cut short is a
+// prefix in exactly the way a budget-stopped one is — the rows did not reach
+// those positions, so the list is not whole and must not be published, and the
+// row cursor must be left where the rows actually stopped rather than where the
+// walk did. rowCycleDone() and nextCursor() below take both as `cutShort`.
+inline bool rowShareDenied(const WalkState& w) {
+  return w.rowsCollected < w.rowCap && w.pos >= w.rowPos && rowShareSpent(w);
+}
+
 // One position.
 //
 // Order matters and each step is here for a reason:
@@ -357,10 +508,12 @@ struct WalkState {
 //     row decision, where it did not apply to the expensive half of the walk.
 //     It cannot stop a pass that has read nothing yet (passMayStop() above).
 //  3. Only then the cheap step-over: past a position neither half wants —
-//     already collected, or already swept.
+//     already collected, already swept, or wanted by the rows after they have
+//     spent their share of this pass (rowShareSpent() above). That last one is
+//     what makes the step-over reach the sweep's cursor rather than the budget.
 inline WalkStep walkStep(const WalkState& w) {
   const bool rowsFull  = w.rowsCollected >= w.rowCap;
-  const bool wantRow   = !rowsFull && w.pos >= w.rowPos;
+  const bool wantRow   = !rowsFull && w.pos >= w.rowPos && !rowShareSpent(w);
   const bool wantSweep = w.sweeping && w.pos >= w.sweepPos;
   if (rowsFull && !w.sweeping) return WalkStep::StopRowsFull;
   if (passMayStop(w.elapsedMs, w.readAny, w.budgetMs)) return WalkStep::StopBudget;
@@ -371,13 +524,19 @@ inline WalkStep walkStep(const WalkState& w) {
 // Whether the row list this pass has been building is a whole one.
 //
 // Two ways round, and only these two: the cap filled, or the walk reached the
-// end of the table without the budget stopping it. Anything else is a valid
-// prefix and nothing more, and a prefix must not be published — a panel showing
-// four paths on a node holding eighty is worse than a panel showing the last
-// whole list, because nothing on it says which it is. The count beside the list
-// comes from the table's own size() and stays exact either way.
-inline bool rowCycleDone(size_t rowsCollected, size_t rowCap, bool ranOut) {
-  return rowsCollected >= rowCap || !ranOut;
+// end of the table without anything cutting the row half short. Anything else
+// is a valid prefix and nothing more, and a prefix must not be published — a
+// panel showing four paths on a node holding eighty is worse than a panel
+// showing the last whole list, because nothing on it says which it is. The
+// count beside the list comes from the table's own size() and stays exact
+// either way.
+//
+// `cutShort` is the budget ending the pass *or* the share ending the row half
+// (rowShareDenied() above), and the two have to be one argument because they
+// have the same consequence: positions the rows wanted and did not reach. The
+// caller passes `ranOut || rowsCut`.
+inline bool rowCycleDone(size_t rowsCollected, size_t rowCap, bool cutShort) {
+  return rowsCollected >= rowCap || !cutShort;
 }
 
 // Whether the walk should give the core up before touching this record.
@@ -452,15 +611,21 @@ inline size_t resumeRowCursor(size_t cursor, size_t tableSize, bool passWasClean
 // resuming a part-built row list steps over the rows it already has. Writing
 // the stop position in unconditionally would drag the cursor back to the front
 // and leave the tail of the table never reached, which is the exact bug a
-// resuming cursor is added to avoid. Reaching the end of the table (`!ranOut`)
+// resuming cursor is added to avoid. Getting all the way round (`!cutShort`)
 // closes the cycle instead: for the sweep that puts the next one a
 // kStaleSweepMs out, and for the rows it is what makes the list publishable.
+//
+// `cutShort` and `stoppedAt` are each cursor's own, not the walk's. They are
+// the same for the sweep, whose half ends where the walk ends; for the rows
+// they are where row collection stopped and whether anything stopped it —
+// which after the share is spent is not where the walk stopped, because the
+// walk carries on to the sweep's cursor without them.
 //
 // Forwards only is a ratchet, and a ratchet has to be answerable to the thing
 // it indexes: resumeCursor() above is what keeps it from ratcheting into a
 // table that has since shrunk past it.
-inline size_t nextCursor(size_t cursor, size_t stoppedAt, bool ranOut) {
-  if (!ranOut) return 0;
+inline size_t nextCursor(size_t cursor, size_t stoppedAt, bool cutShort) {
+  if (!cutShort) return 0;
   return stoppedAt > cursor ? stoppedAt : cursor;
 }
 

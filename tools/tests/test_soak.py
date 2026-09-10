@@ -395,13 +395,14 @@ class TheSnapshotWalkIsRecordedAndRead(unittest.TestCase):
         body["diag"]["tables"] = {"paths": 200, "links": 0, "destinations": 2,
                                   "announces": 0, "snap_walk_max_ms": 412,
                                   "snap_walk_pos": 14, "snap_budget_stops": 96,
-                                  "snap_rows_whole": False}
+                                  "snap_rows_whole": False, "snap_interval_ms": 5000}
         with _mocked_node(body):
             row = soak.sample("node")
         self.assertEqual(row["paths"], 200)
         self.assertEqual(row["snap_walk_max_ms"], 412)
         self.assertEqual(row["snap_walk_pos"], 14)
         self.assertEqual(row["snap_budget_stops"], 96)
+        self.assertEqual(row["snap_interval_ms"], 5000)
         # Encoded like every other tri-state in this file: 0 for a real false.
         self.assertEqual(row["snap_rows_whole"], 0)
 
@@ -411,7 +412,7 @@ class TheSnapshotWalkIsRecordedAndRead(unittest.TestCase):
         with _mocked_node(_status()):
             row = soak.sample("node")
         for key in ("snap_walk_max_ms", "snap_walk_pos", "snap_budget_stops",
-                    "snap_rows_whole"):
+                    "snap_rows_whole", "snap_interval_ms"):
             self.assertEqual(row[key], "", key)
         self.assertFalse(soak.is_true(row["snap_rows_whole"]))
         self.assertTrue(soak.is_blank(row["snap_rows_whole"]))
@@ -435,6 +436,23 @@ class TheSnapshotWalkIsRecordedAndRead(unittest.TestCase):
         self.assertIn("snap_budget_stops", text)
         self.assertIn("snap_walk_max_ms", text)
 
+    def test_a_node_that_backed_its_own_passes_off_is_a_warning(self):
+        # The reading that makes every other one older than it looks: the node
+        # measured a pass costing more than a quarter of its window and put the
+        # next one further out (docs/api.md).
+        rows = []
+        for k in range(4):
+            body = _status(clean=True)
+            body["diag"]["tables"] = {"paths": 200, "links": 0, "destinations": 2,
+                                      "announces": 0, "snap_walk_max_ms": 7500,
+                                      "snap_walk_pos": 14, "snap_budget_stops": 20 * k,
+                                      "snap_rows_whole": True,
+                                      "snap_interval_ms": 5000 if k == 0 else 30000}
+            with _mocked_node(body):
+                rows.append(soak.sample("node"))
+        text = _summary_of(rows)
+        self.assertIn("snap_interval_ms up to 30000", text)
+
     def test_a_healthy_node_says_none_of_it(self):
         rows = []
         for _ in range(4):
@@ -442,12 +460,13 @@ class TheSnapshotWalkIsRecordedAndRead(unittest.TestCase):
             body["diag"]["tables"] = {"paths": 3, "links": 0, "destinations": 2,
                                       "announces": 0, "snap_walk_max_ms": 0,
                                       "snap_walk_pos": 3, "snap_budget_stops": 0,
-                                      "snap_rows_whole": True}
+                                      "snap_rows_whole": True, "snap_interval_ms": 5000}
             with _mocked_node(body):
                 rows.append(soak.sample("node"))
         text = _summary_of(rows)
         self.assertNotIn("snap_rows_whole false", text)
         self.assertNotIn("snap_budget_stops:", text)
+        self.assertNotIn("snap_interval_ms", text)
 
 
 def _summary_of(rows):
