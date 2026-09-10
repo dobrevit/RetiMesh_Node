@@ -208,3 +208,63 @@
 #define PIN_GPS_RST         42               // low for >100 ms resets an L76K
 #define PIN_GPS_PPS         41
 #define PIN_GPS_STANDBY     40               // high forces the receiver awake
+
+// ---------------------------------------------------------------------------
+// Environment — a BME280 on an expansion module, not on the board
+// ---------------------------------------------------------------------------
+// The same story as the sounder above, and it is worth telling once more
+// because the paperwork does not tell it. The expansion kit datasheet on file
+// (Rev 1.4, Oct 2025 — roadmap/datasheets) lists a spec table of DA217, L76K,
+// the cell and the touch front, and **no environmental sensor at all**. The
+// part is one of the modules that plug into the slot, exactly as the sounder
+// is, so the board can carry it or not and the datasheet is right either way.
+//
+// Which means the address is the module's business rather than the board's:
+// SDO decides it, both 0x76 and 0x77 are in the wild, and nothing here knows
+// which one a given module strapped. So both are tried, first the lower — the
+// bare part's own default — and then the other, each held to a chip id and a
+// real calibration before it is accepted (Config.h, ENV_ADDR_ALT). That is
+// safe on this bus in a way it would not be everywhere: the parts on the V4's
+// main I2C are the DA217 and the touch controller at 0x2E, so neither address
+// has a neighbour that could answer in the part's place.
+//
+// It sits on the main I2C bus, with the DA217 accelerometer at 0x26 — and,
+// less obviously, with the BQ25896 charger that `Power::battery()` reads. The
+// panel is *not* on this bus: it is an ST7789 on SPI and the touch layer is on
+// the other I2C host, so an earlier version of this comment claiming a shared
+// panel bus was wrong on both counts.
+//
+// That matters because it changes the safety argument rather than decorating
+// it. `Environment::poll()` runs on the loop task and nowhere else, but it is
+// not the only reader here: `Power::battery()` reaches the charger from the
+// display task too, so this board already has two tasks reading one bus. That
+// is the interleave issue 33 describes and has not yet fixed — I2cReg drains a
+// read after `requestFrom` has given the lock back — and driving these parts
+// adds traffic to it rather than being immune to it.
+//
+// The exposure is asymmetric and worth knowing: the humidity part checksums
+// every reply, so a torn read is refused and counted as a missed interval. The
+// BME280 has no checksum on its data registers, so a torn read there is
+// published as a reading. Neither is new with this change; both are closed by
+// issue 33's per-host lock.
+//
+// A V4 with no sensor module fitted costs nothing for this: begin() finds
+// nothing at either address, says so once, and present() stays false — every
+// surface already draws that case, because the T-Beam Supreme has had a real
+// one to draw since before this board existed.
+#define HAS_ENV             1
+#define ENV_KIND            ENV_KIND_BME280
+#define ENV_ADDR            0x76
+#define ENV_ADDR_ALT        0x77
+
+// And a second one beside it: the expansion's third I2C part is a GXHT3V,
+// GXCAS's clone of an SHTC3, at 0x70. The bus scan on the bench unit is what
+// named it — `parts=3 acked=0x26 0x70 0x76`, which is the accelerometer, this
+// part and the barometer — because 0x70 belongs to the SHTC3 family and to
+// nothing else this board could be carrying.
+//
+// Both parts are driven and both are reported. They measure the same two
+// quantities and will not agree to the tenth of a degree, and that is the
+// point: which of them a number came from is a thing the operator can see
+// rather than a choice made in the firmware (Environment.h).
+#define HAS_ENV2            1

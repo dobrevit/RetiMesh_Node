@@ -22,6 +22,7 @@
 #include "Diag.h"
 #include "Display.h"
 #include "Environment.h"
+#include "EnvReportPolicy.h"
 #include "DisplayLayout.h"
 #include "BacklightLadder.h"
 #include "DisplayPace.h"
@@ -1128,29 +1129,51 @@ void Display::paintEnv() {
     _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print("No sensor on this bus");
     return;
   }
+  const uint32_t missed = Environment::missedIntervals();
+  const EnvReportPolicy::State st =
+      EnvReportPolicy::classify(Environment::present(), e.valid, missed);
   if (!e.valid) {
     // The first conversion is triggered on the first pass of the loop, so this
     // page is only ever seen with "waiting" on it for a few milliseconds — and
     // then only if somebody is looking at that moment. What it must not say is
     // how long the wait will be: a part that never becomes ready would show a
     // countdown that never runs out. The interval count is the honest version.
-    const uint32_t missed = Environment::missedIntervals();
-    if (missed >= 2) snprintf(line, sizeof(line), "no reading, %u tries", (unsigned)missed);
-    else             snprintf(line, sizeof(line), "waiting for a reading");
+    if (st == EnvReportPolicy::State::NoReading)
+      snprintf(line, sizeof(line), "no reading, %u tries", (unsigned)missed);
+    else
+      snprintf(line, sizeof(line), "waiting for a reading");
     _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
     return;
   }
+  uint8_t row = 0;
   snprintf(line, sizeof(line), "%.1f C", (double)e.tempC);
-  _gfx->setCursor(0, DisplayLayout::rowY(0)); _gfx->print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(row++)); _gfx->print(line);
   snprintf(line, sizeof(line), "%.0f%% humidity", (double)e.humidityPct);
-  _gfx->setCursor(0, DisplayLayout::rowY(1)); _gfx->print(line);
-  snprintf(line, sizeof(line), "%.1f hPa", (double)e.pressureHpa);
-  _gfx->setCursor(0, DisplayLayout::rowY(2)); _gfx->print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(row++)); _gfx->print(line);
+  // Only from the part that measures it. This page is the fallback the V4
+  // drops to when the GUI shell cannot start, and that board's second sensor
+  // has no barometer — printing 0.0 hPa for it would read as a reading.
+  if (e.hasPressure) {
+    snprintf(line, sizeof(line), "%.1f hPa", (double)e.pressureHpa);
+    _gfx->setCursor(0, DisplayLayout::rowY(row++)); _gfx->print(line);
+  }
   // The age, because every other surface prints it and for the same reason:
   // half a minute between conversions, and a page that looks live while
   // showing a reading from before the node was moved is a page that lies.
   snprintf(line, sizeof(line), "measured %us ago", (unsigned)Environment::ageS(e));
-  _gfx->setCursor(0, DisplayLayout::rowY(3)); _gfx->print(line);
+  _gfx->setCursor(0, DisplayLayout::rowY(row++)); _gfx->print(line);
+  // And the third fact, which this page alone was still leaving out.
+  // Environment.h asks every surface to print all three, because a part that
+  // answered at boot and died an hour ago shows a valid reading for ever and
+  // only this line says so.
+  // Bounds-checked rather than left to rowY()'s clamp: the clamp would draw
+  // this over the age line on a four-row panel, which trades one of the three
+  // facts for another silently. Where there is no room the line is dropped and
+  // the console, the API and the portal still carry it.
+  if (st == EnvReportPolicy::State::Stale && row < DisplayLayout::active().rows) {
+    snprintf(line, sizeof(line), "stopped, %u missed", (unsigned)missed);
+    _gfx->setCursor(0, DisplayLayout::rowY(row++)); _gfx->print(line);
+  }
 }
 #endif
 

@@ -69,6 +69,31 @@
 
 namespace Bme280 {
 
+// What answered at an address, decided from the chip id register alone.
+//
+// Here rather than in the driver because it is a rule with three outcomes and
+// no hardware in it, and because the probe below it now asks the question at
+// more than one address: a board whose part arrives on a plug-in module does
+// not know which of the two straps the module used, so something has to say
+// what counts as "that is the part" — and saying it once, testably, is what
+// keeps a probe from accepting a neighbour that happens to answer.
+enum class Part : uint8_t {
+  None   = 0,   // nothing, or something that is not a Bosch pressure part
+  Bme280 = 1,   // temperature, pressure and humidity
+  Bmp280 = 2,   // the same part without the humidity half
+};
+
+// `id` is the byte read from register 0xD0, or a negative value when the read
+// itself failed — which is the ordinary answer at an address with nothing on
+// it, and must not be confused with a part that answered something unexpected.
+inline Part identify(int id) {
+  if (id < 0) return Part::None;
+  if (id == 0x60) return Part::Bme280;
+  if (id == 0x58) return Part::Bmp280;
+  return Part::None;
+}
+
+
 // The eleven coefficients, as the part reports them. Named for the datasheet's
 // own names rather than anything more descriptive, because the polynomial is
 // written in those names and a reader checking one against the other should
@@ -140,6 +165,25 @@ inline Calibration decodeCalibration(const uint8_t first[26], const uint8_t seco
 // The eight bytes of one burst read from 0xf7: pressure, temperature and
 // humidity in that order, the first two as msb/lsb/xlsb where only the top
 // four bits of the xlsb carry data.
+// Whether a calibration block is a real one the part gave up, or a transfer
+// that half worked.
+//
+// Here rather than in the driver for the same reason identify() is: it is a
+// decision over data the caller already holds, with no bus in it, and it is
+// the second half of what makes a two-address probe safe — a part is accepted
+// only when it answers the right chip id *and* hands over coefficients that
+// could have come from silicon.
+//
+// All three are unsigned in the datasheet's table and none is zero on any real
+// device. t1 alone would not be enough: a zero p1 is the *divisor* in the
+// pressure polynomial below, whose guard returns the 300 hPa clamp, so a part
+// accepted with one would publish the lowest pressure ever recorded, steadily,
+// for as long as the node ran. A sensor reporting nothing is better than that,
+// because only one of the two makes anybody look at it.
+inline bool calibrationLooksReal(const Calibration& c) {
+  return c.t1 != 0 && c.p1 != 0 && c.h1 != 0;
+}
+
 inline Raw decodeRaw(const uint8_t d[8]) {
   Raw r;
   r.pressure    = ((uint32_t)d[0] << 12) | ((uint32_t)d[1] << 4) | ((uint32_t)d[2] >> 4);

@@ -26,6 +26,7 @@
 #include "Gps.h"
 #include "Compass.h"
 #include "Environment.h"
+#include "EnvReportPolicy.h"
 #include "Imu.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -2093,38 +2094,65 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
 
 #if HAS_ENV
   {
-    const Environment::Reading e = Environment::last();
-    JsonObject env = doc["env"].to<JsonObject>();
-    // Present and valid are two facts, and a caller graphing this needs both:
-    // a fitted part that has not finished its first conversion reports present
-    // with no reading, which is a different thing from no sensor at all.
-    env["present"] = Environment::present();
-    env["valid"]   = e.valid;
-    if (e.valid) {
-      // Rounded to the part's resolution, which is finer than its accuracy:
-      // the datasheet's tolerances are +/-1 C, +/-3 % and +/-1 hPa, so the last
-      // digit here is real precision and not a real guarantee.
-      env["temp_c"]       = roundf(e.tempC * 100.0f) / 100.0f;
-      env["humidity_pct"] = roundf(e.humidityPct * 10.0f) / 10.0f;
-      env["pressure_hpa"] = roundf(e.pressureHpa * 100.0f) / 100.0f;
-      // How old the reading is, for the same reason the console prints it: one
-      // conversion every half minute, and a caller cannot tell a fresh reading
-      // from a stale one without being told.
-      env["age_s"]        = Environment::ageS(e);
-    }
-    // And the failure count whenever there is one, beside a reading or instead
-    // of it. This used to appear only when `valid` was false, which meant it
-    // never appeared at all on a part that had ever worked: this driver keeps
-    // its last conversion deliberately — a stale temperature is still the best
-    // answer available and `age_s` says how stale (Environment.h) — so a part
-    // that answered at boot and then stopped went on presenting that reading
-    // with nothing to say it had. Now `valid` means "a conversion has landed
-    // at some point", `age_s` says when, and this says how many intervals have
-    // produced nothing since.
-    if (Environment::present()) {
-      const uint32_t missed = Environment::missedIntervals();
-      if (missed) env["missed_intervals"] = missed;
-    }
+    // Written once and called for each part the board carries. The V4 has two
+    // — a BME280 and an SHTC3-class humidity sensor — and they report the same
+    // two quantities without agreeing to the tenth of a degree. Publishing
+    // both is deliberate (Environment.h); publishing them through one rule is
+    // what stops the second from drifting away from the first.
+    auto emitEnv = [](JsonObject env, Environment::Source src) {
+      const Environment::Reading e = Environment::last(src);
+      // Which part this is, so a caller graphing two series can label them
+      // rather than guess from the presence of a pressure field.
+      env["part"] = Environment::partName(src);
+      // Present and valid are two facts, and a caller graphing this needs both:
+      // a fitted part that has not finished its first conversion reports present
+      // with no reading, which is a different thing from no sensor at all.
+      env["present"] = Environment::present(src);
+      env["valid"]   = e.valid;
+      // What those two and the interval count add up to, decided once in
+      // EnvReportPolicy and sent rather than re-derived: the portal is the one
+      // consumer that cannot call the header, so this is how that copy is
+      // closed. Documented in docs/api.md as a stable vocabulary.
+      env["state"]   = EnvReportPolicy::name(EnvReportPolicy::classify(
+                           Environment::present(src), e.valid,
+                           Environment::missedIntervals(src)));
+      if (e.valid) {
+        // Rounded to the part's resolution, which is finer than its accuracy:
+        // the datasheet's tolerances are +/-1 C, +/-3 % and +/-1 hPa, so the last
+        // digit here is real precision and not a real guarantee.
+        env["temp_c"]       = roundf(e.tempC * 100.0f) / 100.0f;
+        env["humidity_pct"] = roundf(e.humidityPct * 10.0f) / 10.0f;
+        // Only from the part that has a barometer. A zero here would read as a
+        // vacuum rather than as the absence of the instrument.
+        if (e.hasPressure)
+          env["pressure_hpa"] = roundf(e.pressureHpa * 100.0f) / 100.0f;
+        // How old the reading is, for the same reason the console prints it: one
+        // conversion every half minute, and a caller cannot tell a fresh reading
+        // from a stale one without being told.
+        env["age_s"]        = Environment::ageS(e);
+      }
+      // And the failure count whenever there is one, beside a reading or instead
+      // of it. This used to appear only when `valid` was false, which meant it
+      // never appeared at all on a part that had ever worked: this driver keeps
+      // its last conversion deliberately — a stale temperature is still the best
+      // answer available and `age_s` says how stale (Environment.h) — so a part
+      // that answered at boot and then stopped went on presenting that reading
+      // with nothing to say it had. Now `valid` means "a conversion has landed
+      // at some point", `age_s` says when, and this says how many intervals have
+      // produced nothing since.
+      if (Environment::present(src)) {
+        const uint32_t missed = Environment::missedIntervals(src);
+        if (missed) env["missed_intervals"] = missed;
+      }
+    };
+
+    emitEnv(doc["env"].to<JsonObject>(), Environment::Source::Primary);
+#if HAS_ENV2
+    // A second object rather than an array, because `env` is a documented
+    // shape that existing callers and the portal already read: a board that
+    // gains a part must not change what a board without one answers.
+    emitEnv(doc["env2"].to<JsonObject>(), Environment::Source::Secondary);
+#endif
   }
 #endif
 

@@ -162,4 +162,35 @@ inline bool write(TwoWire& bus, uint8_t addr, uint8_t reg, uint8_t val) {
   return bus.endTransmission() == 0;
 }
 
+// Not every part is a register file. Sensirion's humidity sensors — the SHTC3
+// on the Heltec V4's expansion module and the SHT3x that another module could
+// carry — take a sixteen-bit *command* and then answer with a run of bytes,
+// with no register number anywhere in the exchange. Written here rather than
+// against the wire object in the driver, because this file is where the rule
+// about talking to an I2C part lives and a driver that reached past it would
+// be the second place that rule is written (issue 33 says the same).
+//
+// The same caveat as readN applies and is not hidden: requestFrom releases the
+// bus lock before this drains rxBuffer, so two tasks reading one bus can take
+// each other's bytes. The callers here are on the loop task and nowhere else,
+// which is the whole of the safety until issue 33 lands.
+inline bool writeRaw(TwoWire& bus, uint8_t addr, const uint8_t* d, size_t n) {
+  bus.beginTransmission(addr);
+  for (size_t i = 0; i < n; i++) bus.write(d[i]);
+  return bus.endTransmission() == 0;
+}
+
+// A sixteen-bit command, most significant byte first, which is how both
+// families put one on the wire.
+inline bool writeCmd16(TwoWire& bus, uint8_t addr, uint16_t cmd) {
+  const uint8_t d[2] = { (uint8_t)(cmd >> 8), (uint8_t)(cmd & 0xFF) };
+  return writeRaw(bus, addr, d, sizeof(d));
+}
+
+inline bool readRaw(TwoWire& bus, uint8_t addr, uint8_t* out, size_t n) {
+  if (bus.requestFrom(addr, (uint8_t)n) != n) return false;
+  for (size_t i = 0; i < n; i++) out[i] = bus.read();
+  return true;
+}
+
 } // namespace I2cReg

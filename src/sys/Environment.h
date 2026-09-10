@@ -71,16 +71,42 @@ struct Reading {
   float    pressureHpa = 0.0f;
   float    humidityPct = 0.0f;
   uint32_t atMs        = 0;
+  // Whether pressureHpa means anything. The BME280 measures all three; the
+  // humidity part beside it on the V4 measures two, and a zero there is the
+  // absence of a barometer rather than a vacuum. Surfaces print the field only
+  // when this is set, which is why it is carried with the reading rather than
+  // asked of the part — a reading is copied out and read later, by which time
+  // "which part was this" is no longer in scope.
+  bool     hasPressure = false;
 };
 
-// Find the part and read its calibration. Safe to call with nothing fitted.
+// Which of the board's environmental parts a reading came from.
+//
+// Both are asked and both are published, rather than one being chosen here.
+// The Heltec V4 carries a BME280 and a GXHT3V, and they will not agree to the
+// tenth of a degree: two readings a little apart is the most useful thing this
+// board can say about its own measurements, and picking one in the firmware
+// would throw that away and call the survivor "the temperature".
+enum class Source : uint8_t {
+  Primary   = 0,   // the BME280 — temperature, pressure, humidity
+  Secondary = 1,   // an SHTC3-class part — temperature and humidity
+};
+
+// Find the parts and read what each needs before it can be driven. Safe to
+// call with nothing fitted, and safe on a board that carries only one.
 void begin();
 
-// Whether a part answered its chip id and gave up a calibration block.
-bool present();
+// Whether that part answered and proved what it is — a chip id and a real
+// calibration for the BME280, an identity word and a good checksum for the
+// other. False for Secondary on every board that has no second part.
+bool present(Source s = Source::Primary);
+
+// What the part is, for a surface that has to say which reading is which:
+// "bme280", "shtc3", "sht3x", or "none". Never null.
+const char* partName(Source s);
 
 // The last completed conversion. Safe from any task.
-Reading last();
+Reading last(Source s = Source::Primary);
 
 // How long ago that reading was taken, in seconds. Here rather than at each
 // surface because three of them print it — the console, the status API and the
@@ -92,7 +118,7 @@ uint32_t ageS(const Reading& r);
 // asked for. Zero while the sensor is answering. A part that is fitted and
 // never becomes ready would otherwise leave every surface saying "waiting for
 // the first reading" for hours, which is a promise rather than a report.
-uint32_t missedIntervals();
+uint32_t missedIntervals(Source s = Source::Primary);
 
 // Trigger a conversion, or collect one that has had time to finish. Called
 // from the main loop; free on every pass but the two that do the work, and it
@@ -110,12 +136,21 @@ struct Reading {
   float    pressureHpa = 0.0f;
   float    humidityPct = 0.0f;
   uint32_t atMs        = 0;
+  // Whether pressureHpa means anything. The BME280 measures all three; the
+  // humidity part beside it on the V4 measures two, and a zero there is the
+  // absence of a barometer rather than a vacuum. Surfaces print the field only
+  // when this is set, which is why it is carried with the reading rather than
+  // asked of the part — a reading is copied out and read later, by which time
+  // "which part was this" is no longer in scope.
+  bool     hasPressure = false;
 };
+enum class Source : uint8_t { Primary = 0, Secondary = 1 };
 inline void begin() {}
-inline bool present() { return false; }
-inline Reading last() { return Reading{}; }
+inline bool present(Source = Source::Primary) { return false; }
+inline const char* partName(Source) { return "none"; }
+inline Reading last(Source = Source::Primary) { return Reading{}; }
 inline uint32_t ageS(const Reading&) { return 0; }
-inline uint32_t missedIntervals() { return 0; }
+inline uint32_t missedIntervals(Source = Source::Primary) { return 0; }
 inline void poll() {}
 } // namespace Environment
 

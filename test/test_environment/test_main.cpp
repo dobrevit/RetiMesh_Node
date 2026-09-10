@@ -44,7 +44,10 @@
 // operations — with the two required to agree.
 #include <unity.h>
 #include <stdint.h>
+#include <string.h>
 #include "../../src/sys/Bme280Math.h"
+#include "../../src/sys/SensirionRhtMath.h"
+#include "../../src/sys/EnvReportPolicy.h"
 
 // A coefficient set of the shape a real part reports: t1 large and unsigned,
 // t2 positive, t3 small and negative, the pressure set spanning both signs.
@@ -362,6 +365,203 @@ static void test_humidity_saturates_at_exactly_one_hundred_percent() {
   TEST_ASSERT_EQUAL_UINT32(102400U, Bme280::humidityQ1024(c, tf, 0xFFFF));
 }
 
+// ---------------------------------------------------------------------------
+// Which part answered — the rule the two-address probe leans on
+// ---------------------------------------------------------------------------
+// This is what makes probing a second address safe rather than a guess: the
+// V4's sensor arrives on a plug-in module whose SDO strap the board does not
+// know, so begin() tries 0x76 and then 0x77 and accepts neither on the
+// strength of "something answered".
+
+static void test_the_bme280s_chip_id_is_the_only_accepted_one() {
+  TEST_ASSERT_EQUAL_INT((int)Bme280::Part::Bme280, (int)Bme280::identify(0x60));
+}
+
+static void test_a_bmp280_is_named_rather_than_accepted() {
+  // The pressure and temperature halves would work; the humidity does not
+  // exist. Told apart so the log can say which, and still refused.
+  TEST_ASSERT_EQUAL_INT((int)Bme280::Part::Bmp280, (int)Bme280::identify(0x58));
+}
+
+static void test_a_failed_read_is_absence_not_a_surprising_part() {
+  // I2cReg::read returns negative when nothing acks, which is the ordinary
+  // answer at an address with nothing on it. It must not be confused with a
+  // part that answered a byte this driver does not know.
+  TEST_ASSERT_EQUAL_INT((int)Bme280::Part::None, (int)Bme280::identify(-1));
+  TEST_ASSERT_EQUAL_INT((int)Bme280::Part::None, (int)Bme280::identify(-99));
+}
+
+static void test_no_other_byte_is_taken_for_a_bme280() {
+  // The whole point of the probe's second leg: a neighbour that acks and
+  // returns something must be refused, or the search picks it up. 0x00 and
+  // 0xFF are what a floating or stuck bus reads, and both are refused.
+  for (int id = 0; id <= 0xFF; id++) {
+    if (id == 0x60 || id == 0x58) continue;
+    TEST_ASSERT_EQUAL_INT((int)Bme280::Part::None, (int)Bme280::identify(id));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The second part: an SHTC3-class humidity sensor beside the barometer
+// ---------------------------------------------------------------------------
+
+static void test_the_datasheets_crc_example() {
+  // 0xBE 0xEF -> 0x92, the worked example both Sensirion datasheets print.
+  // The one vector that proves the polynomial, the seed and the bit order all
+  // at once.
+  const uint8_t d[2] = { 0xBE, 0xEF };
+  TEST_ASSERT_EQUAL_UINT8(0x92, SensirionRht::crc8(d, sizeof(d)));
+}
+
+static void test_a_word_with_a_wrong_checksum_is_refused() {
+  const uint8_t good[3] = { 0xBE, 0xEF, 0x92 };
+  const uint8_t bad[3]  = { 0xBE, 0xEF, 0x93 };
+  TEST_ASSERT_TRUE(SensirionRht::wordOk(good));
+  TEST_ASSERT_FALSE(SensirionRht::wordOk(bad));
+}
+
+static void test_half_a_good_measurement_is_not_a_measurement() {
+  // The humidity half is corrupt. Accepting the temperature would publish one
+  // real number beside one invented one with nothing to tell them apart.
+  uint8_t d[6] = { 0xBE, 0xEF, 0x92, 0xBE, 0xEF, 0x00 };
+  TEST_ASSERT_FALSE(SensirionRht::measurementOk(d));
+  d[5] = 0x92;
+  TEST_ASSERT_TRUE(SensirionRht::measurementOk(d));
+}
+
+static void test_the_shtc3_identity_word_ignores_the_revision_bits() {
+  // The mask 0x083F selects bit 11 and bits 5:0; bits 10:6 and 15:12 are
+  // silicon revision and differ between otherwise identical parts, which is
+  // why a clone can answer this correctly. The value below is that maximal
+  // adversarial word — the product code with *every* out-of-mask bit set — so
+  // an implementation comparing the raw id, or masking the wrong bits, fails
+  // here rather than passing by restating the constant.
+  TEST_ASSERT_TRUE(Shtc3::isShtc3(0x0807));
+  TEST_ASSERT_TRUE(Shtc3::isShtc3(0xFFFF & (0x0807 | ~0x083F)));
+  // A multiplexer or anything else that happens to reply at 0x70 is refused.
+  TEST_ASSERT_FALSE(Shtc3::isShtc3(0x0000));
+  TEST_ASSERT_FALSE(Shtc3::isShtc3(0x0806));
+}
+
+static void test_the_two_families_agree_at_the_bottom_of_the_scale() {
+  // Zero counts is -45.00 C and 0 % in both, which is where the two transfer
+  // functions coincide.
+  TEST_ASSERT_EQUAL_INT32(-4500, Shtc3::temperatureCentiC(0));
+  TEST_ASSERT_EQUAL_INT32(-4500, Sht3x::temperatureCentiC(0));
+  TEST_ASSERT_EQUAL_UINT32(0, Shtc3::humidityQ1024(0));
+  TEST_ASSERT_EQUAL_UINT32(0, Sht3x::humidityQ1024(0));
+}
+
+static void test_the_two_families_differ_at_the_top_by_their_divisor() {
+  // The SHT3x divides by 2^16-1 and so reaches its endpoints exactly; the
+  // SHTC3 divides by 2^16 and stops a shade short. Not a rounding slip in
+  // either — the datasheets specify it differently, and this test is here so
+  // that nobody "fixes" one into the other.
+  TEST_ASSERT_EQUAL_INT32(13000, Sht3x::temperatureCentiC(0xFFFF));
+  TEST_ASSERT_EQUAL_UINT32(102400, Sht3x::humidityQ1024(0xFFFF));   // exactly 100 %
+  TEST_ASSERT_EQUAL_INT32(12999, Shtc3::temperatureCentiC(0xFFFF));
+  TEST_ASSERT_EQUAL_UINT32(102398, Shtc3::humidityQ1024(0xFFFF));   // 99.998 %
+}
+
+static void test_a_midscale_count_is_the_middle_of_the_range() {
+  // Half scale: -45 + 175/2 = 42.5 C, and 50 % humidity.
+  // Exact, not near: at half scale both transfer functions land on the same
+  // integer, so a tolerance here would only hide a divisor that had drifted.
+  TEST_ASSERT_EQUAL_INT32(4250, Shtc3::temperatureCentiC(0x8000));
+  TEST_ASSERT_EQUAL_INT32(4250, Sht3x::temperatureCentiC(0x8000));
+  TEST_ASSERT_EQUAL_UINT32(51200, Shtc3::humidityQ1024(0x8000));
+  TEST_ASSERT_EQUAL_UINT32(51200, Sht3x::humidityQ1024(0x8000));
+}
+
+static void test_humidity_never_overflows_its_widened_multiply() {
+  // 102400 * 65535 is 6.71e9 and exceeds 32 bits; both conversions widen to
+  // 64-bit for that reason. Asserted against the value a *non*-widened
+  // implementation actually produces — 36862, a plausible-looking 36 % — 
+  // rather than against a loose bound, because "greater than 102000" is
+  // already implied by the full-scale test above and would catch nothing new.
+  TEST_ASSERT_NOT_EQUAL_UINT32(36862, Shtc3::humidityQ1024(0xFFFF));
+  TEST_ASSERT_NOT_EQUAL_UINT32(36862, Sht3x::humidityQ1024(0xFFFF));
+}
+
+// ---------------------------------------------------------------------------
+// The calibration accept/reject rule — the other half of a safe probe
+// ---------------------------------------------------------------------------
+
+static void test_a_real_calibration_is_accepted() {
+  Bme280::Calibration c{};
+  c.t1 = 28000; c.p1 = 36000; c.h1 = 75;
+  TEST_ASSERT_TRUE(Bme280::calibrationLooksReal(c));
+}
+
+static void test_any_one_zero_coefficient_refuses_the_part() {
+  // All three are unsigned in the datasheet's table and none is zero on a real
+  // device, so a zero in any of them is a transfer that half worked. Checked
+  // one at a time, because an && written as || would still pass a test that
+  // only ever zeroed everything.
+  Bme280::Calibration c{};
+  c.t1 = 28000; c.p1 = 36000; c.h1 = 75;
+  Bme280::Calibration t1 = c; t1.t1 = 0;
+  Bme280::Calibration p1 = c; p1.p1 = 0;
+  Bme280::Calibration h1 = c; h1.h1 = 0;
+  TEST_ASSERT_FALSE(Bme280::calibrationLooksReal(t1));
+  TEST_ASSERT_FALSE(Bme280::calibrationLooksReal(p1));
+  TEST_ASSERT_FALSE(Bme280::calibrationLooksReal(h1));
+}
+
+static void test_an_all_zero_block_is_refused() {
+  // What a block of zeroes decodes to, which is what a part that acknowledged
+  // and then said nothing produces. A zero p1 in particular is the divisor in
+  // the pressure polynomial, whose guard returns the 300 hPa floor — accepting
+  // it would publish the lowest pressure ever recorded, steadily, for ever.
+  TEST_ASSERT_FALSE(Bme280::calibrationLooksReal(Bme280::Calibration{}));
+}
+
+// ---------------------------------------------------------------------------
+// What three facts add up to, decided once for four surfaces
+// ---------------------------------------------------------------------------
+
+static void test_nothing_fitted_is_absent_whatever_else_says() {
+  using namespace EnvReportPolicy;
+  TEST_ASSERT_EQUAL_INT((int)State::Absent, (int)classify(false, false, 0));
+  TEST_ASSERT_EQUAL_INT((int)State::Absent, (int)classify(false, true, 0));
+  TEST_ASSERT_EQUAL_INT((int)State::Absent, (int)classify(false, true, 9));
+}
+
+static void test_fitted_and_silent_is_warming_up_then_a_fault() {
+  using namespace EnvReportPolicy;
+  TEST_ASSERT_EQUAL_INT((int)State::WarmingUp, (int)classify(true, false, 0));
+  TEST_ASSERT_EQUAL_INT((int)State::WarmingUp, (int)classify(true, false, 1));
+  // The threshold itself, asserted at the boundary in both directions: one
+  // interval either side is what separates "wait" from "go and look".
+  TEST_ASSERT_EQUAL_INT((int)State::NoReading, (int)classify(true, false, kQuietIntervals));
+  TEST_ASSERT_EQUAL_INT((int)State::NoReading, (int)classify(true, false, kQuietIntervals + 1));
+}
+
+static void test_a_reading_and_a_fault_are_both_true_at_once() {
+  using namespace EnvReportPolicy;
+  // The state this whole header exists for. `valid` stays true for ever once a
+  // conversion has landed, so a part that died an hour ago still carries a
+  // reading — and only the missed count says so.
+  TEST_ASSERT_EQUAL_INT((int)State::Fresh, (int)classify(true, true, 0));
+  TEST_ASSERT_EQUAL_INT((int)State::Stale, (int)classify(true, true, 1));
+  TEST_ASSERT_EQUAL_INT((int)State::Stale, (int)classify(true, true, 500));
+}
+
+static void test_every_state_has_a_distinct_wire_name() {
+  using namespace EnvReportPolicy;
+  // The portal switches on these strings, so a collision or a typo would make
+  // two states render as one and nothing on the host would notice.
+  const char* names[] = { name(State::Absent), name(State::WarmingUp),
+                          name(State::NoReading), name(State::Stale),
+                          name(State::Fresh) };
+  for (size_t i = 0; i < 5; i++) {
+    TEST_ASSERT_NOT_NULL(names[i]);
+    TEST_ASSERT_TRUE(names[i][0] != '\0');
+    for (size_t j = i + 1; j < 5; j++)
+      TEST_ASSERT_TRUE(strcmp(names[i], names[j]) != 0);
+  }
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -385,5 +585,24 @@ int main() {
   RUN_TEST(test_the_datasheets_worked_example);
   RUN_TEST(test_the_two_forms_of_the_polynomial_agree);
   RUN_TEST(test_humidity_saturates_at_exactly_one_hundred_percent);
+  RUN_TEST(test_the_bme280s_chip_id_is_the_only_accepted_one);
+  RUN_TEST(test_a_bmp280_is_named_rather_than_accepted);
+  RUN_TEST(test_a_failed_read_is_absence_not_a_surprising_part);
+  RUN_TEST(test_no_other_byte_is_taken_for_a_bme280);
+  RUN_TEST(test_the_datasheets_crc_example);
+  RUN_TEST(test_a_word_with_a_wrong_checksum_is_refused);
+  RUN_TEST(test_half_a_good_measurement_is_not_a_measurement);
+  RUN_TEST(test_the_shtc3_identity_word_ignores_the_revision_bits);
+  RUN_TEST(test_the_two_families_agree_at_the_bottom_of_the_scale);
+  RUN_TEST(test_the_two_families_differ_at_the_top_by_their_divisor);
+  RUN_TEST(test_a_midscale_count_is_the_middle_of_the_range);
+  RUN_TEST(test_humidity_never_overflows_its_widened_multiply);
+  RUN_TEST(test_a_real_calibration_is_accepted);
+  RUN_TEST(test_any_one_zero_coefficient_refuses_the_part);
+  RUN_TEST(test_an_all_zero_block_is_refused);
+  RUN_TEST(test_nothing_fitted_is_absent_whatever_else_says);
+  RUN_TEST(test_fitted_and_silent_is_warming_up_then_a_fault);
+  RUN_TEST(test_a_reading_and_a_fault_are_both_true_at_once);
+  RUN_TEST(test_every_state_has_a_distinct_wire_name);
   return UNITY_END();
 }
