@@ -161,6 +161,14 @@ lv_obj_t* reading(lv_obj_t* parent, const char* label, const char* value) {
   UiTheme::value(v);
   lv_label_set_text(v, value ? value : "—");
   lv_obj_set_flex_grow(v, 1);                 // and the value takes the rest
+  // One line, always — and this is the half that was missing. DOTS only
+  // engages on a label whose height is fixed as well as its width: bounded
+  // horizontally but left to grow downwards, the text wraps instead, which is
+  // how a longitude came to be broken across two lines at its decimal point
+  // and a packet count to sit above the frequency it belongs to. Pinned to a
+  // single line, a value that does not fit is ellipsised rather than
+  // rearranged.
+  lv_obj_set_height(v, lv_font_get_line_height(&font_plexmono_16));
   lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
   lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
   return v;

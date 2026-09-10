@@ -131,7 +131,12 @@ void refreshHome(lv_timer_t*) {
   if (g_stats.radioOnline)
     // The rx/tx pair is the one-glance "is this node hearing anything" the
     // field checks live on; it left with the old cards and is missed.
-    snprintf(v, sizeof(v), "%.3f SF%d · %lu rx %lu tx", (double)settings.radio().freqMhz,
+    // Written to the row's budget, which is about eighteen characters after
+    // the caption. The spelled-out " rx"/" tx" cost six of them to say what
+    // the suffixes say in two, and the channel is the one field here that
+    // cannot lose digits — an operator reads it to know which network this
+    // node is on.
+    snprintf(v, sizeof(v), "%.3f SF%d %lur%lut", (double)settings.radio().freqMhz,
              settings.radio().sf, (unsigned long)g_stats.loraRxPackets,
              (unsigned long)g_stats.loraTxPackets);
   else
@@ -275,7 +280,11 @@ void openHome() {
   sGnssVal  = reading(body, "GNSS TIME");
   sPeersVal = reading(body, "PEERS SEEN");
   sRssiVal  = reading(body, "LAST RSSI");
-  sPosVal   = reading(body, "POSITION");
+  // "POS", not "POSITION": the caption is condensed 14 and the value is
+  // monospace 16, so five characters of caption buy three of coordinate — and
+  // the pair needs every one of them. Shortening the caption costs nothing;
+  // shortening the coordinates would cost metres.
+  sPosVal   = reading(body, "POS");
   sBattVal  = reading(body, "BATTERY");
   sRadioVal = reading(body, "RADIO");
 #if HAS_ENV
