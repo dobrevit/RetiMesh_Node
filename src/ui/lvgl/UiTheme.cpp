@@ -136,14 +136,41 @@ lv_obj_t* reading(lv_obj_t* parent, const char* label, const char* value) {
   lv_obj_set_height(row, LV_SIZE_CONTENT);
   lv_obj_set_style_pad_hor(row, 8, 0);
   lv_obj_set_style_pad_ver(row, 5, 0);
+  // Flex, not two independent aligns, and the reason is a defect rather than a
+  // preference. Aligned separately, the value knew nothing about the caption
+  // beside it: an overlong reading grew leftward from the right edge, ran under
+  // the caption, and lost its *leading* characters — silently, with no dots and
+  // no clue. On the V4's 240 px panel that meant a temperature displayed
+  // without its first digit, which is not a degraded reading but a wrong one.
+  //
+  // Grown into whatever the caption leaves and ellipsised, a value that does
+  // not fit loses its tail instead. That orders the loss the right way round:
+  // these strings are written most-significant-first, so what survives is the
+  // number somebody is looking at, and the dots say the rest was cut.
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(row, 6, 0);
+
   lv_obj_t* l = lv_label_create(row);
   lv_label_set_text(l, label);
   labelCaps(l);
-  lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_set_flex_grow(l, 0);                 // the caption keeps its own width
+
   lv_obj_t* v = lv_label_create(row);
   UiTheme::value(v);
   lv_label_set_text(v, value ? value : "—");
-  lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_set_flex_grow(v, 1);                 // and the value takes the rest
+  // One line, always — and this is the half that was missing. DOTS only
+  // engages on a label whose height is fixed as well as its width: bounded
+  // horizontally but left to grow downwards, the text wraps instead, which is
+  // how a longitude came to be broken across two lines at its decimal point
+  // and a packet count to sit above the frequency it belongs to. Pinned to a
+  // single line, a value that does not fit is ellipsised rather than
+  // rearranged.
+  lv_obj_set_height(v, lv_font_get_line_height(&font_plexmono_16));
+  lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+  lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
   return v;
 }
 

@@ -131,7 +131,12 @@ void refreshHome(lv_timer_t*) {
   if (g_stats.radioOnline)
     // The rx/tx pair is the one-glance "is this node hearing anything" the
     // field checks live on; it left with the old cards and is missed.
-    snprintf(v, sizeof(v), "%.3f SF%d · %lu rx %lu tx", (double)settings.radio().freqMhz,
+    // Written to the row's budget, which is about eighteen characters after
+    // the caption. The spelled-out " rx"/" tx" cost six of them to say what
+    // the suffixes say in two, and the channel is the one field here that
+    // cannot lose digits — an operator reads it to know which network this
+    // node is on.
+    snprintf(v, sizeof(v), "%.3f SF%d %lur%lut", (double)settings.radio().freqMhz,
              settings.radio().sf, (unsigned long)g_stats.loraRxPackets,
              (unsigned long)g_stats.loraTxPackets);
   else
@@ -169,20 +174,40 @@ void refreshHome(lv_timer_t*) {
         tintIf(lbl, st == EnvReportPolicy::State::NoReading ? UiTheme::kWarn
                                                             : UiTheme::kInkLabel);
       } else {
-        const uint32_t age = Environment::ageS(e);
-        // Pressure only from the part that has a barometer, so the humidity
-        // sensor's row does not carry a figure it never measured.
-        if (e.hasPressure)
-          snprintf(v, sizeof(v), "%.1f C · %.0f%% · %.1f hPa · %lus%s",
-                   (double)e.tempC, (double)e.humidityPct, (double)e.pressureHpa,
-                   (unsigned long)age, missed ? " · stopped" : "");
+        // Written to a budget, because this row has one. The value font is
+        // monospace at 9.625 px a character and the panel is 240 px wide, so
+        // after the caption there is room for about seventeen — and the older
+        // form of this line was thirty-one. It did not wrap or ellipsise, it
+        // simply lost its front, which is why the temperature arrived without
+        // its leading digit. UiTheme::reading() now ellipsises instead; this
+        // keeps the common case from needing it at all.
+        //
+        // The age is what went, and deliberately. Environment.h asks every
+        // surface to carry the reading, its age and the missed count so that a
+        // dead sensor cannot look like a live one — but on a thirty-second
+        // cadence the number is between 0 and 30 nearly always, and it was
+        // costing a third of the row to say nothing. The obligation is met
+        // instead by naming the state outright: a part that has stopped says
+        // so in words and turns amber, and the exact age is still on the
+        // console, the API and the portal for anyone who needs the figure.
+        const bool stale = (st == EnvReportPolicy::State::Stale);
+        if (stale)
+          // Pressure is what gives way here rather than the fault: a barometer
+          // reading matters less than the fact that none of these numbers is
+          // current.
+          snprintf(v, sizeof(v), "%.1fC·%.0f%%·old",
+                   (double)e.tempC, (double)e.humidityPct);
+        else if (e.hasPressure)
+          // Pressure to the nearest hectopascal. The decimal was precision the
+          // part does not have — its tolerance is ±1 hPa — spent on two of the
+          // seventeen characters available.
+          snprintf(v, sizeof(v), "%.1fC·%.0f%%·%.0f",
+                   (double)e.tempC, (double)e.humidityPct, (double)e.pressureHpa);
         else
-          snprintf(v, sizeof(v), "%.1f C · %.0f%% · %lus%s",
-                   (double)e.tempC, (double)e.humidityPct,
-                   (unsigned long)age, missed ? " · stopped" : "");
+          snprintf(v, sizeof(v), "%.1fC·%.0f%%",
+                   (double)e.tempC, (double)e.humidityPct);
         Ui::setLabel(lbl, v);
-        tintIf(lbl, st == EnvReportPolicy::State::Stale ? UiTheme::kWarn
-                                                        : UiTheme::kInk);
+        tintIf(lbl, stale ? UiTheme::kWarn : UiTheme::kInk);
       }
     };
 
@@ -255,7 +280,11 @@ void openHome() {
   sGnssVal  = reading(body, "GNSS TIME");
   sPeersVal = reading(body, "PEERS SEEN");
   sRssiVal  = reading(body, "LAST RSSI");
-  sPosVal   = reading(body, "POSITION");
+  // "POS", not "POSITION": the caption is condensed 14 and the value is
+  // monospace 16, so five characters of caption buy three of coordinate — and
+  // the pair needs every one of them. Shortening the caption costs nothing;
+  // shortening the coordinates would cost metres.
+  sPosVal   = reading(body, "POS");
   sBattVal  = reading(body, "BATTERY");
   sRadioVal = reading(body, "RADIO");
 #if HAS_ENV
@@ -264,7 +293,7 @@ void openHome() {
 #if HAS_ENV2
   // Its own row rather than a second figure on the first: they are two
   // instruments and the operator is meant to be able to see them disagree.
-  sEnv2Val  = reading(body, "HUMIDITY SENSOR");
+  sEnv2Val  = reading(body, "HUMIDITY");
 #endif
   lv_obj_t* latestRow = lv_obj_create(body);
   UiTheme::card(latestRow);
