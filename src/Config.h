@@ -1569,6 +1569,15 @@ struct NodeStats {
   volatile uint32_t loraRxCrcErrors   = 0;  // readData() refused it: bad CRC or spurious IRQ
   volatile uint32_t loraRxBadLength   = 0;  // frame shorter than a header or longer than the max
   volatile uint32_t loraRxSpuriousIrq = 0;  // woken with no completed reception to collect
+  // Not one of the six above it, whatever the neighbours suggest: nothing is
+  // lost when this moves. The RNS task takes frames off the RX ring a bounded
+  // batch at a time (RingDrain.h) and what a batch leaves stays in the ring for
+  // the next pass, so this counts passes rather than frames. It rises when
+  // frames arrived faster than one pass could take them — the pass after a
+  // full-budget path-table sweep is the case to expect, since two drains can be
+  // 400 ms apart rather than 10. Real loss on this path is loraRxDropRing
+  // above, which is what the producer counts when the ring has no room left.
+  volatile uint32_t loraRxDrainCapped = 0;  // passes the batch cap ended with more queued
   // The other half of the radio's health, on the transmit side. A carrier-sense
   // probe that never reports is read as a busy channel — the only safe reading
   // of a medium nobody measured — so the fault is silent by construction: the
@@ -1580,6 +1589,16 @@ struct NodeStats {
   volatile uint32_t loraCadArmErrors  = 0;  // the driver refused to start the scan at all
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
+  // The inbound TCP ring's "we fell behind" — and unlike the drop counters
+  // above it, nothing is lost when it moves, which is why it is not called a
+  // drop. The RNS task drains that ring a bounded batch at a time
+  // (RingDrain.h) and what the batch leaves goes on the next pass, so this
+  // counts passes rather than packets: a rising figure means a client is
+  // sending faster than this node can route, not that anything was thrown
+  // away. It is here because the cap is also what hides the condition — it is
+  // what keeps a flood from reaching the watchdog, so without this a node
+  // being outrun would only get slower and say nothing.
+  volatile uint32_t tcpDrainCapped = 0;     // passes the batch cap ended with more queued
 };
 
 // Restart into the application or the bootloader: the delay before the

@@ -37,6 +37,7 @@ finding, not a reason to stop collecting from the other three.
 import argparse
 import csv
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -99,6 +100,16 @@ FIELDS = [
     # discharging, and its rising voltage is not a measurement.
     "power_profile", "cpu_mhz", "pmu",
     "battery_present", "battery_v", "battery_pct", "battery_charging",
+    # The two inbound rings' batch caps, counted per Reticulum-task pass that
+    # ended with more still queued. Neither is a loss column — what a batch
+    # leaves is taken on the next pass — but they are the only sign the node is
+    # being outrun, because the cap is also what keeps that condition from
+    # reaching the watchdog. `rx_drain_capped` is the radio's and is expected to
+    # move a little: two passes can be 400 ms apart when a path-table sweep runs
+    # its whole budget between them, which on a fast channel is more than one
+    # batch of frames. Real loss is drop_ring above. Appended, per the rule
+    # above.
+    "tcp_drain_capped", "rx_drain_capped",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -126,6 +137,7 @@ def sample(host, timeout=8):
     tables = diag.get("tables", {})
     faults = diag.get("faults", {})
     power  = d.get("power", {})
+    peers  = d.get("peers", {})
 
     row.update(
         uptime_s=d.get("uptime_s", ""),
@@ -158,6 +170,8 @@ def sample(host, timeout=8):
         announce_interval=radio.get("announce_interval", ""),
         cad_timeouts=radio.get("cad_timeouts", ""),
         cad_arm_errors=radio.get("cad_arm_errors", ""),
+        tcp_drain_capped=peers.get("tcp_drain_capped", ""),
+        rx_drain_capped=radio.get("rx_drain_capped", ""),
         tasks_missing=" ".join(missing_tasks(diag)),
         dram_free=heap.get("dram_free", ""),
         dram_min=heap.get("dram_min_free", ""),
@@ -631,6 +645,136 @@ def summarise(path, band=None):
             print(f"   ⚠ {key}: {vals[0]:.0f} -> {vals[-1]:.0f} (peak {max(vals):.0f}) — "
                   f"{meaning} (docs/troubleshooting.md)")
 
+        # The two rings' batch caps, read the same way as the pair above and for
+        # the same reason: the value itself is the finding rather than the
+        # delta, and per sample rather than first-to-last because a burst that
+        # ended before the last sample still happened. Without this the columns
+        # ride a week of CSV and are never read.
+        #
+        # Neither is a warning, and both say something narrower than carrier
+        # sense does. Non-zero means the cap did its job — a pass ended with
+        # more still in the ring and the remainder was taken on the following
+        # pass. Nothing was thrown away, so the finding is "this node is being
+        # outrun", not "this node lost packets". The drop that can follow is a
+        # producer-side ring-full: logged on the TCP side, counted as drop_ring
+        # on the radio side. docs/troubleshooting.md has the row for each.
+        #
+        # The radio one is expected to be small and non-zero on a fast channel:
+        # two drains can be 400 ms apart when a path-table sweep runs its whole
+        # budget between them, and the node catches up on the passes after. It
+        # is worth printing because the figure that is *not* expected — a total
+        # that keeps climbing — reads the same way on the line.
+        capped_meaning = {
+            "tcp_drain_capped":
+                "the inbound TCP ring's batch cap ended that many Reticulum-task passes "
+                "with traffic still queued: a client outrunning this node's routing",
+            "rx_drain_capped":
+                "the RX ring's batch cap ended that many Reticulum-task passes with frames "
+                "still queued: expected in small totals after a path-table sweep, and real "
+                "loss on that path is drop_ring",
+        }
+        for key, meaning in capped_meaning.items():
+            capped = [v for v in (num(r.get(key)) for r in up) if v is not None]
+            if not capped or max(capped) == 0:
+                continue
+            print(f"   {key}: {capped[0]:.0f} -> {capped[-1]:.0f} "
+                  f"(peak {max(capped):.0f}) — {meaning}, and nothing lost by the cap "
+                  f"(docs/troubleshooting.md)")
+
+
+def appender(f, path):
+    """A csv.DictWriter for appending samples to `path`, already opened as `f`.
+
+    Appending is what lets an interrupted run keep its history, and it is also
+    the one way a newly appended column breaks an old file. A
+    `DictWriter(fieldnames=FIELDS)` writes one cell per name in FIELDS whatever
+    the header on disk says, so a CSV started before a column existed got rows
+    one cell longer than its own header from the moment the run resumed —
+    and `csv.DictReader` files that extra cell under the `None` restkey, where
+    `summarise()` never looks. Every post-resume sample of the new column was
+    lost, silently, in precisely the long-running fleet CSVs the column exists
+    for. That the appended column happened to be last is the only reason the
+    other columns still lined up; a second appended column makes it worse.
+
+    So the header on disk decides. When it is a prefix of FIELDS — an earlier
+    revision of this file's own list, which the append-only rule guarantees is
+    the only shape an older file can have — the rows are written with *it*, and
+    the newer columns are simply not in that file. `is_blank()` already treats a
+    column a CSV does not have exactly as it treats one left empty, so that file
+    summarises as it always did.
+
+    A header that is not a prefix of FIELDS was not written by this script (or
+    was written by a version whose columns were renamed or reordered, which the
+    rule above forbids). Appending into it would interleave two different
+    column meanings in one file, so it is refused instead.
+
+    `extrasaction="ignore"` is what lets a full row be written against a shorter
+    header, and it is deliberately narrow: the prefix check means the only keys
+    it can drop are `FIELDS[len(header):]`, which are named on stderr when it
+    happens. A genuinely misspelled key still raises, on the fresh-file path
+    below, where the fieldnames are FIELDS itself.
+
+    Two more shapes are refused rather than appended to, both because the row
+    they would produce is wrong in a way nothing downstream can see: a file that
+    does not end in a newline, whose last line an append would run this run's
+    first sample onto, and a file whose first line is blank, which has no column
+    list to append under. Raising is the operator-facing behaviour here —
+    `main()` turns it into exit code 2 and a line on stderr rather than a
+    traceback.
+    """
+    header = None
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        # `f` is open for appending and cannot be read; the header comes off a
+        # separate read handle, before anything has been written.
+        with open(path, newline="") as r:
+            header = next(csv.reader(r), None)
+        # An append resumes at the byte after the last one, not at the start of
+        # a line. A file whose last line was never terminated — a run killed
+        # mid-write, or a header typed by hand — takes the first cell of the
+        # first appended row onto the end of that line, giving one row of twice
+        # the width with every column in it shifted. Nothing downstream can
+        # spot that afterwards, and the reader above cannot see it at all
+        # (a final line without its newline parses exactly like one with it),
+        # so the last byte is asked for directly.
+        with open(path, "rb") as r:
+            r.seek(-1, os.SEEK_END)
+            tail = r.read(1)
+        if tail not in (b"\n", b"\r"):
+            raise ValueError(
+                f"{path} does not end with a newline, so its last line was "
+                f"never finished: appending would merge this run's first sample "
+                f"onto the end of it. Terminate that line, or write this run to "
+                f"a new file.")
+    if header is None:
+        w = csv.DictWriter(f, fieldnames=FIELDS)
+        w.writeheader()
+        return w
+    if not header:
+        # A file whose first line is blank. `next()` returns [] for that, not
+        # None, and [] is a prefix of everything — so treating it as falsy once
+        # wrote a second header into the middle of a file that already had one,
+        # and treating it as a header would write every row with no columns at
+        # all. Neither is this run's to do, so it refuses.
+        raise ValueError(
+            f"{path} begins with a blank line rather than a header, so there is "
+            f"no column list to append under. Write this run to a new file.")
+    if FIELDS[:len(header)] != header:
+        extra = [c for c in header if c not in FIELDS]
+        raise ValueError(
+            f"{path} has a header this run cannot append to: it is not an "
+            f"earlier revision of the current columns"
+            + (f" (unknown column(s): {', '.join(extra)})" if extra else
+               " (the columns it does have are ordered or named differently)")
+            + ". Write this run to a new file rather than mixing two layouts "
+              "in one.")
+    missing = FIELDS[len(header):]
+    if missing:
+        print(f"soak: {path} was started before {len(missing)} column(s) existed "
+              f"({', '.join(missing)}); this run appends under its own header, so "
+              f"they stay absent from that file. Use a new --out to record them.",
+              file=sys.stderr)
+    return csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -667,14 +811,15 @@ def main():
     if not args.nodes:
         ap.error("name at least one node, or pass --summarise")
 
-    # Append, so a run interrupted and restarted keeps its history.
-    import os
-    new = not os.path.exists(args.out) or os.path.getsize(args.out) == 0
+    # Append, so a run interrupted and restarted keeps its history — under
+    # whatever header that file already has, which is the whole of appender().
     end = time.time() + args.duration
     with open(args.out, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
-        if new:
-            w.writeheader()
+        try:
+            w = appender(f, args.out)
+        except ValueError as e:
+            print(f"soak: {e}", file=sys.stderr)
+            return 2
         while time.time() < end:
             for n in args.nodes:
                 w.writerow(sample(n))
