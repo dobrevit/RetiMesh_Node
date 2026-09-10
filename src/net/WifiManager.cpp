@@ -1845,6 +1845,16 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     tb["announces"]      = t.announces;
     tb["announces_held"] = t.heldAnnounces;
     tb["rates"]          = t.rates;
+    // The snapshot walk's own health, which nothing served before. A soak run
+    // watching `paths` climb had no way to tell whether the node was still
+    // reading its own table: snap_walk_max_ms is the worst pass, snap_walk_pos
+    // against `paths` is how far the last one got, snap_budget_stops counts the
+    // passes the budget ended, and snap_rows_whole says whether the `paths`
+    // list this API serves is a complete cycle (RnsTransport.h).
+    tb["snap_walk_max_ms"]   = t.snapWalkMaxMs;
+    tb["snap_walk_pos"]      = t.snapWalkPos;
+    tb["snap_budget_stops"]  = t.snapBudgetStops;
+    tb["snap_rows_whole"]    = t.snapRowsWhole;
   }
 
   JsonObject radio    = doc["radio"].to<JsonObject>();

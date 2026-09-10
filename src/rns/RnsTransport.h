@@ -91,14 +91,35 @@ struct Tables {
   uint32_t announces;      // announce table awaiting retransmission
   uint32_t heldAnnounces;
   uint32_t rates;          // per-destination announce rate table
-  // Longest the snapshot pass has taken to read path records back off the
-  // filesystem, since boot. Reported because it is the figure that decides
-  // whether this node is near the edge the V4 went over: the walk is bounded
-  // and feeds the watchdog now, but a record costs whatever the filesystem
-  // charges, and a table big enough or a filesystem slow enough still makes a
-  // pass long. A number here in the seconds means the RNS task is spending
-  // that long not forwarding.
+  // Longest one snapshot pass has taken, since boot: the path-table walk plus
+  // the removal that follows it, which share one budget. Reported because it is
+  // the figure that decides whether this node is near the edge the V4 went
+  // over: the pass is bounded and feeds the watchdog now, but a record costs
+  // whatever the filesystem charges, and a table big enough or a filesystem
+  // slow enough still makes a pass long. A number here in the seconds means the
+  // RNS task is spending that long not forwarding.
   uint32_t snapWalkMaxMs;
+  // The three below say what that high-water mark cannot: whether the node is
+  // getting through its own table. snapWalkMaxMs alone reads the same for a
+  // pass that finished the table in 380 ms and one that was cut off at 400.
+  //
+  // Where the last pass's walk stopped — an offset into the path table in
+  // iteration order. At or past `paths` means it reached the end: at, ordinarily
+  // (positions run 0..size-1, so the size itself is one past the last), and past
+  // it on a pass that went on to remove dead entries, since `paths` is read
+  // after that and is the smaller table.
+  uint32_t snapWalkPos;
+  // How many passes the budget has ended since boot. Zero on a node that walks
+  // its table comfortably; climbing by one every five seconds means every pass
+  // is being cut off, which is survivable (the cursors resume) but is the node
+  // saying its table has outgrown one pass.
+  uint32_t snapBudgetStops;
+  // Whether the published path rows are a whole cycle. A pass stopped by the
+  // budget keeps its prefix in staging rather than publishing it, so a list
+  // that has been published is complete by construction and this is false only
+  // until the first cycle closes — or for ever, on a node that cannot finish
+  // one, which beside a non-zero `paths` is the reading that says so.
+  bool     snapRowsWhole;
 };
 Tables tables();
 

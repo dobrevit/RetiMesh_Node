@@ -28,9 +28,9 @@
 //   * it stops one on the free step-over path too, which used to `continue`
 //     before the check was ever reached;
 //   * "the rows are full and no sweep wants the rest" is still a clean finish
-//     and not a budget stop, because only a budget stop writes the sweep
-//     cursor;
-//   * the sweep cursor never moves backwards, which is a hazard the first of
+//     and not a budget stop, because only a budget stop leaves a cursor
+//     part-way down the table;
+//   * neither cursor ever moves backwards, which is a hazard the first of
 //     those creates: a stop in the row half is at the front of the table, and
 //     writing it in would drag the sweep there and leave the tail unexamined;
 //   * a cursor the table has shrunk past starts the cycle again instead of
@@ -42,12 +42,19 @@
 //     one budget at the per-record costs this repository has measured — the
 //     exact thing reusing Sys::RingDrain::kFeedEvery would have failed at.
 //
-// One test here pins a limitation rather than a guarantee —
-// test_a_row_bound_table_never_advances_the_cursor. Bounding the row half
-// stopped the watchdog reboots and cost the sweep its cycle on any table slow
-// enough to spend a budget before the rows fill. That is written down and
-// driven so the pass that resumes row collection across passes has something
-// to flip, not because it is a state worth keeping.
+// And what the pass that resumed row collection across passes had to hold on
+// to, all of it learned from the abandoned branch that tried it first:
+//
+//   * row collection carries a cursor of its own, under the same two rules the
+//     sweep's is under — test_a_row_bound_table_now_advances_the_cursor is the
+//     limitation test that used to assert the opposite;
+//   * a pass may not be stopped by the budget until it has dereferenced one
+//     record, so it always reaches its own cursor and always moves it forward,
+//     whatever a step comes to cost;
+//   * the end of a pass is the rows being *full*, not this position wanting no
+//     row — "no row here" is what a resuming pass sees at position 0, and
+//     ending on it published 19 rows on a node holding 87;
+//   * only a whole list is published; a budget-stopped pass keeps its prefix.
 //
 // refreshSnapshots() itself cannot be built for the host — [env:native] has no
 // framework, no microReticulum, no LittleFS and no FreeRTOS — so the rule was
@@ -88,16 +95,33 @@ constexpr uint32_t kSlowRecordMs = 162;
 // ---------------------------------------------------------------------------
 // One position's inputs, spelled out so a test reads as a sentence.
 // ---------------------------------------------------------------------------
+// `readAny` is true because that is what every position after the first of a
+// pass looks like; the two tests about the forward-progress rule say otherwise
+// with havingReadNothing() below.
 Rns::WalkState at(size_t rows, bool sweeping, size_t pos, size_t sweepPos,
                   uint32_t elapsedMs, uint32_t budgetMs = Rns::kWalkBudgetMs) {
   Rns::WalkState w;
   w.rowsCollected = rows;
   w.rowCap        = kRowCap;
+  w.rowPos        = 0;
   w.sweeping      = sweeping;
   w.pos           = pos;
   w.sweepPos      = sweepPos;
   w.elapsedMs     = elapsedMs;
   w.budgetMs      = budgetMs;
+  w.readAny       = true;
+  return w;
+}
+
+// The same position on a pass that is continuing a part-built row list.
+Rns::WalkState resumingRowsAt(Rns::WalkState w, size_t rowPos) {
+  w.rowPos = rowPos;
+  return w;
+}
+
+// The same position on a pass that has not dereferenced anything yet.
+Rns::WalkState havingReadNothing(Rns::WalkState w) {
+  w.readAny = false;
   return w;
 }
 
@@ -111,12 +135,15 @@ Rns::WalkState at(size_t rows, bool sweeping, size_t pos, size_t sweepPos,
 //
 // The clock only moves when a record is dereferenced, plus one tick per yield:
 // stepping over a position is free (test_typed_store_iterator pins that against
-// microStore itself).
+// microStore itself). `skipMs` exists to say what happens when it is *not* —
+// the regression the forward-progress rule is a defence against — and is zero
+// everywhere else.
 // ---------------------------------------------------------------------------
 struct Pass {
-  size_t   rows      = 0;      // rows the pass collected
+  size_t   rows      = 0;      // rows in the staging list after this pass
+  size_t   added     = 0;      // ...of which this pass collected these
   size_t   reads     = 0;      // records dereferenced
-  size_t   skipped   = 0;      // positions stepped over for free
+  size_t   skipped   = 0;      // positions stepped over
   size_t   yields    = 0;
   size_t   stoppedAt = 0;      // the position the walk left off at
   bool     ranOut    = false;  // the budget ended it
@@ -127,17 +154,21 @@ struct Pass {
 
 Pass runWalk(const std::vector<bool>& live, bool sweeping, size_t sweepPos,
              uint32_t recordMs, uint32_t yieldMs = Rns::kWalkYieldMs,
-             uint32_t tickMs = 1, uint32_t budgetMs = Rns::kWalkBudgetMs) {
+             uint32_t tickMs = 1, uint32_t budgetMs = Rns::kWalkBudgetMs,
+             size_t rowPos = 0, size_t rowsAlready = 0, uint32_t skipMs = 0) {
   Pass r;
+  r.rows = rowsAlready;                    // the cycle's list, carried in
   uint32_t lastYieldMs = 0;
   for (size_t pos = 0; pos < live.size(); pos++) {
-    const Rns::WalkState w =
+    Rns::WalkState w =
         at(r.rows, sweeping, pos, sweepPos, r.elapsedMs, budgetMs);
+    w.rowPos  = rowPos;
+    w.readAny = r.reads > 0;
     const Rns::WalkStep step = Rns::walkStep(w);
     r.stoppedAt = pos;
     if (step == Rns::WalkStep::StopRowsFull) { r.rowsFull = true; return r; }
     if (step == Rns::WalkStep::StopBudget)   { r.ranOut   = true; return r; }
-    if (step == Rns::WalkStep::Skip)         { r.skipped++; continue; }
+    if (step == Rns::WalkStep::Skip)         { r.skipped++; r.elapsedMs += skipMs; continue; }
 
     if (Rns::walkShouldYield(w.elapsedMs, lastYieldMs, yieldMs)) {
       lastYieldMs = w.elapsedMs;
@@ -147,7 +178,7 @@ Pass runWalk(const std::vector<bool>& live, bool sweeping, size_t sweepPos,
     r.reads++;
     r.elapsedMs += recordMs;
     if (!live[pos]) { if (sweeping) r.swept.push_back(pos); continue; }
-    if (step == Rns::WalkStep::Row) r.rows++;
+    if (step == Rns::WalkStep::Row) { r.rows++; r.added++; }
   }
   r.stoppedAt = live.size();               // the walk reached the end of the table
   return r;
@@ -160,6 +191,10 @@ std::vector<bool> table(size_t n, bool allLive) { return std::vector<bool>(n, al
 // applies them: resume against the table as it is now, walk, write the cursor
 // back. `sweeping` is forced on, which is the firmware's state whenever a
 // cursor is part-way down a table or the minute is up.
+//
+// Row collection is left at the front here, so this drives the sweep cursor on
+// its own. The whole of refreshSnapshots()'s bookkeeping — both cursors, the
+// staging list and the publish — is Node below.
 // ---------------------------------------------------------------------------
 struct Sweep {
   size_t cursor = 0;      // where the next pass would resume
@@ -169,11 +204,52 @@ struct Sweep {
 
 Sweep sweepOnce(const std::vector<bool>& live, size_t cursor, uint32_t recordMs) {
   Sweep s;
-  const size_t from = Rns::sweepResumePos(cursor, live.size());
+  const size_t from = Rns::resumeCursor(cursor, live.size());
   s.pass   = runWalk(live, true, from, recordMs);
   s.closed = !s.pass.ranOut;
-  s.cursor = Rns::nextSweepPos(from, s.pass.stoppedAt, s.pass.ranOut);
+  s.cursor = Rns::nextCursor(from, s.pass.stoppedAt, s.pass.ranOut);
   return s;
+}
+
+// ---------------------------------------------------------------------------
+// Everything refreshSnapshots() carries in statics from one pass to the next,
+// and the order it applies the rules in: resume both cursors against the table
+// as it is now, empty the staging list only if the row cycle is starting, walk,
+// write both cursors back, and publish the rows only if the cycle finished.
+//
+// Kept deliberately close to the call site, like runWalk() above: if the two
+// shapes diverge this suite stops describing the firmware.
+// ---------------------------------------------------------------------------
+struct Node {
+  size_t sweepPos    = 0;
+  size_t rowPos      = 0;
+  size_t staged      = 0;      // rows the current cycle has collected so far
+  size_t published   = 0;      // rows in the list readers actually see
+  bool   rowsWhole   = false;  // a cycle has been published at least once
+  size_t rowCycles   = 0;
+  size_t sweepCloses = 0;
+  size_t sweptTotal  = 0;
+  size_t budgetStops = 0;
+};
+
+Pass onePass(Node& n, const std::vector<bool>& live, uint32_t recordMs,
+             bool sweeping = true, uint32_t skipMs = 0) {
+  n.sweepPos = Rns::resumeCursor(n.sweepPos, live.size());
+  n.rowPos   = Rns::resumeCursor(n.rowPos,   live.size());
+  if (n.rowPos == 0) n.staged = 0;
+  const Pass r = runWalk(live, sweeping, n.sweepPos, recordMs, Rns::kWalkYieldMs, 1,
+                         Rns::kWalkBudgetMs, n.rowPos, n.staged, skipMs);
+  n.staged      = r.rows;
+  n.sweptTotal += r.swept.size();
+  if (r.ranOut) n.budgetStops++;
+  const bool rowsDone = Rns::rowCycleDone(r.rows, kRowCap, r.ranOut);
+  n.rowPos = rowsDone ? 0 : Rns::nextCursor(n.rowPos, r.stoppedAt, r.ranOut);
+  if (sweeping) {
+    n.sweepPos = Rns::nextCursor(n.sweepPos, r.stoppedAt, r.ranOut);
+    if (!r.ranOut) n.sweepCloses++;
+  }
+  if (rowsDone) { n.published = r.rows; n.rowsWhole = true; n.rowCycles++; }
+  return r;
 }
 
 } // namespace
@@ -360,7 +436,7 @@ void test_a_small_table_finishes_inside_the_budget_and_closes_the_cycle() {
   TEST_ASSERT_EQUAL_size_t(3, r.reads);
   TEST_ASSERT_EQUAL_size_t(3, r.rows);
   TEST_ASSERT_EQUAL_size_t(0, r.yields);                    // 90 ms of walk, cadence is 100
-  TEST_ASSERT_EQUAL_size_t(0, Rns::nextSweepPos(0, r.stoppedAt, r.ranOut));
+  TEST_ASSERT_EQUAL_size_t(0, Rns::nextCursor(0, r.stoppedAt, r.ranOut));
 }
 
 void test_a_pass_stops_on_rows_full_when_nothing_else_needs_the_rest() {
@@ -394,15 +470,15 @@ void test_the_sweep_cursor_never_moves_backwards() {
   // The hazard the budget's new reach creates. Rows are collected from the
   // front of the table on every pass, so a budget stop in the row half is at a
   // position *behind* a cursor that has already worked its way down the table.
-  TEST_ASSERT_EQUAL_size_t(60, Rns::nextSweepPos(60, 13, true));
-  TEST_ASSERT_EQUAL_size_t(60, Rns::nextSweepPos(60, 0,  true));
-  TEST_ASSERT_EQUAL_size_t(60, Rns::nextSweepPos(60, 59, true));
+  TEST_ASSERT_EQUAL_size_t(60, Rns::nextCursor(60, 13, true));
+  TEST_ASSERT_EQUAL_size_t(60, Rns::nextCursor(60, 0,  true));
+  TEST_ASSERT_EQUAL_size_t(60, Rns::nextCursor(60, 59, true));
   // Forwards it does move.
-  TEST_ASSERT_EQUAL_size_t(61, Rns::nextSweepPos(60, 61, true));
-  TEST_ASSERT_EQUAL_size_t(60, Rns::nextSweepPos(60, 60, true));
+  TEST_ASSERT_EQUAL_size_t(61, Rns::nextCursor(60, 61, true));
+  TEST_ASSERT_EQUAL_size_t(60, Rns::nextCursor(60, 60, true));
   // And reaching the end of the table closes the cycle whatever the position.
-  TEST_ASSERT_EQUAL_size_t(0, Rns::nextSweepPos(60, 999, false));
-  TEST_ASSERT_EQUAL_size_t(0, Rns::nextSweepPos(60, 0,   false));
+  TEST_ASSERT_EQUAL_size_t(0, Rns::nextCursor(60, 999, false));
+  TEST_ASSERT_EQUAL_size_t(0, Rns::nextCursor(60, 0,   false));
 }
 
 void test_a_row_bound_pass_leaves_the_cursor_where_it_was() {
@@ -413,22 +489,22 @@ void test_a_row_bound_pass_leaves_the_cursor_where_it_was() {
   const Pass r = runWalk(table(200, true), true, cursor, kFastRecordMs);
   TEST_ASSERT_TRUE(r.ranOut);
   TEST_ASSERT_LESS_THAN_size_t(cursor, r.stoppedAt);        // stopped ahead of the cursor
-  TEST_ASSERT_EQUAL_size_t(cursor, Rns::nextSweepPos(cursor, r.stoppedAt, r.ranOut));
+  TEST_ASSERT_EQUAL_size_t(cursor, Rns::nextCursor(cursor, r.stoppedAt, r.ranOut));
   // Which is not what an unconditional write would have done: that is the value
   // on the other side of the clamp, and it is at the front of the table.
   TEST_ASSERT_NOT_EQUAL_size_t(r.stoppedAt,
-                               Rns::nextSweepPos(cursor, r.stoppedAt, r.ranOut));
+                               Rns::nextCursor(cursor, r.stoppedAt, r.ranOut));
 }
 
 void test_a_cursor_past_the_end_of_the_table_starts_the_cycle_again() {
   // The other side of "forwards only". Positions run 0..size-1, so the size
   // itself is already past the end.
-  TEST_ASSERT_EQUAL_size_t(0, Rns::sweepResumePos(150, 100));
-  TEST_ASSERT_EQUAL_size_t(0, Rns::sweepResumePos(100, 100));
-  TEST_ASSERT_EQUAL_size_t(0, Rns::sweepResumePos(1, 0));      // an emptied table
+  TEST_ASSERT_EQUAL_size_t(0, Rns::resumeCursor(150, 100));
+  TEST_ASSERT_EQUAL_size_t(0, Rns::resumeCursor(100, 100));
+  TEST_ASSERT_EQUAL_size_t(0, Rns::resumeCursor(1, 0));      // an emptied table
   // A cursor the table still holds is left exactly where it was.
-  TEST_ASSERT_EQUAL_size_t(99, Rns::sweepResumePos(99, 100));
-  TEST_ASSERT_EQUAL_size_t(0,  Rns::sweepResumePos(0, 100));
+  TEST_ASSERT_EQUAL_size_t(99, Rns::resumeCursor(99, 100));
+  TEST_ASSERT_EQUAL_size_t(0,  Rns::resumeCursor(0, 100));
 }
 
 void test_a_cursor_left_past_a_shrunken_table_does_not_latch() {
@@ -440,7 +516,7 @@ void test_a_cursor_left_past_a_shrunken_table_does_not_latch() {
   const size_t stranded = 150;
 
   // Unresumed, it latches: the pass stops in the row half with the budget
-  // spent, and nextSweepPos() — forwards only — hands the same out-of-range
+  // spent, and nextCursor() — forwards only — hands the same out-of-range
   // value straight back. No position in this table is at or past it, so while
   // the budget is what ends a pass — which it is at every per-record cost this
   // tree has measured — no later pass can end anywhere else either: the cycle
@@ -449,7 +525,7 @@ void test_a_cursor_left_past_a_shrunken_table_does_not_latch() {
   TEST_ASSERT_TRUE(raw.ranOut);
   TEST_ASSERT_LESS_THAN_size_t(stranded, raw.stoppedAt);
   TEST_ASSERT_EQUAL_size_t(stranded,
-                           Rns::nextSweepPos(stranded, raw.stoppedAt, raw.ranOut));
+                           Rns::nextCursor(stranded, raw.stoppedAt, raw.ranOut));
 
   // Resumed against the table as it is now, the cursor is inside it again and
   // this pass advances it like any other.
@@ -465,45 +541,163 @@ void test_a_cursor_left_past_a_shrunken_table_does_not_latch() {
 }
 
 // ---------------------------------------------------------------------------
-// What bounding the row half costs, until row collection resumes across passes
+// Row collection resumes across passes, and what that closed
 // ---------------------------------------------------------------------------
 
-void test_a_row_bound_table_never_advances_the_cursor() {
-  // A limitation, pinned so it can be shown to close rather than argued about.
+void test_a_row_bound_table_now_advances_the_cursor() {
+  // This was test_a_row_bound_table_never_advances_the_cursor, and it was
+  // written to be flipped. What it pinned was the cost of bounding the row
+  // half: rows were re-collected from the front of the table on every pass, so
+  // on a table slow enough to spend the budget before they filled, every pass
+  // read the same live prefix and stopped in the same place. Over thirty passes
+  // the cursor settled at 14 and never moved, the cycle closed zero times, not
+  // one of the hundred dead entries was ever seen, and the published list was a
+  // permanent fourteen-row prefix stamped fresh every five seconds.
   //
-  // 100 live entries followed by 100 dead ones — the dead half being what the
-  // sweep exists to remove — at the 30 ms a record costs in the regime this
-  // firmware links. Rows are collected from the front of the table on every
-  // pass, so every pass reads the same live prefix, spends the whole budget on
-  // it and stops in the same place. The cursor reaches the end of that prefix
-  // and never moves again; the published list is not a late reading, it is
-  // permanently the same fourteen rows; and not one dead entry is ever seen.
-  //
-  // The regime is rowCap x per-record cost > kWalkBudgetMs, which at 64 rows is
-  // any store charging more than 6.25 ms a record — so this is the ordinary
-  // case on a node with more paths than one budget reads, not an edge.
-  // Resuming row collection across passes is what flips it.
+  // The same table, the same per-record cost, with row collection carrying a
+  // cursor of its own. The three assertions that were `== 0` are the three that
+  // matter.
   std::vector<bool> live = table(200, true);
   for (size_t k = 100; k < live.size(); k++) live[k] = false;
 
-  size_t cursor = 0, closes = 0, sweptTotal = 0, settled = 0;
-  for (int passNo = 0; passNo < 30; passNo++) {
-    const Sweep s = sweepOnce(live, cursor, kFastRecordMs);
-    sweptTotal += s.pass.swept.size();
-    if (s.closed) closes++;
-    TEST_ASSERT_TRUE(s.pass.ranOut);
-    TEST_ASSERT_LESS_THAN_size_t(kRowCap, s.pass.rows);   // never a full list
-    if (passNo == 0) settled = s.cursor;
-    else TEST_ASSERT_EQUAL_size_t(settled, s.cursor);     // and it never moves
-    cursor = s.cursor;
+  Node n;
+  std::vector<size_t> rowCursor;
+  for (int passNo = 0; passNo < 5; passNo++) {
+    onePass(n, live, kFastRecordMs);
+    rowCursor.push_back(n.rowPos);
   }
-  // Fourteen: at 30 ms a record, with a yield tick at 100, 200 and 300 ms of
-  // walk time, the fifteenth record is the first to find the budget spent.
-  TEST_ASSERT_EQUAL_size_t(14, settled);
-  TEST_ASSERT_GREATER_THAN_size_t(0, settled);
-  TEST_ASSERT_LESS_THAN_size_t(kRowCap, settled);
-  TEST_ASSERT_EQUAL_size_t(0, sweptTotal);   // not one of the hundred, ever
-  TEST_ASSERT_EQUAL_size_t(0, closes);       // and the cycle never closes
+  // Four budget-stopped passes walking fourteen records each, and the fifth
+  // fills the cap and closes the cycle. The cursor moves every pass, which is
+  // the whole of what was broken.
+  TEST_ASSERT_EQUAL_size_t(14, rowCursor[0]);
+  TEST_ASSERT_EQUAL_size_t(28, rowCursor[1]);
+  TEST_ASSERT_EQUAL_size_t(42, rowCursor[2]);
+  TEST_ASSERT_EQUAL_size_t(56, rowCursor[3]);
+  TEST_ASSERT_EQUAL_size_t(0,  rowCursor[4]);   // wrapped: the cycle closed
+  TEST_ASSERT_EQUAL_size_t(1, n.rowCycles);
+  // And a whole list is what got published, not the fourteen-row prefix.
+  TEST_ASSERT_EQUAL_size_t(kRowCap, n.published);
+  TEST_ASSERT_TRUE(n.rowsWhole);
+
+  // The dead half beyond the prefix is reached as well, which it never was.
+  // The sweep cursor advances by whatever is left of a budget after the rows
+  // have had theirs, so on this table it takes a while — 30 further passes to
+  // the first dead entry and 110 to a closed sweep cycle when this was written,
+  // against never and never. The bounds asserted are loose because the exact
+  // figures are an artefact of one synthetic table with nothing ever removed
+  // from it; that they are finite is the property.
+  size_t firstSwept = 0, firstClose = 0;
+  for (int passNo = 1; passNo <= 200; passNo++) {
+    const Pass r = onePass(n, live, kFastRecordMs);
+    if (!firstSwept && !r.swept.empty()) firstSwept = (size_t)passNo;
+    if (!firstClose && n.sweepCloses)    firstClose = (size_t)passNo;
+  }
+  TEST_ASSERT_GREATER_THAN_size_t(0, firstSwept);
+  TEST_ASSERT_LESS_OR_EQUAL_size_t(60, firstSwept);
+  TEST_ASSERT_GREATER_THAN_size_t(0, firstClose);
+  TEST_ASSERT_LESS_OR_EQUAL_size_t(150, firstClose);
+  TEST_ASSERT_GREATER_THAN_size_t(0, n.sweptTotal);
+  TEST_ASSERT_GREATER_OR_EQUAL_size_t(1, n.sweepCloses);
+}
+
+void test_a_pass_may_not_stop_on_budget_before_it_has_read_something() {
+  // The forward-progress guarantee, at one position. With the budget spent and
+  // nothing read yet, a position the pass would step over is still stepped
+  // over, and a position it wants is still read.
+  TEST_ASSERT_TRUE(Rns::WalkStep::Skip ==
+                   Rns::walkStep(havingReadNothing(
+                       resumingRowsAt(at(14, false, 0, 0, Rns::kWalkBudgetMs), 14))));
+  TEST_ASSERT_TRUE(Rns::WalkStep::Row ==
+                   Rns::walkStep(havingReadNothing(at(14, false, 20, 0, Rns::kWalkBudgetMs))));
+  // Once one record has been dereferenced the budget bites at the next position.
+  TEST_ASSERT_TRUE(Rns::WalkStep::StopBudget ==
+                   Rns::walkStep(resumingRowsAt(at(14, false, 0, 0, Rns::kWalkBudgetMs), 14)));
+  TEST_ASSERT_TRUE(Rns::WalkStep::StopBudget ==
+                   Rns::walkStep(at(14, false, 20, 0, Rns::kWalkBudgetMs)));
+  // The same rule the removal is bounded by, asked directly.
+  TEST_ASSERT_FALSE(Rns::passMayStop(Rns::kWalkBudgetMs * 10, false));
+  TEST_ASSERT_TRUE(Rns::passMayStop(Rns::kWalkBudgetMs, true));
+  TEST_ASSERT_FALSE(Rns::passMayStop(Rns::kWalkBudgetMs - 1, true));
+}
+
+void test_a_pass_reaches_its_own_cursor_even_if_stepping_stops_being_free() {
+  // The structural defence, driven. Stepping costs nothing today — microStore
+  // loads on dereference and not on ++, which test_typed_store_iterator pins —
+  // so the prefix a resuming pass steps over is free. The abandoned branch
+  // fix/snapshot-walk-starves-loop tried a row cursor back when stepping *did*
+  // load, and the pass stopped inside its own prefix on every pass: "pinned at
+  // position 15 of 87 for ever, publishing an empty list".
+  //
+  // Here every step costs a whole record, so the budget is long gone before the
+  // cursor at 50 is reached. The pass still gets there, still reads one record,
+  // and the cursor still moves forward.
+  const Pass r = runWalk(table(200, true), false, 0, kFastRecordMs, Rns::kWalkYieldMs,
+                         1, Rns::kWalkBudgetMs, /*rowPos=*/50, /*rowsAlready=*/50,
+                         /*skipMs=*/kFastRecordMs);
+  TEST_ASSERT_TRUE(r.ranOut);
+  TEST_ASSERT_EQUAL_size_t(50, r.skipped);
+  TEST_ASSERT_EQUAL_size_t(1, r.reads);            // exactly one, beyond the cursor
+  TEST_ASSERT_EQUAL_size_t(1, r.added);
+  TEST_ASSERT_EQUAL_size_t(51, r.stoppedAt);
+  TEST_ASSERT_GREATER_THAN_size_t(50, Rns::nextCursor(50, r.stoppedAt, r.ranOut));
+  // The price of the guarantee: the pass costs the prefix plus one record
+  // rather than the budget. That is only ever paid if the dependency regresses,
+  // and it is the right way round — a bound that could stall the node for ever
+  // is worse than one that can be overrun.
+  TEST_ASSERT_GREATER_THAN_UINT32(Rns::kWalkBudgetMs, r.elapsedMs);
+}
+
+void test_a_resuming_pass_does_not_end_at_its_own_front_door() {
+  // The second thing the abandoned branch got wrong, and it published 19 rows
+  // on a node holding 87. With a row cursor, `!wantRow` is true at position 0 on
+  // every resuming pass — it wants no row *there*. Ending the pass on that, and
+  // treating the short list as finished, is the bug; the end condition is the
+  // rows being full.
+  const Rns::WalkState front = resumingRowsAt(at(14, false, 0, 0, 0), 14);
+  TEST_ASSERT_TRUE(Rns::WalkStep::Skip == Rns::walkStep(front));
+  TEST_ASSERT_FALSE(Rns::WalkStep::StopRowsFull == Rns::walkStep(front));
+  // Full is full, though, and that is still a clean finish.
+  TEST_ASSERT_TRUE(Rns::WalkStep::StopRowsFull ==
+                   Rns::walkStep(resumingRowsAt(at(kRowCap, false, 0, 0, 0), 14)));
+
+  // End to end: a pass resuming at 14 on a table with no sweep due walks past
+  // its prefix and collects the next fourteen rather than stopping at nothing.
+  const Pass r = runWalk(table(200, true), false, 0, kFastRecordMs, Rns::kWalkYieldMs,
+                         1, Rns::kWalkBudgetMs, /*rowPos=*/14, /*rowsAlready=*/14);
+  TEST_ASSERT_EQUAL_size_t(14, r.skipped);
+  TEST_ASSERT_EQUAL_size_t(14, r.added);
+  TEST_ASSERT_EQUAL_size_t(28, r.rows);
+  TEST_ASSERT_EQUAL_size_t(28, r.stoppedAt);
+}
+
+void test_only_a_whole_list_is_published() {
+  // A budget-stopped pass has a valid prefix and nothing more. What readers see
+  // stays at the last whole list rather than becoming four paths on a node
+  // holding eighty.
+  TEST_ASSERT_FALSE(Rns::rowCycleDone(14, kRowCap, true));   // stopped, not full
+  TEST_ASSERT_TRUE(Rns::rowCycleDone(kRowCap, kRowCap, true));  // the cap filled
+  TEST_ASSERT_TRUE(Rns::rowCycleDone(3, kRowCap, false));    // walked to the end
+  TEST_ASSERT_TRUE(Rns::rowCycleDone(0, kRowCap, false));    // an empty table
+
+  Node n;
+  const std::vector<bool> live = table(200, true);
+  // Nothing published until the fifth pass closes the cycle.
+  for (int k = 0; k < 4; k++) {
+    onePass(n, live, kFastRecordMs, /*sweeping=*/false);
+    TEST_ASSERT_EQUAL_size_t(0, n.published);
+    TEST_ASSERT_FALSE(n.rowsWhole);
+    TEST_ASSERT_GREATER_THAN_size_t(0, n.staged);      // but the prefix is kept
+  }
+  onePass(n, live, kFastRecordMs, /*sweeping=*/false);
+  TEST_ASSERT_EQUAL_size_t(kRowCap, n.published);
+  TEST_ASSERT_TRUE(n.rowsWhole);
+  // And a table the walk finishes in one pass publishes on that pass, which is
+  // every ordinary node: no list is delayed by this.
+  Node small;
+  onePass(small, table(3, true), kFastRecordMs, /*sweeping=*/false);
+  TEST_ASSERT_EQUAL_size_t(3, small.published);
+  TEST_ASSERT_TRUE(small.rowsWhole);
+  TEST_ASSERT_EQUAL_size_t(0, small.rowPos);
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +796,11 @@ int main() {
   RUN_TEST(test_a_row_bound_pass_leaves_the_cursor_where_it_was);
   RUN_TEST(test_a_cursor_past_the_end_of_the_table_starts_the_cycle_again);
   RUN_TEST(test_a_cursor_left_past_a_shrunken_table_does_not_latch);
-  RUN_TEST(test_a_row_bound_table_never_advances_the_cursor);
+  RUN_TEST(test_a_row_bound_table_now_advances_the_cursor);
+  RUN_TEST(test_a_pass_may_not_stop_on_budget_before_it_has_read_something);
+  RUN_TEST(test_a_pass_reaches_its_own_cursor_even_if_stepping_stops_being_free);
+  RUN_TEST(test_a_resuming_pass_does_not_end_at_its_own_front_door);
+  RUN_TEST(test_only_a_whole_list_is_published);
   RUN_TEST(test_the_yield_cadence_fires_more_than_once_inside_one_budget);
   RUN_TEST(test_the_feed_cadence_would_not_yield_at_all);
   RUN_TEST(test_the_yield_ceiling_does_not_move_with_the_record_cost);

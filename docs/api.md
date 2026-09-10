@@ -145,7 +145,9 @@ the ordinary reading on the shipped channel and needs no action.
             "stacks": { "loopTask": 3120, "rns": 6284, "radio": 2960, "gps": 1180 },
             "stack_lowest": 1180, "stack_lowest_task": "gps",
             "tables": { "paths": 3, "links": 1, "links_active": 1, "links_pending": 0,
-                        "destinations": 2, "announces": 0, "announces_held": 0, "rates": 4 } },
+                        "destinations": 2, "announces": 0, "announces_held": 0, "rates": 4,
+                        "snap_walk_max_ms": 62, "snap_walk_pos": 3,
+                        "snap_budget_stops": 0, "snap_rows_whole": true } },
   "radio": { "online": true, "model": "SX1276", "freq_mhz": 868.1, "bw_khz": 125,
              "sf": 8, "cr": 5, "tx_dbm": 7, "sync_word": 18, "preamble": 18,
              "announce_interval": 600, "beacon_interval": 0, "callsign": "retimesh-8249CC",
@@ -176,7 +178,7 @@ the ordinary reading on the shipped channel and needs no action.
                  "interfaces": [ { "name": "LoRa", "mode": "full", "rx_bytes": 1234, "tx_bytes": 567 },
                                  { "name": "WiFi/10.42.0.2:51022", "mode": "full", "rx_bytes": 0, "tx_bytes": 0 },
                                  { "name": "Auto/fe80::2cdb:d4ff:fe82:1f20", "mode": "full", "rx_bytes": 9012, "tx_bytes": 3400 } ],
-                 "path_count": 2,
+                 "path_count": 2, "interface_count": 3, "snapshot_age_s": 2,
                  "paths": [ { "hash": "5168bb90…", "hops": 1, "via": "WiFi/10.42.0.2:51022", "age_s": 40 } ] },
   "neighbors": [ { "name": "Anonymous Peer", "version": "", "kind": "announce", "hash": "5168bb90…",
                    "aspect": "lxmf.delivery", "hops": 0, "via": "wifi", "rssi": 0, "snr": 0, "age_s": 40, "count": 3 } ]
@@ -391,6 +393,36 @@ SD card) are omitted rather than reported as zero.
 `tables` are the Reticulum structures that grow with traffic. A table that
 climbs and never falls is where a week-long run runs out of memory, and it is
 the part a heap figure alone will not explain.
+
+The four `snap_*` fields beside them describe the pass that reads the path
+table, because on a large table that pass no longer sees all of it at once. It
+runs every five seconds under a budget, reading path records back off the
+filesystem, and carries a cursor from one pass to the next.
+
+- `snap_walk_max_ms` — the longest one pass has taken since boot, the walk plus
+  the removal of dead entries that follows it. Tens of milliseconds is ordinary.
+  A figure in the seconds means the Reticulum task is spending that long not
+  forwarding, on a filesystem or a table that has gone past what this node can
+  read in a pass.
+- `snap_walk_pos` — how far the last pass got, as an offset into the table. At
+  or past `paths` means it reached the end; below it means the pass was cut off
+  there and the next one carries on from that point.
+- `snap_budget_stops` — how many passes the budget has ended since boot. Zero on
+  a node that walks its table comfortably. Climbing steadily means every pass is
+  being cut off: survivable, because the cursors resume where they stopped, but
+  it is the node saying its table has outgrown a single pass.
+- `snap_rows_whole` — whether the `transport.paths` rows above are a complete
+  cycle. A pass cut off by the budget keeps its partial list to itself rather
+  than publishing a prefix that looks like the whole table, so this is `true` on
+  any node that has finished a cycle at least once. `false` beside a non-zero
+  `paths` means the node has never got all the way round its own table — the
+  count is still exact, the list is empty rather than misleading.
+
+`tables.paths` and `transport.path_count` are the whole table on every pass
+whatever the walk did: they are the table's own size and are never truncated.
+`transport.paths` is a capped list of rows out of it, and on a table that takes
+several passes to walk it can be a cycle older than `transport.snapshot_age_s`,
+which is the age of the reading as a whole.
 
 `airtime` reports channel use and the transmit budget:
 `{"short_pct":0.46,"long_pct":0.02,"band":"869.4-869.65 (10 %)",

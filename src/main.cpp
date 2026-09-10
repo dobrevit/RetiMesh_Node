@@ -602,11 +602,19 @@ void loop() {
     // Reticulum's tables are the other thing that grows with traffic, and the
     // one a heap figure alone will not explain.
     RnsTransport::Tables t = RnsTransport::tables();
-    log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu snap %lums",
+    // The four snapshot figures travel together on purpose. The worst pass on
+    // its own cannot tell a node that finished its table in 380 ms from one cut
+    // off at 400: `pos` against `paths` says how far the last pass actually
+    // got, `stops` says how often the budget has ended one, and `rows` says
+    // whether what /api/status and the panels are showing is a whole list or a
+    // node that has never managed to build one (RnsTransport.h).
+    log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu "
+          "snap %lums pos %lu stops %lu rows %s",
           (unsigned long)t.paths, (unsigned long)t.links, (unsigned long)t.activeLinks,
           (unsigned long)t.pendingLinks, (unsigned long)t.destinations,
           (unsigned long)t.announces, (unsigned long)t.heldAnnounces, (unsigned long)t.rates,
-          (unsigned long)t.snapWalkMaxMs);
+          (unsigned long)t.snapWalkMaxMs, (unsigned long)t.snapWalkPos,
+          (unsigned long)t.snapBudgetStops, t.snapRowsWhole ? "whole" : "partial");
     #if HAS_GPS
       // The satellite count is the number that tells you whether the antenna
       // has a view of the sky; the sentence count tells you the receiver is

@@ -91,14 +91,22 @@ namespace Rns {
 // and never inside one, so a pass costs it plus however long the record in
 // hand takes.
 //
-// It now bounds the whole walk rather than only the part after the rows are
-// full. What that costs, until row collection can be resumed across passes, is
-// worth stating in full rather than as "the reading is late". Rows are
+// It bounds the whole walk rather than only the part after the rows are full,
+// and it bounds the removal that follows the walk as well — one budget on one
+// clock over the whole pass (see passMayStop() below). The removal used to sit
+// outside it on the grounds that what it removes is capped by count at
+// SNAPSHOT_MAX_PATHS, which is the same "bounded by count is not bounded by
+// time" the paragraph at the top of this file is about: each removal is a
+// tombstone written and flushed to flash and an index entry written and flushed
+// after it, so 64 of them is 128 write-and-sync pairs with nothing watching the
+// clock.
+//
+// Bounding the rows cost the walk its ability to finish. Rows used to be
 // collected from the front of the table on every pass, so on a table slow
-// enough to spend the budget before the rows fill, every pass reads the same
-// short prefix and stops in the same place: the published list is not late, it
-// is permanently a prefix; the sweep cursor never gets past that prefix; the
-// cycle never closes; and a dead entry beyond it is never found at all. The
+// enough to spend the budget before the rows fill, every pass read the same
+// short prefix and stopped in the same place: the published list was not late,
+// it was permanently a prefix; the sweep cursor never got past that prefix; the
+// cycle never closed; and a dead entry beyond it was never found at all. The
 // regime is exactly rowCap x per-record cost > kWalkBudgetMs — with 64 rows,
 // any store charging more than 6.25 ms a record, and lower still on a table
 // with dead entries in it, which cost a read and fill no row. At the 30 ms a
@@ -106,20 +114,25 @@ namespace Rns {
 // fourteen. What that fourteen is not is a crossover: both per-record figures
 // in this file were taken on a 200-record store, and nothing in this tree
 // measures what a record costs on a table of ten, so the count a smaller table
-// reads does not follow from either. The regime a sentence above is the part
-// that is unarguable; where the real crossover falls is a measurement nobody
-// has taken. test_a_row_bound_table_never_advances_the_cursor drives the
-// regime, and is written to be flipped by the pass that resumes row collection
-// across passes.
+// reads does not follow from either.
 //
-// What is bought for that, and why the bound is taken anyway: pathCount() is
-// the whole table and is unaffected, no pass is long, and the node stays up.
+// Row collection now resumes across passes the way the sweep does, under the
+// same two cursor rules (resumeCursor() and nextCursor() below), so a table in
+// that regime is walked over several passes instead of the same prefix being
+// re-read for ever — and rowCycleDone() below is what makes a list publishable
+// only once it has been all the way round.
+//
+// What is bought for the bound: pathCount() is the whole table and is
+// unaffected, no pass is long, and the node stays up.
 //
 // Other surfaces quote this figure as the gap between two drains of a ring —
 // main.cpp's heartbeat line, Config.h beside loraRxDrainCapped, tools/soak.py's
 // column notes, docs/api.md, docs/troubleshooting.md — and RingDrain.h derives
 // the radio drain's frames-per-gap arithmetic from it. Retuning it means
-// visiting those.
+// visiting those. Those surfaces all call it a floor under the gap rather than
+// a ceiling over it, and that stayed true when the removal was unbounded on top
+// of it; now that the removal shares this budget it is closer to being the real
+// figure, over by one record and one removal.
 constexpr uint32_t kWalkBudgetMs = 400;
 
 // How much walk time may pass between two yields.
@@ -242,8 +255,8 @@ static_assert(kWalkYieldMs > 0 && kWalkYieldMs * 2 < kWalkBudgetMs,
 // has to end well inside the interval its pass is gated on, or passes run back
 // to back and the RNS task never reaches the sleep that is what lets loopTask
 // run at all. A quarter is where the line is drawn — at 400 ms against 5000 ms
-// the margin is 12.5x, and even at the limit a walk ends a quarter of the way
-// into a window, plus the record in hand.
+// the margin is 12.5x, and even at the limit a pass ends a quarter of the way
+// into a window, plus the record and the removal in hand.
 //
 // A function rather than a static_assert here because SNAPSHOT_INTERVAL_MS is
 // Config.h's and this header depends on nothing (see the top of the file).
@@ -257,13 +270,43 @@ constexpr bool walkBudgetFitsInterval(uint32_t intervalMs) {
   return kWalkBudgetMs <= intervalMs / 4;
 }
 
+// Whether a pass that has spent its budget may stop here.
+//
+// One rule for both halves of a pass — the walk between two records, and the
+// removal between two entries — so there is one clock, one budget and one
+// definition of "out of time" over the whole of refreshSnapshots().
+//
+// `didSomething` is the forward-progress guarantee, and it is the whole reason
+// this is a function rather than `elapsed >= budget` written twice. A pass has
+// a prefix it does not want: positions already collected, positions the sweep
+// has been through. Stepping over that prefix costs nothing today — microStore
+// loads a record on dereference and not on ++, which test_typed_store_iterator
+// pins at both the TypedStore and the file-store layer — so a pass always
+// reaches its own cursor. If that ever stopped being true, a budget that could
+// stop the walk inside the prefix would stop it *before* its cursor, on every
+// pass, for ever: the cursor would never advance and the node would publish the
+// same nothing until it was rebooted. That is not hypothetical. It is what the
+// abandoned branch fix/snapshot-walk-starves-loop did on a bench node in
+// September 2026 — "a pass pinned at position 15 of 87 for ever, publishing an
+// empty list" — back when stepping did load.
+//
+// So the budget may not end a pass until the pass has dereferenced something.
+// Worst case is then the prefix plus one record rather than the budget, which
+// is the price of the guarantee, and it is only ever paid if the dependency
+// regresses. Every pass moves at least one position of real work forward
+// whatever a step comes to cost.
+inline bool passMayStop(uint32_t elapsedMs, bool didSomething,
+                        uint32_t budgetMs = kWalkBudgetMs) {
+  return didSomething && elapsedMs >= budgetMs;
+}
+
 // What the walk should do with the position it is standing on.
 enum class WalkStep : uint8_t {
   Row,           // read it: it fills a row, and is swept as well if a sweep is running
   Examine,       // read it for the sweep alone; the rows are full, so it is not rendered
   Skip,          // step past without touching the filesystem
-  StopBudget,    // out of time — the pass ends here; nextSweepPos() says where
-                 // the sweep picks up, which is not always here
+  StopBudget,    // out of time — the pass ends here; nextCursor() says where each
+                 // cursor picks up, which is not always here
   StopRowsFull,  // the rows are full and no sweep wants the rest of the table
 };
 
@@ -271,13 +314,15 @@ enum class WalkStep : uint8_t {
 // iteration order; times are milliseconds since the walk started, so neither
 // can wrap inside one pass.
 struct WalkState {
-  size_t   rowsCollected = 0;   // rows filled so far this pass
+  size_t   rowsCollected = 0;   // rows in the staging list, this cycle, not this pass
   size_t   rowCap        = 0;   // SNAPSHOT_MAX_PATHS
+  size_t   rowPos        = 0;   // where row collection resumes; 0 = a fresh cycle
   bool     sweeping      = false;
   size_t   pos           = 0;   // where the walk is
   size_t   sweepPos      = 0;   // where the sweep is resuming from; 0 = a fresh cycle
   uint32_t elapsedMs     = 0;
   uint32_t budgetMs      = kWalkBudgetMs;
+  bool     readAny       = false;  // a record has been dereferenced this pass
 };
 
 // One position.
@@ -286,21 +331,43 @@ struct WalkState {
 //
 //  1. "Nothing left to do" is answered before the clock, so a pass that
 //     finished what it came for is never recorded as having run out of time.
-//     The difference is not cosmetic: only a budget stop writes the sweep
-//     cursor.
+//     The difference is not cosmetic: only a budget stop writes the cursors.
+//
+//     It is decided on the rows being *full*, not on this position wanting no
+//     row, and that distinction is the second thing the abandoned branch got
+//     wrong. With a resuming row cursor, `!wantRow` is true at position 0 on
+//     every pass that is continuing a part-built list — it wants no row *here*,
+//     which is not the same as wanting no more rows at all. Stopping on it ends
+//     a resuming pass before it reaches its own cursor, and the short list is
+//     then treated as a finished one. That branch published 19 rows on a node
+//     holding 87.
 //  2. The budget is next, and so covers every position that follows —
 //     including the skip below. It used to sit after the skip, where a pass
 //     stepping over a long prefix could not be stopped at all, and after the
 //     row decision, where it did not apply to the expensive half of the walk.
-//  3. Only then the cheap step-over: past a position the rows do not want and
-//     the sweep has already been through.
+//     It cannot stop a pass that has read nothing yet (passMayStop() above).
+//  3. Only then the cheap step-over: past a position neither half wants —
+//     already collected, or already swept.
 inline WalkStep walkStep(const WalkState& w) {
-  const bool wantRow   = w.rowsCollected < w.rowCap;
+  const bool rowsFull  = w.rowsCollected >= w.rowCap;
+  const bool wantRow   = !rowsFull && w.pos >= w.rowPos;
   const bool wantSweep = w.sweeping && w.pos >= w.sweepPos;
-  if (!wantRow && !w.sweeping) return WalkStep::StopRowsFull;
-  if (w.elapsedMs >= w.budgetMs) return WalkStep::StopBudget;
-  if (!wantRow && !wantSweep)   return WalkStep::Skip;
+  if (rowsFull && !w.sweeping) return WalkStep::StopRowsFull;
+  if (passMayStop(w.elapsedMs, w.readAny, w.budgetMs)) return WalkStep::StopBudget;
+  if (!wantRow && !wantSweep)  return WalkStep::Skip;
   return wantRow ? WalkStep::Row : WalkStep::Examine;
+}
+
+// Whether the row list this pass has been building is a whole one.
+//
+// Two ways round, and only these two: the cap filled, or the walk reached the
+// end of the table without the budget stopping it. Anything else is a valid
+// prefix and nothing more, and a prefix must not be published — a panel showing
+// four paths on a node holding eighty is worse than a panel showing the last
+// whole list, because nothing on it says which it is. The count beside the list
+// comes from the table's own size() and stays exact either way.
+inline bool rowCycleDone(size_t rowsCollected, size_t rowCap, bool ranOut) {
+  return rowsCollected >= rowCap || !ranOut;
 }
 
 // Whether the walk should give the core up before touching this record.
@@ -313,42 +380,53 @@ inline bool walkShouldYield(uint32_t elapsedMs, uint32_t lastYieldMs,
   return (uint32_t)(elapsedMs - lastYieldMs) >= intervalMs;
 }
 
-// Where a sweep resumes at the top of a pass, given how big the table is now.
+// Where a cursor resumes at the top of a pass, given how big the table is now.
 //
-// The cursor is an offset into a table that is mutated between passes, so it
-// can be left pointing past the end of one: the caller drops up to
+// One rule, both cursors. The walk carries two — where the sweep left off and
+// where row collection left off — and the hazard is identical for each, so it
+// is defined once and asked twice rather than written out again for the newer
+// one.
+//
+// A cursor is an offset into a table that is mutated between passes, so it can
+// be left pointing past the end of one: the caller drops up to
 // SNAPSHOT_MAX_PATHS entries at the end of a pass, which can take the table out
 // from under a cursor that was beyond them. Such a cursor is reached by no
-// position, and nothing downstream corrects it — nextSweepPos() below only ever
+// position, and nothing downstream corrects it — nextCursor() below only ever
 // moves forwards, so on a table slow enough for the budget to end every pass it
 // would keep returning that same stale value: the sweep would stay part-way
 // through for ever, the cycle would never close, and the minute clock that
-// starts the next one would never be stamped again.
+// starts the next one would never be stamped again. The row cursor stranded the
+// same way would stop a list ever being finished, so nothing would be published
+// at all.
 //
-// So a cursor at or past the end of the table is not a cursor, and the cycle
+// So a cursor at or past the end of the table is not a cursor, and its cycle
 // starts again from the front. Asked before the caller decides whether it is
 // sweeping, so the pass that finds it stale is the one that starts afresh.
-inline size_t sweepResumePos(size_t sweepPos, size_t tableSize) {
-  return sweepPos < tableSize ? sweepPos : 0;
+inline size_t resumeCursor(size_t cursor, size_t tableSize) {
+  return cursor < tableSize ? cursor : 0;
 }
 
-// Where the next sweep pass resumes, given where this one stopped.
+// Where a cursor resumes on the next pass, given where this one stopped.
 //
-// Forwards only, within a cycle. The budget can now end the walk anywhere,
-// including in the row half at a position *behind* the cursor — rows are
-// collected from the front of the table on every pass, so a stop at row 13 with
-// the sweep at 60 is the ordinary case, not the exotic one. Writing the stop
-// position in unconditionally would drag the sweep back to the front and leave
-// the tail of the table never examined, which is the exact bug the resuming
-// cursor was added to avoid. Reaching the end of the table (`!ranOut`) closes
-// the cycle instead and puts the next one a kStaleSweepMs out.
+// One rule, both cursors again, and for the same reason: what the sweep needed
+// of its cursor is exactly what row collection needs of its own.
+//
+// Forwards only, within a cycle. The budget can end the walk anywhere,
+// including at a position *behind* one of the cursors — a sweeping pass steps
+// over the prefix it has already examined and can be stopped in it, and a pass
+// resuming a part-built row list steps over the rows it already has. Writing
+// the stop position in unconditionally would drag the cursor back to the front
+// and leave the tail of the table never reached, which is the exact bug a
+// resuming cursor is added to avoid. Reaching the end of the table (`!ranOut`)
+// closes the cycle instead: for the sweep that puts the next one a
+// kStaleSweepMs out, and for the rows it is what makes the list publishable.
 //
 // Forwards only is a ratchet, and a ratchet has to be answerable to the thing
-// it indexes: sweepResumePos() above is what keeps it from ratcheting into a
+// it indexes: resumeCursor() above is what keeps it from ratcheting into a
 // table that has since shrunk past it.
-inline size_t nextSweepPos(size_t sweepPos, size_t stoppedAt, bool ranOut) {
+inline size_t nextCursor(size_t cursor, size_t stoppedAt, bool ranOut) {
   if (!ranOut) return 0;
-  return stoppedAt > sweepPos ? stoppedAt : sweepPos;
+  return stoppedAt > cursor ? stoppedAt : cursor;
 }
 
 } // namespace Rns
