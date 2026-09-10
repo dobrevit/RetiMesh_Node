@@ -84,10 +84,11 @@ struct Boot {
   // different answer from a power cut and must not be reported as one.
   bool        prevFaultsKnown   = false;
   uint32_t    prevAllocFailures = 0;
-  // Every exception Diag::guard() contained, of which a failed allocation is
-  // one kind. Not a subset of prevAllocFailures and legitimately larger: a
-  // contained socket bring-up failure counts here and says nothing about
-  // memory.
+  // Every exception the firmware contained: Diag::guard()'s, and the Reticulum
+  // listener's refusal of a client it could not enrol, which calls noteCaught()
+  // directly (RetiTransportServer.cpp). A failed allocation is one kind. Not a
+  // subset of prevAllocFailures and legitimately larger: a contained socket
+  // bring-up failure counts here and says nothing about memory.
   uint32_t    prevCaught        = 0;
   LastRestart lastRestart;
 };
@@ -223,7 +224,12 @@ uint32_t lowestHeadroom(const char** name);
 struct Faults { uint32_t allocFailures; uint32_t lastMs; uint32_t caught; };
 Faults faults();
 
-void noteCaught(const char* what, const char* why);   // guard()'s reporting half
+// Record one contained exception, and say so. `what` names the work, `why` what
+// came out of it. Always counted; `report` false drops only the log line and
+// the two heap walks that fill it, for a caller that produces containments in
+// bulk and rate-limits its own reporting. Diag.cpp says why the count itself is
+// never the thing rated.
+void noteCaught(const char* what, const char* why, bool report = true);
 
 // Run `body`, and survive what it throws. Returns false when something was
 // caught, so a caller can back off rather than retry into the same wall.

@@ -133,9 +133,24 @@ Faults faults() {
   return f;
 }
 
-void noteCaught(const char* what, const char* why) {
+// The counting half of any containment, and the reporting half of it. They are
+// separable because they cost wildly different things: the count is two relaxed
+// atomic stores, while the line under it walks the heap's free list twice,
+// under the allocator's lock, to say what the failure happened against.
+//
+// `report` false keeps the count and drops that. It is for a caller that can
+// produce containments in bulk and rate-limits its own line — the listener
+// refusing clients on a starved node, RetiTransportServer::onClient() — and
+// only the line may be rated. `caught` is what /api/status and STATUS report as
+// `contained` and what the next boot reads back as prev_contained, and a
+// rate-limited count would make three hundred refusals read as one containment,
+// which is not a quieter truth but a different and false one. The RNS task hit
+// the same cost from the other side and answered it the same way: back off the
+// failing work's cadence, never drop the count (RnsTransport.cpp:2424-2432).
+void noteCaught(const char* what, const char* why, bool report) {
   sCaught.fetch_add(1, std::memory_order_relaxed);
   mirrorFaults();
+  if (!report) return;
   const uint32_t dram = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   log_e("%s failed and was contained: %s — %lu B free / %lu B largest block of 8-bit "
         "internal RAM. That work was skipped; the node is still running",
@@ -271,11 +286,12 @@ void begin() {
   // minutes earlier.
   //
   // Only the allocation count carries that claim. `caught` is every exception
-  // guard() contained — a refused socket bring-up counts there and says
-  // nothing about memory — so folding it into the same condition asserted
-  // "short of memory" about nodes that were not, including on the wake from a
-  // deliberate deep-sleep power-off. Two facts, two lines, and the second is
-  // not a warning.
+  // the firmware contained — guard()'s, and the Reticulum listener's refusal of
+  // a client it could not enrol — and a refused socket bring-up counts there
+  // and says nothing about memory, so folding it into the same condition
+  // asserted "short of memory" about nodes that were not, including on the wake
+  // from a deliberate deep-sleep power-off. Two facts, two lines, and the
+  // second is not a warning.
   if (sBoot.prevFaultsKnown && sBoot.prevAllocFailures)
     log_w("the run that just ended had %lu allocation failure(s) — it was short of "
           "memory before it stopped", (unsigned long)sBoot.prevAllocFailures);

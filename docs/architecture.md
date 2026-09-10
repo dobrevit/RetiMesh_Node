@@ -99,6 +99,7 @@ belong to no unit: one is the board's shape, the other is the boot order.
 | `PppArbiter.h`, `PppUart.*` | PPP over the bridge UART, sharing the port with the console |
 | `ConsoleServer.*` | the maintenance console on TCP :4243, one caller at a time, authenticated |
 | `LazyStart.h` | when a link built on demand may be built: the failure latch and the teardown gate, shared by PPP and USB-NCM (pure, unit-tested) |
+| `ClientAdmit.h` | whether a peer on :4242 gets a client slot, and who frees what when it does not — a refusal rather than an abort on a node out of memory (pure, unit-tested) |
 | `RetiTransportServer.*` | TCP :4242, HDLC, per-client ids, announce bookkeeping |
 | `HDLC.h` | RNS TCP framing (pure, unit-tested) |
 | `Mdns.h` | node name to a legal DNS label (pure, unit-tested) |

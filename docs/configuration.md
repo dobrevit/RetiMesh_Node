@@ -307,7 +307,7 @@ rather than failing the whole import.
 | `DIAG_*` | see `Config.h` | boot counter namespace and diagnostics reporting |
 | `ASSET_STAMP` | build hash | set by `tools/asset_stamp.py`; compared at boot against `/assets.json` so a firmware-only update says so |
 | `DISPLAY_SLEEP_MS`, `DISPLAY_PAGE_TIMEOUT_MS` | 60000 / 30000 | |
-| `RNS_MAX_CLIENTS` | 4 | simultaneous TCP peers |
+| `RNS_MAX_CLIENTS` | 4, 2 on a Wireless Stick | simultaneous TCP peers; the board with no room to spare holds fewer, and past the cap a client is refused rather than the node evicting one |
 | `CONSOLE_TCP_PORT`, `MAINT_AUTH_MAX_FAILURES`, `MAINT_AUTH_LOCKOUT_MS` | 4243 / 3 / 30000 | the console over TCP: the port it answers on, and how many wrong passwords the node takes before it stops listening to guesses for a while. One caller at a time, which is fixed rather than tunable — the transport holds a single client slot |
 | `PSRAM_MALLOC_THRESHOLD` | 128 | allocations above this size prefer PSRAM |
 | `RING_BYTES` (`TX_RING_BYTES`, `RX_RING_BYTES`, `TCP_IN_RING_BYTES`) | 8192 with PSRAM, 4096 without | the three packet rings between the radio, the TCP clients and the transport. Their storage goes to PSRAM where the board has any and to the internal heap where it does not, which is why the default differs: 24 KB is nothing out of 2 MB of PSRAM and it is a tenth of everything a Heltec Wireless Stick has. One ring holds about sixteen RNS packets at 8192 B and eight at 4096, and a ring too small for its board says so — `LoRa TX ring full` in the log and `lora_rx_drop_ring` in `/api/status`. Override per board in `platformio.ini` |

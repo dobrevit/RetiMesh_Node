@@ -350,8 +350,12 @@ zeroes with a rising `boot.count` are a boot loop.
 `boot.prev_alloc_failures` is how many allocations had already failed in the
 run that just ended. `boot.prev_contained` is how many *exceptions* that run
 caught and contained — a failed allocation is one kind, a refused socket
-bring-up is another — so it is **not** a subset of `prev_alloc_failures` and
-can legitimately exceed it. Only the first is evidence of memory exhaustion.
+bring-up is another, and a Reticulum client on :4242 the node could not enrol
+is a third — so it is **not** a subset of `prev_alloc_failures` and can
+legitimately exceed it. Only the first is evidence of memory exhaustion. That
+last one is counted per connection attempt and is not rate-limited, so a peer
+reconnecting in a loop against a node short of memory runs it, and the live
+`faults.contained` beside it, into the thousands while the node stays up.
 
 They ride across the restart in the same RTC record as `prev_uptime_s`, and
 are **absent, not zero**, when the rail dropped. The two counts can also be
