@@ -592,9 +592,12 @@ void loop() {
     // (RingDrain.h). They are here because the cap is what keeps a full ring
     // from holding that task past the watchdog — so with it in place, a node
     // routing late has no other outward sign at all. On the radio side the pass
-    // after a full-budget path-table sweep is the case to expect, since two
-    // drains can be 400 ms apart rather than 10; what was really lost there is
-    // the "ring" figure in the line above.
+    // after a full-budget path-table walk is the case to expect, since two
+    // drains can be 400 ms apart rather than 10 — and on a table too big to
+    // read in one pass that is most passes rather than the odd one, so a total
+    // that climbs steadily is the `stops` figure in the tables line below
+    // rather than the channel. What was really lost is the "ring" figure in the
+    // line above.
     if (g_stats.loraRxDrainCapped || g_stats.tcpDrainCapped)
       log_i("drain cap: lora %u passes, tcp inbound %u passes ended with more "
             "queued (nothing dropped; the rest went on the following pass)",

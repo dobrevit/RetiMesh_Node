@@ -1905,8 +1905,9 @@ static void processEvents() {
 // See RingDrain.h. The feeds this takes are the first reporting after the RNS
 // task's own feed at the top of the pass (main.cpp): the radio drain feeds
 // again from inside reticulum.loop(), which runs next, and refreshSnapshots()
-// twice after that, either side of its path-table walk — that walk being
-// bounded is what makes two enough.
+// three times after that — either side of its path-table walk, and once more
+// after the removal that follows it. That walk being bounded, and the removal
+// now sharing its budget, is what makes three enough.
 static void drainTcp() {
   size_t sz = 0;
   const Sys::RingDrain::Pass pass = Sys::RingDrain::drain(
@@ -2063,11 +2064,13 @@ static void refreshSnapshots(bool allowSweep) {
   //   * An erase. It does not rehash and the survivors keep their buckets, but
   //     every element after the erased one loses an ordinal — an entry dropped
   //     ahead of the cursor shifts the whole tail behind it by one. This is the
-  //     ordinary path, not an exotic one: remove_paths() at the end of this
-  //     function drops up to SNAPSHOT_MAX_PATHS entries after every sweeping
-  //     pass, and a stale entry is collected on the Row step as well as the
-  //     Examine step — that is, at the front of the table, behind a cursor that
-  //     has already worked its way past it.
+  //     ordinary path, not an exotic one: the removal at the end of this
+  //     function drops as many entries as what is left of the pass's budget
+  //     allows — up to SNAPSHOT_MAX_PATHS on a pass whose walk finished early,
+  //     and exactly one on a pass whose walk spent the whole of it. And a stale
+  //     entry is collected on the Row step as well as the Examine step — that
+  //     is, at the front of the table, behind a cursor that has already worked
+  //     its way past it.
   //   * An insert that rehashes, which reorders the whole table rather than
   //     shifting a tail.
   //   * Segment-rotation compaction. A put() that fills the active segment
@@ -2099,14 +2102,10 @@ static void refreshSnapshots(bool allowSweep) {
   // cannot finish a cycle at all, which — beside a pathCount() in the dozens —
   // is exactly the reading an operator needs and had no way to get.
   static bool   sRowsWhole = false;
-  // Whether the last pass got as far as writing the row cursor back. The
-  // staging list and the cursor have to agree — the list holds exactly what the
-  // positions before the cursor contributed — and the one thing that can part
-  // them is this function throwing mid-walk, which Diag::guard catches and
-  // which reading a record under memory pressure can do. The rows collected
-  // before the throw would then be in the list with the cursor still behind
-  // them, and the next pass would collect them a second time. Cheaper to start
-  // the cycle again than to reason about it.
+  // Whether the last pass got as far as writing the row cursor back. What that
+  // buys, and why a pass that did not gets its cycle started again rather than
+  // resumed, is Rns::resumeRowCursor() — the rule is there with the other two
+  // cursor rules, where the host can drive it.
   static bool   sRowPassClean = true;
   stale.clear();
   // A cursor the table has outgrown is not a cursor. `stale` is capped at
@@ -2121,9 +2120,10 @@ static void refreshSnapshots(bool allowSweep) {
   sSweepPos = Rns::resumeCursor(sSweepPos, pathTable.size());
   // And the row cursor by the same rule, against the same hazard: stranded
   // beyond a shrunken table it would stop any cycle ever closing, so nothing
-  // would ever be published at all.
-  sRowPos = Rns::resumeCursor(sRowPos, pathTable.size());
-  if (!sRowPassClean) sRowPos = 0;      // the previous pass threw; see above
+  // would ever be published at all — plus the one condition that is the row
+  // cursor's alone, a previous pass that threw before writing it back
+  // (Rns::resumeRowCursor, where both are decided together).
+  sRowPos = Rns::resumeRowCursor(sRowPos, pathTable.size(), sRowPassClean);
   // A fresh cycle starts an empty list; a resuming one keeps what earlier
   // passes collected. This is the only clear(), which is why it is here and not
   // at the top of the function with the interface list's.
@@ -2278,8 +2278,26 @@ static void refreshSnapshots(bool allowSweep) {
     // budget exists to kill, one screen below the code that killed it.
     //
     // One at a time rather than Transport::remove_paths(), because a whole
-    // vector cannot be stopped part-way. What the budget leaves is not lost:
-    // the entry is still dead, so the next sweeping pass finds it again.
+    // vector cannot be stopped part-way.
+    //
+    // What the budget leaves is not lost, but it is not free either, and the
+    // shape of that is worth being exact about because the obvious sentence —
+    // "the next sweeping pass finds it again" — is not true of the entries
+    // that matter. `stale` is cleared at the top of every pass, so an
+    // un-removed key is discarded and has to be *re-found* by a later walk;
+    // and both cursors have already been written past the positions the walk
+    // reached, so the next pass does not look there. An entry left behind is
+    // re-found when row collection comes round to the front of the table again
+    // — which is every row cycle, and so soon — if it lies within the stretch
+    // the rows reach. One beyond that stretch waits for the sweep cursor to
+    // come all the way round, which is a whole sweep cycle.
+    //
+    // Hence back to front. `stale` is in table order, so its tail is exactly
+    // the part the rows will not reach again this cycle, and its head is the
+    // part they will. Removing from the tail spends a short budget on the
+    // entries that would otherwise wait longest. It changes nothing else: every
+    // key here sits behind the cursor already, so each removal shifts the tail
+    // under it whichever order they go in (the ordinal paragraph above).
     //
     // On a pass whose walk spent the whole budget this removes one entry and
     // stops — passMayStop()'s forward-progress rule is what makes it one rather
@@ -2288,10 +2306,20 @@ static void refreshSnapshots(bool allowSweep) {
     // finished early hands the removal everything that is left, which on the
     // tables this cleanup is for is the ordinary case.
     const uint32_t removeStartMs = millis();
-    size_t dropped = 0;
-    for (const RNS::Bytes& key : stale) {
-      if (Rns::passMayStop((uint32_t)(millis() - walkStartMs), dropped > 0)) break;
-      if (RNS::Transport::remove_path(key)) dropped++;
+    size_t dropped  = 0;
+    size_t attempts = 0;
+    for (size_t k = stale.size(); k-- > 0; ) {
+      // Attempts, not successes. passMayStop()'s second argument is "this pass
+      // has done something", and the walk answers it with reads attempted
+      // (SnapshotWalk.h). Answering it with removals that *succeeded* would
+      // mean a `stale` whose keys have all gone already — every remove_path()
+      // returning false — running all 64 iterations with the clock switched
+      // off. Harmless today, since BasicFileStore::remove() misses in the
+      // index and returns before it touches flash, but it is not what the rule
+      // says and the two must not drift.
+      if (Rns::passMayStop((uint32_t)(millis() - walkStartMs), attempts > 0)) break;
+      attempts++;
+      if (RNS::Transport::remove_path(stale[k])) dropped++;
     }
     log_i("dropped %u of %u stored path(s) whose interface is gone, in %u ms",
           (unsigned)dropped, (unsigned)stale.size(),

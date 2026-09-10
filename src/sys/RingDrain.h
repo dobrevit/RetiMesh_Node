@@ -199,14 +199,21 @@ inline Pass drain(size_t cap, size_t feedEvery,
   while (pass.handled < cap) {
     auto item = receive();
     if (!item) { ranDry = true; break; }
-    // Feeds bracket the work the way the snapshot walk's do: one before the
-    // first item, one every `every` items through it, one after the last. Not
-    // before the receive, though — this is called a hundred times a second on
-    // a ring that is usually empty, and a pass with no work has nothing to
-    // report and no reason to take the watchdog's lock to say so.
+    // Feeds bracket the work: one before the first item, one every `every`
+    // items through it, one after the last. Not before the receive, though —
+    // this is called a hundred times a second on a ring that is usually empty,
+    // and a pass with no work has nothing to report and no reason to take the
+    // watchdog's lock to say so.
+    //
+    // The cadence in the middle is this drain's own and no longer has a
+    // sibling: the snapshot walk used to feed on the same rule and does not any
+    // more, because a bounded pass needs no feed inside it and 16 records is
+    // longer than the whole of that pass's budget anyway (SnapshotWalk.h). Here
+    // an item is a ring item rather than a file read, a batch is 64 of them,
+    // and nothing bounds one by time — so the cadence stands on that.
     if (pass.handled == 0) feed();
-    // Counted, and fed for, before the item is handled: as in the walk, the
-    // feed has to come before the expensive part, not after it.
+    // Counted, and fed for, before the item is handled: the feed has to come
+    // before the expensive part, not after it.
     if (++pass.handled % every == 0) feed();
     handle(item);
   }

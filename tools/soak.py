@@ -105,11 +105,23 @@ FIELDS = [
     # leaves is taken on the next pass — but they are the only sign the node is
     # being outrun, because the cap is also what keeps that condition from
     # reaching the watchdog. `rx_drain_capped` is the radio's and is expected to
-    # move a little: two passes can be 400 ms apart when a path-table sweep runs
-    # its whole budget between them, which on a fast channel is more than one
-    # batch of frames. Real loss is drop_ring above. Appended, per the rule
-    # above.
+    # move: two passes can be 400 ms apart when the path-table walk runs its
+    # whole budget between them, which on a fast channel is more than one batch
+    # of frames. The walk, not the sweep — the budget covers the whole pass, so
+    # any pass it ends produces that gap, and on a table too big to read in one
+    # pass that is most passes. Real loss is drop_ring above. Appended, per the
+    # rule above.
     "tcp_drain_capped", "rx_drain_capped",
+    # The snapshot pass's own health, which is what says whether the column
+    # above is the node reading its own table or the channel. `paths` alone
+    # cannot: it is the table's size and is exact whatever the walk managed.
+    # snap_walk_pos is per-pass and means nothing without `paths` beside it,
+    # which is why the whole set is recorded rather than a chosen subset — every
+    # snap_* field /api/status serves, so a run can be read against the API's
+    # own documentation (docs/api.md). snap_rows_whole is 1/0/blank through
+    # fmt_bool(): a firmware too old to serve it did not say "no". Appended, per
+    # the rule above.
+    "snap_walk_max_ms", "snap_walk_pos", "snap_budget_stops", "snap_rows_whole",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -163,6 +175,12 @@ def sample(host, timeout=8):
         links=tables.get("links", ""),
         destinations=tables.get("destinations", ""),
         announces=tables.get("announces", ""),
+        snap_walk_max_ms=tables.get("snap_walk_max_ms", ""),
+        snap_walk_pos=tables.get("snap_walk_pos", ""),
+        snap_budget_stops=tables.get("snap_budget_stops", ""),
+        # Tri-state, like battery_charging: blank is a firmware that does not
+        # serve the field, which must not be read as "the list is a prefix".
+        snap_rows_whole=fmt_bool(tables.get("snap_rows_whole")),
         neighbours=len(d.get("neighbors", [])),
         airtime_long_pct=d.get("airtime", {}).get("long_pct", ""),
         transport_online=int(bool(d.get("transport", {}).get("online"))),
@@ -659,18 +677,25 @@ def summarise(path, band=None):
         # producer-side ring-full: logged on the TCP side, counted as drop_ring
         # on the radio side. docs/troubleshooting.md has the row for each.
         #
-        # The radio one is expected to be small and non-zero on a fast channel:
-        # two drains can be 400 ms apart when a path-table sweep runs its whole
-        # budget between them, and the node catches up on the passes after. It
-        # is worth printing because the figure that is *not* expected — a total
-        # that keeps climbing — reads the same way on the line.
+        # The radio one is expected to be non-zero on a fast channel: two
+        # drains can be 400 ms apart when the path-table walk runs its whole
+        # budget between them, and the node catches up on the passes after.
+        #
+        # A total that keeps climbing is *also* expected, and that is the part
+        # this note used to have backwards. The budget covers the whole walk
+        # now, rows included, so every pass it ends produces that gap — and on a
+        # table too big to read in one pass the budget ends most passes, every
+        # five seconds, for as long as the table stays that big. The figure that
+        # separates the two readings is snap_budget_stops, printed below: rising
+        # beside this one is the node getting round its own table, flat beside
+        # it is the channel.
         capped_meaning = {
             "tcp_drain_capped":
                 "the inbound TCP ring's batch cap ended that many Reticulum-task passes "
                 "with traffic still queued: a client outrunning this node's routing",
             "rx_drain_capped":
                 "the RX ring's batch cap ended that many Reticulum-task passes with frames "
-                "still queued: expected in small totals after a path-table sweep, and real "
+                "still queued: check snap_budget_stops beside it before the radio, and real "
                 "loss on that path is drop_ring",
         }
         for key, meaning in capped_meaning.items():
@@ -680,6 +705,35 @@ def summarise(path, band=None):
             print(f"   {key}: {capped[0]:.0f} -> {capped[-1]:.0f} "
                   f"(peak {max(capped):.0f}) — {meaning}, and nothing lost by the cap "
                   f"(docs/troubleshooting.md)")
+
+        # The snapshot pass, which is what the line above defers to. Recorded
+        # since the firmware began serving it, and read here rather than left to
+        # ride the CSV: `paths` climbing said the table was growing and nothing
+        # said whether the node was still able to read it.
+        stops = [v for v in (num(r.get("snap_budget_stops")) for r in up) if v is not None]
+        walk = [v for v in (num(r.get("snap_walk_max_ms")) for r in up) if v is not None]
+        if stops and stops[-1] > 0:
+            # Per sample rather than first-to-last, like the caps above: a run
+            # that started after the stops began still has the finding in it.
+            print(f"   snap_budget_stops: {stops[0]:.0f} -> {stops[-1]:.0f} — the budget "
+                  f"ended that many path-table passes; the walk resumes where it stopped, "
+                  f"so this is the table being bigger than one pass rather than a fault "
+                  f"(docs/api.md)")
+        if walk and max(walk) > 0:
+            print(f"   snap_walk_max_ms: peak {max(walk):.0f} ms — the worst single pass "
+                  f"the Reticulum task spent reading the path table instead of forwarding")
+        # The one reading here that is a warning. `paths` is the table's own
+        # size and is exact on every pass, so a node can report hundreds of
+        # paths while the list it serves and renders is empty: false here beside
+        # a non-zero paths is a node that has never got all the way round.
+        never = [r for r in up
+                 if not is_blank(r.get("snap_rows_whole"))
+                 and not is_true(r.get("snap_rows_whole"))
+                 and (num(r.get("paths")) or 0) > 0]
+        if never:
+            print(f"   ⚠ snap_rows_whole false in {len(never)}/{len(up)} samples with paths "
+                  f"in the table — this node has never finished one pass round its own path "
+                  f"table, so /api/status and the panels show no path rows at all")
 
 
 def appender(f, path):

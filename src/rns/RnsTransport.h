@@ -104,10 +104,32 @@ struct Tables {
   // pass that finished the table in 380 ms and one that was cut off at 400.
   //
   // Where the last pass's walk stopped — an offset into the path table in
-  // iteration order. At or past `paths` means it reached the end: at, ordinarily
-  // (positions run 0..size-1, so the size itself is one past the last), and past
-  // it on a pass that went on to remove dead entries, since `paths` is read
-  // after that and is the smaller table.
+  // iteration order.
+  //
+  // A pass ends in exactly one of three ways (SnapshotWalk.h: the end of the
+  // table, WalkStep::StopRowsFull, WalkStep::StopBudget) and this offset reads
+  // differently in each, so on its own it says nothing. This is the canonical
+  // statement of the three; docs/api.md follows it.
+  //
+  //   * It reached the end of the table. The offset is at `paths` — positions
+  //     run 0..size-1, so the size itself is one past the last — or past it on
+  //     a pass that went on to remove dead entries, since `paths` is read
+  //     after the removal and is the smaller table.
+  //   * The row cap filled and no sweep wanted the rest of the table. The
+  //     offset is one past the position that filled it, which on a table
+  //     larger than SNAPSHOT_MAX_PATHS is below `paths` and is a healthy
+  //     reading: snapRowsWhole is true, snapBudgetStops did not move, and the
+  //     next pass starts again at the front rather than here, because a
+  //     finished cycle returns the row cursor to 0. This is the ordinary end
+  //     of a pass on any node holding more paths than the cap — a sweep runs
+  //     on a minute's clock and a pass on five seconds, so most passes are not
+  //     sweeping and stop this way.
+  //   * The budget ended it. The offset is where it stopped, below `paths`,
+  //     snapBudgetStops moved with it, and the next pass carries on from that
+  //     offset.
+  //
+  // So "below `paths`" is the cap on a healthy node and the budget on a
+  // struggling one, and snapBudgetStops is what tells them apart.
   uint32_t snapWalkPos;
   // How many passes the budget has ended since boot. Zero on a node that walks
   // its table comfortably; climbing by one every five seconds means every pass

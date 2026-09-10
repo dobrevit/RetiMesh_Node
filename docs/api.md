@@ -260,10 +260,14 @@ catches up on the passes that follow.
 
 - **Zero** is the ordinary reading on any normal channel.
 - **A small total that stops growing** is that catch-up, and needs nothing.
-- **Rising steadily** means frames are arriving faster than this node takes
-  them off the ring, for long stretches. Still nothing dropped: the counter to
-  read next to it is `rx_dropped_ring`, which is the radio finding no room left
-  in the ring, and that one *is* loss.
+- **Rising steadily** — read `diag.tables.snap_budget_stops` first. A node whose
+  path-table walk is cut off on every pass opens that gap itself, every five
+  seconds, for as long as its table stays too big to read in one pass; the
+  `snap_*` fields under `diag.tables`, described below, are where a gap is
+  diagnosed, and this counter only shows what one cost. With `snap_budget_stops`
+  flat, frames really are arriving faster than this node takes them off the
+  ring. Either way nothing has been dropped by the cap: the counter that *is*
+  loss is `rx_dropped_ring`, the radio finding no room left in the ring.
 
 It is on the console's `STATUS` line as `rx_drain_capped=`, printed after the
 `rx=`/`tx=` pair it belongs with and before the two carrier-sense counters.
@@ -404,9 +408,18 @@ filesystem, and carries a cursor from one pass to the next.
   A figure in the seconds means the Reticulum task is spending that long not
   forwarding, on a filesystem or a table that has gone past what this node can
   read in a pass.
-- `snap_walk_pos` — how far the last pass got, as an offset into the table. At
-  or past `paths` means it reached the end; below it means the pass was cut off
-  there and the next one carries on from that point.
+- `snap_walk_pos` — how far the last pass got, as an offset into the table. A
+  pass ends in one of three ways and the offset reads differently in each, so
+  it means nothing read on its own:
+  - **at or past `paths`** — it reached the end of the table. (Past, on a pass
+    that went on to remove dead entries: `paths` is read after the removal.)
+  - **below `paths`, `snap_budget_stops` not moving** — the row cap of 64 rows
+    filled and nothing else wanted the rest of the table. This is the ordinary
+    end of a pass on any node holding more than 64 paths, `snap_rows_whole` is
+    `true` beside it, and the next pass starts again at the **front** rather
+    than from this offset.
+  - **below `paths`, `snap_budget_stops` climbing** — the budget cut the pass
+    off there, and the next one carries on from that offset.
 - `snap_budget_stops` — how many passes the budget has ended since boot. Zero on
   a node that walks its table comfortably. Climbing steadily means every pass is
   being cut off: survivable, because the cursors resume where they stopped, but

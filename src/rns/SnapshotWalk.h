@@ -125,14 +125,18 @@ namespace Rns {
 // What is bought for the bound: pathCount() is the whole table and is
 // unaffected, no pass is long, and the node stays up.
 //
-// Other surfaces quote this figure as the gap between two drains of a ring —
-// main.cpp's heartbeat line, Config.h beside loraRxDrainCapped, tools/soak.py's
-// column notes, docs/api.md, docs/troubleshooting.md — and RingDrain.h derives
-// the radio drain's frames-per-gap arithmetic from it. Retuning it means
-// visiting those. Those surfaces all call it a floor under the gap rather than
-// a ceiling over it, and that stayed true when the removal was unbounded on top
-// of it; now that the removal shares this budget it is closer to being the real
-// figure, over by one record and one removal.
+// Other surfaces quote this figure as the gap between two drains of a ring.
+// Which surfaces, and what else moves when it is retuned, is the registry in
+// RingDrain.h — one copy, kept there because that is where the drain's own
+// frames-per-gap arithmetic is derived. It was written out a second time here
+// and the two disagreed on their first day about where that arithmetic lives,
+// which is what a duplicated list of this kind always comes to. Retuning this
+// figure means going through that registry.
+//
+// What those surfaces say about it is that it is a floor under the gap rather
+// than a ceiling over it, and that stayed true when the removal was unbounded
+// on top of it; now that the removal shares this budget it is closer to being
+// the real figure, over by one record and one removal.
 constexpr uint32_t kWalkBudgetMs = 400;
 
 // How much walk time may pass between two yields.
@@ -156,14 +160,21 @@ constexpr uint32_t kWalkBudgetMs = 400;
 // why the walk no longer *feeds* on that cadence either (RingDrain.h): a
 // bounded pass needs no feed inside it, and this one could not have had one.
 //
-// 100 ms, which is three yields to a full budget: they land at the first record
-// at or past 100 ms, 200 ms and 300 ms of walk time, and a fourth would need
-// 400 ms, by which point the budget has already ended the pass. So the core is
-// given up several times per pass at every per-record cost this repository has
-// measured — three yields at 30 ms a record, two at 162 — while a walk short
-// enough to finish inside 100 ms never reaches one at all. It is bounded at the
-// other end by the same arithmetic: three yields is the ceiling however cheap a
-// record becomes, which is the property no count of records has.
+// 100 ms, which is three yields to a full budget: each lands at the first
+// record at or past 100 ms *since the previous yield*, and a fourth would need
+// the whole 400 ms, by which point the budget has already ended the pass. Since
+// the previous yield and not since the start of the walk, because a yield costs
+// a tick that is itself charged to the budget: at 30 ms a record the three land
+// at 120, 241 and 362 ms of walk time rather than at 100, 200 and 300. Those
+// three figures are driven in test_snapshot_walk rather than divided out here,
+// which is how the divided-out version of this sentence was found to be wrong.
+//
+// So the core is given up several times per pass at every per-record cost this
+// repository has measured — three yields at 30 ms a record, two at 162 — while
+// a walk short enough to finish inside 100 ms never reaches one at all. It is
+// bounded at the other end by the same arithmetic: three yields is the ceiling
+// however cheap a record becomes, which is the property no count of records
+// has.
 //
 // A yield is vTaskDelay(1), deliberately a bare tick count and not
 // pdMS_TO_TICKS(1). CONFIG_FREERTOS_HZ is 1000 in the esp32 and esp32s3
@@ -237,11 +248,10 @@ constexpr uint32_t kWalkBudgetMs = 400;
 // sleep at the end of its loop about two hundred times in that remainder.
 //
 // So the relation is asserted rather than asked for (walkBudgetFitsInterval()
-// below), and it is
-// worth asserting because nothing else would catch a repeat: core 1's idle
-// task is not watched (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is unset in
-// both sdkconfigs, while CPU0's is set), so loopTask's own subscription in
-// setup() is the only thing that would notice.
+// below), and it is worth asserting because nothing else would catch a repeat:
+// core 1's idle task is not watched (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+// is unset in both sdkconfigs, while CPU0's is set), so loopTask's own
+// subscription in setup() is the only thing that would notice.
 constexpr uint32_t kWalkYieldMs = 100;
 
 // The relation the choice above rests on. A cadence that does not fit strictly
@@ -404,6 +414,31 @@ inline bool walkShouldYield(uint32_t elapsedMs, uint32_t lastYieldMs,
 // sweeping, so the pass that finds it stale is the one that starts afresh.
 inline size_t resumeCursor(size_t cursor, size_t tableSize) {
   return cursor < tableSize ? cursor : 0;
+}
+
+// Where the row cursor resumes, which is the rule above plus one condition of
+// its own.
+//
+// The row cursor indexes a list as well as a table, and the two have to agree:
+// the staging list holds exactly what the positions before the cursor
+// contributed. The one thing that can part them is the pass throwing between
+// the last row it pushed and the cursor being written back — Diag::guard
+// catches it, and reading a record under memory pressure can cause it. The
+// rows collected before the throw are then in the list with the cursor still
+// behind them, so the next pass collects them a second time and publishes a
+// list with duplicates in it, or one short of the table.
+//
+// `passWasClean` is the caller's record of whether the last pass got as far as
+// writing the cursor back. When it did not, the cycle starts again from the
+// front: cheaper than reasoning about which rows survived, and it is the same
+// answer resumeCursor() gives a cursor it cannot trust.
+//
+// Here rather than at the call site because it is a rule about a cursor, and
+// every other rule about these two cursors is in this file where the host can
+// drive it. It was the one piece of that bookkeeping left in RnsTransport.cpp,
+// which cannot be compiled for the host at all.
+inline size_t resumeRowCursor(size_t cursor, size_t tableSize, bool passWasClean) {
+  return passWasClean ? resumeCursor(cursor, tableSize) : 0;
 }
 
 // Where a cursor resumes on the next pass, given where this one stopped.

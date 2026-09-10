@@ -54,7 +54,11 @@
 //   * the end of a pass is the rows being *full*, not this position wanting no
 //     row — "no row here" is what a resuming pass sees at position 0, and
 //     ending on it published 19 rows on a node holding 87;
-//   * only a whole list is published; a budget-stopped pass keeps its prefix.
+//   * only a whole list is published; a budget-stopped pass keeps its prefix;
+//   * a pass that threw between its last row and its cursor starts the cycle
+//     again rather than collecting those rows a second time;
+//   * the removal that follows the walk is on the *walk's* clock, so the two
+//     together are one budget and not two.
 //
 // refreshSnapshots() itself cannot be built for the host — [env:native] has no
 // framework, no microReticulum, no LittleFS and no FreeRTOS — so the rule was
@@ -150,6 +154,7 @@ struct Pass {
   bool     rowsFull  = false;  // it ended because there was nothing left to do
   uint32_t elapsedMs = 0;
   std::vector<size_t> swept;   // dead entries the pass found while sweeping
+  std::vector<uint32_t> yieldAt;  // walk time at each yield, before its tick is paid
 };
 
 Pass runWalk(const std::vector<bool>& live, bool sweeping, size_t sweepPos,
@@ -173,6 +178,7 @@ Pass runWalk(const std::vector<bool>& live, bool sweeping, size_t sweepPos,
     if (Rns::walkShouldYield(w.elapsedMs, lastYieldMs, yieldMs)) {
       lastYieldMs = w.elapsedMs;
       r.yields++;
+      r.yieldAt.push_back(w.elapsedMs);
       r.elapsedMs += tickMs;               // a yield is paid out of the budget
     }
     r.reads++;
@@ -221,34 +227,82 @@ Sweep sweepOnce(const std::vector<bool>& live, size_t cursor, uint32_t recordMs)
 // shapes diverge this suite stops describing the firmware.
 // ---------------------------------------------------------------------------
 struct Node {
-  size_t sweepPos    = 0;
-  size_t rowPos      = 0;
-  size_t staged      = 0;      // rows the current cycle has collected so far
-  size_t published   = 0;      // rows in the list readers actually see
-  bool   rowsWhole   = false;  // a cycle has been published at least once
-  size_t rowCycles   = 0;
-  size_t sweepCloses = 0;
-  size_t sweptTotal  = 0;
-  size_t budgetStops = 0;
+  size_t sweepPos     = 0;
+  size_t rowPos       = 0;
+  size_t staged       = 0;      // rows the current cycle has collected so far
+  size_t published    = 0;      // rows in the list readers actually see
+  bool   rowsWhole    = false;  // a cycle has been published at least once
+  bool   rowPassClean = true;   // the last pass wrote its row cursor back
+  size_t rowCycles    = 0;
+  size_t sweepCloses  = 0;
+  size_t sweptTotal   = 0;
+  size_t budgetStops  = 0;
 };
 
+// `aborts` is a pass that throws mid-walk: Diag::guard catches it in the
+// firmware and nothing after the walk runs — no cursor written back, no
+// publish. The staging list keeps what the walk pushed into it before the
+// throw, because it is the caller's own vector and the throw does not unwind
+// it. That is the one state in which the list and the cursor disagree, and it
+// is what Rns::resumeRowCursor() is for.
 Pass onePass(Node& n, const std::vector<bool>& live, uint32_t recordMs,
-             bool sweeping = true, uint32_t skipMs = 0) {
+             bool sweeping = true, uint32_t skipMs = 0, bool aborts = false) {
   n.sweepPos = Rns::resumeCursor(n.sweepPos, live.size());
-  n.rowPos   = Rns::resumeCursor(n.rowPos,   live.size());
+  n.rowPos   = Rns::resumeRowCursor(n.rowPos, live.size(), n.rowPassClean);
   if (n.rowPos == 0) n.staged = 0;
+  n.rowPassClean = false;        // set again when the cursor is written back
   const Pass r = runWalk(live, sweeping, n.sweepPos, recordMs, Rns::kWalkYieldMs, 1,
                          Rns::kWalkBudgetMs, n.rowPos, n.staged, skipMs);
-  n.staged      = r.rows;
+  n.staged = r.rows;             // pushed as the walk went, so it survives a throw
+  if (aborts) return r;
   n.sweptTotal += r.swept.size();
   if (r.ranOut) n.budgetStops++;
   const bool rowsDone = Rns::rowCycleDone(r.rows, kRowCap, r.ranOut);
   n.rowPos = rowsDone ? 0 : Rns::nextCursor(n.rowPos, r.stoppedAt, r.ranOut);
+  n.rowPassClean = true;         // list and cursor agree again
   if (sweeping) {
     n.sweepPos = Rns::nextCursor(n.sweepPos, r.stoppedAt, r.ranOut);
     if (!r.ranOut) n.sweepCloses++;
   }
   if (rowsDone) { n.published = r.rows; n.rowsWhole = true; n.rowCycles++; }
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// The removal that follows the walk, as refreshSnapshots() runs it.
+//
+// The point of the harness is the clock. The loop at the call site is bounded
+// by passMayStop((uint32_t)(millis() - walkStartMs), ...) — the *walk's* start,
+// deliberately, so that the walk and the removal together are one budget and
+// not two. Only the primitive was pinned before this; the sharing was not, and
+// swapping walkStartMs for a removeStartMs of its own would hand the removal a
+// second full budget without failing anything.
+//
+// `removeMs` is this harness's own parameter and not a measurement: nothing in
+// this tree times a BasicFileStore::remove(), which is a tombstone appended and
+// flushed plus an index entry written and flushed (FileStore.h). The tests pick
+// figures that divide the budget so the arithmetic is readable.
+//
+// `allGone` is the case where every key in `stale` has already been removed by
+// something else: remove_path() returns false, and it returns before touching
+// flash, so the iteration costs nothing.
+// ---------------------------------------------------------------------------
+struct Removal {
+  size_t   dropped   = 0;      // remove_path() said yes
+  size_t   attempts  = 0;      // ...out of this many tries
+  uint32_t elapsedMs = 0;      // still measured from the start of the *walk*
+  bool     stopped   = false;  // the budget ended it with entries left
+};
+
+Removal runRemoval(size_t stale, uint32_t walkElapsedMs, uint32_t removeMs,
+                   uint32_t budgetMs = Rns::kWalkBudgetMs, bool allGone = false) {
+  Removal r;
+  r.elapsedMs = walkElapsedMs;          // one clock, and the walk started it
+  for (size_t k = 0; k < stale; k++) {
+    if (Rns::passMayStop(r.elapsedMs, r.attempts > 0, budgetMs)) { r.stopped = true; break; }
+    r.attempts++;
+    if (!allGone) { r.dropped++; r.elapsedMs += removeMs; }
+  }
   return r;
 }
 
@@ -701,6 +755,119 @@ void test_only_a_whole_list_is_published() {
 }
 
 // ---------------------------------------------------------------------------
+// A pass that threw, and the removal's clock
+// ---------------------------------------------------------------------------
+
+void test_a_pass_that_threw_starts_the_row_cycle_again() {
+  // The newest piece of bookkeeping in refreshSnapshots() and the one with no
+  // test: the flag that says whether the last pass got as far as writing its
+  // row cursor back. The staging list and the cursor have to agree, and the one
+  // thing that parts them is the pass throwing between the last row it pushed
+  // and the write-back — Diag::guard catches that, and reading a record under
+  // memory pressure can cause it.
+  const std::vector<bool> live = table(200, true);
+  Node n;
+
+  // Two clean passes: fourteen rows, then twenty-eight, cursor following.
+  onePass(n, live, kFastRecordMs, /*sweeping=*/false);
+  TEST_ASSERT_EQUAL_size_t(14, n.rowPos);
+  TEST_ASSERT_EQUAL_size_t(14, n.staged);
+  TEST_ASSERT_TRUE(n.rowPassClean);
+
+  // The third throws after the walk. Its rows are in the list — the vector is
+  // the caller's own and the throw does not unwind it — and the cursor was
+  // never written, so it still points at 14 with 28 rows collected.
+  const Pass thrown = onePass(n, live, kFastRecordMs, /*sweeping=*/false,
+                              /*skipMs=*/0, /*aborts=*/true);
+  TEST_ASSERT_EQUAL_size_t(28, thrown.rows);
+  TEST_ASSERT_EQUAL_size_t(28, n.staged);
+  TEST_ASSERT_EQUAL_size_t(14, n.rowPos);
+  TEST_ASSERT_FALSE(n.rowPassClean);
+
+  // That disagreement is exactly what the rule is asked about. Resumed as an
+  // ordinary cursor it would say 14 — and the next pass would then collect
+  // positions 14..27 a second time into a list that already holds them.
+  TEST_ASSERT_EQUAL_size_t(14, Rns::resumeCursor(n.rowPos, live.size()));
+  TEST_ASSERT_EQUAL_size_t(0, Rns::resumeRowCursor(n.rowPos, live.size(), n.rowPassClean));
+
+  // So the next pass starts at the front with an empty list: nothing stepped
+  // over, fourteen rows collected, fourteen in the list rather than forty-two.
+  const Pass again = onePass(n, live, kFastRecordMs, /*sweeping=*/false);
+  TEST_ASSERT_EQUAL_size_t(0, again.skipped);
+  TEST_ASSERT_EQUAL_size_t(14, again.added);
+  TEST_ASSERT_EQUAL_size_t(14, again.rows);
+  TEST_ASSERT_EQUAL_size_t(14, n.rowPos);
+  TEST_ASSERT_TRUE(n.rowPassClean);
+
+  // And the cycle that follows it closes on a whole list of exactly the cap,
+  // not on a list padded out by the rows the throw left behind.
+  for (int k = 0; k < 4; k++) onePass(n, live, kFastRecordMs, /*sweeping=*/false);
+  TEST_ASSERT_EQUAL_size_t(kRowCap, n.published);
+  TEST_ASSERT_EQUAL_size_t(1, n.rowCycles);
+
+  // The rule on its own, both conditions of it. A clean pass keeps a cursor the
+  // table still holds; an unclean one starts again whatever the cursor said;
+  // and a cursor the table has shrunk past starts again either way.
+  TEST_ASSERT_EQUAL_size_t(14, Rns::resumeRowCursor(14, 200, true));
+  TEST_ASSERT_EQUAL_size_t(0,  Rns::resumeRowCursor(14, 200, false));
+  TEST_ASSERT_EQUAL_size_t(0,  Rns::resumeRowCursor(150, 100, true));
+  TEST_ASSERT_EQUAL_size_t(0,  Rns::resumeRowCursor(150, 100, false));
+}
+
+void test_the_removal_is_bounded_by_the_walks_clock_and_not_a_fresh_one() {
+  // The removal at the end of a pass is bounded by
+  // passMayStop(millis() - walkStartMs, ...) — the walk's start, so that the
+  // walk and the removal together are one budget rather than two. The rule was
+  // pinned; the sharing was not, and a removeStartMs of its own would be a
+  // silent second budget.
+  //
+  // 20 ms a removal is this harness's own figure and divides the budget by
+  // twenty, so what each case spends is readable rather than asserted blind.
+  const uint32_t kRemoveMs = 20;
+
+  // A pass whose walk spent the whole budget still removes one entry. Not
+  // none: passMayStop() may not stop a pass that has done nothing, which is
+  // the same forward-progress rule the walk is under.
+  const Removal spent = runRemoval(kRowCap, Rns::kWalkBudgetMs, kRemoveMs);
+  TEST_ASSERT_EQUAL_size_t(1, spent.attempts);
+  TEST_ASSERT_EQUAL_size_t(1, spent.dropped);
+  TEST_ASSERT_TRUE(spent.stopped);
+
+  // A pass whose walk finished early removes as many as the rest of the budget
+  // holds: 400 / 20.
+  const Removal early = runRemoval(kRowCap, 0, kRemoveMs);
+  TEST_ASSERT_EQUAL_size_t(20, early.dropped);
+  TEST_ASSERT_TRUE(early.stopped);
+
+  // And the sharing itself, which is the assertion a fresh clock would fail.
+  // The same removal after a walk that used 300 of the 400 gets what is left,
+  // five entries — where a clock of its own would give it the full twenty
+  // again and let one pass spend 700 ms.
+  const Removal shared = runRemoval(kRowCap, 300, kRemoveMs);
+  TEST_ASSERT_EQUAL_size_t(5, shared.dropped);
+  TEST_ASSERT_EQUAL_UINT32(400, shared.elapsedMs);   // measured from the walk's start
+  TEST_ASSERT_EQUAL_size_t(20, early.dropped);       // what a fresh clock would allow
+  TEST_ASSERT_LESS_THAN_size_t(early.dropped, shared.dropped);
+
+  // Walk plus removal is one budget and the item in hand, at every split of it.
+  for (uint32_t walked = 0; walked <= Rns::kWalkBudgetMs; walked += 25) {
+    const Removal r = runRemoval(kRowCap, walked, kRemoveMs);
+    TEST_ASSERT_GREATER_OR_EQUAL_size_t(1, r.attempts);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(Rns::kWalkBudgetMs + kRemoveMs, r.elapsedMs);
+  }
+
+  // Attempts and not successes. Every key already gone is a `stale` full of
+  // remove_path()s that return false without touching flash, so the clock does
+  // not move: answered with successes the loop would run all 64 with nothing
+  // watching it, which is the count-bounded loop this milestone exists to kill.
+  const Removal gone = runRemoval(kRowCap, Rns::kWalkBudgetMs, kRemoveMs,
+                                  Rns::kWalkBudgetMs, /*allGone=*/true);
+  TEST_ASSERT_EQUAL_size_t(0, gone.dropped);
+  TEST_ASSERT_EQUAL_size_t(1, gone.attempts);
+  TEST_ASSERT_TRUE(gone.stopped);
+}
+
+// ---------------------------------------------------------------------------
 // The yield cadence
 // ---------------------------------------------------------------------------
 
@@ -709,6 +876,21 @@ void test_the_yield_cadence_fires_more_than_once_inside_one_budget() {
   // and 300 ms of walk time.
   const Pass fast = runWalk(table(200, true), false, 0, kFastRecordMs);
   TEST_ASSERT_EQUAL_size_t(3, fast.yields);
+  // Where they land, which the header quotes and used to divide out wrongly.
+  // Not 100, 200 and 300: the cadence is measured from the previous yield, and
+  // a yield costs a tick that is itself charged to the budget, so the gap
+  // between two of them is a record's worth over the interval rather than
+  // exactly it. Driven here so the header cannot drift back to the tidy
+  // version.
+  TEST_ASSERT_EQUAL_size_t(3, fast.yieldAt.size());
+  TEST_ASSERT_EQUAL_UINT32(120, fast.yieldAt[0]);
+  TEST_ASSERT_EQUAL_UINT32(241, fast.yieldAt[1]);
+  TEST_ASSERT_EQUAL_UINT32(362, fast.yieldAt[2]);
+  // The rule they come from, at each landing: at or past a cadence since the
+  // one before, and never before it.
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT32(Rns::kWalkYieldMs, fast.yieldAt[0]);
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT32(Rns::kWalkYieldMs, fast.yieldAt[1] - fast.yieldAt[0]);
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT32(Rns::kWalkYieldMs, fast.yieldAt[2] - fast.yieldAt[1]);
   // And at the worst per-record cost the tree records, where a pass reads only
   // a handful of records at all. Still more than once, which is the property.
   const Pass slow = runWalk(table(200, true), false, 0, kSlowRecordMs);
@@ -801,6 +983,8 @@ int main() {
   RUN_TEST(test_a_pass_reaches_its_own_cursor_even_if_stepping_stops_being_free);
   RUN_TEST(test_a_resuming_pass_does_not_end_at_its_own_front_door);
   RUN_TEST(test_only_a_whole_list_is_published);
+  RUN_TEST(test_a_pass_that_threw_starts_the_row_cycle_again);
+  RUN_TEST(test_the_removal_is_bounded_by_the_walks_clock_and_not_a_fresh_one);
   RUN_TEST(test_the_yield_cadence_fires_more_than_once_inside_one_budget);
   RUN_TEST(test_the_feed_cadence_would_not_yield_at_all);
   RUN_TEST(test_the_yield_ceiling_does_not_move_with_the_record_cost);

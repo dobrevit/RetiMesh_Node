@@ -383,6 +383,92 @@ class TheDrainCapsAreReadFromTheirOwnObjects(unittest.TestCase):
         self.assertNotEqual(blank["rx_drain_capped"], 0)
 
 
+class TheSnapshotWalkIsRecordedAndRead(unittest.TestCase):
+    """The columns rx_drain_capped now defers to. `paths` is the path table's
+    own size and is exact whatever the walk managed, so a run watching it climb
+    could not tell a node still reading its table from one that had given up on
+    it. These four are what says which, and the firmware served them while this
+    script threw them away."""
+
+    def test_the_snapshot_figures_are_recorded_off_the_tables_object(self):
+        body = _status()
+        body["diag"]["tables"] = {"paths": 200, "links": 0, "destinations": 2,
+                                  "announces": 0, "snap_walk_max_ms": 412,
+                                  "snap_walk_pos": 14, "snap_budget_stops": 96,
+                                  "snap_rows_whole": False}
+        with _mocked_node(body):
+            row = soak.sample("node")
+        self.assertEqual(row["paths"], 200)
+        self.assertEqual(row["snap_walk_max_ms"], 412)
+        self.assertEqual(row["snap_walk_pos"], 14)
+        self.assertEqual(row["snap_budget_stops"], 96)
+        # Encoded like every other tri-state in this file: 0 for a real false.
+        self.assertEqual(row["snap_rows_whole"], 0)
+
+    def test_a_firmware_that_does_not_serve_them_records_blanks(self):
+        # And blank is not "the list is a prefix": a node too old to have the
+        # field did not say the rows were partial, it said nothing.
+        with _mocked_node(_status()):
+            row = soak.sample("node")
+        for key in ("snap_walk_max_ms", "snap_walk_pos", "snap_budget_stops",
+                    "snap_rows_whole"):
+            self.assertEqual(row[key], "", key)
+        self.assertFalse(soak.is_true(row["snap_rows_whole"]))
+        self.assertTrue(soak.is_blank(row["snap_rows_whole"]))
+
+    def test_a_node_that_has_never_read_its_table_is_a_warning(self):
+        # The one finding here. A node reporting paths in the hundreds with
+        # snap_rows_whole false has never got all the way round its own table,
+        # so the rows /api/status serves and the panels render are empty while
+        # the count beside them is in the hundreds.
+        rows = []
+        for k in range(4):
+            body = _status(clean=True)
+            body["diag"]["tables"] = {"paths": 200, "links": 0, "destinations": 2,
+                                      "announces": 0, "snap_walk_max_ms": 402,
+                                      "snap_walk_pos": 14, "snap_budget_stops": 20 * k,
+                                      "snap_rows_whole": False}
+            with _mocked_node(body):
+                rows.append(soak.sample("node"))
+        text = _summary_of(rows)
+        self.assertIn("snap_rows_whole false", text)
+        self.assertIn("snap_budget_stops", text)
+        self.assertIn("snap_walk_max_ms", text)
+
+    def test_a_healthy_node_says_none_of_it(self):
+        rows = []
+        for _ in range(4):
+            body = _status(clean=True)
+            body["diag"]["tables"] = {"paths": 3, "links": 0, "destinations": 2,
+                                      "announces": 0, "snap_walk_max_ms": 0,
+                                      "snap_walk_pos": 3, "snap_budget_stops": 0,
+                                      "snap_rows_whole": True}
+            with _mocked_node(body):
+                rows.append(soak.sample("node"))
+        text = _summary_of(rows)
+        self.assertNotIn("snap_rows_whole false", text)
+        self.assertNotIn("snap_budget_stops:", text)
+
+
+def _summary_of(rows):
+    """Write `rows` to a CSV under the current header and return what
+    summarise() printed for it."""
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    os.close(fd)
+    try:
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=soak.FIELDS)
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            soak.summarise(path)
+        return out.getvalue()
+    finally:
+        os.unlink(path)
+
+
 class ResumingAnOlderCsvKeepsItWellFormed(unittest.TestCase):
     """Appending a column broke every CSV already in progress. A
     `DictWriter(fieldnames=FIELDS)` writes a cell per current column whatever
