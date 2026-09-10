@@ -70,14 +70,42 @@ private:
   void onData(ClientCtx* ctx, const uint8_t* data, size_t len);
   void onDisconnect(ClientCtx* ctx);
 
+  // One "does this event also get a line?" rule, for the two lines in this
+  // file that are rate-limited. They had a copy each and the copies disagreed;
+  // RetiTransportServer.cpp says how, and why the count is never the half that
+  // gets rated.
+  //
+  // The period is the caller's and is passed per call, so the two cadences
+  // below stay independent: retuning one of them must not retune the other.
+  struct RateLimit {
+    uint32_t lastMs = 0;
+    uint32_t events = 0;                 // since boot, reported or not
+    bool due(uint32_t periodMs);
+  };
+
+  // A peer whose framing has desynced produces oversize frames in a stream, so
+  // the line about it is worth one every five seconds: often enough to show the
+  // fault is still live, rare enough that the report does not become the larger
+  // fault. One counter for the listener rather than one per connection, so two
+  // desynced peers at once still share the five seconds and the line names
+  // whichever of them tripped it.
   static constexpr uint32_t OVERSIZE_LOG_MS = 5000;
+  // A node that has run out of memory refuses every peer that connects, and a
+  // peer reconnecting in a loop is refused as fast as it can ask: five seconds
+  // keeps such a node saying so without a starved minute filling the log. This
+  // is node-wide and about the heap, where the figure above is about one peer's
+  // stream; Diag's allocation line arrived at the same five seconds separately
+  // again (Diag.cpp:90). Three reasons, three constants — the same number
+  // today, and none of them defined in terms of another.
+  static constexpr uint32_t PRESSURE_LOG_MS = 5000;
 
   AsyncServer*            _server = nullptr;
   RingbufHandle_t         _tcpInRing = nullptr;
   std::vector<ClientCtx*> _clients;
   SemaphoreHandle_t       _lock   = nullptr;   // guards _clients + _frameBuf
   uint32_t                _nextId = 1;
-  uint32_t                _lastOversizeLogMs = 0;
+  RateLimit               _oversizeLog;   // a peer framing past the MTU
+  RateLimit               _pressureLog;   // clients refused when short of RAM
 
   // Shared framing scratch: worst case 2 + 2*508 bytes.
   uint8_t _frameBuf[HDLC::frameCapacity(2 * LORA_FRAG_PAYLOAD)];

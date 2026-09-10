@@ -289,6 +289,7 @@ them on every push.
 | `test_lxmf_commands` | what the node says back to a ping, an echo and a signal report, and that nothing a stranger sends can overrun the reply |
 | `test_telemetry` | what the node says about itself: sensor shapes, msgpack str against bin, and that a document too big is not sent half-written |
 | `test_nomadnet` | the node's own page: what it says, what it refuses to claim, and that a page never overruns the buffer a stranger asked it to fill |
+| `test_client_admit` | who gets one of the node's TCP client slots on :4242, and above all what a refusal costs: that a context which cannot be allocated or cannot be enrolled is given back and its client closed, rather than either being leaked or the node aborting |
 
 ### HDLC fuzzing and the sanitizer gate
 
