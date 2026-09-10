@@ -217,9 +217,15 @@ void beginSecondary() {
 
 bool trigger2() {
   if (sKind2 == Kind2::Shtc3) {
-    if (!cmd2(Shtc3::kCmdWake)) return false;
+    if (!cmd2(Shtc3::kCmdWake)) return false;      // never woke; nothing to undo
     delayMicroseconds(300);                        // wake-up time; see probeShtc3
-    return cmd2(Shtc3::kCmdMeasure);
+    if (cmd2(Shtc3::kCmdMeasure)) return true;
+    // Woken and then refused. The other two paths through this part both put
+    // it back (probeShtc3, collect2) and this one did not, which left a failed
+    // trigger as the single way the part could sit awake until some later
+    // reading happened to succeed — and if the bus stays broken, indefinitely.
+    cmd2(Shtc3::kCmdSleep);
+    return false;
   }
   return cmd2(Sht3x::kCmdMeasure);
 }
@@ -232,9 +238,11 @@ bool collect2(Environment::Reading& out) {
   uint8_t d[6];
   const bool got = I2cReg::readRaw(bus2(), sAddr2, d, sizeof(d));
   // Back to sleep whichever way the read went, so the failure paths leave the
-  // part in the same state the success path does. Idle is about 45 uA against
-  // 0.3 uA asleep — nothing on this board, but a part left awake by a fault is
-  // a difference between two runs that nobody chose.
+  // part in the same state the success path does. The power difference is
+  // small on this part — both states are well under a milliamp — so the reason
+  // is consistency rather than the battery: a part left awake by a fault is a
+  // difference between two runs that nobody chose, and the kind of asymmetry a
+  // later reader takes for a deliberate exception.
   if (sKind2 == Kind2::Shtc3) cmd2(Shtc3::kCmdSleep);
   if (!got) return false;
   if (!SensirionRht::measurementOk(d)) return false;
