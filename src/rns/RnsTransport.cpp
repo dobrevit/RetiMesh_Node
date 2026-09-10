@@ -218,15 +218,41 @@ public:
     // is the half this loop never had: reticulum.loop() calls it and feeds
     // nothing, so between main.cpp's feed at the top of the pass and
     // refreshSnapshots() at the end of it, a backlog here reported nothing at
-    // all. The cap does not bind on the air — at the fastest channel the
-    // settings will accept (SF7, the floor on every part in RadioCaps; 500 kHz
-    // sub-GHz or 1625 kHz on the SX1280; CR 4/5; the six-symbol preamble
-    // SettingsRules allows; one payload byte) Airtime::timeOnAirMs gives
-    // 5.95 ms or 1.83 ms a frame, so 168 or 546 a second, and a 10 ms pass sees
-    // under two frames or under six against an allowance of 64. Nothing is
-    // dropped by the cap either way: what it leaves stays in the ring for the
-    // next tick.
-    Sys::RingDrain::drain(
+    // all.
+    //
+    // The cap can bind on the air, and the interval that decides it is not the
+    // RNS task's 10 ms delay. This drain runs inside reticulum.loop(); the same
+    // pass then runs on to refreshSnapshots(), whose path-table walk puts two
+    // consecutive radio drains of the order of 410 ms apart rather than 10.
+    // That figure is derived in RingDrain.h; what follows is a summary of that
+    // derivation rather than a second one, and it goes stale with it: the short
+    // of it is that kWalkBudgetMs — 400 ms, declared further down this file —
+    // bounds only the part of the walk that runs after the snapshot's rows are
+    // full, so 410 ms is the least such a gap can be and not the most.
+    //
+    // At the fastest channel the settings will accept — SF7, the floor on every
+    // part in RadioCaps; 500 kHz sub-GHz or 1625 kHz on the SX1280; CR 4/5; the
+    // six-symbol preamble SettingsRules allows; one payload byte —
+    // Airtime::timeOnAirMs gives 5.95 ms or 1.83 ms a frame, so 168 or 546 a
+    // second: about 69 or 224 frames across that 410 ms alone, against an
+    // allowance of 64, and more across a longer gap. Both frame times are
+    // asserted in test/test_airtime, so a change to either rulebook fails a
+    // test rather than quietly falsifying this paragraph. The ring is deep
+    // enough to hold that backlog, so it really can exceed one batch rather
+    // than the producer having dropped the excess first (RX_RING_BYTES is
+    // 8192 B, or 4096 B without PSRAM, and a minimal frame costs about 20 B in
+    // it once the ring's own item header and alignment are paid).
+    //
+    // What makes that safe is not the rate. It is that the feed every
+    // kFeedEvery items keeps this task reporting while the batch runs, and that
+    // what the cap leaves stays in the ring for the next pass — which, with no
+    // walk in the way, is 10 ms later and takes another 64. refreshSnapshots()
+    // returns immediately unless SNAPSHOT_INTERVAL_MS has passed, so at most
+    // one pass in five seconds is a slow one and this is a burst to be caught
+    // up on rather than a rate the node cannot carry. Nothing is dropped by the
+    // cap; loraRxDrainCapped counts the passes it ended with frames still
+    // queued, and real loss is the producer's loraRxDropRing.
+    const Sys::RingDrain::Pass pass = Sys::RingDrain::drain(
         Sys::RingDrain::kBatch, Sys::RingDrain::kFeedEvery,
         [&sz]() { return (uint8_t*)xRingbufferReceive(sRxRing, &sz, 0); },
         [this, &sz](uint8_t* item) {
@@ -264,12 +290,39 @@ public:
           handle_incoming(Bytes(item + sizeof(hdr), sz - sizeof(hdr)));
         },
         []() { Watchdog::feed(); },
-        // Nothing counts cap hits on this path, so the ring is not asked: the
-        // counter the TCP drain keeps is what this was for, and a
-        // vRingbufferGetInfo whose answer is discarded is work done for
-        // nobody. Pass::capped is therefore always false here, which is why it
-        // is not read.
-        []() { return false; });
+        []() {
+          // The same reading the TCP drain takes below, for the same reason:
+          // the ring's item count without taking anything out, which is the
+          // only way to tell "the cap stopped us with more waiting" from "the
+          // ring happened to hold exactly the batch".
+          //
+          // Cheap and safe to ask from here. The IDF header documents what
+          // it returns — free/read/write pointers and the number of items
+          // waiting — which reads as a copy of counters rather than a walk of
+          // anything; it documents the return and not the cost, and ringbuf.c
+          // is not in the core-3 tree to confirm it there. It is asked at most
+          // once a pass and only when the cap ended the drain. It takes the
+          // ring's own lock, which it shares with the producer: the radio
+          // task, on this same core at a higher priority (main.cpp), so it is
+          // not running while this is and a handful of instructions is the
+          // most it could ever be held up by. The answer is a snapshot either
+          // way — a frame posted just after it is read waits for the next pass
+          // whichever way this went, which is why either answer is honest.
+          UBaseType_t waiting = 0;
+          vRingbufferGetInfo(sRxRing, nullptr, nullptr, nullptr, nullptr, &waiting);
+          return waiting > 0;
+        });
+    // Once per pass the cap ended with frames still queued — not once per
+    // frame, and not when a pass happened to take exactly its allowance from a
+    // ring that is now empty. Nothing is lost when this moves: unlike
+    // loraRxDropRing beside it in /api/status, the frames are still in the ring
+    // and go out on the next pass. It is here because the cap is also what
+    // hides the condition — it is what keeps a backlog from reaching the
+    // watchdog, so without this a node routing late after a long path-table
+    // sweep has no outward sign at all. Written as a read-add-write rather than
+    // ++ because the field is volatile and a compound operator on one is
+    // deprecated (-Wvolatile).
+    if (pass.capped) g_stats.loraRxDrainCapped = g_stats.loraRxDrainCapped + 1;
   }
 private:
   uint8_t _sf = 0, _cr = 0;
@@ -1840,8 +1893,13 @@ static void processEvents() {
 // hold this task past its thirty-second watchdog. (Can: that is read off the
 // code and has not been watched happen — RingDrain.h says which part is
 // analysis and what the bench has yet to confirm.) What the cap leaves is
-// drained on the next 10 ms tick; a pass that threw is abandoned by Diag::guard
-// instead, and the back-off at the end of loop() puts the next one 250 ms out.
+// drained on the next pass: 10 ms later when nothing else in this one is slow,
+// but of the order of 410 ms later — at least that, not at most — when
+// refreshSnapshots() walked the path table in between. The interval between
+// two passes is the tick plus the pass, not the tick; RingDrain.h derives the
+// figure and says why kWalkBudgetMs floors it rather than caps it. A pass that
+// threw is abandoned by Diag::guard instead, and the back-off at the end of
+// loop() puts the next one a further 250 ms out.
 //
 // See RingDrain.h. The feeds this takes are the first reporting after the RNS
 // task's own feed at the top of the pass (main.cpp): the radio drain feeds
@@ -1889,7 +1947,8 @@ static uint32_t sSnapOkMs = 0;          // last pass that actually published; th
 // Dead paths are cleaned up on a slower clock than the reading is refreshed:
 // the reading is capped and cheap, the sweep walks the whole table.
 static const uint32_t kStaleSweepMs = 60000;
-// How long one pass may spend reading path records back off the filesystem.
+// How long the sweep phase of one pass may spend reading path records back off
+// the filesystem.
 //
 // Not a tuning knob — a bound this walk did not have. Every record examined is
 // one file opened, sought, read and closed, and on LittleFS that is a
@@ -1903,8 +1962,10 @@ static const uint32_t kStaleSweepMs = 60000;
 //
 // 400 ms is picked to be obviously survivable rather than optimal: two orders
 // of magnitude inside the watchdog, and small next to the five seconds between
-// passes, so the RNS task still spends the overwhelming majority of its time
-// forwarding. What one pass does not get through, the next one does.
+// passes. What it bounds is the sweep and not the whole walk — the check below
+// is guarded on !wantRow, so the row phase ahead of it runs unbudgeted, and
+// RingDrain.h works through what that leaves for the gap between two drains of
+// a ring. What one pass does not get through, the next one does.
 static const uint32_t kWalkBudgetMs = 400;
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
 static uint32_t sSnapWalkMaxMs = 0;      // worst snapshot walk since boot; see Tables
@@ -2003,7 +2064,7 @@ static void refreshSnapshots(bool allowSweep) {
     // rows full is with wantSweep set, so pos is at or past sSweepPos and the
     // cursor written below can only ever move forwards.
     if (!wantRow && (uint32_t)(millis() - walkStartMs) >= kWalkBudgetMs) { ranOut = true; break; }
-    // kWalkBudgetMs ends the walk, but it is only checked between records, and
+    // kWalkBudgetMs ends the sweep, but it is only checked between records, and
     // one record on a sick filesystem can take a long time on its own — so the
     // walk keeps reporting while it runs rather than relying on finishing. The
     // cadence is Sys::RingDrain::kFeedEvery rather than a 16 of this walk's

@@ -54,7 +54,7 @@
 //  seen.
 //
 //  A pass therefore takes a bite, feeds the watchdog while it chews, and comes
-//  back for the rest on the next tick. Nothing here knows what a ring is: the
+//  back for the rest on the next pass. Nothing here knows what a ring is: the
 //  receive, the handler, the feed and the "is there more" are all the
 //  caller's, which is what lets the shape be proven on the host
 //  (test/test_ring_drain) rather than by flooding a bench board and watching
@@ -79,15 +79,58 @@ namespace RingDrain {
 // RNS pass on core 1, and either can be retuned without the other.
 //
 // Nothing is dropped by hitting it: the remainder stays in the ring and the
-// caller is back for it on its next tick. What it bounds is one pass, not a
-// rate — without it the count per pass had no bound at all. A pass may take
-// 64, so on the RNS task's 10 ms loop it permits *up to* 6400 items a second,
-// and even that is a ceiling rather than a promise: a pass is the 10 ms delay
-// plus the pass itself, and refreshSnapshots() may spend up to kWalkBudgetMs
-// — 400 ms — on its record walk, so the sustained rate can be well below it.
-// High enough not to bind on ordinary traffic, few enough that no single pass
-// runs long — that gap is what this is meant to sit in, and deferring a
-// flood's remainder by a tick is what it is for.
+// caller is back for it on its next pass. What it bounds is one pass, not a
+// rate — without it the count per pass had no bound at all.
+//
+// How long "the next pass" is, since both callers' comments and both counters
+// depend on it. The derivation is here; the figure is not confined here. Both
+// drains in RnsTransport.cpp quote it, and so does test/test_ring_drain —
+// those three name this file for the reasoning — while the surfaces that
+// explain the counter to a reader quote the walk's 400 ms budget as the gap:
+// main.cpp's heartbeat line, Config.h beside loraRxDrainCapped,
+// tools/soak.py's column notes, docs/api.md and docs/troubleshooting.md.
+// Retuning kWalkBudgetMs means visiting all of those, and the radio drain's
+// frames-per-gap arithmetic in RnsTransport.cpp is derived from this figure
+// and moves with it — test_airtime pins the two frame times that arithmetic
+// rests on, not the frames it puts in the gap.
+//
+// The RNS task delays 10 ms between passes (main.cpp), but the interval
+// between two drains of the same ring is that delay plus a whole pass, and a
+// pass contains refreshSnapshots(), whose path-table walk reads records back
+// off the filesystem under a kWalkBudgetMs — 400 ms — budget
+// (RnsTransport.cpp).
+//
+// That budget is a floor under the gap, not a ceiling over it. It is consulted
+// only once the snapshot's rows are full — the check is guarded on !wantRow,
+// and the walk states the rule itself: "the budget ends the sweep, never the
+// rows". While rows are still being collected it is not consulted at all, and
+// a record whose interface has gone away is read off the filesystem and then
+// skipped without filling a row, which is the very thing the sweep exists to
+// clean up. A table of those keeps the row phase going to the end of the table
+// with no budget in force. The row phase is bounded by the table, not by the
+// clock, and it runs ahead of the budgeted part.
+//
+// Two consecutive drains of one ring are therefore of the order of 410 ms
+// apart rather than 10 — the sweep's budget plus the tick — and that is the
+// least of it, before the row phase ahead of the budget or the rest of the
+// pass is counted at all, and further again after a pass that threw, which
+// adds loop()'s 250 ms back-off.
+//
+// So the cap does bind, on both rings, after a long walk: 410 ms on its own is
+// already several batches of frames at the fastest channel the settings will
+// accept. That arithmetic, through Airtime::timeOnAirMs, is at the radio drain
+// in RnsTransport.cpp, and the two frame times it rests on are pinned in
+// test/test_airtime rather than left in prose. A LAN peer needs no such
+// contrivance and can exceed the cap whenever it likes.
+//
+// What makes hitting it safe is not the rate. It is kFeedEvery below — the
+// task keeps reporting while the batch runs, so a long batch cannot reach the
+// watchdog — and the remainder surviving in the ring for the next pass. A
+// bigger cap would buy nothing: it would only make one pass longer, and the
+// figure to raise if a node were genuinely being outrun for minutes at a time
+// is the ring, not this. The two counters — radio rx_drain_capped and
+// peers.tcp_drain_capped — are what say it is happening at all, since the cap
+// is also what keeps it from showing up as anything else.
 constexpr size_t kBatch = 64;
 
 // Items between watchdog feeds, and the one definition of that cadence: the
@@ -108,7 +151,7 @@ struct Pass {
   // counting how often this node is being outrun they are opposites, so the
   // ring is asked rather than guessed at. (A producer that posts between the
   // last receive and the asking also reads as capped, which is the honest
-  // answer: that item is waiting for the next tick either way.)
+  // answer: that item is waiting for the next pass either way.)
   bool capped = false;
 };
 

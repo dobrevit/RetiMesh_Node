@@ -1871,6 +1871,11 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   radio["rx_crc_errors"]           = g_stats.loraRxCrcErrors;
   radio["rx_bad_length"]           = g_stats.loraRxBadLength;
   radio["rx_spurious_irq"]         = g_stats.loraRxSpuriousIrq;
+  // Beside the drops but not one of them: nothing was lost when this moves.
+  // The RNS task takes frames off the RX ring a bounded batch at a time and
+  // what a batch leaves is taken on the next pass, so this counts passes, not
+  // frames; see docs/api.md.
+  radio["rx_drain_capped"]         = g_stats.loraRxDrainCapped;
   // The transmit side's own pair. Nothing above them moves when the carrier
   // sense stops working, which is why they are here rather than left to the
   // log; see docs/api.md and docs/troubleshooting.md.
@@ -1890,8 +1895,8 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   peers["wifi_sta"]   = WiFi.softAPgetStationNum();
   peers["tcp_rx_packets"] = g_stats.tcpRxPackets;
   // Nothing was dropped when this moves — the batch cap deferred it to the next
-  // 10 ms tick — but it is the only outward sign that a client is sending
-  // faster than this node routes; see docs/api.md.
+  // pass — but it is the only outward sign that a client is sending faster than
+  // this node routes; see docs/api.md.
   peers["tcp_drain_capped"] = g_stats.tcpDrainCapped;
   doc["wifi_enabled"] = wifiEnabled();
 

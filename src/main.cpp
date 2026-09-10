@@ -586,17 +586,19 @@ void loop() {
             (unsigned)g_stats.loraRxDropPartial, (unsigned)g_stats.loraRxCrcErrors,
             (unsigned)g_stats.loraRxBadLength, (unsigned)g_stats.loraRxSpuriousIrq,
             (unsigned)g_stats.loraRxPackets);
-    // The same treatment for the other side, and silent on a healthy node for
-    // the same reason. This one is not a loss: the inbound TCP ring's batch cap
-    // ended a pass with traffic still queued and the rest went on the next
-    // 10 ms tick (RingDrain.h). It is here because the cap is what keeps a
-    // flooded ring from holding the RNS task past the watchdog — so with it in
-    // place, a client outrunning this node's routing has no other outward sign
-    // at all.
-    if (g_stats.tcpDrainCapped)
-      log_i("tcp inbound: drain cap ended %u passes with traffic still queued "
-            "(nothing dropped; the rest went on the following tick)",
-            (unsigned)g_stats.tcpDrainCapped);
+    // The drain cap on both inbound rings, silent until one of them has been
+    // reached. Neither figure is a loss: the batch ended a Reticulum-task pass
+    // with more still in the ring and the rest was taken on the following pass
+    // (RingDrain.h). They are here because the cap is what keeps a full ring
+    // from holding that task past the watchdog — so with it in place, a node
+    // routing late has no other outward sign at all. On the radio side the pass
+    // after a full-budget path-table sweep is the case to expect, since two
+    // drains can be 400 ms apart rather than 10; what was really lost there is
+    // the "ring" figure in the line above.
+    if (g_stats.loraRxDrainCapped || g_stats.tcpDrainCapped)
+      log_i("drain cap: lora %u passes, tcp inbound %u passes ended with more "
+            "queued (nothing dropped; the rest went on the following pass)",
+            (unsigned)g_stats.loraRxDrainCapped, (unsigned)g_stats.tcpDrainCapped);
     // Reticulum's tables are the other thing that grows with traffic, and the
     // one a heap figure alone will not explain.
     RnsTransport::Tables t = RnsTransport::tables();

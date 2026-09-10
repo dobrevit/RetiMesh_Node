@@ -25,9 +25,10 @@
 // pass happened to take exactly its allowance from a ring that is now empty.
 // Two more are here because a surface depends on them: the ring is asked "is
 // there more" at most once a pass and only when the cap ended it, which is the
-// whole of what the tcp_drain_capped counter is; and a handler that returns
-// early — the radio drain's short-item path — still counts against the cap and
-// does not end the drain.
+// whole of what the two drain-cap counters are — radio rx_drain_capped and
+// peers.tcp_drain_capped, both incremented by their call site on Pass::capped;
+// and a handler that returns early — the radio drain's short-item path — still
+// counts against the cap and does not end the drain.
 //
 // The firmware's ring is FreeRTOS's, which the host cannot have; the ring
 // here is a deque with the same manners — receive() takes the item out and
@@ -144,7 +145,11 @@ static void test_more_than_the_cap_is_taken_a_batch_at_a_time() {
   // Nothing was dropped on the way: the remainder is still in the ring.
   TEST_ASSERT_EQUAL_size_t(100 - Sys::RingDrain::kBatch, ring.waiting());
 
-  // ...and the following pass — the next 10 ms tick — drains it.
+  // ...and the following pass drains it. That pass is 10 ms away when nothing
+  // else in the current one is slow and 410 ms or more away when the path-table
+  // walk ran in between — RingDrain.h derives that gap and says why the walk's
+  // budget is its floor, not its ceiling. Either way the remainder is still
+  // here to be taken.
   Record second;
   Sys::RingDrain::Pass p2 = run(ring, second, Sys::RingDrain::kBatch, Sys::RingDrain::kFeedEvery);
   TEST_ASSERT_EQUAL_size_t(100 - Sys::RingDrain::kBatch, p2.handled);
@@ -176,7 +181,7 @@ static void test_more_than_the_cap_is_taken_a_batch_at_a_time() {
   TEST_ASSERT_EQUAL_size_t(1, ring.anyLeftAsks());
 }
 
-// The tcp_drain_capped counter is only as honest as this: it fires on
+// Both drain-cap counters are only as honest as this: they fire on
 // Pass::capped, and Pass::capped is whatever anyLeft() returned. Asking twice
 // would double-count a pass; asking on a pass that ran the ring dry would race
 // the producer into a "capped" that never happened. RingDrain.h states both;
@@ -430,6 +435,49 @@ static void test_a_throwing_handler_returns_its_item_and_keeps_the_count() {
   TEST_ASSERT_EQUAL_INT(4, after.handled[1]);
 }
 
+// What both call sites do with Pass::capped: one increment per pass the cap
+// ended with something still in the ring — g_stats.loraRxDrainCapped at the
+// radio drain, g_stats.tcpDrainCapped at the TCP one. The property worth
+// holding is the one that is not obvious from either line: a backlog of n items
+// does not add n to the counter, it adds one per pass, and the pass that
+// finally empties the ring adds nothing at all. A counter incremented inside
+// the drain instead would read as a packet loss of nearly the whole backlog.
+static void test_the_counter_moves_once_per_capped_pass_not_once_per_item() {
+  FakeRing ring;
+  const int kBacklog = 200;                 // more than three batches
+  fill(ring, kBacklog);
+  size_t capped = 0, passes = 0, handled = 0;
+  Record rec;
+  for (;;) {
+    Sys::RingDrain::Pass p = run(ring, rec, Sys::RingDrain::kBatch, Sys::RingDrain::kFeedEvery);
+    passes++;
+    handled += p.handled;
+    if (p.capped) capped++;                 // the call sites' `if (pass.capped)`
+    else break;
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(20, (uint32_t)passes);   // so a stuck drain fails here
+  }
+  TEST_ASSERT_EQUAL_size_t(kBacklog, handled);
+  TEST_ASSERT_EQUAL_size_t(4, passes);      // ceil(200/64)
+  // Three passes left something behind. The fourth took the remaining 8 and
+  // emptied the ring, and must not be counted: it was not outrun. Counting
+  // items would have read 192 here.
+  TEST_ASSERT_EQUAL_size_t(3, capped);
+  TEST_ASSERT_EQUAL_size_t(0, ring.waiting());
+  // ...and the ring was asked at most once a pass, and only on a pass the cap
+  // ended, which is what keeps the reading cheap on the node: the IDF header
+  // documents vRingbufferGetInfo as a status read of the ring's pointers and
+  // item count, and the drain asks it only after a pass the cap ended
+  // (RnsTransport.cpp, which attributes the cost the same way — ringbuf.c is
+  // not in the core-3 tree to read). That the two counts come out *equal* is an
+  // artefact of this backlog rather than the property: 200 is not a multiple of
+  // the batch, so the last pass runs dry and never asks. At 192 the third pass
+  // would end on the cap, ask, and be told the ring was empty — three asks
+  // against two capped passes. The property that always holds is
+  // test_the_ring_is_asked_at_most_once_a_pass's; the equality is asserted here
+  // because it is true of this backlog.
+  TEST_ASSERT_EQUAL_size_t(capped, ring.anyLeftAsks());
+}
+
 static void test_a_backlog_clears_in_as_many_passes_as_it_takes() {
   // A ring far deeper than one batch still empties, in ceil(n/cap) passes,
   // with nothing lost and nothing handled twice.
@@ -471,5 +519,6 @@ int main() {
   RUN_TEST(test_a_zero_cap_takes_nothing_and_reports_nothing);
   RUN_TEST(test_a_throwing_handler_returns_its_item_and_keeps_the_count);
   RUN_TEST(test_a_backlog_clears_in_as_many_passes_as_it_takes);
+  RUN_TEST(test_the_counter_moves_once_per_capped_pass_not_once_per_item);
   return UNITY_END();
 }

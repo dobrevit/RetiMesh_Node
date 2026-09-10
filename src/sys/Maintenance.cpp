@@ -387,9 +387,21 @@ static void doStatus() {
   // waits the whole deferral and no packet was ever measured against the air.
   // An operator reading radio=online needs the contradiction on the same line.
   // Both are zero on a healthy node whatever the traffic (docs/api.md).
-  dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu cad_timeouts=%lu cad_arm_errors=%lu",
+  //
+  // rx_drain_capped is on the same line and is not a third fault: it counts the
+  // Reticulum-task passes whose batch of received frames ended with more still
+  // in the ring, which loses nothing and is expected after a long path-table
+  // sweep. The format below prints it after the rx=/tx= pair and before the two
+  // carrier-sense counters — with the traffic figures it is about, and without
+  // splitting the two an operator reads together — and it is on the console at
+  // all because a node reachable only over TCP 4243 has no other way to be
+  // asked. /api/status carries it as radio.rx_drain_capped, and real loss on
+  // this path is radio.rx_dropped_ring.
+  dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu rx_drain_capped=%lu "
+                  "cad_timeouts=%lu cad_arm_errors=%lu",
         g_stats.radioOnline ? "online" : "offline", g_stats.radioModel,
         (unsigned long)g_stats.loraRxPackets, (unsigned long)g_stats.loraTxPackets,
+        (unsigned long)g_stats.loraRxDrainCapped,
         (unsigned long)g_stats.loraCadTimeouts, (unsigned long)g_stats.loraCadArmErrors);
   // Duty-cycled receive, read back rather than echoed. The switch being on
   // proves nothing: the mode exists only on an SX1262, and even there the sleep

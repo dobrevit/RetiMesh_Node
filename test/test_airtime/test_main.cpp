@@ -30,6 +30,26 @@ void test_time_on_air_matches_datasheet() {
   TEST_ASSERT_FLOAT_WITHIN(2.0f, 727.6f, d.timeOnAirMs(255));
 }
 
+// The two frame times the drain-cap reasoning rests on, pinned so that they
+// are enforced rather than asserted in prose. The radio drain in
+// RnsTransport.cpp argues that a batch cap of 64 frames can be reached across
+// the gap between two Reticulum-task passes, and the whole of that argument is
+// how many frames fit in the gap — which is these two numbers. Nothing but a
+// comment had ever computed them, and a comment cannot fail.
+//
+// This is the fastest frame either family will let a node emit: SF7 is sfMin
+// on every part in RadioCaps (test_radio_plan pins that it never drops below
+// 7), 500 kHz is the widest sub-GHz bandwidth and 1625 kHz the widest the
+// SX128x has, CR 4/5 and a six-symbol preamble are the floors SettingsRules
+// accepts, and one payload byte is the smallest frame there is. So a change to
+// either rulebook that makes a faster frame legal fails here.
+void test_the_fastest_frame_the_settings_will_accept() {
+  Airtime sub = make(7, 500.0f, 5, 6);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 5.9520f, sub.timeOnAirMs(1));   // ~168 frames/s
+  Airtime ism = make(7, 1625.0f, 5, 6);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.8314f, ism.timeOnAirMs(1));   // ~546 frames/s
+}
+
 void test_symbol_time_and_slot() {
   Airtime a = make(8, 125.0f);
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 2.048f, a.symbolTimeMs());
@@ -389,6 +409,7 @@ void test_the_cad_deadline_is_clamped_at_both_ends() {
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_time_on_air_matches_datasheet);
+  RUN_TEST(test_the_fastest_frame_the_settings_will_accept);
   RUN_TEST(test_symbol_time_and_slot);
   RUN_TEST(test_the_cad_deadline_follows_the_channel);
   RUN_TEST(test_the_cad_deadline_is_clamped_at_both_ends);

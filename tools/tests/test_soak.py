@@ -188,7 +188,21 @@ class SummariseNamesTheDeadRun(unittest.TestCase):
     def test_a_csv_written_before_the_columns_existed_is_silent(self):
         # Old files must summarise exactly as they always did.
         rows = self._rows("", "", prev_uptime="")
-        legacy = soak.FIELDS[:-2]
+        # Everything up to the two columns this class is about, taken by name.
+        # It was FIELDS[:-2], which meant those two only while they were last:
+        # appending battery_* on main turned it into a header that *has* them,
+        # so the test went on passing through the blank path and stopped
+        # covering the absent one it names. By name it cannot drift again, and
+        # a rename of either column fails here loudly rather than quietly.
+        legacy = soak.FIELDS[:soak.FIELDS.index("prev_alloc_failures")]
+        self.assertNotIn("prev_alloc_failures", legacy)
+        self.assertNotIn("prev_contained", legacy)
+        # The second of those two passes on its own even if the column were
+        # renamed, because it is excluded by sitting after prev_alloc_failures
+        # rather than by its name. Anchoring where it sits makes the rename a
+        # failure: FIELDS.index() raises if the name is gone.
+        self.assertEqual(soak.FIELDS.index("prev_contained"),
+                         soak.FIELDS.index("prev_alloc_failures") + 1)
         fd, path = tempfile.mkstemp(suffix=".csv")
         os.close(fd)
         try:
@@ -332,14 +346,14 @@ class BatterySampling(unittest.TestCase):
             self.assertEqual(row[k], "", f"{k} was {row[k]!r}")
 
 
-class TheDrainCapIsReadFromPeers(unittest.TestCase):
-    def test_the_counter_is_taken_off_the_peers_object(self):
-        # tcp_drain_capped lives under `peers`, beside tcp_rx_packets — not
-        # under `radio`, where every other counter this file samples lives. The
-        # wiring is the only host-testable part of it: a node that reports the
-        # figure has it recorded, and a node whose firmware predates the column
-        # records blank rather than a zero that would read as "nobody has ever
-        # outrun this node".
+class TheDrainCapsAreReadFromTheirOwnObjects(unittest.TestCase):
+    """Two counters, two objects. The node reports the TCP ring's cap under
+    `peers`, beside tcp_rx_packets, and the RX ring's under `radio`, beside the
+    drop counters. Taking either off the wrong object records a permanent blank
+    on every node in the fleet, which reads exactly like firmware too old to
+    have the column."""
+
+    def test_the_tcp_counter_is_taken_off_the_peers_object(self):
         body = _status()
         body["peers"] = {"rns_tcp": 1, "wifi_sta": 2, "tcp_rx_packets": 4180,
                          "tcp_drain_capped": 37}
@@ -351,6 +365,227 @@ class TheDrainCapIsReadFromPeers(unittest.TestCase):
             blank = soak.sample("node")
         self.assertEqual(blank["tcp_drain_capped"], "")
         self.assertNotEqual(blank["tcp_drain_capped"], 0)
+
+    def test_the_radio_counter_is_taken_off_the_radio_object(self):
+        body = _status()
+        body["radio"] = {"rx_packets": 900, "rx_dropped_ring": 2,
+                         "rx_drain_capped": 5}
+        with _mocked_node(body):
+            row = soak.sample("node")
+        self.assertEqual(row["rx_drain_capped"], 5)
+        # And it is its own column, not read off the TCP one: a node reporting
+        # only the radio figure must not have it appear as the network's.
+        self.assertEqual(row["tcp_drain_capped"], "")
+
+        with _mocked_node(_status()):          # radio object with no counters
+            blank = soak.sample("node")
+        self.assertEqual(blank["rx_drain_capped"], "")
+        self.assertNotEqual(blank["rx_drain_capped"], 0)
+
+
+class ResumingAnOlderCsvKeepsItWellFormed(unittest.TestCase):
+    """Appending a column broke every CSV already in progress. A
+    `DictWriter(fieldnames=FIELDS)` writes a cell per current column whatever
+    the header on disk says, so resuming a file written before the column
+    existed produced rows one cell longer than its own header — and DictReader
+    files that cell under the `None` restkey, where summarise() never looks.
+    Every post-resume sample of the new column was lost in exactly the
+    long-running fleet files it exists for."""
+
+    def _tmp(self):
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def _row(self):
+        row = {k: "" for k in soak.FIELDS}
+        row.update(node="n", reachable=1, uptime_s=600,
+                   tcp_drain_capped=7, rx_drain_capped=3)
+        return row
+
+    def test_a_fresh_file_gets_the_full_current_header(self):
+        path = self._tmp()
+        os.unlink(path)                        # not merely empty: absent
+        with open(path, "a", newline="") as f:
+            soak.appender(f, path).writerow(self._row())
+        with open(path, newline="") as f:
+            header = next(csv.reader(f))
+        self.assertEqual(header, soak.FIELDS)
+
+    def test_an_empty_file_is_treated_as_fresh(self):
+        # `--out` pointed at a file the shell has already created is the
+        # ordinary case, and it must not be read as a header of no columns.
+        path = self._tmp()
+        with open(path, "a", newline="") as f:
+            soak.appender(f, path).writerow(self._row())
+        with open(path, newline="") as f:
+            header = next(csv.reader(f))
+        self.assertEqual(header, soak.FIELDS)
+
+    def test_resuming_a_pre_upgrade_header_stays_well_formed(self):
+        # A CSV written before the two drain-cap columns existed, resumed by
+        # this version. Its own header decides, so its rows keep their width.
+        legacy = soak.FIELDS[:soak.FIELDS.index("tcp_drain_capped")]
+        path = self._tmp()
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=legacy)
+            w.writeheader()
+            w.writerow({k: "" for k in legacy})
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with open(path, "a", newline="") as f:
+                soak.appender(f, path).writerow(self._row())
+        # The columns that file cannot hold are named, once, rather than lost
+        # in silence.
+        self.assertIn("tcp_drain_capped", err.getvalue())
+        self.assertIn("rx_drain_capped", err.getvalue())
+
+        with open(path, newline="") as f:
+            rdr = csv.DictReader(f)
+            self.assertEqual(rdr.fieldnames, legacy)
+            rows = list(rdr)
+        # The defect itself: no cell fell off the end into the restkey.
+        for r in rows:
+            self.assertNotIn(None, r, "a row was written wider than the header")
+            self.assertEqual(len(r), len(legacy))
+        # The row still carries every column that file does have...
+        self.assertEqual(rows[-1]["node"], "n")
+        self.assertEqual(rows[-1]["uptime_s"], "600")
+        # ...and the appended ones are simply absent, which is_blank() already
+        # treats exactly as present-and-empty.
+        self.assertIsNone(rows[-1].get("tcp_drain_capped"))
+        self.assertTrue(soak.is_blank(rows[-1].get("tcp_drain_capped")))
+        self.assertTrue(soak.is_blank(rows[-1].get("rx_drain_capped")))
+
+    def test_a_resumed_file_still_summarises(self):
+        # The end the round-trip is for: an old file resumed by a new version
+        # reads back through summarise() without a word about the columns it
+        # does not have.
+        legacy = soak.FIELDS[:soak.FIELDS.index("tcp_drain_capped")]
+        path = self._tmp()
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=legacy)
+            w.writeheader()
+        with contextlib.redirect_stderr(io.StringIO()):
+            with open(path, "a", newline="") as f:
+                w = soak.appender(f, path)
+                for ts in ("2026-09-08T00:00:00+00:00", "2026-09-08T01:00:00+00:00"):
+                    row = self._row()
+                    row.update(ts=ts, boot_count=5, heap_free=50000, heap_min=40000,
+                               heap_largest=30000, stack_lowest=2000,
+                               stack_lowest_task="rns", boot_reason="power-on")
+                    w.writerow(row)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            soak.summarise(path)
+        text = out.getvalue()
+        self.assertIn("2/2 samples reachable", text)
+        self.assertNotIn("tcp_drain_capped", text)
+        self.assertNotIn("rx_drain_capped", text)
+
+    def test_a_header_that_is_not_an_earlier_revision_is_refused(self):
+        # Not a prefix: appending into it would put two different column
+        # meanings in one file. The rows already there are not this run's to
+        # reinterpret, so it refuses rather than writes.
+        path = self._tmp()
+        with open(path, "w", newline="") as f:
+            f.write("ts,node,something_else\n1,n,x\n")
+        with open(path, "a", newline="") as f:
+            with self.assertRaises(ValueError) as cm:
+                soak.appender(f, path)
+        self.assertIn("something_else", str(cm.exception))
+        # ...and it wrote nothing on the way out.
+        with open(path, newline="") as f:
+            self.assertEqual(len(f.read().splitlines()), 2)
+
+    def test_a_file_with_a_blank_first_line_is_not_treated_as_fresh(self):
+        # `next(csv.reader(...))` gives [] for a blank first line, not None,
+        # and [] is falsy and is a prefix of every list. Read as "fresh" it
+        # wrote a *second* header into the middle of a file that already had
+        # one; read as a header it would write every row with no columns. The
+        # file is not this run's to repair either way.
+        path = self._tmp()
+        with open(path, "w", newline="") as f:
+            f.write("\n" + ",".join(soak.FIELDS) + "\n")
+            csv.DictWriter(f, fieldnames=soak.FIELDS).writerow(self._row())
+        with open(path, newline="") as f:
+            before = f.read()
+        with open(path, "a", newline="") as f:
+            with self.assertRaises(ValueError) as cm:
+                soak.appender(f, path)
+        self.assertIn("blank line", str(cm.exception))
+        # ...and nothing was written on the way out, so the file still has
+        # exactly the one header it started with.
+        with open(path, newline="") as f:
+            after = f.read()
+        self.assertEqual(after, before)
+        self.assertEqual(after.count(",".join(soak.FIELDS)), 1)
+
+    def test_a_file_whose_last_line_was_never_finished_is_refused(self):
+        # An append starts at the byte after the last one. A header left without
+        # its newline — a run killed mid-write, or a file made by hand — takes
+        # the first cell of the first appended row onto its end, giving one row
+        # of twice the width with every column in it shifted, which nothing
+        # downstream can spot afterwards.
+        path = self._tmp()
+        with open(path, "w", newline="") as f:
+            f.write(",".join(soak.FIELDS))          # no trailing newline
+        with open(path, "a", newline="") as f:
+            with self.assertRaises(ValueError) as cm:
+                soak.appender(f, path)
+        self.assertIn("newline", str(cm.exception))
+        # Refused before writing: the file is still the single unterminated
+        # line it was, not a merged one.
+        with open(path, newline="") as f:
+            self.assertEqual(f.read(), ",".join(soak.FIELDS))
+
+    def test_a_file_that_does_end_in_a_newline_is_appended_to(self):
+        # The other side of that check, so it cannot be satisfied by refusing
+        # everything: an ordinary well-formed file still resumes.
+        path = self._tmp()
+        with open(path, "w", newline="") as f:
+            csv.DictWriter(f, fieldnames=soak.FIELDS).writeheader()
+        with open(path, "a", newline="") as f:
+            soak.appender(f, path).writerow(self._row())
+        with open(path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["node"], "n")
+
+    def test_a_refusal_is_an_exit_code_and_a_message_not_a_traceback(self):
+        # The operator-facing half of all of the above: main() turns the
+        # ValueError into exit 2 and one line on stderr. Every other test here
+        # calls appender() directly, so nothing was covering the translation.
+        # --duration 0 means the sampling loop never runs and no node is
+        # contacted.
+        path = self._tmp()
+        with open(path, "w", newline="") as f:
+            f.write("ts,node,something_else\n1,n,x\n")
+        err = io.StringIO()
+        argv = ["soak.py", "node1", "--out", path, "--duration", "0"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(err):
+            rc = soak.main()
+        self.assertEqual(rc, 2)
+        self.assertIn("something_else", err.getvalue())
+        self.assertIn(path, err.getvalue())
+        # And it did not append to the file it refused.
+        with open(path, newline="") as f:
+            self.assertEqual(len(f.read().splitlines()), 2)
+
+    def test_a_reordered_header_is_refused_too(self):
+        # Same column names, different order. Every value would be filed under
+        # the wrong name from the resume onward, which is worse than a lost
+        # column and impossible to spot in the file afterwards.
+        swapped = list(soak.FIELDS)
+        swapped[1], swapped[2] = swapped[2], swapped[1]
+        path = self._tmp()
+        with open(path, "w", newline="") as f:
+            csv.DictWriter(f, fieldnames=swapped).writeheader()
+        with open(path, "a", newline="") as f:
+            with self.assertRaises(ValueError):
+                soak.appender(f, path)
 
 
 class TheBandSurvivesARealCell(unittest.TestCase):

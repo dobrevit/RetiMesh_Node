@@ -151,7 +151,7 @@ the ordinary reading on the shipped channel and needs no action.
              "announce_interval": 600, "beacon_interval": 0, "callsign": "retimesh-8249CC",
              "rssi": -68, "snr": 11.5, "rx_packets": 27, "tx_packets": 9, "rx_dropped": 0,
              "rx_dropped_ring": 0, "rx_dropped_reassembly": 0, "rx_dropped_partial": 0,
-             "rx_crc_errors": 4, "rx_bad_length": 0,
+             "rx_crc_errors": 4, "rx_bad_length": 0, "rx_drain_capped": 0,
              "cad_timeouts": 0, "cad_arm_errors": 0,
              "announces_tx": 3, "announces_rx": 5, "beacons_tx": 0, "beacons_rx": 2, "apply_error": 0 },
   "peers": { "rns_tcp": 1, "wifi_sta": 1, "tcp_rx_packets": 12, "tcp_drain_capped": 0 },
@@ -240,6 +240,32 @@ So a node's total received traffic is `rx_packets + beacons_rx` plus whatever
 the loss counters record, and a split packet contributes two frames to the air
 but one to those totals.
 
+`rx_drain_capped` sits with those counters and is **not** one of them: nothing
+is lost when it moves, and it belongs to none of the totals above. The
+Reticulum task takes frames off the RX ring a bounded batch at a time, and what
+a batch leaves stays in the ring for the next pass. This counts the **passes**
+whose batch ended with frames still queued — not frames, and not passes that
+happened to take exactly a batch from a ring that is now empty.
+
+The interval between two of those passes is not the task's ten-millisecond
+tick. The same pass goes on to refresh the status snapshots, where walking the
+path table can spend 400 ms or more before the task comes round again — that
+figure is the walk's budget, which is a floor under the gap rather than a
+ceiling over it — so on a fast channel (SF7 at the widest bandwidth the part
+offers) more than one batch of frames can arrive while it is away. A single
+capped pass after a long walk is therefore expected behaviour, and the node
+catches up on the passes that follow.
+
+- **Zero** is the ordinary reading on any normal channel.
+- **A small total that stops growing** is that catch-up, and needs nothing.
+- **Rising steadily** means frames are arriving faster than this node takes
+  them off the ring, for long stretches. Still nothing dropped: the counter to
+  read next to it is `rx_dropped_ring`, which is the radio finding no room left
+  in the ring, and that one *is* loss.
+
+It is on the console's `STATUS` line as `rx_drain_capped=`, printed after the
+`rx=`/`tx=` pair it belongs with and before the two carrier-sense counters.
+
 The transmit side has a pair of its own, and they are the only outward sign of
 a carrier-sense probe that has stopped working. Before every packet the node
 puts the radio into channel-activity detection and waits for the chip to report
@@ -265,17 +291,18 @@ logged as a warning — the first one immediately, then at most one a minute so
 a wedged chip cannot flood the console. See
 [troubleshooting.md](troubleshooting.md).
 
-`peers.tcp_drain_capped` is the same idea on the network side, and the one
-counter here that records no loss at all. Packets arriving from Reticulum TCP
-clients and from AutoInterface peers are queued on an inbound ring and drained
-by the Reticulum task a bounded batch at a time. The batch exists because
-"drain until the ring is empty" is a condition the *sender* decides: a host on
-the access point that refills the ring as fast as it empties can hold that task
-past its thirty-second watchdog. This counter is **passes** — not packets — in
-which the batch ended with traffic still queued. What the batch leaves is
-drained on the next pass ten milliseconds later — or a quarter of a second
-later, in the one case where an error abandoned a pass and the node backed off
-— so the batch itself drops nothing and reorders nothing:
+`peers.tcp_drain_capped` is `radio.rx_drain_capped`'s counterpart on the
+network side, and reports no loss for the same reason. Packets arriving from
+Reticulum TCP clients and from AutoInterface peers are queued on an inbound
+ring and drained by the Reticulum task a bounded batch at a time. The batch
+exists because "drain until the ring is empty" is a condition the *sender*
+decides: a host on the access point that refills the ring as fast as it empties
+can hold that task past its thirty-second watchdog. This counter is **passes** —
+not packets — in which the batch ended with traffic still queued. What the batch
+leaves is drained on the next pass: ten milliseconds later when nothing else in
+the pass is slow, 400 ms or more later when a path-table walk ran in between,
+and a further quarter of a second after a pass an error abandoned. The batch
+itself drops nothing and reorders nothing:
 
 - **Zero** is the normal reading. Reaching the cap takes a client sending
   faster than this node can route, which ordinary Reticulum traffic does not.
@@ -295,7 +322,8 @@ later, in the one case where an error abandoned a pass and the node backed off
   that resolves itself leaves a small permanent total rather than a rate.
 
 It is on the console's `STATUS` line as `tcp_drain_capped=` beside
-`tcp_clients=`, and the heartbeat log names it only when it is non-zero. See
+`tcp_clients=`. The heartbeat log reports it and `radio.rx_drain_capped`
+together on one line, and only when one of them is non-zero. See
 [troubleshooting.md](troubleshooting.md).
 
 `diag` is what a soak run reads off a node it has no console on.
