@@ -41,6 +41,7 @@
 #include "Diag.h"
 #include "Watchdog.h"
 #include "RingItem.h"
+#include "RingDrain.h"
 #include "Lock.h"
 #include "Power.h"
 #include "Gps.h"
@@ -213,39 +214,62 @@ public:
   void loop() override {
     refreshBitrate();
     size_t sz = 0;
-    uint8_t* item;
-    while ((item = (uint8_t*)xRingbufferReceive(sRxRing, &sz, 0)) != nullptr) {
-      // Given back however this body is left, including by a throw out of
-      // handle_incoming below (Sys::RingItem). Returned by hand, a bad_alloc
-      // there leaked a frame's worth of ring on every failure and the node
-      // eventually went deaf with every counter still rising.
-      Sys::RingItem held(sRxRing, item);
-      // The reading the radio took of this frame, carried with it rather than
-      // sampled now: draining three at once used to stamp all three with the
-      // newest one's RSSI (Config.h, LoRaRxFrame).
-      if (sz <= sizeof(LoRaRxFrame)) {
-        // A header with no frame behind it. Cannot happen from the radio task,
-        // which only posts what it decoded — but the producer has already
-        // counted it, so dropping it silently would leave the two ends of the
-        // ring disagreeing with nothing to say so.
-        g_stats.loraRxBadLength++;
-        continue;
-      }
-      {
-        LoRaRxFrame hdr;
-        memcpy(&hdr, item, sizeof(hdr));
-        // Signal stats are private to InterfaceImpl; the wrapper exposes setters.
-        std::shared_ptr<RNS::InterfaceImpl> sp = shared_from_this();
-        RNS::Interface self(sp);
-        self.r_stat_rssi(hdr.rssi);
-        self.r_stat_snr(hdr.snr);
-        // Quality is not a figure any radio reports; RNS derives it, and so
-        // does the panel. Nothing set it before, so the line a signal report
-        // promised could never appear.
-        self.r_stat_q((float)loraQualityPercent(hdr.snr, settings.radio().sf));
-        handle_incoming(Bytes(item + sizeof(hdr), sz - sizeof(hdr)));
-      }
-    }
+    // Bounded and fed, through the same helper as the TCP drain below. The feed
+    // is the half this loop never had: reticulum.loop() calls it and feeds
+    // nothing, so between main.cpp's feed at the top of the pass and
+    // refreshSnapshots() at the end of it, a backlog here reported nothing at
+    // all. The cap does not bind on the air — at the fastest channel the
+    // settings will accept (SF7, the floor on every part in RadioCaps; 500 kHz
+    // sub-GHz or 1625 kHz on the SX1280; CR 4/5; the six-symbol preamble
+    // SettingsRules allows; one payload byte) Airtime::timeOnAirMs gives
+    // 5.95 ms or 1.83 ms a frame, so 168 or 546 a second, and a 10 ms pass sees
+    // under two frames or under six against an allowance of 64. Nothing is
+    // dropped by the cap either way: what it leaves stays in the ring for the
+    // next tick.
+    Sys::RingDrain::drain(
+        Sys::RingDrain::kBatch, Sys::RingDrain::kFeedEvery,
+        [&sz]() { return (uint8_t*)xRingbufferReceive(sRxRing, &sz, 0); },
+        [this, &sz](uint8_t* item) {
+          // Given back however this body is left, including by a throw out of
+          // handle_incoming below (Sys::RingItem). Returned by hand, a bad_alloc
+          // there leaked a frame's worth of ring on every failure and the node
+          // eventually went deaf with every counter still rising.
+          Sys::RingItem held(sRxRing, item);
+          // The reading the radio took of this frame, carried with it rather than
+          // sampled now: draining three at once used to stamp all three with the
+          // newest one's RSSI (Config.h, LoRaRxFrame).
+          if (sz <= sizeof(LoRaRxFrame)) {
+            // A header with no frame behind it. Cannot happen from the radio task,
+            // which only posts what it decoded — but the producer has already
+            // counted it, so dropping it silently would leave the two ends of the
+            // ring disagreeing with nothing to say so.
+            //
+            // A return out of the handler, where this was a `continue`: the item
+            // is done with, the drain goes on to the next one, and it still
+            // counts against the cap because it did leave the ring.
+            g_stats.loraRxBadLength++;
+            return;
+          }
+          LoRaRxFrame hdr;
+          memcpy(&hdr, item, sizeof(hdr));
+          // Signal stats are private to InterfaceImpl; the wrapper exposes setters.
+          std::shared_ptr<RNS::InterfaceImpl> sp = shared_from_this();
+          RNS::Interface self(sp);
+          self.r_stat_rssi(hdr.rssi);
+          self.r_stat_snr(hdr.snr);
+          // Quality is not a figure any radio reports; RNS derives it, and so
+          // does the panel. Nothing set it before, so the line a signal report
+          // promised could never appear.
+          self.r_stat_q((float)loraQualityPercent(hdr.snr, settings.radio().sf));
+          handle_incoming(Bytes(item + sizeof(hdr), sz - sizeof(hdr)));
+        },
+        []() { Watchdog::feed(); },
+        // Nothing counts cap hits on this path, so the ring is not asked: the
+        // counter the TCP drain keeps is what this was for, and a
+        // vRingbufferGetInfo whose answer is discarded is work done for
+        // nobody. Pass::capped is therefore always false here, which is why it
+        // is not read.
+        []() { return false; });
   }
 private:
   uint8_t _sf = 0, _cr = 0;
@@ -1809,20 +1833,54 @@ static void processEvents() {
   }
 }
 
+// Bounded, like the radio drain above and for a sharper version of the same
+// reason: this ring's producer is not the air at all. AsyncTCP fills it from
+// core 0 as fast as a host on the access point cares to send, so "until it is
+// empty" is a condition a LAN peer decides — and a peer that decides never can
+// hold this task past its thirty-second watchdog. (Can: that is read off the
+// code and has not been watched happen — RingDrain.h says which part is
+// analysis and what the bench has yet to confirm.) What the cap leaves is
+// drained on the next 10 ms tick; a pass that threw is abandoned by Diag::guard
+// instead, and the back-off at the end of loop() puts the next one 250 ms out.
+//
+// See RingDrain.h. The feeds this takes are the first reporting after the RNS
+// task's own feed at the top of the pass (main.cpp): the radio drain feeds
+// again from inside reticulum.loop(), which runs next, and refreshSnapshots()
+// three times after that.
 static void drainTcp() {
   size_t sz = 0;
-  uint8_t* item;
-  while ((item = (uint8_t*)xRingbufferReceive(sTcpInRing, &sz, 0)) != nullptr) {
-    // As in the radio drain above: incoming() runs a whole packet through the
-    // library and can throw, and a hand-written return is skipped when it
-    // does — bleeding this ring until no client's traffic gets through.
-    Sys::RingItem held(sTcpInRing, item);
-    if (sz > sizeof(TcpItemHeader)) {
-      TcpItemHeader h; memcpy(&h, item, sizeof(h));
-      auto it = tcpIfaces.find(h.clientId);
-      if (it != tcpIfaces.end()) it->second.impl->incoming(item + sizeof(h), sz - sizeof(h));
-    }
-  }
+  const Sys::RingDrain::Pass pass = Sys::RingDrain::drain(
+      Sys::RingDrain::kBatch, Sys::RingDrain::kFeedEvery,
+      [&sz]() { return (uint8_t*)xRingbufferReceive(sTcpInRing, &sz, 0); },
+      [&sz](uint8_t* item) {
+        // As in the radio drain above: incoming() runs a whole packet through
+        // the library and can throw, and a hand-written return is skipped when
+        // it does — bleeding this ring until no client's traffic gets through.
+        Sys::RingItem held(sTcpInRing, item);
+        if (sz > sizeof(TcpItemHeader)) {
+          TcpItemHeader h; memcpy(&h, item, sizeof(h));
+          auto it = tcpIfaces.find(h.clientId);
+          if (it != tcpIfaces.end()) it->second.impl->incoming(item + sizeof(h), sz - sizeof(h));
+        }
+      },
+      []() { Watchdog::feed(); },
+      []() {
+        // Reads the item count without taking anything out, which is the only
+        // way to tell "the cap stopped us with more waiting" from "the ring
+        // happened to hold exactly the batch". A receive would answer the
+        // question by consuming the answer.
+        UBaseType_t waiting = 0;
+        vRingbufferGetInfo(sTcpInRing, nullptr, nullptr, nullptr, nullptr, &waiting);
+        return waiting > 0;
+      });
+  // Once per pass the cap ended with traffic still queued — not once per item,
+  // and not when a pass happened to take exactly its allowance from a ring that
+  // is now empty. That is a node being outrun, which is the one thing the cap
+  // makes invisible from outside: it is what keeps the condition from reaching
+  // the watchdog, so without this a flooded node just gets slower and says
+  // nothing. Written as a read-add-write rather than ++ because the field is
+  // volatile and a compound operator on one is deprecated (-Wvolatile).
+  if (pass.capped) g_stats.tcpDrainCapped = g_stats.tcpDrainCapped + 1;
 }
 
 // Snapshots for the web layer
@@ -1848,11 +1906,6 @@ static const uint32_t kStaleSweepMs = 60000;
 // passes, so the RNS task still spends the overwhelming majority of its time
 // forwarding. What one pass does not get through, the next one does.
 static const uint32_t kWalkBudgetMs = 400;
-// Records read between watchdog feeds. The budget above ends the walk, but it
-// is only checked between records, and one record on a sick filesystem can
-// take a long time on its own — so the walk keeps reporting while it runs
-// rather than relying on finishing.
-static const size_t   kFeedEvery = 16;
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
 static uint32_t sSnapWalkMaxMs = 0;      // worst snapshot walk since boot; see Tables
 static size_t   sIfaceCount = 0;         // likewise, so a capped list still counts true
@@ -1950,7 +2003,13 @@ static void refreshSnapshots(bool allowSweep) {
     // rows full is with wantSweep set, so pos is at or past sSweepPos and the
     // cursor written below can only ever move forwards.
     if (!wantRow && (uint32_t)(millis() - walkStartMs) >= kWalkBudgetMs) { ranOut = true; break; }
-    if (++reads % kFeedEvery == 0) Watchdog::feed();
+    // kWalkBudgetMs ends the walk, but it is only checked between records, and
+    // one record on a sick filesystem can take a long time on its own — so the
+    // walk keeps reporting while it runs rather than relying on finishing. The
+    // cadence is Sys::RingDrain::kFeedEvery rather than a 16 of this walk's
+    // own: one definition, so a retune cannot move the drains and leave this
+    // behind (RingDrain.h).
+    if (++reads % Sys::RingDrain::kFeedEvery == 0) Watchdog::feed();
 
     RNS::Persistence::NewPathTable::Entry& e = *it;   // reads the record off the filesystem
     if (!e.value.receiving_interface()) {

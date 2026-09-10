@@ -1580,6 +1580,16 @@ struct NodeStats {
   volatile uint32_t loraCadArmErrors  = 0;  // the driver refused to start the scan at all
   volatile uint32_t tcpRxPackets  = 0;      // deframed packets from clients
   volatile uint32_t tcpClients    = 0;
+  // The inbound TCP ring's "we fell behind" — and unlike the drop counters
+  // above it, nothing is lost when it moves, which is why it is not called a
+  // drop. The RNS task drains that ring a bounded batch at a time
+  // (RingDrain.h) and what the batch leaves goes on the next 10 ms tick, so
+  // this counts passes rather than packets: a rising figure means a client is
+  // sending faster than this node can route, not that anything was thrown
+  // away. It is here because the cap is also what hides the condition — it is
+  // what keeps a flood from reaching the watchdog, so without this a node
+  // being outrun would only get slower and say nothing.
+  volatile uint32_t tcpDrainCapped = 0;     // passes the batch cap ended with more queued
 };
 
 // Restart into the application or the bootloader: the delay before the

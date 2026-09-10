@@ -99,6 +99,12 @@ FIELDS = [
     # discharging, and its rising voltage is not a measurement.
     "power_profile", "cpu_mhz", "pmu",
     "battery_present", "battery_v", "battery_pct", "battery_charging",
+    # The inbound TCP ring's batch cap, counted per Reticulum-task pass that
+    # ended with traffic still queued. Not a loss column — the remainder is
+    # drained ten milliseconds later — but the only sign a client is outrunning
+    # the node's routing, because the cap is also what keeps that condition
+    # from reaching the watchdog. Appended, per the rule above.
+    "tcp_drain_capped",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -126,6 +132,7 @@ def sample(host, timeout=8):
     tables = diag.get("tables", {})
     faults = diag.get("faults", {})
     power  = d.get("power", {})
+    peers  = d.get("peers", {})
 
     row.update(
         uptime_s=d.get("uptime_s", ""),
@@ -158,6 +165,7 @@ def sample(host, timeout=8):
         announce_interval=radio.get("announce_interval", ""),
         cad_timeouts=radio.get("cad_timeouts", ""),
         cad_arm_errors=radio.get("cad_arm_errors", ""),
+        tcp_drain_capped=peers.get("tcp_drain_capped", ""),
         tasks_missing=" ".join(missing_tasks(diag)),
         dram_free=heap.get("dram_free", ""),
         dram_min=heap.get("dram_min_free", ""),
@@ -630,6 +638,28 @@ def summarise(path, band=None):
                 continue
             print(f"   ⚠ {key}: {vals[0]:.0f} -> {vals[-1]:.0f} (peak {max(vals):.0f}) — "
                   f"{meaning} (docs/troubleshooting.md)")
+
+        # The inbound TCP ring's batch cap, read the same way and for the same
+        # reason: zero on a node nobody is outrunning, whatever the traffic, so
+        # the value itself is the finding rather than the delta, and per sample
+        # rather than first-to-last because a burst that ended before the last
+        # sample still happened. Without this the column rides a week of CSV and
+        # is never read.
+        #
+        # It is not a warning, and it says something narrower than the two
+        # above. Non-zero means the cap did its job — a pass ended with traffic
+        # still queued and the remainder was drained on the following pass.
+        # Nothing was thrown away, so the finding is "a client is outrunning
+        # this node's routing", not "this node lost packets". The drop that can
+        # follow it is a producer-side ring-full and is logged, not counted;
+        # the row in docs/troubleshooting.md names the log lines.
+        capped = [v for v in (num(r.get("tcp_drain_capped")) for r in up) if v is not None]
+        if capped and max(capped) > 0:
+            print(f"   tcp_drain_capped: {capped[0]:.0f} -> {capped[-1]:.0f} "
+                  f"(peak {max(capped):.0f}) — the inbound ring's batch cap ended that "
+                  f"many Reticulum-task passes with traffic still queued: a client "
+                  f"outrunning this node's routing, and nothing lost by the cap "
+                  f"(docs/troubleshooting.md)")
 
 
 def main():

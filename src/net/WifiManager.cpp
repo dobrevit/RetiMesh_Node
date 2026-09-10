@@ -1889,6 +1889,10 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   peers["rns_tcp"]    = g_stats.tcpClients;      // Reticulum clients on :4242
   peers["wifi_sta"]   = WiFi.softAPgetStationNum();
   peers["tcp_rx_packets"] = g_stats.tcpRxPackets;
+  // Nothing was dropped when this moves — the batch cap deferred it to the next
+  // 10 ms tick — but it is the only outward sign that a client is sending
+  // faster than this node routes; see docs/api.md.
+  peers["tcp_drain_capped"] = g_stats.tcpDrainCapped;
   doc["wifi_enabled"] = wifiEnabled();
 
   // Every way a host can reach this node, in one vocabulary (LocalLink.h):

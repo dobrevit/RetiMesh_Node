@@ -586,6 +586,17 @@ void loop() {
             (unsigned)g_stats.loraRxDropPartial, (unsigned)g_stats.loraRxCrcErrors,
             (unsigned)g_stats.loraRxBadLength, (unsigned)g_stats.loraRxSpuriousIrq,
             (unsigned)g_stats.loraRxPackets);
+    // The same treatment for the other side, and silent on a healthy node for
+    // the same reason. This one is not a loss: the inbound TCP ring's batch cap
+    // ended a pass with traffic still queued and the rest went on the next
+    // 10 ms tick (RingDrain.h). It is here because the cap is what keeps a
+    // flooded ring from holding the RNS task past the watchdog — so with it in
+    // place, a client outrunning this node's routing has no other outward sign
+    // at all.
+    if (g_stats.tcpDrainCapped)
+      log_i("tcp inbound: drain cap ended %u passes with traffic still queued "
+            "(nothing dropped; the rest went on the following tick)",
+            (unsigned)g_stats.tcpDrainCapped);
     // Reticulum's tables are the other thing that grows with traffic, and the
     // one a heap figure alone will not explain.
     RnsTransport::Tables t = RnsTransport::tables();

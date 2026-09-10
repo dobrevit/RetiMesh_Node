@@ -154,7 +154,7 @@ the ordinary reading on the shipped channel and needs no action.
              "rx_crc_errors": 4, "rx_bad_length": 0,
              "cad_timeouts": 0, "cad_arm_errors": 0,
              "announces_tx": 3, "announces_rx": 5, "beacons_tx": 0, "beacons_rx": 2, "apply_error": 0 },
-  "peers": { "rns_tcp": 1, "wifi_sta": 1, "tcp_rx_packets": 12 },
+  "peers": { "rns_tcp": 1, "wifi_sta": 1, "tcp_rx_packets": 12, "tcp_drain_capped": 0 },
   "wifi_enabled": true,
   "local_links": [
     { "name": "wifi-ap",  "type": "wifi_ap",  "hardware": true, "firmware": true, "enabled": true,
@@ -263,6 +263,39 @@ Both are on the console's `STATUS` line as `cad_timeouts=` and
 `cad_arm_errors=` beside `radio=online`, and a failure of either kind is
 logged as a warning — the first one immediately, then at most one a minute so
 a wedged chip cannot flood the console. See
+[troubleshooting.md](troubleshooting.md).
+
+`peers.tcp_drain_capped` is the same idea on the network side, and the one
+counter here that records no loss at all. Packets arriving from Reticulum TCP
+clients and from AutoInterface peers are queued on an inbound ring and drained
+by the Reticulum task a bounded batch at a time. The batch exists because
+"drain until the ring is empty" is a condition the *sender* decides: a host on
+the access point that refills the ring as fast as it empties can hold that task
+past its thirty-second watchdog. This counter is **passes** — not packets — in
+which the batch ended with traffic still queued. What the batch leaves is
+drained on the next pass ten milliseconds later — or a quarter of a second
+later, in the one case where an error abandoned a pass and the node backed off
+— so the batch itself drops nothing and reorders nothing:
+
+- **Zero** is the normal reading. Reaching the cap takes a client sending
+  faster than this node can route, which ordinary Reticulum traffic does not.
+- **Rising** means exactly that: a peer is outrunning the node's routing. The
+  node stays online, keeps its clients and simply routes late; nothing the
+  batch defers is lost. Since the cap is what keeps that condition from
+  reaching the watchdog, this counter is the only outward sign it is happening.
+- A client that keeps outrunning the node for long enough is a different event,
+  and one this counter does not cover: the ring fills, the *producer* waits
+  20 ms for room, and then it drops the packet. That drop is logged, not
+  counted. A Reticulum TCP client's reads
+  `TCP-in ring full, dropping …-byte packet`; an AutoInterface peer's reads
+  `AutoInterface: inbound ring full, dropping … bytes`. So if
+  `tcp_drain_capped` is climbing, the log is where to check whether it has gone
+  that far.
+- It counts once per pass, so it climbs at most a hundred a second, and a burst
+  that resolves itself leaves a small permanent total rather than a rate.
+
+It is on the console's `STATUS` line as `tcp_drain_capped=` beside
+`tcp_clients=`, and the heartbeat log names it only when it is non-zero. See
 [troubleshooting.md](troubleshooting.md).
 
 `diag` is what a soak run reads off a node it has no console on.

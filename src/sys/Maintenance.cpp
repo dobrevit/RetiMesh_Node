@@ -738,8 +738,17 @@ static void doStatus() {
     snprintf(restart, sizeof(restart), " restart_target=%s restart_source=%s restart_in_ms=%lu",
              Bootloader::targetName(p.target), Bootloader::sourceName(p.source),
              (unsigned long)p.dueInMs(millis()));
-  dataf("STATUS", "transport=%s tcp_clients=%lu dns=%s restart_pending=%s%s",
+  // tcp_drain_capped rides this line for the same reason cad_timeouts rides the
+  // radio one: it counts a failure that leaves everything else looking healthy.
+  // The batch cap keeps a flooded inbound ring from holding the RNS task past
+  // the watchdog (RingDrain.h), so the node stays online, keeps its clients and
+  // loses nothing the cap deferred — it just routes late, and this is what says
+  // so. On the line with tcp_clients because that is who is doing it, and on
+  // the console at all because a node reachable only over TCP 4243 has no other
+  // way to be asked.
+  dataf("STATUS", "transport=%s tcp_clients=%lu tcp_drain_capped=%lu dns=%s restart_pending=%s%s",
         g_stats.transportOnline ? "online" : "offline", (unsigned long)g_stats.tcpClients,
+        (unsigned long)g_stats.tcpDrainCapped,
         wifiManager.dnsListening() ? "listening" : "down",
         p.armed() ? "true" : "false", restart);
   ok("STATUS");

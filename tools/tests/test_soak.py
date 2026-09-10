@@ -331,6 +331,28 @@ class BatterySampling(unittest.TestCase):
         for k in ("power_profile", "pmu", "battery_v", "battery_charging"):
             self.assertEqual(row[k], "", f"{k} was {row[k]!r}")
 
+
+class TheDrainCapIsReadFromPeers(unittest.TestCase):
+    def test_the_counter_is_taken_off_the_peers_object(self):
+        # tcp_drain_capped lives under `peers`, beside tcp_rx_packets — not
+        # under `radio`, where every other counter this file samples lives. The
+        # wiring is the only host-testable part of it: a node that reports the
+        # figure has it recorded, and a node whose firmware predates the column
+        # records blank rather than a zero that would read as "nobody has ever
+        # outrun this node".
+        body = _status()
+        body["peers"] = {"rns_tcp": 1, "wifi_sta": 2, "tcp_rx_packets": 4180,
+                         "tcp_drain_capped": 37}
+        with _mocked_node(body):
+            row = soak.sample("node")
+        self.assertEqual(row["tcp_drain_capped"], 37)
+
+        with _mocked_node(_status()):          # no peers object at all
+            blank = soak.sample("node")
+        self.assertEqual(blank["tcp_drain_capped"], "")
+        self.assertNotEqual(blank["tcp_drain_capped"], 0)
+
+
 class TheBandSurvivesARealCell(unittest.TestCase):
     """The band time is the figure that will pick a shipped default, and every
     case here made it print `0.00 h` — or a truncated traversal — while still
