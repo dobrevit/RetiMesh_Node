@@ -1905,7 +1905,8 @@ static void processEvents() {
 // See RingDrain.h. The feeds this takes are the first reporting after the RNS
 // task's own feed at the top of the pass (main.cpp): the radio drain feeds
 // again from inside reticulum.loop(), which runs next, and refreshSnapshots()
-// three times after that.
+// twice after that, either side of its path-table walk — that walk being
+// bounded is what makes two enough.
 static void drainTcp() {
   size_t sz = 0;
   const Sys::RingDrain::Pass pass = Sys::RingDrain::drain(
@@ -1954,6 +1955,18 @@ static const uint32_t kStaleSweepMs = 60000;
 // their derivations are and where test/test_snapshot_walk asserts them: this
 // file cannot be compiled for the host, so a rule that only exists here cannot
 // be pinned by anything. What one pass does not get through, the next one does.
+//
+// The one part of that derivation the header cannot assert for itself, because
+// SNAPSHOT_INTERVAL_MS is Config.h's: the budget has to leave the pass ending
+// well inside the interval the pass is gated on. That is what returns this task
+// to the 10 ms sleep in main.cpp hundreds of times per window, and it is what
+// actually keeps loopTask running — a walk that outlasts the interval makes the
+// gate below a no-op and the passes run back to back, which is the shape that
+// took a T-Beam down. Raising kWalkBudgetMs past a quarter of the interval
+// fails the build rather than the node.
+static_assert(Rns::walkBudgetFitsInterval(SNAPSHOT_INTERVAL_MS),
+              "the walk's budget must stay well inside SNAPSHOT_INTERVAL_MS, or "
+              "snapshot passes run back to back and starve loopTask");
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
 static uint32_t sSnapWalkMaxMs = 0;      // worst snapshot walk since boot; see Tables
 static size_t   sIfaceCount = 0;         // likewise, so a capped list still counts true
@@ -2025,13 +2038,29 @@ static void refreshSnapshots(bool allowSweep) {
   //
   // An offset rather than a saved iterator, because the table is mutated
   // between passes — by the removal at the end of this very function, among
-  // others — and no iterator survives that. The cost is that an entry inserted
-  // or dropped ahead of the cursor shifts everything after it by one, so that
-  // entry is examined twice or skipped once. For a cleanup sweep that is one
-  // more cycle, which is the right price for not holding an iterator across a
-  // deletion.
+  // others — and no iterator survives that. What an offset costs is that it
+  // means something only while iteration order holds: the index behind
+  // NewPathTable is a std::unordered_map (microStore's FileStore.h), so order
+  // is bucket order, an erase leaves the rest where it was, and an insert that
+  // rehashes reorders the whole table rather than shifting a tail. Positions
+  // are therefore comparable from one pass to the next until a rehash, and
+  // after one the cursor means a different place — so entries either side of it
+  // are examined twice or skipped for a cycle. For a cleanup sweep that is one
+  // more minute, which is the right price for not holding an iterator across a
+  // deletion. What it must not do is point outside the table altogether, which
+  // is sweepResumePos() below.
   static size_t sSweepPos = 0;
   stale.clear();
+  // A cursor the table has outgrown is not a cursor. `stale` is capped at
+  // SNAPSHOT_MAX_PATHS, so the removal at the end of a pass can take 64 entries
+  // out from under a cursor sitting beyond them — and nothing downstream would
+  // ever bring it back, because nextSweepPos() only moves forwards and no
+  // position at or past the stale value exists to end the pass anywhere else.
+  // The sweep would then be part-way through for ever: `sweeping` latched true,
+  // sSweptMs never stamped again, the cycle never closed (SnapshotWalk.h).
+  // Asked before `sweeping` is decided, so the pass that finds it stale is the
+  // one that starts the cycle afresh.
+  sSweepPos = Rns::sweepResumePos(sSweepPos, pathTable.size());
   // A sweep begins on the minute clock, and once begun it continues on every
   // pass until it has been all the way round. Waiting a minute between slices
   // as well would put a full cycle on a large table hours away, which is not
@@ -2041,7 +2070,6 @@ static void refreshSnapshots(bool allowSweep) {
                         (sSweepPos != 0 || (uint32_t)(millis() - sSweptMs) >= kStaleSweepMs);
   const uint32_t walkStartMs = millis();
   size_t   pos = 0;         // position in the table, for the sweep cursor
-  size_t   reads = 0;       // records actually read back, for the feed clock
   uint32_t lastYieldMs = 0; // walk time at the last yield, for the yield clock
   bool     ranOut = false;  // budget ended the walk before the table did
   Watchdog::feed();
@@ -2070,22 +2098,51 @@ static void refreshSnapshots(bool allowSweep) {
     if (step == Rns::WalkStep::StopRowsFull) break;      // nothing else needs the rest
     if (step == Rns::WalkStep::StopBudget) { ranOut = true; break; }
     if (step == Rns::WalkStep::Skip) continue;           // rows full, behind the cursor
-    // The budget is only checked between records, and one record on a sick
-    // filesystem can take a long time on its own — so the walk keeps reporting
-    // while it runs rather than relying on finishing. The cadence is
-    // Sys::RingDrain::kFeedEvery rather than a 16 of this walk's own: one
-    // definition, so a retune cannot move the drains and leave this behind
-    // (RingDrain.h).
-    if (++reads % Sys::RingDrain::kFeedEvery == 0) Watchdog::feed();
-    // Yield as well as feed, on a clock of its own. Feeding answers for *this*
-    // task — esp_task_wdt_reset() reports on behalf of the running task and
-    // there is no way to report for another — and the task being starved is
-    // Arduino's loopTask, priority 1 against this task's 3 on the same core, so
-    // it does not run again until this one stops asking. Its watchdog is the
-    // one that fired. A tick is what lets it back in; the cadence and its cost
-    // are derived in SnapshotWalk.h.
+    // No feed inside the loop, and that is a deliberate removal rather than an
+    // omission. This walk used to feed every Sys::RingDrain::kFeedEvery records
+    // on the drains' reasoning — a pass that cannot be stopped mid-item has to
+    // report while it runs — and here that reasoning is upside down. 16 records
+    // is 480 ms at the 30 ms a record this firmware links, and 1.5-2.6 s in the
+    // reopen-per-record regime; both are longer than the whole budget, so the
+    // sixteenth record is never reached and the feed never fired at either cost
+    // this tree has measured. The sicker the filesystem the fewer records fit
+    // in a pass, so the case it was justified by is the case it can do least
+    // for (the arithmetic is in SnapshotWalk.h).
+    //
+    // Nor is there anything for it to do. The loop is bounded to kWalkBudgetMs
+    // plus the record in hand — 400 ms plus the 162 ms that is the worst
+    // per-record cost anywhere in this tree — against a 30 s watchdog
+    // (WATCHDOG_TIMEOUT_S), and the feeds either side of the loop bracket it.
+    // The one thing that could still get near the timeout is a single record
+    // that takes for ever, and no between-record cadence covers that.
+    //
+    // What the walk does instead is yield, on a clock of its own, because
+    // feeding was never the problem. esp_task_wdt_reset() reports on behalf of
+    // the running task and there is no way to report for another, and the task
+    // being starved is Arduino's loopTask: priority 1 against this task's 3 on
+    // the same core, so it does not run at all while this one is runnable, and
+    // its watchdog is the one that fired. A yield is worth 0-3 ms of core 1 per
+    // pass and is a margin, not the rescue — the rescue is this walk ending
+    // inside its budget so the task reaches the sleep at the end of its loop.
+    // Both are derived in SnapshotWalk.h.
+    //
+    // Yielding here holds a live store iterator across the delay, which is only
+    // safe because this task is the single entrant into RNS:: — Transport is
+    // single-threaded and the RNS task owns every call into it (main.cpp); no
+    // other translation unit in src/ names RNS:: at all, and every entry point
+    // in this one that another task calls posts to a queue, sets an atomic, or
+    // copies an already-published value under sSnapLock — none of them enters
+    // Transport or the store. So nothing can put, remove or compact the store
+    // while this delay runs, which matters because microStore documents
+    // mutating a store during iteration as undefined (FileStore.h). That is a
+    // property held by convention and a grep rather than by the type system, so
+    // it is written down here: an interface that touched RNS:: from its own
+    // task would break this line first.
     if (Rns::walkShouldYield(w.elapsedMs, lastYieldMs)) {
       lastYieldMs = w.elapsedMs;
+      // A bare tick count, not pdMS_TO_TICKS(1): at any tick rate below 1 kHz
+      // that truncates to 0, and vTaskDelay(0) yields only to this priority and
+      // above — never to the priority-1 task this exists for (SnapshotWalk.h).
       vTaskDelay(1);
     }
 

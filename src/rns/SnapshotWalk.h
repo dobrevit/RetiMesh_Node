@@ -85,19 +85,30 @@ namespace Rns {
 // because the watchdog's own report died on the way out (see Watchdog.h).
 // Nothing here is allowed to be unbounded again.
 //
-// 400 ms is picked to be obviously survivable rather than optimal: two orders
-// of magnitude inside the watchdog, and small next to the five seconds between
-// passes (SNAPSHOT_INTERVAL_MS). It is checked between records and never inside
-// one, so a pass costs it plus however long the record in hand takes.
+// 400 ms is picked to be obviously survivable rather than optimal: 75x inside
+// the 30 s watchdog (WATCHDOG_TIMEOUT_S), and well under a tenth of the five
+// seconds between passes (SNAPSHOT_INTERVAL_MS). It is checked between records
+// and never inside one, so a pass costs it plus however long the record in
+// hand takes.
 //
 // It now bounds the whole walk rather than only the part after the rows are
 // full. What that costs, until row collection can be resumed across passes, is
-// that a table slow enough to exhaust the budget in the row half publishes the
-// rows it managed rather than a full SNAPSHOT_MAX_PATHS — and, because rows
-// restart at the front of the table every pass, the sweep cursor then stops
-// advancing. Both are bounded and honest: pathCount() is the whole table and is
-// unaffected, and a short list is a reading that is late rather than a node
-// that is down.
+// worth stating in full rather than as "the reading is late". Rows are
+// collected from the front of the table on every pass, so on a table slow
+// enough to spend the budget before the rows fill, every pass reads the same
+// short prefix and stops in the same place: the published list is not late, it
+// is permanently a prefix; the sweep cursor never gets past that prefix; the
+// cycle never closes; and a dead entry beyond it is never found at all. The
+// regime is exactly rowCap x per-record cost > kWalkBudgetMs — with 64 rows,
+// any store charging more than 6.25 ms a record, and lower still on a table
+// with dead entries in it, which cost a read and fill no row. The 30 ms a
+// record costs in the regime this firmware links is well past that line: a
+// pass reads fourteen records, so any node holding more paths than that is in
+// it. test_a_row_bound_table_never_advances_the_cursor drives it, and is
+// written to be flipped by the pass that resumes row collection across passes.
+//
+// What is bought for that, and why the bound is taken anyway: pathCount() is
+// the whole table and is unaffected, no pass is long, and the node stays up.
 //
 // Other surfaces quote this figure as the gap between two drains of a ring —
 // main.cpp's heartbeat line, Config.h beside loraRxDrainCapped, tools/soak.py's
@@ -123,11 +134,9 @@ constexpr uint32_t kWalkBudgetMs = 400;
 // whole 400 ms budget, so a yield on that cadence fires *zero* times in a pass
 // — at 30 ms a record the budget ends the walk before the sixteenth record is
 // reached. That is not a cadence, it is a yield that never happens, and it is
-// driven rather than argued in test/test_snapshot_walk. kFeedEvery stays the one definition of the *feed*
-// cadence and the walk still uses it for that; this is a different clock for a
-// different job, which is why it is defined here and not there. RingDrain's own
-// passes are bounded by count over cheap in-memory ring items and have no
-// elapsed-time notion to hang a millisecond figure on.
+// driven rather than argued in test/test_snapshot_walk. The same arithmetic is
+// why the walk no longer *feeds* on that cadence either (RingDrain.h): a
+// bounded pass needs no feed inside it, and this one could not have had one.
 //
 // 100 ms, which is three yields to a full budget: they land at the first record
 // at or past 100 ms, 200 ms and 300 ms of walk time, and a fourth would need
@@ -138,13 +147,47 @@ constexpr uint32_t kWalkBudgetMs = 400;
 // other end by the same arithmetic: three yields is the ceiling however cheap a
 // record becomes, which is the property no count of records has.
 //
-// A yield is vTaskDelay(1). CONFIG_FREERTOS_HZ is 1000 on both chips this
-// firmware builds for (the esp32s3 and esp32 sdkconfigs of
-// framework-arduinoespressif32-libs), so one tick is 1 ms and three yields are
-// at most ~3 ms of delay per pass. Those 3 ms are spent *inside* the budget,
-// not added to it — the walk measures elapsed time from its own start — so the
-// yields cost this pass a fraction of one record rather than lengthening it,
-// and cost the rest of the RNS task's pass nothing at all.
+// A yield is vTaskDelay(1), deliberately a bare tick count and not
+// pdMS_TO_TICKS(1). CONFIG_FREERTOS_HZ is 1000 in the esp32 and esp32s3
+// sdkconfigs of framework-arduinoespressif32-libs, so today the two would
+// compile to the same thing; at any lower tick rate pdMS_TO_TICKS(1) truncates
+// to zero, and vTaskDelay(0) does not block at all — it yields to tasks of this
+// task's priority and above, which is every task except the one the yield
+// exists for. A bare 1 is one tick whatever a tick is worth.
+//
+// What one yield is worth, exactly: vTaskDelay(1) blocks until the *next tick
+// interrupt*, so it hands the core down for anywhere between nearly nothing and
+// 1 ms depending where in the tick period the call lands, and the priority-3
+// RNS task preempts loopTask again the moment that tick readies it. Three of
+// them are therefore 0-3 ms of core 1 per pass, with a floor of nearly nothing.
+//
+// So the yields are a margin inside the walk. They are not what stops loopTask
+// starving — the budget is, and by a different mechanism entirely.
+// refreshSnapshots() returns immediately unless SNAPSHOT_INTERVAL_MS (5000 ms)
+// has passed since the *start* of the last pass, and the RNS task's own loop
+// ends in vTaskDelay(pdMS_TO_TICKS(10)) (main.cpp). With the walk bounded, a
+// pass is a fraction of that window and the task spends the rest of it going
+// round its loop and sleeping those 10 ms, hundreds of times per window — and
+// every one of those sleeps is core 1 for the tasks below it, loopTask among
+// them. The walk that took the node down did not leave any: 7.5 s on the T-Beam
+// is longer than the interval, so the gate was already open when the pass
+// returned and the next walk began at once. Passes ran back to back, and
+// loopTask got the one 10 ms sleep per 7.5 s of walking that separated them,
+// against a watchdog of 30 s (WATCHDOG_TIMEOUT_S). Milliseconds per pass is
+// what the yields add to that; seconds per five-second window is what the
+// budget returns, and the second number is the rescue.
+//
+// Which is why kWalkBudgetMs must stay well inside SNAPSHOT_INTERVAL_MS. A
+// budget that lets a pass outlast the interval brings the back-to-back passes
+// back, and no yield cadence rescues that. Someone buying rows back with a 3 s
+// budget would get 29 yields to a pass rather than three, and they would still
+// be worth at most a millisecond each — under 30 ms of core 1 for every 3 s of
+// walking, against a walk that once again never stops. So the relation is
+// asserted rather than asked for (walkBudgetFitsInterval() below), and it is
+// worth asserting because nothing else would catch a repeat: core 1's idle
+// task is not watched (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is unset in
+// both sdkconfigs, while CPU0's is set), so loopTask's own subscription in
+// setup() is the only thing that would notice.
 constexpr uint32_t kWalkYieldMs = 100;
 
 // The relation the choice above rests on. A cadence that does not fit strictly
@@ -153,6 +196,21 @@ constexpr uint32_t kWalkYieldMs = 100;
 // is a stop rather than a yield.
 static_assert(kWalkYieldMs > 0 && kWalkYieldMs * 2 < kWalkBudgetMs,
               "the yield cadence must fire more than once inside one budget");
+
+// The relation the paragraph above rests on, for the caller to assert: a walk
+// has to end well inside the interval its pass is gated on, or passes run back
+// to back and the RNS task never reaches the sleep that is what lets loopTask
+// run at all. A quarter is where the line is drawn — at 400 ms against 5000 ms
+// the margin is 12.5x, and even at the limit a walk ends a quarter of the way
+// into a window, plus the record in hand.
+//
+// A function rather than a static_assert here because SNAPSHOT_INTERVAL_MS is
+// Config.h's and this header depends on nothing (see the top of the file).
+// RnsTransport.cpp static_asserts it against the real figure beside the call,
+// and test_snapshot_walk asserts the same thing on the host.
+constexpr bool walkBudgetFitsInterval(uint32_t intervalMs) {
+  return (uint32_t)(kWalkBudgetMs * 4) <= intervalMs;
+}
 
 // What the walk should do with the position it is standing on.
 enum class WalkStep : uint8_t {
@@ -210,6 +268,25 @@ inline bool walkShouldYield(uint32_t elapsedMs, uint32_t lastYieldMs,
   return (uint32_t)(elapsedMs - lastYieldMs) >= intervalMs;
 }
 
+// Where a sweep resumes at the top of a pass, given how big the table is now.
+//
+// The cursor is an offset into a table that is mutated between passes, so it
+// can be left pointing past the end of one: the caller drops up to
+// SNAPSHOT_MAX_PATHS entries at the end of a pass, which can take the table out
+// from under a cursor that was beyond them. Such a cursor is reached by no
+// position, and nothing downstream corrects it — nextSweepPos() below only ever
+// moves forwards, so on a table slow enough for the budget to end every pass it
+// would keep returning that same stale value: the sweep would stay part-way
+// through for ever, the cycle would never close, and the minute clock that
+// starts the next one would never be stamped again.
+//
+// So a cursor at or past the end of the table is not a cursor, and the cycle
+// starts again from the front. Asked before the caller decides whether it is
+// sweeping, so the pass that finds it stale is the one that starts afresh.
+inline size_t sweepResumePos(size_t sweepPos, size_t tableSize) {
+  return sweepPos < tableSize ? sweepPos : 0;
+}
+
 // Where the next sweep pass resumes, given where this one stopped.
 //
 // Forwards only, within a cycle. The budget can now end the walk anywhere,
@@ -220,6 +297,10 @@ inline bool walkShouldYield(uint32_t elapsedMs, uint32_t lastYieldMs,
 // the tail of the table never examined, which is the exact bug the resuming
 // cursor was added to avoid. Reaching the end of the table (`!ranOut`) closes
 // the cycle instead and puts the next one a kStaleSweepMs out.
+//
+// Forwards only is a ratchet, and a ratchet has to be answerable to the thing
+// it indexes: sweepResumePos() above is what keeps it from ratcheting into a
+// table that has since shrunk past it.
 inline size_t nextSweepPos(size_t sweepPos, size_t stoppedAt, bool ranOut) {
   if (!ranOut) return 0;
   return stoppedAt > sweepPos ? stoppedAt : sweepPos;

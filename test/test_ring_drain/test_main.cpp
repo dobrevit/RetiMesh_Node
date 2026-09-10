@@ -324,10 +324,17 @@ static void test_exactly_the_cap_with_one_more_waiting_is_capped() {
   TEST_ASSERT_EQUAL_size_t(1, ring.waiting());
 }
 
-static void test_the_feed_cadence_matches_the_snapshot_walk() {
-  // refreshSnapshots(): feed before the walk, feed before every kFeedEvery-th
-  // record, feed after the walk. Positions are the count of items completed
-  // when the feed happened, so a feed "before the 16th" reads as 15.
+static void test_a_pass_is_bracketed_by_feeds_with_the_cadence_in_between() {
+  // Feed before the first item, feed before every kFeedEvery-th item after
+  // that, feed after the last. Positions are the count of items completed when
+  // the feed happened, so a feed "before the 16th" reads as 15.
+  //
+  // This used to be named for the path-table walk in refreshSnapshots(), which
+  // borrowed kFeedEvery for its own feeds. It no longer does: a record costs
+  // 30 ms or more, so sixteen of them outlast that walk's whole budget and the
+  // middle branch below never ran there at all. The walk is bounded and feeds
+  // either side instead (SnapshotWalk.h). What is asserted here is unchanged
+  // and is the drains' own cadence, where an item is a memcpy and a handler.
   FakeRing ring;
   fill(ring, 100);
   Record rec;
@@ -513,7 +520,7 @@ int main() {
   RUN_TEST(test_exactly_the_cap_with_one_more_waiting_is_capped);
   RUN_TEST(test_the_ring_is_asked_at_most_once_a_pass);
   RUN_TEST(test_a_handler_that_returns_early_still_counts_and_keeps_going);
-  RUN_TEST(test_the_feed_cadence_matches_the_snapshot_walk);
+  RUN_TEST(test_a_pass_is_bracketed_by_feeds_with_the_cadence_in_between);
   RUN_TEST(test_an_empty_ring_is_a_no_op);
   RUN_TEST(test_a_zero_feed_cadence_does_not_divide_by_zero);
   RUN_TEST(test_a_zero_cap_takes_nothing_and_reports_nothing);

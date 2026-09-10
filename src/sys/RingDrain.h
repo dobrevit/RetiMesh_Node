@@ -131,19 +131,20 @@ namespace RingDrain {
 // is also what keeps it from showing up as anything else.
 constexpr size_t kBatch = 64;
 
-// Items between watchdog feeds, and the one definition of that cadence: the
-// record walk in refreshSnapshots() reads it from here rather than keeping its
-// own 16, so the two cannot drift apart. The cap ends the pass, but it is only
-// checked between items and one item can be a whole packet through
-// microReticulum — so the drain keeps reporting while it runs rather than
-// relying on finishing.
+// Items between watchdog feeds. The cap ends the pass, but it is only checked
+// between items and one item can be a whole packet through microReticulum — so
+// the drain keeps reporting while it runs rather than relying on finishing.
 //
-// Feeding only. The walk also *yields*, and that is deliberately not this
-// number: a yield is scheduling rather than reporting, and 16 records is longer
-// than the walk's whole budget at every per-record cost this tree has measured,
-// so a yield on this cadence would never fire at all. Its own cadence, and the
-// arithmetic, are in SnapshotWalk.h — a ring item costs nothing like a record,
-// so this side has no use for one.
+// The rings' cadence and no one else's, now. The path-table walk in
+// refreshSnapshots() used to borrow this number for its own feeds, on the
+// reasoning above and for the sake of one definition; the arithmetic does not
+// carry across. A ring item is a memcpy and a handler, and 64 of them are what
+// one pass takes; a record is a file opened on LittleFS, and at 30 ms — or the
+// 93-162 ms of the reopen-per-record regime — sixteen of them are longer than
+// that walk's whole 400 ms budget, so neither a feed nor a yield on this
+// cadence could fire there at all. The walk feeds either side of its loop
+// instead, being bounded, and yields on an elapsed-time cadence of its own:
+// both are in SnapshotWalk.h, with the arithmetic and the test that drives it.
 constexpr size_t kFeedEvery = 16;
 
 // What one pass did.

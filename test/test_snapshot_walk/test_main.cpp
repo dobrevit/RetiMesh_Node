@@ -33,9 +33,21 @@
 //   * the sweep cursor never moves backwards, which is a hazard the first of
 //     those creates: a stop in the row half is at the front of the table, and
 //     writing it in would drag the sweep there and leave the tail unexamined;
+//   * a cursor the table has shrunk past starts the cycle again instead of
+//     latching, which is the other side of "forwards only": a ratchet with
+//     nothing to answer to would never come back inside the table;
+//   * the budget stays well inside the interval a pass is gated on, which is
+//     what actually returns the core to loopTask — the yields are a margin;
 //   * and the yield cadence really does give the core up several times inside
 //     one budget at the per-record costs this repository has measured — the
 //     exact thing reusing Sys::RingDrain::kFeedEvery would have failed at.
+//
+// One test here pins a limitation rather than a guarantee —
+// test_a_row_bound_table_never_advances_the_cursor. Bounding the row half
+// stopped the watchdog reboots and cost the sweep its cycle on any table slow
+// enough to spend a budget before the rows fill. That is written down and
+// driven so the pass that resumes row collection across passes has something
+// to flip, not because it is a state worth keeping.
 //
 // refreshSnapshots() itself cannot be built for the host — [env:native] has no
 // framework, no microReticulum, no LittleFS and no FreeRTOS — so the rule was
@@ -143,6 +155,27 @@ Pass runWalk(const std::vector<bool>& live, bool sweeping, size_t sweepPos,
 
 std::vector<bool> table(size_t n, bool allLive) { return std::vector<bool>(n, allLive); }
 
+// ---------------------------------------------------------------------------
+// One pass with the cursor rules around it, in the order refreshSnapshots()
+// applies them: resume against the table as it is now, walk, write the cursor
+// back. `sweeping` is forced on, which is the firmware's state whenever a
+// cursor is part-way down a table or the minute is up.
+// ---------------------------------------------------------------------------
+struct Sweep {
+  size_t cursor = 0;      // where the next pass would resume
+  bool   closed = false;  // this pass reached the end of the table
+  Pass   pass;
+};
+
+Sweep sweepOnce(const std::vector<bool>& live, size_t cursor, uint32_t recordMs) {
+  Sweep s;
+  const size_t from = Rns::sweepResumePos(cursor, live.size());
+  s.pass   = runWalk(live, true, from, recordMs);
+  s.closed = !s.pass.ranOut;
+  s.cursor = Rns::nextSweepPos(from, s.pass.stoppedAt, s.pass.ranOut);
+  return s;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -156,6 +189,28 @@ void test_the_constants_are_what_the_fix_committed_to() {
   // budget yields once and then needs the whole budget elapsed for its second,
   // which is a stop.
   TEST_ASSERT_TRUE(Rns::kWalkYieldMs * 2 < Rns::kWalkBudgetMs);
+}
+
+void test_the_budget_stays_well_inside_the_interval_a_pass_is_gated_on() {
+  // The relation the fix actually rests on, and the one most likely to be
+  // broken by someone buying rows back with a bigger budget. refreshSnapshots()
+  // runs at most once per SNAPSHOT_INTERVAL_MS, measured from the start of a
+  // pass: while a walk ends well inside that window the RNS task spends the
+  // rest of it going round its loop and sleeping 10 ms at a time, and those
+  // sleeps are the only core 1 the priority-1 loopTask gets. A walk that
+  // outlasts the window makes the gate a no-op and the passes run back to back,
+  // which is the shape that took a T-Beam down at 7.5 s a walk. The firmware
+  // static_asserts this beside the call; it is asserted here too, because this
+  // is the file kWalkBudgetMs would be retuned in.
+  TEST_ASSERT_EQUAL_UINT32(5000, (uint32_t)SNAPSHOT_INTERVAL_MS);
+  TEST_ASSERT_TRUE(Rns::walkBudgetFitsInterval(SNAPSHOT_INTERVAL_MS));
+  // A quarter is where the line is: the same rule read the other way says the
+  // budget may not exceed a quarter of the interval.
+  TEST_ASSERT_TRUE(Rns::walkBudgetFitsInterval(Rns::kWalkBudgetMs * 4));
+  TEST_ASSERT_FALSE(Rns::walkBudgetFitsInterval(Rns::kWalkBudgetMs * 4 - 1));
+  // At the figures the firmware ships, that leaves 12.5x rather than 4x.
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT32(Rns::kWalkBudgetMs * 12,
+                                      (uint32_t)SNAPSHOT_INTERVAL_MS);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,9 +363,96 @@ void test_a_row_bound_pass_leaves_the_cursor_where_it_was() {
   TEST_ASSERT_TRUE(r.ranOut);
   TEST_ASSERT_LESS_THAN_size_t(cursor, r.stoppedAt);        // stopped ahead of the cursor
   TEST_ASSERT_EQUAL_size_t(cursor, Rns::nextSweepPos(cursor, r.stoppedAt, r.ranOut));
-  // Without the clamp this pass would have dragged the sweep back to r.stoppedAt
-  // and the tail of the table would never be examined again.
-  TEST_ASSERT_LESS_THAN_size_t(cursor, r.stoppedAt);
+  // Which is not what an unconditional write would have done: that is the value
+  // on the other side of the clamp, and it is at the front of the table.
+  TEST_ASSERT_NOT_EQUAL_size_t(r.stoppedAt,
+                               Rns::nextSweepPos(cursor, r.stoppedAt, r.ranOut));
+}
+
+void test_a_cursor_past_the_end_of_the_table_starts_the_cycle_again() {
+  // The other side of "forwards only". Positions run 0..size-1, so the size
+  // itself is already past the end.
+  TEST_ASSERT_EQUAL_size_t(0, Rns::sweepResumePos(150, 100));
+  TEST_ASSERT_EQUAL_size_t(0, Rns::sweepResumePos(100, 100));
+  TEST_ASSERT_EQUAL_size_t(0, Rns::sweepResumePos(1, 0));      // an emptied table
+  // A cursor the table still holds is left exactly where it was.
+  TEST_ASSERT_EQUAL_size_t(99, Rns::sweepResumePos(99, 100));
+  TEST_ASSERT_EQUAL_size_t(0,  Rns::sweepResumePos(0, 100));
+}
+
+void test_a_cursor_left_past_a_shrunken_table_does_not_latch() {
+  // Reachable through the sweep's own behaviour: what it collects is capped at
+  // SNAPSHOT_MAX_PATHS, so one pass can drop 64 entries from under a cursor
+  // sitting beyond them. Here a table of 200 with the sweep at 150 is 100 long
+  // by the next pass.
+  const std::vector<bool> shrunk = table(100, true);
+  const size_t stranded = 150;
+
+  // Unresumed, it latches: the pass stops in the row half with the budget
+  // spent, and nextSweepPos() — forwards only — hands the same out-of-range
+  // value straight back. No position in this table is at or past it, so while
+  // the budget is what ends a pass — which it is at every per-record cost this
+  // tree has measured — no later pass can end anywhere else either: the cycle
+  // never closes and the minute clock is never stamped again.
+  const Pass raw = runWalk(shrunk, true, stranded, kFastRecordMs);
+  TEST_ASSERT_TRUE(raw.ranOut);
+  TEST_ASSERT_LESS_THAN_size_t(stranded, raw.stoppedAt);
+  TEST_ASSERT_EQUAL_size_t(stranded,
+                           Rns::nextSweepPos(stranded, raw.stoppedAt, raw.ranOut));
+
+  // Resumed against the table as it is now, the cursor is inside it again and
+  // this pass advances it like any other.
+  const Sweep s = sweepOnce(shrunk, stranded, kFastRecordMs);
+  TEST_ASSERT_GREATER_THAN_size_t(0, s.cursor);
+  TEST_ASSERT_LESS_THAN_size_t(shrunk.size(), s.cursor);
+
+  // And a table cheap enough to walk closes the cycle from the same stale
+  // start, rather than being stuck outside itself for ever.
+  const Sweep cheap = sweepOnce(shrunk, stranded, 0);
+  TEST_ASSERT_TRUE(cheap.closed);
+  TEST_ASSERT_EQUAL_size_t(0, cheap.cursor);
+}
+
+// ---------------------------------------------------------------------------
+// What bounding the row half costs, until row collection resumes across passes
+// ---------------------------------------------------------------------------
+
+void test_a_row_bound_table_never_advances_the_cursor() {
+  // A limitation, pinned so it can be shown to close rather than argued about.
+  //
+  // 100 live entries followed by 100 dead ones — the dead half being what the
+  // sweep exists to remove — at the 30 ms a record costs in the regime this
+  // firmware links. Rows are collected from the front of the table on every
+  // pass, so every pass reads the same live prefix, spends the whole budget on
+  // it and stops in the same place. The cursor reaches the end of that prefix
+  // and never moves again; the published list is not a late reading, it is
+  // permanently the same fourteen rows; and not one dead entry is ever seen.
+  //
+  // The regime is rowCap x per-record cost > kWalkBudgetMs, which at 64 rows is
+  // any store charging more than 6.25 ms a record — so this is the ordinary
+  // case on a node with more paths than one budget reads, not an edge.
+  // Resuming row collection across passes is what flips it.
+  std::vector<bool> live = table(200, true);
+  for (size_t k = 100; k < live.size(); k++) live[k] = false;
+
+  size_t cursor = 0, closes = 0, sweptTotal = 0, settled = 0;
+  for (int passNo = 0; passNo < 30; passNo++) {
+    const Sweep s = sweepOnce(live, cursor, kFastRecordMs);
+    sweptTotal += s.pass.swept.size();
+    if (s.closed) closes++;
+    TEST_ASSERT_TRUE(s.pass.ranOut);
+    TEST_ASSERT_LESS_THAN_size_t(kRowCap, s.pass.rows);   // never a full list
+    if (passNo == 0) settled = s.cursor;
+    else TEST_ASSERT_EQUAL_size_t(settled, s.cursor);     // and it never moves
+    cursor = s.cursor;
+  }
+  // Fourteen: at 30 ms a record, with a yield tick at 100, 200 and 300 ms of
+  // walk time, the fifteenth record is the first to find the budget spent.
+  TEST_ASSERT_EQUAL_size_t(14, settled);
+  TEST_ASSERT_GREATER_THAN_size_t(0, settled);
+  TEST_ASSERT_LESS_THAN_size_t(kRowCap, settled);
+  TEST_ASSERT_EQUAL_size_t(0, sweptTotal);   // not one of the hundred, ever
+  TEST_ASSERT_EQUAL_size_t(0, closes);       // and the cycle never closes
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +475,9 @@ void test_the_yield_cadence_fires_more_than_once_inside_one_budget() {
 void test_the_feed_cadence_would_not_yield_at_all() {
   // Why the yield is not Sys::RingDrain::kFeedEvery. That cadence is a count of
   // records; 16 of them at 30 ms is 480 ms, which is longer than the whole
-  // budget, so the walk is stopped before it ever reaches one.
+  // budget, so the walk is stopped before it ever reaches one. It is also why
+  // the walk no longer *feeds* on that cadence: the same sixteenth record is
+  // the one a feed on it would have waited for.
   TEST_ASSERT_EQUAL_size_t(16, Sys::RingDrain::kFeedEvery);
   TEST_ASSERT_GREATER_THAN_UINT32(Rns::kWalkBudgetMs,
                                   (uint32_t)Sys::RingDrain::kFeedEvery * kFastRecordMs);
@@ -363,9 +507,15 @@ void test_the_yield_ceiling_does_not_move_with_the_record_cost() {
     const Pass r = runWalk(table(4000, true), false, 0, recordMs);
     TEST_ASSERT_LESS_OR_EQUAL_size_t(3, r.yields);
   }
-  // A free record is the extreme of that: 4000 positions, no reading cost, and
-  // still only the yields' own ticks are spent.
-  const Pass free = runWalk(table(4000, true), false, 0, 0);
+  // A free record is the extreme of that, and it needs a sweep running to be
+  // the case it claims: with no sweep the walk stops at the row cap after 64
+  // positions and the 4000 are never reached. Sweeping, it reads all 4000 —
+  // and because nothing moves the clock it never reaches a yield at all, which
+  // is the ceiling holding from below rather than above.
+  const Pass free = runWalk(table(4000, true), true, 0, 0);
+  TEST_ASSERT_FALSE(free.ranOut);
+  TEST_ASSERT_EQUAL_size_t(4000, free.reads);
+  TEST_ASSERT_EQUAL_size_t(0, free.yields);
   TEST_ASSERT_LESS_OR_EQUAL_size_t(3, free.yields);
 }
 
@@ -385,6 +535,7 @@ void tearDown() {}
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_the_constants_are_what_the_fix_committed_to);
+  RUN_TEST(test_the_budget_stays_well_inside_the_interval_a_pass_is_gated_on);
   RUN_TEST(test_the_budget_stops_a_pass_while_rows_are_still_filling);
   RUN_TEST(test_the_budget_applies_on_the_skip_path);
   RUN_TEST(test_rows_full_and_no_sweep_is_a_finish_not_a_budget_stop);
@@ -397,6 +548,9 @@ int main() {
   RUN_TEST(test_a_sweeping_pass_steps_over_the_prefix_it_has_already_examined);
   RUN_TEST(test_the_sweep_cursor_never_moves_backwards);
   RUN_TEST(test_a_row_bound_pass_leaves_the_cursor_where_it_was);
+  RUN_TEST(test_a_cursor_past_the_end_of_the_table_starts_the_cycle_again);
+  RUN_TEST(test_a_cursor_left_past_a_shrunken_table_does_not_latch);
+  RUN_TEST(test_a_row_bound_table_never_advances_the_cursor);
   RUN_TEST(test_the_yield_cadence_fires_more_than_once_inside_one_budget);
   RUN_TEST(test_the_feed_cadence_would_not_yield_at_all);
   RUN_TEST(test_the_yield_ceiling_does_not_move_with_the_record_cost);
