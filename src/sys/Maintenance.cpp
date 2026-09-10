@@ -31,6 +31,7 @@
 #include "Imu.h"
 #include "Compass.h"
 #include "Environment.h"
+#include "EnvReportPolicy.h"
 #include "Display.h"
 #include "TouchInput.h"
 #include "LvglUi.h"
@@ -509,35 +510,52 @@ static void doStatus() {
   // part is read once every half minute and reports nothing at all until the
   // first conversion lands, so a reading with no age beside it cannot be told
   // from one taken while the node was somewhere else half an hour ago.
+  //
+  // Written once and run for each part the board carries. The V4 has two and
+  // they disagree slightly, which is the reason both are printed rather than
+  // one being chosen (Environment.h) — and the reason each line names the part
+  // it came from, so the disagreement reads as two instruments rather than as
+  // one instrument that cannot make up its mind.
   {
-    const Environment::Reading e = Environment::last();
-    if (!e.valid) {
-      // Three silences now, and the third is the one that used to lie. A part
-      // that is not on the bus is a wiring question. A part that is there and
-      // has not finished its first conversion is a matter of waiting one
-      // interval. And a part that has been asked several times and produced
-      // nothing is neither — it answered at boot, so saying "warming up" for
-      // the next hour would send somebody to wait rather than to look.
-      const uint32_t missed = Environment::missedIntervals();
-      dataf("STATUS", "env=%s%s",
-            !Environment::present() ? "absent"
-          : missed >= 2             ? "no-reading" : "warming-up",
-            missed >= 2 ? "" : "");
-      if (missed >= 2)
-        dataf("STATUS", "env missed_intervals=%u", (unsigned)missed);
-    } else {
-      dataf("STATUS", "env temp=%.2fC humidity=%.1f%% pressure=%.2fhPa age=%us",
-            e.tempC, e.humidityPct, e.pressureHpa,
-            (unsigned)Environment::ageS(e));
+    auto reportEnv = [](const char* tag, Environment::Source src) {
+      const Environment::Reading e = Environment::last(src);
+      const uint32_t missed = Environment::missedIntervals(src);
+      // The ladder is EnvReportPolicy's, not this surface's: three silences
+      // that mean different things, and four surfaces that used to work them
+      // out separately.
+      const EnvReportPolicy::State st =
+          EnvReportPolicy::classify(Environment::present(src), e.valid, missed);
+      if (!e.valid) {
+        dataf("STATUS", "%s=%s part=%s", tag, EnvReportPolicy::name(st),
+              Environment::partName(src));
+        if (st == EnvReportPolicy::State::NoReading)
+          dataf("STATUS", "%s missed_intervals=%u", tag, (unsigned)missed);
+        return;
+      }
+      // Pressure only from the part that measures it: printing 0.00 hPa for a
+      // humidity sensor would read as a reading rather than as its absence.
+      if (e.hasPressure)
+        dataf("STATUS", "%s part=%s temp=%.2fC humidity=%.1f%% pressure=%.2fhPa age=%us",
+              tag, Environment::partName(src), e.tempC, e.humidityPct,
+              e.pressureHpa, (unsigned)Environment::ageS(e));
+      else
+        dataf("STATUS", "%s part=%s temp=%.2fC humidity=%.1f%% age=%us",
+              tag, Environment::partName(src), e.tempC, e.humidityPct,
+              (unsigned)Environment::ageS(e));
       // A reading *and* a fault, which is a state this part can be in for as
       // long as the node runs: it keeps its last conversion on purpose, so a
       // sensor that stopped answering an hour ago still prints a temperature.
       // The age says so to anybody who thinks about it; this says so to
       // everybody.
-      if (const uint32_t missed = Environment::missedIntervals())
-        dataf("STATUS", "env stopped answering — %u intervals with no reading, "
-                        "the figures above are that old", (unsigned)missed);
-    }
+      if (missed)
+        dataf("STATUS", "%s stopped answering — %u intervals with no reading, "
+                        "the figures above are that old", tag, (unsigned)missed);
+    };
+
+    reportEnv("env", Environment::Source::Primary);
+#if HAS_ENV2
+    reportEnv("env2", Environment::Source::Secondary);
+#endif
   }
 #endif
   // The clock, and where it came from. A node whose time is wrong sends

@@ -1149,6 +1149,40 @@ heading there, so say COMPASS_FOLLOWS_SCREEN 0 and let the console and the API h
 #ifndef ENV_ADDR
   #define ENV_ADDR          0x76
 #endif
+// A second address to try when the first does not answer, or -1 for a board
+// that must not go looking. Off by default, and the default is the important
+// half: the T-Beam Supreme knows its part is at 0x77 and says so, on a bus
+// with three devices where a probe that wandered could pick a neighbour —
+// which is the reasoning already written in that board's header, and this
+// keeps it true by leaving probing switched off unless a board asks.
+//
+// A board asks when it genuinely does not know. The Heltec V4's sensor arrives
+// on a plug-in module, so the SDO strap belongs to the module rather than to
+// the board, and both values are in the wild. What makes the search safe there
+// is that it is not a scan: exactly two addresses are tried, each one has to
+// return a BME280's chip id (Bme280::identify) *and* give up a calibration
+// block whose t1 is non-zero, and anything less is left off and named in the
+// log rather than half-driven.
+#ifndef ENV_ADDR_ALT
+  #define ENV_ADDR_ALT      (-1)
+#endif
+// A second environmental part on the same bus, alongside the barometer.
+//
+// The Heltec V4's expansion carries a GXHT3V — a clone of Sensirion's SHTC3 —
+// beside its BME280, and the two measure the same two quantities. Both are
+// published rather than one being chosen here: two readings a little apart is
+// the most useful thing that board can say about its own measurements, and a
+// firmware that picked a winner would throw that away (Environment.h).
+//
+// Which family is not declared, only that there is one. The driver probes an
+// SHTC3 at 0x70 first, because that is what the bench unit answers at, and
+// then an SHT3x at 0x44 and 0x45 — so a different expansion module drops in
+// without a build flag. Every candidate has to produce a checksummed reply
+// before it is accepted (SensirionRhtMath.h), which is what keeps a probe at
+// 0x70 from mistaking an I2C multiplexer for a sensor.
+#ifndef HAS_ENV2
+  #define HAS_ENV2          0
+#endif
 #ifndef PIN_ENV_SDA
   #define PIN_ENV_SDA       PIN_I2C_SDA
 #endif

@@ -452,10 +452,54 @@ a divider infers presence from the voltage and leaves the last reading in place
 when its converter stops, so treat `battery_present: false` with a plausible
 voltage as a stale reading rather than an empty holder.
 
-`env` appears on boards with an environmental sensor — a BME280, and so far
-only the T-Beam Supreme:
-`{"present":true,"valid":true,"temp_c":21.94,"humidity_pct":43.8,
-"pressure_hpa":1006.77,"age_s":12}`.
+`env` appears on boards with an environmental sensor — a BME280 on the T-Beam
+Supreme and on the Heltec V4:
+`{"part":"bme280","present":true,"valid":true,"temp_c":21.94,
+"humidity_pct":43.8,"pressure_hpa":1006.77,"age_s":12}`.
+
+`env2` appears beside it on a board carrying a **second** environmental part,
+which today means the Heltec V4: its expansion module has a GXHT3V — a clone of
+Sensirion's SHTC3 — at 0x70 alongside the BME280 at 0x76. It has the same shape
+minus the barometer:
+`{"part":"shtc3","present":true,"valid":true,"temp_c":22.31,
+"humidity_pct":44.1,"age_s":7}`.
+
+Two things follow from that, and both are deliberate:
+
+* **`pressure_hpa` is absent, not zero,** on a part with no barometer. A zero
+  would read as a vacuum rather than as the absence of the instrument, so the
+  field simply does not appear and a caller should test for it.
+* **The two parts will not agree.** They measure the same two quantities to
+  their own tolerances, so expect a few tenths of a degree between them. Neither
+  is authoritative and the firmware does not pick one: which reading came from
+  which part is `part`, and choosing between them — or plotting both — is the
+  caller's. `part` is one of `bme280`, `shtc3`, `sht3x` or `none`.
+
+The probe is by identity, not by address. The BME280 is accepted only after its
+chip id reads 0x60 *and* it gives up a calibration block whose coefficients are
+non-zero; the humidity part only after a reply whose CRC-8 checks out, and for
+an SHTC3 its product-code word as well. So a board whose module straps a
+different address still works — 0x76 then 0x77 for the barometer, 0x70 then
+0x44 then 0x45 for the humidity part — and something else answering at one of
+those addresses is refused rather than decoded into a plausible reading.
+
+`state` is the verdict those facts add up to, decided once in the firmware
+(`src/sys/EnvReportPolicy.h`) rather than re-derived by each caller. It is one
+of a fixed, stable vocabulary:
+
+| `state` | means |
+|---|---|
+| `absent` | nothing fitted, or nothing answered at boot. A wiring question. |
+| `warming_up` | fitted, no reading yet, too early to call it a fault. |
+| `no_reading` | fitted, still nothing, and enough intervals have passed to say so. |
+| `fresh` | a reading, and the part is still answering. |
+| `stale` | a reading **and** the part has stopped answering — both are true. |
+
+Prefer `state` to re-deriving the ladder from the three fields below. Those
+fields are still sent, and still mean what they always did — they are the
+evidence behind the verdict, and a caller graphing the sensor needs them — but
+a client that switches on `state` cannot disagree with the node's own screen
+about whether a sensor is faulty. The portal does exactly this.
 
 `present` and `valid` are two facts and a caller needs both. A fitted part that
 has not finished its first conversion reports `present: true` with no readings

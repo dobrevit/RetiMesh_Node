@@ -113,6 +113,40 @@ function cardOnOffer(sd) {
   return "a blank card is free";
 }
 
+// One environmental part, as a card — or as nothing at all when the node does
+// not report it. Written here rather than at each call site because a node can
+// carry more than one such part and the rule for drawing one must not be
+// copied per sensor.
+//
+// The ladder itself is no longer worked out here: `state` comes from the
+// firmware, decided once in src/sys/EnvReportPolicy.h, because this file was
+// the fourth place the same "two missed intervals" threshold was written down.
+// `present`, `valid` and `missed_intervals` are still sent and still shown —
+// they are the evidence behind the state, and a caller graphing them needs
+// them — but nothing here re-derives the verdict from them.
+function envCard(e, title) {
+  if (!e) return [];
+  var body;
+  switch (e.state) {
+    case "absent":     body = "no sensor"; break;
+    case "warming_up": body = "waiting for the first reading"; break;
+    case "no_reading":
+      body = "no reading after " + e.missed_intervals + " tries"; break;
+    default:
+      body = e.temp_c.toFixed(1) + " °C · " + e.humidity_pct.toFixed(0) + "%"
+        // Only the part with a barometer sends this field, so its absence is
+        // the absence of the instrument rather than a zero reading.
+        + (e.pressure_hpa != null ? " · " + e.pressure_hpa.toFixed(1) + " hPa" : "")
+        // The age matters because the part is read once every thirty seconds.
+        + (e.age_s != null ? " · " + e.age_s + "s ago" : "")
+        // A reading and a fault at once — the "stale" state. The driver keeps
+        // its last conversion on purpose, so figures can be here and hours old.
+        + (e.state === "stale" ? " · stopped answering, "
+             + e.missed_intervals + " intervals ago" : "");
+  }
+  return [card(title, body, e.state === "fresh" ? "" : "offline")];
+}
+
 function card(k, v, cls) {
   const el = document.createElement("div");
   el.className = "card";
@@ -190,32 +224,19 @@ async function refreshStatus() {
       // GNSS. The health readings are always public; the coordinates appear only
       // when the operator has published them, and the card says which it is —
       // otherwise the settings toggle has no visible effect anywhere.
-      ...(!s.env ? [] : [
-        // The same idiom as the GNSS block below: absent hardware contributes
-        // no card at all rather than a card saying nothing. `present` without
-        // `valid` is a fitted part that has not finished its first conversion,
-        // which is a different thing from a sensor that is not answering — and
-        // the age matters because the part is read once every thirty seconds.
-        card("Weather", !s.env.present ? "no sensor"
-          // A part with no reading is two situations and this has to tell them
-          // apart, as the console and the glass already do: the first half
-          // minute after boot, or a fitted part that has stopped answering.
-          // The interval count is what separates them, and without it this
-          // card said "waiting for the first reading" for as long as the fault
-          // lasted.
-          : !s.env.valid ? (s.env.missed_intervals >= 2
-              ? "no reading after " + s.env.missed_intervals + " tries"
-              : "waiting for the first reading")
-          : s.env.temp_c.toFixed(1) + " °C · " + s.env.humidity_pct.toFixed(0)
-            + "% · " + s.env.pressure_hpa.toFixed(1) + " hPa"
-            + (s.env.age_s != null ? " · " + s.env.age_s + "s ago" : "")
-            // A reading and a fault at once: the driver keeps its last
-            // conversion on purpose, so figures can be here and hours old.
-            // The age says so; this says so in words.
-            + (s.env.missed_intervals ? " · stopped answering, "
-                 + s.env.missed_intervals + " intervals ago" : ""),
-          s.env.present && s.env.valid && !s.env.missed_intervals ? "" : "offline"),
-      ]),
+      // One card per environmental part the node reports. The Heltec V4
+      // carries two — a BME280 and an SHTC3-class humidity sensor — and they
+      // will not agree to the tenth of a degree. Both are shown, each titled
+      // with the part it came from, because that disagreement is the honest
+      // picture and picking one here would hide it. Absent hardware
+      // contributes no card at all, which is the idiom the GNSS block uses.
+      // The title names the part when there is one and the slot when there is
+      // not, so a board with two empty slots still shows two distinguishable
+      // cards rather than "Weather · none" twice. Each guard tests its own
+      // object: a document carrying env2 without env must not throw here and
+      // take the whole render down with it.
+      ...envCard(s.env, s.env2 ? "Weather · " + ((s.env && s.env.present && s.env.part) || "barometer") : "Weather"),
+      ...envCard(s.env2, "Weather · " + ((s.env2 && s.env2.present && s.env2.part) || "humidity")),
       ...(!s.compass ? [] : [
         // Absent hardware contributes no card, the same idiom as the two
         // blocks either side. When it is there, the three qualifiers travel

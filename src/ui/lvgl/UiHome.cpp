@@ -37,6 +37,10 @@
 #include "WifiManager.h"
 #include "RnsTransport.h"
 #include "LxmfInbox.h"
+#if HAS_ENV
+#include "Environment.h"
+#include "EnvReportPolicy.h"
+#endif
 
 namespace {
 
@@ -48,6 +52,12 @@ lv_obj_t* sRssiVal = nullptr;
 lv_obj_t* sPosVal = nullptr;
 lv_obj_t* sBattVal = nullptr;
 lv_obj_t* sRadioVal = nullptr;
+#if HAS_ENV
+lv_obj_t* sEnvVal = nullptr;
+#endif
+#if HAS_ENV2
+lv_obj_t* sEnv2Val = nullptr;
+#endif
 lv_obj_t* sLatestVal = nullptr;
 lv_obj_t* sMsgBadge = nullptr;
 
@@ -129,6 +139,60 @@ void refreshHome(lv_timer_t*) {
   Ui::setLabel(sRadioVal, v);
   tintIf(sRadioVal, g_stats.radioOnline ? UiTheme::kInk : UiTheme::kWarn);
 
+#if HAS_ENV
+  // The air around the node, in the shape Environment.h asks every surface to
+  // draw it: the reading, how old it is, and whether the part has stopped
+  // answering — because `valid` is not a health flag. A sensor that worked at
+  // boot and died an hour ago reports a valid reading forever, and the age and
+  // the missed count are the only two things that say so.
+  //
+  // Written once and run per part, so the second sensor cannot drift into
+  // saying the same thing differently.
+  {
+    auto paintEnvRow = [&](lv_obj_t* lbl, Environment::Source src) {
+      if (!lbl) return;
+      const Environment::Reading e = Environment::last(src);
+      const uint32_t missed = Environment::missedIntervals(src);
+      // The ladder is EnvReportPolicy's; this surface only chooses words and
+      // colours for it.
+      const EnvReportPolicy::State st =
+          EnvReportPolicy::classify(Environment::present(src), e.valid, missed);
+      if (st == EnvReportPolicy::State::Absent) {
+        Ui::setLabel(lbl, "no sensor");
+        tintIf(lbl, UiTheme::kInkLabel);
+      } else if (!e.valid) {
+        if (st == EnvReportPolicy::State::NoReading)
+          snprintf(v, sizeof(v), "no reading after %lu tries", (unsigned long)missed);
+        else
+          snprintf(v, sizeof(v), "waiting");
+        Ui::setLabel(lbl, v);
+        tintIf(lbl, st == EnvReportPolicy::State::NoReading ? UiTheme::kWarn
+                                                            : UiTheme::kInkLabel);
+      } else {
+        const uint32_t age = Environment::ageS(e);
+        // Pressure only from the part that has a barometer, so the humidity
+        // sensor's row does not carry a figure it never measured.
+        if (e.hasPressure)
+          snprintf(v, sizeof(v), "%.1f C · %.0f%% · %.1f hPa · %lus%s",
+                   (double)e.tempC, (double)e.humidityPct, (double)e.pressureHpa,
+                   (unsigned long)age, missed ? " · stopped" : "");
+        else
+          snprintf(v, sizeof(v), "%.1f C · %.0f%% · %lus%s",
+                   (double)e.tempC, (double)e.humidityPct,
+                   (unsigned long)age, missed ? " · stopped" : "");
+        Ui::setLabel(lbl, v);
+        tintIf(lbl, st == EnvReportPolicy::State::Stale ? UiTheme::kWarn
+                                                        : UiTheme::kInk);
+      }
+    };
+
+    paintEnvRow(sEnvVal, Environment::Source::Primary);
+#if HAS_ENV2
+    paintEnvRow(sEnv2Val, Environment::Source::Secondary);
+#endif
+  }
+#endif
+
   {
     const size_t unread = Ui::unreadCount();
     if (unread) {
@@ -194,6 +258,14 @@ void openHome() {
   sPosVal   = reading(body, "POSITION");
   sBattVal  = reading(body, "BATTERY");
   sRadioVal = reading(body, "RADIO");
+#if HAS_ENV
+  sEnvVal   = reading(body, "WEATHER");
+#endif
+#if HAS_ENV2
+  // Its own row rather than a second figure on the first: they are two
+  // instruments and the operator is meant to be able to see them disagree.
+  sEnv2Val  = reading(body, "HUMIDITY SENSOR");
+#endif
   lv_obj_t* latestRow = lv_obj_create(body);
   UiTheme::card(latestRow);
   lv_obj_set_width(latestRow, lv_pct(100));
