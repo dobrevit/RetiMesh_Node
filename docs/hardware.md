@@ -940,19 +940,61 @@ performs; and BOOT + RST recovers any of them.
    connector facts contradict its chip, or one that
    contradicts the framework's USB flags in `platformio.ini`. Drives CI,
    release packaging, the web flasher and the CLI.
-5. Nothing in the workflows: CI, the release matrix and the HIL run all read
+5. `boards.json` again, the `capability` block: MCU, flash, PSRAM, partition
+   table, the panel and the `HAS_*` peripherals. **Do not type it** — run
+
+   ```sh
+   python3 tools/board_facts.py <env>
+   ```
+
+   and paste what it prints. Every field is compared against what the build
+   actually resolves, so a hand-typed value that is wrong is a CI failure with
+   the two readings side by side.
+
+   It is derived rather than declared because one fact can come from three
+   places, and they resolve in an order that is not the intuitive one:
+
+   - an **unguarded `#define` in the board header** wins outright. A `-D` is a
+     define at the top of the translation unit, and a later unguarded `#define`
+     redefines it — `gcc -DHAS_SD=0` over `#define HAS_SD 1` yields 1, with a
+     `-Wmacro-redefined` warning. Board headers write these unguarded, so the
+     header is the answer wherever it speaks;
+   - a **`-D` in the env's `build_flags`** (after PlatformIO expands
+     `${section.option}`) or in the board manifest's own `extra_flags` beats
+     only what follows. `HAS_LVGL_UI` reaches its three boards this way and no
+     other;
+   - the **`#ifndef` default in `Config.h`** is what a board inherits by
+     saying nothing.
+
+   `tools/check_boards.py` refuses a `-D` that collides with a header define
+   for any field the catalogue derives, because the flag would be a no-op while
+   appearing to set something, and warns about the collision on other names.
+
+   Some of it is not in this repository at all: the T-Beam's `BOARD_HAS_PSRAM`
+   is in PlatformIO's own board manifest. Those four manifests are vendored
+   under `boards/` (see `boards/README.md`) so the gate runs in CI, which
+   installs no PlatformIO.
+
+   Two rules worth knowing when you add a board. If it has no panel, say
+   `"display": null` — a silent header inherits `Config.h`'s 128x64 exactly as
+   a 128-wide board does, so a geometry recorded for hardware that does not
+   exist is indistinguishable from a real measurement, and the checker refuses
+   it. And `display.graphical_ui` is `HAS_LVGL_UI`, a graphical shell, not a
+   touch digitiser: the ThinkNode M9 has the first and not the second.
+
+6. Nothing in the workflows: CI, the release matrix and the HIL run all read
    `boards.json` and build whatever is in it. (A bench runner wants a
    `HIL_<ENV>_PORT` repository variable to exercise the new board, but the
    build matrices need no edit — they used to, and a board once reached the
    registry without reaching them.) Regenerate the table above with
    `python tools/board_docs.py`, which CI checks, and run
    `python tools/check_boards.py`.
-6. If the display or radio differ: `Display.*` / `LoRaRadio.*` (probe order,
+7. If the display or radio differ: `Display.*` / `LoRaRadio.*` (probe order,
    TCXO, RF switch). Keep board specifics behind the capability flags. A driver
    that needs SPI asks `SpiBus::get()` for the host rather than constructing an
    `SPIClass` — on a board where two devices share wires, two objects on one
    host re-initialise the peripheral under each other and the boot stops.
-7. Verify: boot log clean, radio detected, announce accepted by an RNS peer.
+8. Verify: boot log clean, radio detected, announce accepted by an RNS peer.
 
 ## Flashing details
 Offsets (from the env's partition table): bootloader `0x0`, partitions

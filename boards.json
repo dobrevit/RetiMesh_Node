@@ -1,6 +1,7 @@
 {
   "_comment": "Single source of truth for release packaging, the web flasher and the CLI. Keys are PlatformIO env names. mcu/radio/display/extras/status are what the board matrix in docs/hardware.md shows; tools/board_docs.py renders it from here.",
   "_local_link": "Per-board host connectivity, read by tools/board_caps.py into BOARD_* build flags and by the settings API. usb.native = the MCU's own D+/D- reach the connector; usb.ncm/cdc_acm = the silicon could present those classes there (whether this firmware build does is HAS_USB_NCM, derived in Config.h); usb.auto_reset_dtr_rts = esptool can reset the chip through this port without BOOT being held; uart.network = the UART behind the bridge carries PPP (HAS_PPP follows it: the node is the PPP client, the host's pppd the server — docs/local-link.md); uart.instance = which UART the bridge sits on; uart.qualification = the speeds PPP may be set to, ascending, 115200 among them; uart.tested_max_baud = the highest of those actually run on the hardware — the firmware refuses anything faster, so raise it only after trying it; rts/cts = flow-control lines the bridge exposes to the chip (none do).",
+  "_capability": "What each board has, derived rather than typed: every field is compared against what the build actually resolves, by tools/board_facts.py, and tools/check_boards.py fails CI when the two disagree. Emit a board's block with `python3 tools/board_facts.py <env>` — do not write one by hand. A fact has three possible sources and they resolve in this order: an unguarded #define in src/boards/<board>.h wins outright (a -D is a define at the top of the translation unit and a later unguarded #define redefines it — gcc -DHAS_SD=0 over #define HAS_SD 1 yields 1); then a -D in the env build_flags or the board manifest's extra_flags, which beats only the last; then the #ifndef default in src/Config.h. HAS_LVGL_UI reaches its three boards only through the second, and psram reaches some boards only through an interpolated ${section.build_flags} and one board (the T-Beam) only through its manifest. mcu/flash_mb/partitions come from platformio.ini and the manifests vendored under boards/, which is why the gate runs without PlatformIO installed. display is null for a board with no panel and is never a geometry the build merely defaulted to: heltec-wb says HAS_DISPLAY 0 and would otherwise inherit 128x64; width/height are the controller's own, with rotation beside them because the prose display field quotes the rotated figures for two boards. graphical_ui is HAS_LVGL_UI and not a touch layer — the M9 has a graphical shell and no digitiser. peripherals track the HAS_* switch each one follows, and any field nothing can be checked against is refused rather than recorded.",
   "_usb_identity": {
     "_comment": "What the S3's composite USB device (CDC-ACM console + CDC-NCM network) says it is; the ACM interface itself is the core's and named by it. tools/board_caps.py hands the strings to the core as USB_MANUFACTURER/USB_PRODUCT/USB_NETWORK_INTERFACE and the pair to the firmware as RETIMESH_USB_VID/RETIMESH_USB_PID (the core's variant header fixes USB_VID/USB_PID, so UsbNcm.cpp supplies the device descriptor itself); the host tool recognises the pair and the product string; the serial number is the factory MAC. 1209:0001 is pid.codes' test allocation, permitted for development and forbidden for anything shipped; an Espressif PID under 0x303A is requested per github.com/espressif/usb-pids.",
     "vid": "0x1209",
@@ -20,6 +21,30 @@
     "extras": "microSD, battery ADC",
     "status": "verified (SX1276), SX1262 expected",
     "notes": "0.96\" OLED, 4 MB flash, 2 MB PSRAM. The transceiver (SX1262 or SX1276/78) is detected at boot. Native USB — hold BOOT while pressing RST if the port is not detected.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 4,
+      "psram": true,
+      "partitions": "partitions/ota_4mb.csv",
+      "display": {
+        "kind": "oled",
+        "width": 128,
+        "height": 64,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": false,
+        "sd": true,
+        "pmu": false,
+        "battery_adc": true,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": true,
@@ -46,6 +71,30 @@
     "extras": "—",
     "status": "builds; wire per flags",
     "notes": "8 MB flash, quad PSRAM. Wire the SX1262 as documented in platformio.ini (PIN_LORA_* overrides).",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 8,
+      "psram": true,
+      "partitions": "default_8MB.csv",
+      "display": {
+        "kind": "oled",
+        "width": 128,
+        "height": 64,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": false,
+        "sd": true,
+        "pmu": false,
+        "battery_adc": true,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": true,
@@ -72,6 +121,30 @@
     "extras": "18650 holder, AXP192/AXP2101 PMU, u-blox GPS, PPP over the CH9102 bridge; **no SD slot**",
     "status": "verified on hardware — see the T-Beam notes below; PPP built, not yet run on this board",
     "notes": "18650 holder, AXP192/AXP2101 power management, u-blox GPS, 0.96\" OLED, no SD card slot. The transceiver and the PMU revision are both detected at boot. Serial is a CH9102 bridge — hold the middle button while pressing RST if flashing does not start. The serial port also carries PPP: pppd on the host makes the node a network interface at 10.65.<n>.1 (docs/local-link.md).",
+    "capability": {
+      "mcu": "esp32",
+      "flash_mb": 4,
+      "psram": true,
+      "partitions": "huge_app.csv",
+      "display": {
+        "kind": "oled",
+        "width": 128,
+        "height": 64,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": true,
+        "sd": false,
+        "pmu": true,
+        "battery_adc": false,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": false,
@@ -109,6 +182,30 @@
     "extras": "18650 holder, AXP2101 PMU owning six rails, u-blox MAX-M10S **or** Quectel L76K GNSS, microSD, PCF8563 RTC, Qwiic socket; BME280 driven (temperature, humidity, pressure); QMI8658 IMU on SPI \u2014 driven, and faulty on the unit tested here: LilyGO's own example finds every other part on the board and cannot find this one either; QMC6310N magnetometer driven at 0x3c (heading, field strength and hard-iron calibration; uncorrected for tilt on this unit, whose accelerometer is faulty)",
     "status": "verified on hardware 2026-09-08: SX1262 on air both ways (rx 24, tx 7 at 869.525, rssi -34, snr 12.5), AXP2101 found on its own I2C host and every rail it feeds alive \u2014 radio, panel, clock and card slot, microSD mounted (8 GB SDHC, Reticulum store moved onto it), PCF8563 holding time to a second, GNSS talking (932 sentences, no fix indoors), 8 MB of PSRAM free, the SH1106 panel rendering its pages and stepping through them on the button, and the BME280 reading 27.7 C, 60 % and 1012.7 hPa. The panel is at **0x3D**, not the 0x3C that both its address probe and the RNode firmware point at: 0x3c is the QMC6310 magnetometer, which took an entire SH1106 initialisation without complaint because a register file accepts any write, while the glass kept the previous firmware's picture and every status field reported the display fine. The three parts on that bus are now each identified by asking them \u2014 0x3c magnetometer, 0x3d panel, 0x77 BME280 \u2014 The 6-axis part is fitted and does not answer: its select works and something drives MISO when it is asserted, but every register reads zero, no write lands, the vendor's reset never completes, and none of it changes across all four SPI modes, two clock rates, a hand-clocked control, or every rail the AXP2101 has. LilyGO's own QMI8658 example, built from their repository with their board definition and rail init, finds the magnetometer, panel, BME280, card and GNSS and then reports \"Failed to find QMI8658 - check your wiring!\" \u2014 so it is a hardware fault on this unit rather than anything a firmware change reaches. Their magnetometer example does read the QMC6310N here, which is what made driving it a port rather than a research task \u2014 it is now driven by this firmware, whose register values and scale are the ones that example was running. Their GNSS probe identifies this unit's receiver as the u-blox MAX-M10S. USB composite with usb0 ready, Wi-Fi AP and transport online. One thing the bench has not settled: whether a rail-cut GNSS nap costs a cold start here",
     "notes": "The T-Beam's successor and a different machine: an ESP32-S3 with native USB where the classic T-Beam is a bridged ESP32, two I2C buses where it has one, two SPI buses, and an AXP2101 that owns six rails rather than three. The rail map is the part with no room for inference \u2014 this board feeds the transceiver from ALDO3 and the receiver from ALDO4, where the T-Beam uses ALDO2 and ALDO3, so the T-Beam's map applied here powers a sensor rail and leaves the radio dark. Its panel is an SH1106, which is a 132-column controller showing the middle 128 and has no horizontal addressing mode: driven by the SSD1306's driver it comes up two columns out of place. The receiver is either a u-blox or a Quectel part depending on the unit and nothing on the wire says which, so the build speaks NMEA to both and naps the receiver by cutting its rail, which works either way. esptool cannot put this board into its downloader over USB \u2014 not from the factory image and not from ours, both of which answer \"No serial data received\" \u2014 which is why auto_reset_dtr_rts is false here where its native-USB siblings say true; a 1200-baud touch on the CDC port does it, and the console's own BOOTLOADER CONFIRM is offered. A/B over the air on partitions/ota_8mb.csv \u2014 two 3264 KiB app slots and a 1536 KiB filesystem, which are LilyGO's own numbers, read off this board's factory image. A partition table is a one-way door, so a Supreme already flashed with the single-slot table has to be written whole once over a cable to gain the second slot.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 8,
+      "psram": true,
+      "partitions": "partitions/ota_8mb.csv",
+      "display": {
+        "kind": "oled",
+        "width": 128,
+        "height": 64,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": true,
+        "sd": true,
+        "pmu": true,
+        "battery_adc": false,
+        "imu": true,
+        "compass": true,
+        "environment": true,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": true,
@@ -135,6 +232,30 @@
     "extras": "microSD, battery ADC",
     "status": "verified on hardware",
     "notes": "0.96\" OLED, SD slot, 4 MB flash. The plain SX1280 module: no power amplifier, so the chip's 13 dBm ceiling applies. The amplified variant is a different image — see t3s3-sx1280-pa. The radio is selected at build time rather than detected, so neither is interchangeable with the sub-GHz t3s3 build. Defaults to 2445 MHz / 812.5 kHz / SF8.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 4,
+      "psram": true,
+      "partitions": "huge_app.csv",
+      "display": {
+        "kind": "oled",
+        "width": 128,
+        "height": 64,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": false,
+        "sd": true,
+        "pmu": false,
+        "battery_adc": true,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": true,
@@ -161,6 +282,30 @@
     "extras": "microSD, battery ADC",
     "status": "**builds only — never run on hardware**, see below",
     "notes": "As t3s3-sx1280, but for the amplified module: the PA sits behind an RX/TX switch on GPIO 21/10 and the ceiling rises to 20 dBm. Flashing this image on a plain board would drive two GPIOs that board uses for something else, so pick by what is actually fitted.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 4,
+      "psram": true,
+      "partitions": "huge_app.csv",
+      "display": {
+        "kind": "oled",
+        "width": 128,
+        "height": 64,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": false,
+        "sd": true,
+        "pmu": false,
+        "battery_adc": true,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": true,
@@ -187,6 +332,30 @@
     "extras": "PPP over the CP2102 bridge (no SD, no GNSS)",
     "status": "verified on hardware; PPP built, not yet run on this board",
     "notes": "0.49\" 64x32 OLED on the switched Vext rail, SX1276, 8 MB flash, no SD slot and no GNSS. The small panel gets its own page layout — ten columns and four rows — rather than the 128x64 one clipped. Serial is a CP2102 bridge, and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. The serial port also carries PPP: pppd on the host makes the node a network interface at 10.65.<n>.1 (docs/local-link.md). Uses the 8 MB partition table for the same reason the V3 does: no SD card, so the filesystem is the only storage the transport store has.",
+    "capability": {
+      "mcu": "esp32",
+      "flash_mb": 8,
+      "psram": false,
+      "partitions": "partitions/huge_app_8mb.csv",
+      "display": {
+        "kind": "oled",
+        "width": 64,
+        "height": 32,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": false,
+        "sd": false,
+        "pmu": false,
+        "battery_adc": false,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": false,
@@ -224,6 +393,24 @@
     "extras": "front LEDs for Wi-Fi and LoRa (the BLE one stays dark), aluminium shell, two SMA sockets, internal 2-pin battery connector, PPP over the CP2102 bridge; no SD, no GNSS",
     "status": "verified on hardware; PPP built, not yet run on this board",
     "notes": "The Wireless Stick's ESP32 and SX1276 in an aluminium box with two SMA antenna sockets, 8 MB flash and 8 MB PSRAM, no display, no SD slot and no GNSS: a headless relay. Serial is a CP2102 bridge on the micro-USB socket, and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. The serial port also carries PPP: pppd on the host makes the node a network interface at 10.65.<n>.1 (docs/local-link.md) — the one IP link a headless box in a cupboard has besides Wi-Fi. Uses the 8 MB partition table: no SD card, so the filesystem is the only storage the transport store has.",
+    "capability": {
+      "mcu": "esp32",
+      "flash_mb": 8,
+      "psram": true,
+      "partitions": "partitions/huge_app_8mb.csv",
+      "display": null,
+      "peripherals": {
+        "gnss": false,
+        "sd": false,
+        "pmu": false,
+        "battery_adc": false,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": false,
@@ -261,6 +448,30 @@
     "extras": "PPP over the CP2102 bridge (no SD, no GNSS)",
     "status": "verified on hardware; PPP built, not yet run on this board",
     "notes": "0.96\" 128x64 OLED on the switched Vext rail, SX1262 with a TCXO, 8 MB flash and no PSRAM, no SD slot and no GNSS. Very common hardware. A CP2102 bridge rather than the S3's native USB, so it appears as /dev/ttyUSB* and not as an Espressif JTAG device — and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. The serial port also carries PPP: pppd on the host makes the node a network interface at 10.65.<n>.1 (docs/local-link.md), and being an S3 it can be put into its downloader over that link. Uses an 8 MB partition table: the stock one maps only the first 4 MB, and with no SD card the filesystem is the only storage the transport store has.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 8,
+      "psram": false,
+      "partitions": "partitions/huge_app_8mb.csv",
+      "display": {
+        "kind": "oled",
+        "width": 128,
+        "height": 64,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": false,
+        "sd": false,
+        "pmu": false,
+        "battery_adc": false,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": false,
@@ -298,6 +509,30 @@
     "extras": "PPP over the CP2102 bridge (no SD, no GNSS)",
     "status": "verified on hardware (console, Wi-Fi, transport, SX1262 self-test, e-paper panel); PPP built, not yet run on this board",
     "notes": "The WiFi LoRa 32 V3's ESP32-S3 and SX1262 with a 2.13\" e-ink panel in place of the OLED, 8 MB flash and no PSRAM, no SD slot and no GNSS. The panel is driven through the display abstraction: pages draw on a GFX canvas and a refresh policy decides what reaches the glass, because an e-ink screen is written in whole frames and takes most of a second to do it. Revisions differ only in the panel — V1.0 is a DEPG0213BNS800, V1.1 an LCMEN2R13EFC1, V1.1.1 and V1.2 an E0213A367 — while the pins are the same across all of them; this build drives the E0213A367, so it covers V1.1.1 and V1.2. A CP2102 bridge rather than the S3's native USB, so it appears as /dev/ttyUSB* and not as an Espressif JTAG device — and every CP2102 reports the serial number 0001, so with more than one attached /dev/serial/by-id/ names only one of them and the rest have to be found by path. The serial port also carries PPP, as on the other Heltec boards. The radio's reset, busy and IRQ pins are the Heltec S3 family's rather than sourced twice for this board, so it boots with the radio self-test on — which passed on the first flash, one packet out and one back, and is what settles them.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 8,
+      "psram": false,
+      "partitions": "partitions/huge_app_8mb.csv",
+      "display": {
+        "kind": "eink",
+        "width": 250,
+        "height": 122,
+        "rotation": 0,
+        "graphical_ui": false
+      },
+      "peripherals": {
+        "gnss": false,
+        "sd": false,
+        "pmu": false,
+        "battery_adc": false,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": false,
+        "buzzer": false
+      }
+    },
     "local_link": {
       "usb": {
         "native": false,
@@ -335,6 +570,30 @@
     "extras": "two buttons + case power button (charger /QON), DA217 accelerometer, BQ25896-ready charging state, battery ADC, GNSS on the expansion header; expansion slots for sounder/sensors (no SD); BME280 driven at 0x76 (temperature, humidity, pressure) and a GXHT3V — an SHTC3 clone — driven at 0x70 (temperature, humidity), both on the main I2C beside the accelerometer at 0x26. Both are reported separately rather than merged: they measure the same two quantities and do not agree exactly, and which part a number came from is the operator's to see",
     "status": "verified on hardware: radio through the KCT8103L front end (TX and RX on air), GNSS fix + clock, panel, touch, both buttons; sounder is on an expansion module, none fitted on the bench unit. The DA217 accelerometer is suspended while the screen is dark and comes back with it — a dark panel needs no orienting — and `STATUS` reports it as `imu=asleep`; the suspend register value is the kernel da280 driver's and has not yet been exercised on this board, so that line is what confirms it took",
     "notes": "The first colour panel and the first amplified front end in this firmware, and the first 16 MB board. The pin map has one published source — the board definition in the open-source firmware it ships with (variants/esp32s3/heltec_v4, the TFT build) — rather than the two this project prefers, so the panel, touch, button and sounder pins are unverified; the LoRa pins are the V3's and carry more weight. The front end is the part with no equivalent elsewhere here: the radio is deaf and mute until the amplifier rail is powered and its mode pins are driven, and which of two parts is fitted is read off GPIO 2 at boot. Native USB, so it enumerates as an Espressif JTAG/serial device with its MAC in the by-id name and none of the CP2102 ambiguity the rest of this bench has. OTG runs the composite device: CDC-ACM console plus CDC-NCM networking, the same stack the T3-S3s carry — note the by-id name changes to the RetiMesh identity once this firmware boots.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 16,
+      "psram": true,
+      "partitions": "partitions/ota_16mb.csv",
+      "display": {
+        "kind": "tft",
+        "width": 240,
+        "height": 320,
+        "rotation": 0,
+        "graphical_ui": true
+      },
+      "peripherals": {
+        "gnss": true,
+        "sd": false,
+        "pmu": false,
+        "battery_adc": true,
+        "imu": true,
+        "compass": false,
+        "environment": true,
+        "touch": true,
+        "buzzer": true
+      }
+    },
     "local_link": {
       "usb": {
         "native": true,
@@ -361,6 +620,30 @@
     "extras": "physical keyboard on its own microcontroller (I2C), trackball with a click on the BOOT pin, microSD, battery ADC, speaker on a MAX98357A over I2S (driven: the boot and message chimes), microphone on an ES7210 (not driven — it costs GPIO 0, which is the trackball's click); GNSS on the Plus only",
     "status": "verified on hardware: SX1262 on air (receiving announces from another node), Reticulum transport, panel with correct colours and text, its stepped backlight, touch landing where the finger is, keyboard, trackball, microSD on the shared bus, GNSS fix and clock, Wi-Fi AP, portal and console, and the speaker — the boot chime was heard on the bench. The speaker costs about 5.4 KB of internal RAM for its task and I2S DMA, on a board that has little to spare, and its task now carries the tightest stack of any on the board. This is a Plus — a plain T-Deck has neither the receiver nor the touch layer. The battery divider reads the system rail on USB and so reports no cell; unverified on battery",
     "notes": "The first board here that is a terminal rather than a gateway: it has keys to type a message on, so the LVGL shell's on-glass keyboard steps aside and the field takes the real ones. Three firsts, each of which cost more than the pin map. The panel, the radio and the card share one SPI bus, which is safe — the Arduino core's per-bus mutex is what beginTransaction takes, and no driver here attaches a hardware chip select — but needs every select idled before any driver starts, because the first one to talk otherwise does so beside two floating selects (src/sys/BoardInit.cpp). Nothing on the board answers until the peripheral rail on GPIO 10 is raised, and an unraised rail reads exactly like a wiring fault: empty bus, absent transceiver. And the backlight is a one-wire dimmer whose brightness is a pulse count rather than a duty cycle, so the PWM every other board uses lands on whatever level the wrap leaves — lit, but not dimmable. The pin map is the best-sourced in this registry: LilyGO's own reference firmware and the Meshtastic, MeshCore and Zephyr ports agree on every number. Native USB, same composite stack as the T3-S3s.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 16,
+      "psram": true,
+      "partitions": "partitions/ota_16mb.csv",
+      "display": {
+        "kind": "tft",
+        "width": 240,
+        "height": 320,
+        "rotation": 1,
+        "graphical_ui": true
+      },
+      "peripherals": {
+        "gnss": true,
+        "sd": true,
+        "pmu": false,
+        "battery_adc": true,
+        "imu": false,
+        "compass": false,
+        "environment": false,
+        "touch": true,
+        "buzzer": true
+      }
+    },
     "local_link": {
       "usb": {
         "native": true,
@@ -387,6 +670,30 @@
     "extras": "full keyboard on its own microcontroller (I2C, register-addressed) with six shortcut keys wired to the shell's screens, ATGM336H GNSS, microSD, sounder, PCF8563 RTC, QMI8658 IMU, QMC6309 magnetometer, 2300 mAh cell behind an LGS4056 charger; PPP over the CH340 bridge",
     "status": "verified on hardware: LR1110 online and on air (boot self-test TxDone in 7 ms through the chip's own antenna switch, and a packet received), panel, keyboard, microSD on the shared bus (15.6 GB SDHC, Reticulum store on the card), GNSS talking (308 sentences, no fix indoors), Wi-Fi AP, mDNS, portal and Reticulum transport. Two caveats: the transceiver's own firmware is 0x0303, old enough that RadioLib has to skip a command for it (see the env's RadioLib pin) and old enough to predate Semtech's security fixes; and the panel's rotation and the battery divider are taken from the sources rather than measured. The PCF8563 clock is driven: it was already holding correct UTC before this firmware ever wrote it, seeds the system clock at boot, and is re-seeded from the receiver — so this board's time is right indoors with no fix, where every other board here counts from 1970 until the sky clears. The QMI8658 accelerometer and QMC6309 magnetometer are driven — both identified by register dump before a driver was written (WHO_AM_I 0x05, chip id 0x90) — and report a tilt-compensated heading on the console. **That heading changed direction** when the T-Beam Supreme's magnetometer was driven: the tilt correction had gravity's sign convention wrong and returned a bearing reflected about north for a board lying flat \u2014 steady, turning with the board, and mirrored. It is fixed and pinned by test_mag_heading, and this board's heading wants re-checking against a known bearing. The heading's hard-iron offsets need the board turned around once before they mean anything, which STATUS reports as cal=; the board's own field is about 385 uT, several times the Earth's and almost all of it perpendicular to the panel, so that correction is not optional here — measured to be the board's rather than the bench's by moving it off a laptop it was resting on, which changed the reading by under a microtesla. The offsets are kept in NVS across restarts for the same reason. Both parts are suspended while the screen is dark and come back with it \u2014 so `STATUS` on a node whose display has timed out reports `compass=asleep` rather than a bearing, and any key or button press brings it back within a poll. That is this board's own setting (COMPASS_FOLLOWS_SCREEN 1) rather than a rule about consumers: no page here shows a bearing either, and the reason the M9 sleeps its parts is that it is a handheld on a cell whose standby current with a magnetometer converting at 200 Hz has never been measured. A caller polling /api/status on a dark M9 is told asleep, and loading a web page does not wake the glass",
     "notes": "The first board here whose radio is not a Semtech SX12xx. The LR1110 is a new family (RadioLib LR11x0) and the reason this board took the work it did: it drives its own antenna switch from its own DIO lines, and until it is told which line means what in each mode it answers over SPI, reports a firmware version, accepts a channel and transmits into a pin that goes nowhere — online by every measure this firmware has, and silent. So the radio is declared by the board rather than probed for, and the switch table lives in the board header. Its bandwidth list is four steps below 1 GHz where the SX126x has ten, so a channel carried over in NVS from another board is corrected at boot rather than failing the probe. Two more firsts: the peripheral rail is active low here (the T-Deck's is active high), and the chip's own USB pins are spent on the panel and the keyboard bus, so the USB pad is released at boot and the console is the CH340 bridge on UART0. No touch layer at all — the shell is driven from the keyboard, which is what the keypad group is for.",
+    "capability": {
+      "mcu": "esp32s3",
+      "flash_mb": 16,
+      "psram": true,
+      "partitions": "partitions/ota_16mb.csv",
+      "display": {
+        "kind": "tft",
+        "width": 240,
+        "height": 320,
+        "rotation": 3,
+        "graphical_ui": true
+      },
+      "peripherals": {
+        "gnss": true,
+        "sd": true,
+        "pmu": false,
+        "battery_adc": true,
+        "imu": true,
+        "compass": true,
+        "environment": false,
+        "touch": false,
+        "buzzer": true
+      }
+    },
     "local_link": {
       "usb": {
         "native": false,
