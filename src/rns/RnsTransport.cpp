@@ -2038,17 +2038,40 @@ static void refreshSnapshots(bool allowSweep) {
   //
   // An offset rather than a saved iterator, because the table is mutated
   // between passes — by the removal at the end of this very function, among
-  // others — and no iterator survives that. What an offset costs is that it
-  // means something only while iteration order holds: the index behind
-  // NewPathTable is a std::unordered_map (microStore's FileStore.h), so order
-  // is bucket order, an erase leaves the rest where it was, and an insert that
-  // rehashes reorders the whole table rather than shifting a tail. Positions
-  // are therefore comparable from one pass to the next until a rehash, and
-  // after one the cursor means a different place — so entries either side of it
-  // are examined twice or skipped for a cycle. For a cleanup sweep that is one
-  // more minute, which is the right price for not holding an iterator across a
-  // deletion. What it must not do is point outside the table altogether, which
-  // is sweepResumePos() below.
+  // others — and no iterator survives that.
+  //
+  // What an offset costs is that it is an *ordinal*, not an address: the number
+  // of ++it steps from begin(). The index behind NewPathTable is a
+  // std::unordered_map (microStore's FileStore.h) and the store's iterator
+  // walks it — operator++ is ++pos_ on the map's own iterator — so the position
+  // means the same place from one pass to the next only while nothing has
+  // shifted the count. Three things do:
+  //
+  //   * An erase. It does not rehash and the survivors keep their buckets, but
+  //     every element after the erased one loses an ordinal — an entry dropped
+  //     ahead of the cursor shifts the whole tail behind it by one. This is the
+  //     ordinary path, not an exotic one: remove_paths() at the end of this
+  //     function drops up to SNAPSHOT_MAX_PATHS entries after every sweeping
+  //     pass, and a stale entry is collected on the Row step as well as the
+  //     Examine step — that is, at the front of the table, behind a cursor that
+  //     has already worked its way past it.
+  //   * An insert that rehashes, which reorders the whole table rather than
+  //     shifting a tail.
+  //   * Segment-rotation compaction. A put() that fills the active segment
+  //     calls rotate_segment_if_needed(), which on the last segment calls
+  //     compact(); that ends in finalize_compaction(), which does _index.clear()
+  //     and rebuilds the map by rescanning the compacted segment — a wholesale
+  //     reorder (FileStore.h). Its sibling, the dead-record-threshold
+  //     compaction, is *not* reachable on this store: compact_if_threshold() is
+  //     gated on policy_max_recs > 0, that member defaults to
+  //     USTORE_DEFAULT_MAX_RECS which is 0, and the only thing that would set it
+  //     — Transport::path_table_maxsize() — is never called from src/.
+  //
+  // So the cursor is an approximation between passes rather than an identity,
+  // and entries either side of a shift are examined twice or skipped for a
+  // cycle. For a cleanup sweep that is one more minute, which is the right
+  // price for not holding an iterator across a deletion. What it must not do is
+  // point outside the table altogether, which is sweepResumePos() below.
   static size_t sSweepPos = 0;
   stale.clear();
   // A cursor the table has outgrown is not a cursor. `stale` is capped at
@@ -2126,18 +2149,22 @@ static void refreshSnapshots(bool allowSweep) {
     // inside its budget so the task reaches the sleep at the end of its loop.
     // Both are derived in SnapshotWalk.h.
     //
-    // Yielding here holds a live store iterator across the delay, which is only
-    // safe because this task is the single entrant into RNS:: — Transport is
-    // single-threaded and the RNS task owns every call into it (main.cpp); no
-    // other translation unit in src/ names RNS:: at all, and every entry point
-    // in this one that another task calls posts to a queue, sets an atomic, or
-    // copies an already-published value under sSnapLock — none of them enters
-    // Transport or the store. So nothing can put, remove or compact the store
-    // while this delay runs, which matters because microStore documents
-    // mutating a store during iteration as undefined (FileStore.h). That is a
-    // property held by convention and a grep rather than by the type system, so
-    // it is written down here: an interface that touched RNS:: from its own
-    // task would break this line first.
+    // Yielding here holds a live store iterator across the delay, which is safe
+    // because nothing another task calls can *mutate* this store. Transport is
+    // single-threaded and the RNS task owns every call into it (main.cpp), and
+    // no other translation unit in src/ names RNS:: at all. Nearly every entry
+    // point in this one that another task calls posts to a queue, sets an
+    // atomic, or copies an already-published value under sSnapLock. The
+    // exceptions are nomadAddress() and lxmf(), which do reach into RNS:: from
+    // loopTask (Maintenance.cpp), the AsyncTCP task (WifiManager.cpp) and the
+    // display task (UiHome.cpp, UiIdentity.cpp) — but only for
+    // Destination::hash(), which returns a Bytes cached on the destination
+    // object and touches no store at all. So nothing can put, remove or compact
+    // the store while this delay runs, which matters because microStore
+    // documents mutating a store during iteration as undefined (FileStore.h).
+    // That is a property held by convention and a grep rather than by the type
+    // system, so the checkable form of it is written down here: an interface
+    // that mutated a store from its own task would break this line first.
     if (Rns::walkShouldYield(w.elapsedMs, lastYieldMs)) {
       lastYieldMs = w.elapsedMs;
       // A bare tick count, not pdMS_TO_TICKS(1): at any tick rate below 1 kHz
@@ -2190,6 +2217,16 @@ static void refreshSnapshots(bool allowSweep) {
   if (!stale.empty()) {
     uint16_t dropped = RNS::Transport::remove_paths(stale);
     log_i("dropped %u stored path(s) whose interface is gone", (unsigned)dropped);
+    // The other end of the bracket, and it was missing. The removal runs after
+    // the walk's own feed above and is nothing like free: `stale` is capped by
+    // count at SNAPSHOT_MAX_PATHS, and every entry in it is a
+    // BasicFileStore::remove() — a tombstone appended and flush_buffer()'d (a
+    // write and a flush of the segment file), then persist_index_entry(), a
+    // second write and an explicit flush of the index file (FileStore.h). Up to
+    // 64 write-and-sync pairs between two feeds is exactly "bounded by count is
+    // not bounded by time", which is the fallacy the budget above exists to
+    // kill (SnapshotWalk.h).
+    Watchdog::feed();
   }
   // Counted into locals and published below with the lists they describe. As
   // members they were written here, outside the lock every reader takes, and

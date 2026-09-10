@@ -101,11 +101,16 @@ namespace Rns {
 // cycle never closes; and a dead entry beyond it is never found at all. The
 // regime is exactly rowCap x per-record cost > kWalkBudgetMs — with 64 rows,
 // any store charging more than 6.25 ms a record, and lower still on a table
-// with dead entries in it, which cost a read and fill no row. The 30 ms a
-// record costs in the regime this firmware links is well past that line: a
-// pass reads fourteen records, so any node holding more paths than that is in
-// it. test_a_row_bound_table_never_advances_the_cursor drives it, and is
-// written to be flipped by the pass that resumes row collection across passes.
+// with dead entries in it, which cost a read and fill no row. At the 30 ms a
+// record measured on a 200-record store (platformio.ini), a pass reads
+// fourteen. What that fourteen is not is a crossover: both per-record figures
+// in this file were taken on a 200-record store, and nothing in this tree
+// measures what a record costs on a table of ten, so the count a smaller table
+// reads does not follow from either. The regime a sentence above is the part
+// that is unarguable; where the real crossover falls is a measurement nobody
+// has taken. test_a_row_bound_table_never_advances_the_cursor drives the
+// regime, and is written to be flipped by the pass that resumes row collection
+// across passes.
 //
 // What is bought for that, and why the bound is taken anyway: pathCount() is
 // the whole table and is unaffected, no pass is long, and the node stays up.
@@ -161,6 +166,13 @@ constexpr uint32_t kWalkBudgetMs = 400;
 // RNS task preempts loopTask again the moment that tick readies it. Three of
 // them are therefore 0-3 ms of core 1 per pass, with a floor of nearly nothing.
 //
+// And a yield hands the core to the highest-priority *ready* task, which need
+// not be the one it was meant for: the radio task is priority 5 on core 1
+// (main.cpp), above this one and far above loopTask, so a yield that lands
+// while a frame is being drained is worth loopTask nothing at all. Which is
+// another way of saying the same thing — the yields are a margin, not a
+// guarantee, and nothing below should be read as one.
+//
 // So the yields are a margin inside the walk. They are not what stops loopTask
 // starving — the budget is, and by a different mechanism entirely.
 // refreshSnapshots() returns immediately unless SNAPSHOT_INTERVAL_MS (5000 ms)
@@ -173,17 +185,46 @@ constexpr uint32_t kWalkBudgetMs = 400;
 // is longer than the interval, so the gate was already open when the pass
 // returned and the next walk began at once. Passes ran back to back, and
 // loopTask got the one 10 ms sleep per 7.5 s of walking that separated them,
-// against a watchdog of 30 s (WATCHDOG_TIMEOUT_S). Milliseconds per pass is
-// what the yields add to that; seconds per five-second window is what the
-// budget returns, and the second number is the rescue.
+// against a watchdog of 30 s (WATCHDOG_TIMEOUT_S).
 //
-// Which is why kWalkBudgetMs must stay well inside SNAPSHOT_INTERVAL_MS. A
-// budget that lets a pass outlast the interval brings the back-to-back passes
-// back, and no yield cadence rescues that. Someone buying rows back with a 3 s
-// budget would get 29 yields to a pass rather than three, and they would still
-// be worth at most a millisecond each — under 30 ms of core 1 for every 3 s of
-// walking, against a walk that once again never stops. So the relation is
-// asserted rather than asked for (walkBudgetFitsInterval() below), and it is
+// Which on its own does not yet predict a reboot: a task that gets 10 ms every
+// 7.5 s and fed at the top of its body would feed every 7.5 s, comfortably
+// inside 30 s. The step that closes it is that a preempted task resumes
+// *mid-body*, not at the top — Watchdog::feed() is the first statement of
+// loop() (main.cpp), so loopTask has to accumulate a whole loop() body of CPU
+// out of those 10 ms slices before it reaches the feed again, and each slice is
+// 7.5 s from the next. That body is not small: Rns::Inbox::poll() writes a
+// queued message to flash, Imu, Compass and Environment each poll a part on
+// I2C, and ConsoleServer::poll() and Maintenance::poll() run before them. A
+// body wanting more CPU than three or four slices carry is therefore 30 s or
+// more between one feed and the next, and that is the reboot.
+//
+// Milliseconds per pass is what the yields add to that; seconds per
+// five-second window is what the budget returns, and the second number is the
+// rescue.
+//
+// Which is why kWalkBudgetMs must stay well inside SNAPSHOT_INTERVAL_MS. The
+// hazard itself is budget + worst record reaching the interval: at that point
+// the gate is open again the moment the pass returns, the back-to-back passes
+// are back, and no yield cadence rescues that. Someone buying rows back with a
+// 6 s budget would get 49 yields to a pass rather than three, and they would
+// still be worth at most a millisecond each — under 50 ms of core 1 for every
+// 6 s of walking, against a walk that once again never stops. (Forty-nine and
+// not sixty: a yield costs a tick that is itself charged to the budget, so at
+// 30 ms a record the yields land about 121 ms apart rather than 100. The figure
+// is driven in test_snapshot_walk rather than divided out here, which is how it
+// was found to be wrong.)
+//
+// The quarter walkBudgetFitsInterval() enforces is not that cliff edge; it is a
+// deliberate 4x margin short of it, so the guard fires on a retune that is
+// merely unwise rather than only on one that is already fatal. A 3 s budget
+// fails it and should: 3 s of walking to 2 s of loop is a node spending most of
+// its time in this function. But 3 s does not reproduce the failure — the pass
+// ends 2 s before the gate reopens, and the RNS task still reaches the 10 ms
+// sleep at the end of its loop about two hundred times in that remainder.
+//
+// So the relation is asserted rather than asked for (walkBudgetFitsInterval()
+// below), and it is
 // worth asserting because nothing else would catch a repeat: core 1's idle
 // task is not watched (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is unset in
 // both sdkconfigs, while CPU0's is set), so loopTask's own subscription in
@@ -208,8 +249,12 @@ static_assert(kWalkYieldMs > 0 && kWalkYieldMs * 2 < kWalkBudgetMs,
 // Config.h's and this header depends on nothing (see the top of the file).
 // RnsTransport.cpp static_asserts it against the real figure beside the call,
 // and test_snapshot_walk asserts the same thing on the host.
+//
+// Divided rather than multiplied. The two are the same relation for every pair
+// of integers that does not overflow, and only one of them stays that way: an
+// absurd budget makes kWalkBudgetMs * 4 wrap and the guard answer "fits".
 constexpr bool walkBudgetFitsInterval(uint32_t intervalMs) {
-  return (uint32_t)(kWalkBudgetMs * 4) <= intervalMs;
+  return kWalkBudgetMs <= intervalMs / 4;
 }
 
 // What the walk should do with the position it is standing on.

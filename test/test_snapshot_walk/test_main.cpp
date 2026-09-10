@@ -89,7 +89,7 @@ constexpr uint32_t kSlowRecordMs = 162;
 // One position's inputs, spelled out so a test reads as a sentence.
 // ---------------------------------------------------------------------------
 Rns::WalkState at(size_t rows, bool sweeping, size_t pos, size_t sweepPos,
-                  uint32_t elapsedMs) {
+                  uint32_t elapsedMs, uint32_t budgetMs = Rns::kWalkBudgetMs) {
   Rns::WalkState w;
   w.rowsCollected = rows;
   w.rowCap        = kRowCap;
@@ -97,7 +97,7 @@ Rns::WalkState at(size_t rows, bool sweeping, size_t pos, size_t sweepPos,
   w.pos           = pos;
   w.sweepPos      = sweepPos;
   w.elapsedMs     = elapsedMs;
-  w.budgetMs      = Rns::kWalkBudgetMs;
+  w.budgetMs      = budgetMs;
   return w;
 }
 
@@ -127,12 +127,12 @@ struct Pass {
 
 Pass runWalk(const std::vector<bool>& live, bool sweeping, size_t sweepPos,
              uint32_t recordMs, uint32_t yieldMs = Rns::kWalkYieldMs,
-             uint32_t tickMs = 1) {
+             uint32_t tickMs = 1, uint32_t budgetMs = Rns::kWalkBudgetMs) {
   Pass r;
   uint32_t lastYieldMs = 0;
   for (size_t pos = 0; pos < live.size(); pos++) {
     const Rns::WalkState w =
-        at(r.rows, sweeping, pos, sweepPos, r.elapsedMs);
+        at(r.rows, sweeping, pos, sweepPos, r.elapsedMs, budgetMs);
     const Rns::WalkStep step = Rns::walkStep(w);
     r.stoppedAt = pos;
     if (step == Rns::WalkStep::StopRowsFull) { r.rowsFull = true; return r; }
@@ -202,8 +202,14 @@ void test_the_budget_stays_well_inside_the_interval_a_pass_is_gated_on() {
   // which is the shape that took a T-Beam down at 7.5 s a walk. The firmware
   // static_asserts this beside the call; it is asserted here too, because this
   // is the file kWalkBudgetMs would be retuned in.
-  TEST_ASSERT_EQUAL_UINT32(5000, (uint32_t)SNAPSHOT_INTERVAL_MS);
-  TEST_ASSERT_TRUE(Rns::walkBudgetFitsInterval(SNAPSHOT_INTERVAL_MS));
+  //
+  // The relation, not the interval: retuning SNAPSHOT_INTERVAL_MS is allowed
+  // and this suite has no opinion on the figure, only on the two holding
+  // together. An equality on 5000 here would have failed such a retune while
+  // saying nothing about the rule.
+  TEST_ASSERT_TRUE_MESSAGE(Rns::walkBudgetFitsInterval(SNAPSHOT_INTERVAL_MS),
+                           "the rule is the relation: the walk's budget must stay "
+                           "inside a quarter of SNAPSHOT_INTERVAL_MS");
   // A quarter is where the line is: the same rule read the other way says the
   // budget may not exceed a quarter of the interval.
   TEST_ASSERT_TRUE(Rns::walkBudgetFitsInterval(Rns::kWalkBudgetMs * 4));
@@ -211,6 +217,51 @@ void test_the_budget_stays_well_inside_the_interval_a_pass_is_gated_on() {
   // At the figures the firmware ships, that leaves 12.5x rather than 4x.
   TEST_ASSERT_GREATER_OR_EQUAL_UINT32(Rns::kWalkBudgetMs * 12,
                                       (uint32_t)SNAPSHOT_INTERVAL_MS);
+  // The rule is written `budget <= interval / 4` rather than
+  // `budget * 4 <= interval`, which are the same relation on every pair of
+  // integers that does not overflow and differ on the pairs that do: a
+  // kWalkBudgetMs at or above 2^30 wraps the product to something small and the
+  // multiplied form answers "fits". The budget is a constant, so only the
+  // interval side is reachable from here — an interval too small to hold any
+  // budget is refused, and is not a division by anything.
+  TEST_ASSERT_FALSE(Rns::walkBudgetFitsInterval(0));
+  TEST_ASSERT_FALSE(Rns::walkBudgetFitsInterval(1));
+  TEST_ASSERT_FALSE(Rns::walkBudgetFitsInterval(3));
+}
+
+void test_a_budget_that_outlasts_the_interval_is_what_the_guard_is_for() {
+  // The passage in SnapshotWalk.h that this pins used to work its example at
+  // 3 s and call it "a walk that never stops". It is not. The guard's rule read
+  // as a bound on the budget is budget <= interval/4, so a 3 s budget does fail
+  // it on the shipped interval...
+  TEST_ASSERT_GREATER_THAN_UINT32((uint32_t)SNAPSHOT_INTERVAL_MS / 4, 3000u);
+  // ...but a 3 s pass, plus even the worst record this tree has measured, still
+  // ends well before the 5 s gate reopens, so the RNS task reaches the 10 ms
+  // sleep at the end of its loop a couple of hundred times in the remainder.
+  // The guard is a 4x margin, not the cliff.
+  TEST_ASSERT_LESS_THAN_UINT32((uint32_t)SNAPSHOT_INTERVAL_MS, 3000u + kSlowRecordMs);
+
+  // The cliff is a budget the interval cannot hold: the pass is still walking
+  // when the gate reopens, so the next one starts at once and the task never
+  // gets to its sleep. That is the shape that took the T-Beam down.
+  TEST_ASSERT_GREATER_THAN_UINT32((uint32_t)SNAPSHOT_INTERVAL_MS, 6000u);
+
+  // And the yields buy nothing there, which is the whole point of the example.
+  // Sixty would be 6000/100; the real figure is 49, because a yield costs a
+  // tick that is itself charged to the budget, so at 30 ms a record the yields
+  // land about 121 ms apart. Driven rather than divided out — dividing it out
+  // is how the comment came to claim 29 for the 3 s case, which is 24.
+  const Pass wide = runWalk(table(4000, true), true, 0, kFastRecordMs,
+                            Rns::kWalkYieldMs, 1, 6000);
+  TEST_ASSERT_TRUE(wide.ranOut);
+  TEST_ASSERT_EQUAL_size_t(49, wide.yields);
+  const Pass narrow = runWalk(table(4000, true), true, 0, kFastRecordMs,
+                              Rns::kWalkYieldMs, 1, 3000);
+  TEST_ASSERT_TRUE(narrow.ranOut);
+  TEST_ASSERT_EQUAL_size_t(24, narrow.yields);
+  // At the shipped budget it is three, and that is the figure the header quotes.
+  const Pass shipped = runWalk(table(4000, true), true, 0, kFastRecordMs);
+  TEST_ASSERT_EQUAL_size_t(3, shipped.yields);
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +587,7 @@ int main() {
   UNITY_BEGIN();
   RUN_TEST(test_the_constants_are_what_the_fix_committed_to);
   RUN_TEST(test_the_budget_stays_well_inside_the_interval_a_pass_is_gated_on);
+  RUN_TEST(test_a_budget_that_outlasts_the_interval_is_what_the_guard_is_for);
   RUN_TEST(test_the_budget_stops_a_pass_while_rows_are_still_filling);
   RUN_TEST(test_the_budget_applies_on_the_skip_path);
   RUN_TEST(test_rows_full_and_no_sweep_is_a_finish_not_a_budget_stop);
