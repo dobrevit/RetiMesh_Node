@@ -290,6 +290,7 @@ them on every push.
 | `test_telemetry` | what the node says about itself: sensor shapes, msgpack str against bin, and that a document too big is not sent half-written |
 | `test_nomadnet` | the node's own page: what it says, what it refuses to claim, and that a page never overruns the buffer a stranger asked it to fill |
 | `test_client_admit` | who gets one of the node's TCP client slots on :4242, and above all what a refusal costs: that a context which cannot be allocated or cannot be enrolled is given back and its client closed, rather than either being leaked or the node aborting |
+| `test_typed_store_iterator` | not our code but the promise the path-table walk rests on: that stepping a microStore iterator reads nothing and dereferencing is the only thing that opens a file. Held on both halves — `TypedStore` over a counting fake, and a real `BasicFileStore` over a counting RAM filesystem. It goes red when the pinned upstream branch moves the wrong way, not when this repository changes |
 
 ### HDLC fuzzing and the sanitizer gate
 
