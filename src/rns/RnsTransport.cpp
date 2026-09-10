@@ -37,6 +37,7 @@
 #include "LxmfCommands.h"
 #include "Telemetry.h"
 #include "PathWait.h"
+#include "SnapshotWalk.h"
 #include "NomadNet.h"
 #include "Diag.h"
 #include "Watchdog.h"
@@ -226,9 +227,9 @@ public:
     // consecutive radio drains of the order of 410 ms apart rather than 10.
     // That figure is derived in RingDrain.h; what follows is a summary of that
     // derivation rather than a second one, and it goes stale with it: the short
-    // of it is that kWalkBudgetMs — 400 ms, declared further down this file —
-    // bounds only the part of the walk that runs after the snapshot's rows are
-    // full, so 410 ms is the least such a gap can be and not the most.
+    // of it is that Rns::kWalkBudgetMs — 400 ms, in SnapshotWalk.h — bounds the
+    // walk but is checked only between records, and the walk is one part of a
+    // pass, so 410 ms is the least such a gap can be and not the most.
     //
     // At the fastest channel the settings will accept — SF7, the floor on every
     // part in RadioCaps; 500 kHz sub-GHz or 1625 kHz on the SX1280; CR 4/5; the
@@ -1947,26 +1948,12 @@ static uint32_t sSnapOkMs = 0;          // last pass that actually published; th
 // Dead paths are cleaned up on a slower clock than the reading is refreshed:
 // the reading is capped and cheap, the sweep walks the whole table.
 static const uint32_t kStaleSweepMs = 60000;
-// How long the sweep phase of one pass may spend reading path records back off
-// the filesystem.
-//
-// Not a tuning knob — a bound this walk did not have. Every record examined is
-// one file opened, sought, read and closed, and on LittleFS that is a
-// directory lookup plus several 512-byte reads, each of which disables the
-// flash cache and stalls the other core while it runs. The sweep dereferenced
-// the whole table in one pass, so its cost grew with the table, and on a node
-// whose table had grown large enough the pass outlasted the 30-second
-// watchdog. The node then rebooted every ninety seconds for two days without
-// once saying why, because the watchdog's own report died on the way out (see
-// Watchdog.h). Nothing here is allowed to be unbounded again.
-//
-// 400 ms is picked to be obviously survivable rather than optimal: two orders
-// of magnitude inside the watchdog, and small next to the five seconds between
-// passes. What it bounds is the sweep and not the whole walk — the check below
-// is guarded on !wantRow, so the row phase ahead of it runs unbudgeted, and
-// RingDrain.h works through what that leaves for the gap between two drains of
-// a ring. What one pass does not get through, the next one does.
-static const uint32_t kWalkBudgetMs = 400;
+// How long one pass of the walk may spend reading path records back off the
+// filesystem, and how often it gives the core up while it does. Both live in
+// SnapshotWalk.h beside the per-position rule they parameterise, which is where
+// their derivations are and where test/test_snapshot_walk asserts them: this
+// file cannot be compiled for the host, so a rule that only exists here cannot
+// be pinned by anything. What one pass does not get through, the next one does.
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
 static uint32_t sSnapWalkMaxMs = 0;      // worst snapshot walk since boot; see Tables
 static size_t   sIfaceCount = 0;         // likewise, so a capped list still counts true
@@ -2020,8 +2007,17 @@ static void refreshSnapshots(bool allowSweep) {
   // that with an unbounded pass: reading a record back is a file opened on
   // LittleFS, so the pass cost whatever the table had grown to, and past a few
   // hundred entries it outlasted the watchdog and took the node down with it.
-  // A sweep now spends kWalkBudgetMs per pass and remembers where it stopped,
-  // which keeps both properties — every entry is reached, and no pass is long.
+  // A pass now spends Rns::kWalkBudgetMs and remembers where the sweep stopped,
+  // so no pass is long.
+  //
+  // Whether every entry is still reached depends on what the rows leave. Rows
+  // are collected from the front of the table on every pass and the budget now
+  // covers them too, so on a table slow enough that the budget runs out before
+  // the rows are full, the walk does not get past the front and the cursor
+  // holds where it is. It never goes backwards (SnapshotWalk.h) and the node
+  // stays up; what it does not do on such a table is close the cycle. Resuming
+  // row collection across passes the way the sweep resumes is what closes that,
+  // and is not done here.
   static std::vector<RNS::Bytes> stale;
   static uint32_t sSweptMs = 0;
   // Where the last sweep ran out of budget, and so where the next one starts.
@@ -2044,40 +2040,61 @@ static void refreshSnapshots(bool allowSweep) {
   const bool sweeping = allowSweep &&
                         (sSweepPos != 0 || (uint32_t)(millis() - sSweptMs) >= kStaleSweepMs);
   const uint32_t walkStartMs = millis();
-  size_t pos = 0;         // position in the table, for the sweep cursor
-  size_t reads = 0;       // records actually read back, for the feed clock
-  bool   ranOut = false;  // budget ended the walk before the table did
+  size_t   pos = 0;         // position in the table, for the sweep cursor
+  size_t   reads = 0;       // records actually read back, for the feed clock
+  uint32_t lastYieldMs = 0; // walk time at the last yield, for the yield clock
+  bool     ranOut = false;  // budget ended the walk before the table did
   Watchdog::feed();
   for (auto it = pathTable.begin(); it != pathTable.end(); ++it, ++pos) {
     // Incrementing reads the in-memory index and nothing else; only the
     // dereference below opens a file. So positions this pass has no use for
     // are stepped over for free, and the budget is spent entirely on records
-    // that are going to be looked at.
-    const bool wantRow   = p.size() < SNAPSHOT_MAX_PATHS;
-    const bool wantSweep = sweeping && pos >= sSweepPos;
-    if (!wantRow && !sweeping) break;       // rows are full and nothing else needs the rest
-    if (!wantRow && !wantSweep) continue;   // ahead of the rows, behind the cursor
-    // The budget ends the sweep, never the rows. Rows are bounded already —
-    // there are at most SNAPSHOT_MAX_PATHS of them and the walk stops asking
-    // once they are full — so letting them finish costs a known amount. It
-    // also keeps the cursor honest: the only way to reach this line with the
-    // rows full is with wantSweep set, so pos is at or past sSweepPos and the
-    // cursor written below can only ever move forwards.
-    if (!wantRow && (uint32_t)(millis() - walkStartMs) >= kWalkBudgetMs) { ranOut = true; break; }
-    // kWalkBudgetMs ends the sweep, but it is only checked between records, and
-    // one record on a sick filesystem can take a long time on its own — so the
-    // walk keeps reporting while it runs rather than relying on finishing. The
-    // cadence is Sys::RingDrain::kFeedEvery rather than a 16 of this walk's
-    // own: one definition, so a retune cannot move the drains and leave this
-    // behind (RingDrain.h).
+    // that are going to be looked at. That is a promise of a dependency pinned
+    // to a branch rather than a commit, so it is not left as prose:
+    // test/test_snapshot_walk drives the rule below, and
+    // test/test_typed_store_iterator asserts the promise itself at both layers
+    // — TypedStore's and the file store's — against the microStore this build
+    // resolves.
+    Rns::WalkState w;
+    w.rowsCollected = p.size();
+    w.rowCap        = SNAPSHOT_MAX_PATHS;
+    w.sweeping      = sweeping;
+    w.pos           = pos;
+    w.sweepPos      = sSweepPos;
+    w.elapsedMs     = (uint32_t)(millis() - walkStartMs);
+    // One budget, and it covers every position: the rows, the sweep and the
+    // free step-over alike (SnapshotWalk.h). Exempting the rows was the defect
+    // — the exemption was justified on their being bounded by count, which they
+    // are, and which is not the same as bounded by time.
+    const Rns::WalkStep step = Rns::walkStep(w);
+    if (step == Rns::WalkStep::StopRowsFull) break;      // nothing else needs the rest
+    if (step == Rns::WalkStep::StopBudget) { ranOut = true; break; }
+    if (step == Rns::WalkStep::Skip) continue;           // rows full, behind the cursor
+    // The budget is only checked between records, and one record on a sick
+    // filesystem can take a long time on its own — so the walk keeps reporting
+    // while it runs rather than relying on finishing. The cadence is
+    // Sys::RingDrain::kFeedEvery rather than a 16 of this walk's own: one
+    // definition, so a retune cannot move the drains and leave this behind
+    // (RingDrain.h).
     if (++reads % Sys::RingDrain::kFeedEvery == 0) Watchdog::feed();
+    // Yield as well as feed, on a clock of its own. Feeding answers for *this*
+    // task — esp_task_wdt_reset() reports on behalf of the running task and
+    // there is no way to report for another — and the task being starved is
+    // Arduino's loopTask, priority 1 against this task's 3 on the same core, so
+    // it does not run again until this one stops asking. Its watchdog is the
+    // one that fired. A tick is what lets it back in; the cadence and its cost
+    // are derived in SnapshotWalk.h.
+    if (Rns::walkShouldYield(w.elapsedMs, lastYieldMs)) {
+      lastYieldMs = w.elapsedMs;
+      vTaskDelay(1);
+    }
 
     RNS::Persistence::NewPathTable::Entry& e = *it;   // reads the record off the filesystem
     if (!e.value.receiving_interface()) {
       if (sweeping && stale.size() < SNAPSHOT_MAX_PATHS) stale.push_back(e.key);
       continue;
     }
-    if (!wantRow) continue;                 // swept, not rendered
+    if (step != Rns::WalkStep::Row) continue;   // swept, not rendered
     PathInfo pi = {};
     strlcpy(pi.hash, e.key.toHex().c_str(), sizeof(pi.hash));
     pi.hops = e.value._hops;
@@ -2091,7 +2108,11 @@ static void refreshSnapshots(bool allowSweep) {
     // running out of budget leaves the cursor where it stopped, which is what
     // keeps the sweep coming back on the next pass rather than the next minute.
     const bool started = (sSweepPos == 0);
-    sSweepPos = ranOut ? pos : 0;
+    // Forwards only, and that is not decoration: the budget can now end the
+    // walk in the row half, which is at the front of the table and so behind
+    // the cursor. Writing pos in unconditionally would drag the sweep back
+    // there and leave the tail never examined (SnapshotWalk.h).
+    sSweepPos = Rns::nextSweepPos(sSweepPos, pos, ranOut);
     if (!ranOut) sSweptMs = millis();
     // Once per cycle, not once per pass: a table that needs twenty passes
     // should say so, and then be quiet about it until the next minute. This is

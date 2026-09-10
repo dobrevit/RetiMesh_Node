@@ -44,7 +44,7 @@
 //
 //  That last step is read off the code, not off a log. No such reset has been
 //  observed on this ring: the two-day reboot loop the neighbouring scar
-//  describes is the path-table sweep's (RnsTransport.cpp, kWalkBudgetMs), a
+//  describes is the path-table sweep's (SnapshotWalk.h, kWalkBudgetMs), a
 //  different unbounded loop, and the bench reproduction for this one —
 //  flooding the ring from a host on the access point — has not been run.
 //  Where the reset itself is named it is named as something that *can*
@@ -89,31 +89,29 @@ namespace RingDrain {
 // explain the counter to a reader quote the walk's 400 ms budget as the gap:
 // main.cpp's heartbeat line, Config.h beside loraRxDrainCapped,
 // tools/soak.py's column notes, docs/api.md and docs/troubleshooting.md.
-// Retuning kWalkBudgetMs means visiting all of those, and the radio drain's
-// frames-per-gap arithmetic in RnsTransport.cpp is derived from this figure
-// and moves with it — test_airtime pins the two frame times that arithmetic
-// rests on, not the frames it puts in the gap.
+// Retuning kWalkBudgetMs (SnapshotWalk.h) means visiting all of those, and the
+// radio drain's frames-per-gap arithmetic in RnsTransport.cpp is derived from
+// this figure and moves with it — test_airtime pins the two frame times that
+// arithmetic rests on, not the frames it puts in the gap.
 //
 // The RNS task delays 10 ms between passes (main.cpp), but the interval
 // between two drains of the same ring is that delay plus a whole pass, and a
 // pass contains refreshSnapshots(), whose path-table walk reads records back
 // off the filesystem under a kWalkBudgetMs — 400 ms — budget
-// (RnsTransport.cpp).
+// (SnapshotWalk.h).
 //
-// That budget is a floor under the gap, not a ceiling over it. It is consulted
-// only once the snapshot's rows are full — the check is guarded on !wantRow,
-// and the walk states the rule itself: "the budget ends the sweep, never the
-// rows". While rows are still being collected it is not consulted at all, and
-// a record whose interface has gone away is read off the filesystem and then
-// skipped without filling a row, which is the very thing the sweep exists to
-// clean up. A table of those keeps the row phase going to the end of the table
-// with no budget in force. The row phase is bounded by the table, not by the
-// clock, and it runs ahead of the budgeted part.
+// That budget is a floor under the gap, not a ceiling over it. It covers every
+// position of the walk now, rows included — it used to be guarded on !wantRow,
+// so the row phase ahead of it ran unbudgeted and a table of entries whose
+// interfaces had gone away, which fill no row, kept that phase going to the end
+// of the table with no bound in force at all. What keeps it a floor rather than
+// a ceiling is the rest: the budget is consulted between records and never
+// inside one, and the walk is one part of a pass.
 //
 // Two consecutive drains of one ring are therefore of the order of 410 ms
-// apart rather than 10 — the sweep's budget plus the tick — and that is the
-// least of it, before the row phase ahead of the budget or the rest of the
-// pass is counted at all, and further again after a pass that threw, which
+// apart rather than 10 — the walk's budget plus the tick — and that is the
+// least of it, before the record in hand when the budget ran out or the rest of
+// the pass is counted at all, and further again after a pass that threw, which
 // adds loop()'s 250 ms back-off.
 //
 // So the cap does bind, on both rings, after a long walk: 410 ms on its own is
@@ -139,6 +137,13 @@ constexpr size_t kBatch = 64;
 // checked between items and one item can be a whole packet through
 // microReticulum — so the drain keeps reporting while it runs rather than
 // relying on finishing.
+//
+// Feeding only. The walk also *yields*, and that is deliberately not this
+// number: a yield is scheduling rather than reporting, and 16 records is longer
+// than the walk's whole budget at every per-record cost this tree has measured,
+// so a yield on this cadence would never fire at all. Its own cadence, and the
+// arithmetic, are in SnapshotWalk.h — a ring item costs nothing like a record,
+// so this side has no use for one.
 constexpr size_t kFeedEvery = 16;
 
 // What one pass did.
