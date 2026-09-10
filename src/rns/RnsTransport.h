@@ -176,6 +176,23 @@ struct Snapshot {
   size_t   pathRows;       // rows actually written to the caller's arrays
   size_t   ifaceRows;
   uint32_t ageMs;
+
+  // Whether an empty path list means "nothing there" or "not read yet".
+  //
+  // Those are two different nodes and they render identically. The rows are
+  // published only once a pass has been all the way round the table
+  // (tables.snapRowsWhole), while pathTotal is the table's own size and is
+  // exact from the first pass — so a node whose table is bigger than one pass
+  // shows a count with no rows under it until the first cycle closes, or for
+  // ever if it can never close one. Every surface that draws that list has to
+  // tell the two apart, and the OLED's PEERS SEEN beside an empty list is
+  // exactly the contradiction an operator reads as a bug.
+  //
+  // Here rather than at each caller: the LVGL destinations page, the nav
+  // page's peer plot and the web portal all ask it, and when the rule sharpens
+  // — plausibly to pathRows < pathTotal, once the row cap and the cycle are
+  // told apart — it has to sharpen for all of them at once.
+  bool stillReadingPaths() const { return !tables.snapRowsWhole && pathTotal > 0; }
 };
 Snapshot snapshot(PathInfo* pathOut, size_t maxPaths,
                   IfaceInfo* ifaceOut, size_t maxIfaces);

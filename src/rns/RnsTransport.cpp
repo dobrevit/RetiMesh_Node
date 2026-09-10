@@ -1948,8 +1948,11 @@ static void drainTcp() {
 static uint32_t sSnapAtMs = 0;
 static uint32_t sSnapOkMs = 0;          // last pass that actually published; the age readers see
 // Dead paths are cleaned up on a slower clock than the reading is refreshed:
-// the reading is capped and cheap, the sweep walks the whole table.
-static const uint32_t kStaleSweepMs = 60000;
+// the reading is capped and cheap, the sweep walks the whole table. The figure
+// is Config.h's because test_snapshot_walk drives the scheduler this is the
+// ceiling for, and a figure written out in both places is a figure that gets
+// retuned in one.
+static const uint32_t kStaleSweepMs = SNAPSHOT_SWEEP_INTERVAL_MS;
 // How long one pass of the walk may spend reading path records back off the
 // filesystem, and how often it gives the core up while it does. Both live in
 // SnapshotWalk.h beside the per-position rule they parameterise, which is where
@@ -1984,6 +1987,19 @@ static uint32_t sSnapBudgetStops = 0;    // passes the budget ended; see Tables
 // per-record figure this tree has measured, and more than that on one where a
 // pass has come to cost more (Rns::nextIntervalMs, where the arithmetic is).
 static uint32_t sSnapIntervalMs = SNAPSHOT_INTERVAL_MS;
+// Whether the log has already said this node backed itself off, which is not
+// the same question as whether it is backed off right now — see the transition
+// test in refreshSnapshots(). Held separately so the published interval above
+// stays the node's real answer while the log holds its tongue.
+static bool     sSnapBackOffSaid = false;
+// How cheap a pass has to become before the log says the node is back on its
+// configured interval: half the quarter nextIntervalMs() backs off at. This is
+// the hysteresis, and it is the whole point of the pair — a cost oscillating
+// either side of the quarter crosses the transition test on *every* pass, so
+// without a margin the node reports backing off and recovering alternately,
+// once every five seconds, while it is already struggling.
+static const uint32_t kSnapBackOffClearMs =
+    SNAPSHOT_INTERVAL_MS / (Rns::kPassShareDiv * 2);
 static size_t   sIfaceCount = 0;         // likewise, so a capped list still counts true
 static Tables   sTables = {};            // table sizes, for soak monitoring
 
@@ -2390,18 +2406,26 @@ static void refreshSnapshots(bool allowSweep) {
   // this exists for, and the gate above is where it takes effect.
   const uint32_t nextGapMs =
       Rns::nextIntervalMs(walkMs, SNAPSHOT_INTERVAL_MS, kStaleSweepMs);
-  // Once when it starts and once when it stops, not once per pass: a node whose
-  // cost sits on the threshold would otherwise say this every five seconds. The
-  // reading itself is served as snap_interval_ms, which is what an operator
-  // watching a node go stale needs — the log is for the one who has a log.
-  if ((nextGapMs > SNAPSHOT_INTERVAL_MS) != (sSnapIntervalMs > SNAPSHOT_INTERVAL_MS)) {
-    if (nextGapMs > SNAPSHOT_INTERVAL_MS)
-      log_w("snapshot pass cost %u ms of the %u ms between passes; backing off to "
-            "one every %u ms (%u paths)", (unsigned)walkMs, (unsigned)SNAPSHOT_INTERVAL_MS,
-            (unsigned)nextGapMs, (unsigned)pathTable.size());
-    else
-      log_i("snapshot pass back to %u ms; one every %u ms again",
-            (unsigned)walkMs, (unsigned)nextGapMs);
+  // Once when it starts and once when it stops, not once per pass — with a
+  // margin on the way back, because a bare "is it backed off now, was it last
+  // pass" transition is crossed on every pass by a cost that oscillates across
+  // the quarter, which is exactly the node this log is about: it would say
+  // both lines alternately, once every five seconds (kSnapBackOffClearMs).
+  // Backing off is reported the moment it happens; recovering is reported only
+  // once a pass has come in at half the quarter or less, which jitter around
+  // the threshold cannot reach. The reading itself is served as
+  // snap_interval_ms, which is what an operator watching a node go stale needs
+  // — the log is for the one who has a log.
+  const bool backedOff = nextGapMs > SNAPSHOT_INTERVAL_MS;
+  if (backedOff && !sSnapBackOffSaid) {
+    sSnapBackOffSaid = true;
+    log_w("snapshot pass cost %u ms of the %u ms between passes; backing off to "
+          "one every %u ms (%u paths)", (unsigned)walkMs, (unsigned)SNAPSHOT_INTERVAL_MS,
+          (unsigned)nextGapMs, (unsigned)pathTable.size());
+  } else if (!backedOff && sSnapBackOffSaid && walkMs <= kSnapBackOffClearMs) {
+    sSnapBackOffSaid = false;
+    log_i("snapshot pass back to %u ms; one every %u ms again",
+          (unsigned)walkMs, (unsigned)nextGapMs);
   }
   sSnapIntervalMs = nextGapMs;
   // Counted into locals and published below with the lists they describe. As

@@ -579,6 +579,14 @@
 // through microStore (flash or SD), so this is deliberately unhurried.
 #define SNAPSHOT_INTERVAL_MS  5000
 #define SNAPSHOT_MAX_PATHS    64
+// How often dead paths are swept out, which is a slower clock than the reading
+// is refreshed on: the reading is capped and cheap, the sweep walks the whole
+// table. It is also the ceiling the pass scheduler is held to — a pass carrying
+// a minute's clock has to come round at least once a minute or that clock is
+// not honoured at all (Rns::nextIntervalMs) — so the firmware and the host
+// tests that drive that scheduler read the same figure from here rather than
+// each writing 60000 out for itself.
+#define SNAPSHOT_SWEEP_INTERVAL_MS 60000
 #define SD_LOG_MAX_BYTES    (1024UL * 1024UL)
 
 // ---------------------------------------------------------------------------

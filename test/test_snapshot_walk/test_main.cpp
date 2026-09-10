@@ -82,7 +82,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <vector>
-#include "Config.h"                       // SNAPSHOT_MAX_PATHS
+#include "Config.h"                       // SNAPSHOT_MAX_PATHS, SNAPSHOT_SWEEP_INTERVAL_MS
 #include "../../src/sys/RingDrain.h"      // kFeedEvery, the cadence that will not do
 #include "../../src/rns/SnapshotWalk.h"
 
@@ -91,6 +91,12 @@ namespace {
 // The firmware's row cap, not a number of this suite's own: a retune of
 // SNAPSHOT_MAX_PATHS must move what is asserted here with it.
 constexpr size_t kRowCap = SNAPSHOT_MAX_PATHS;
+
+// The ceiling refreshSnapshots() passes nextIntervalMs() — the minute between
+// dead-path sweep cycles. Read from Config.h for the same reason as the cap:
+// the firmware's kStaleSweepMs is that same figure, and this suite writing
+// 60000 out for itself is how the two come to disagree after a retune.
+constexpr uint32_t kSweepCeilingMs = SNAPSHOT_SWEEP_INTERVAL_MS;
 
 // Per-record costs, sourced above.
 constexpr uint32_t kFastRecordMs = 30;
@@ -162,10 +168,16 @@ struct Pass {
   std::vector<uint32_t> yieldAt;  // walk time at each yield, before its tick is paid
 };
 
+// `costMs` is what each position's record costs, for the one property that
+// needs two different per-record figures inside one pass: a filesystem charges
+// what it charges, and the range measured on one store is 93-162 ms rather than
+// a constant (FileStore.h). Positions past its end fall back to `recordMs`, so
+// a short vector says "these first few, then the usual".
 Pass runWalk(const std::vector<bool>& live, bool sweeping, size_t sweepPos,
              uint32_t recordMs, uint32_t yieldMs = Rns::kWalkYieldMs,
              uint32_t tickMs = 1, uint32_t budgetMs = Rns::kWalkBudgetMs,
-             size_t rowPos = 0, size_t rowsAlready = 0, uint32_t skipMs = 0) {
+             size_t rowPos = 0, size_t rowsAlready = 0, uint32_t skipMs = 0,
+             const std::vector<uint32_t>* costMs = nullptr) {
   Pass r;
   r.rows = rowsAlready;                    // the cycle's list, carried in
   uint32_t lastYieldMs = 0;
@@ -191,7 +203,7 @@ Pass runWalk(const std::vector<bool>& live, bool sweeping, size_t sweepPos,
       r.elapsedMs += tickMs;               // a yield is paid out of the budget
     }
     r.reads++;
-    r.elapsedMs += recordMs;
+    r.elapsedMs += (costMs && pos < costMs->size()) ? (*costMs)[pos] : recordMs;
     if (!live[pos]) { if (sweeping) r.swept.push_back(pos); continue; }
     if (step == Rns::WalkStep::Row) { r.rows++; r.added++; }
   }
@@ -988,6 +1000,18 @@ void test_the_sweep_cursor_advances_on_every_sweeping_pass() {
   std::vector<bool> live = table(200, true);
   for (size_t k = 100; k < live.size(); k++) live[k] = false;
 
+  // The three exact figures below are exact about one arithmetic: at 30 ms a
+  // record a pass gets fourteen reads, seven of them rows before the share
+  // hands the rest to the sweep. Stated here so that a retune of
+  // kWalkBudgetMs, kWalkYieldMs or SNAPSHOT_MAX_PATHS fails on the premise —
+  // which says what moved — rather than three lines further down on a bare
+  // "expected 10, was 12".
+  const Pass shape = runWalk(live, true, 70, kFastRecordMs);
+  TEST_ASSERT_EQUAL_size_t_MESSAGE(14, shape.reads,
+      "reads per pass at 30 ms a record moved; the pass counts below follow from it");
+  TEST_ASSERT_EQUAL_size_t_MESSAGE(7, shape.rows,
+      "rows before the share hands over moved; the pass counts below follow from it");
+
   Node n;
   size_t firstSwept = 0, firstClose = 0, stalls = 0;
   for (size_t passNo = 1; passNo <= 200; passNo++) {
@@ -1000,9 +1024,12 @@ void test_the_sweep_cursor_advances_on_every_sweeping_pass() {
     if (!firstClose && n.sweepCloses)    firstClose = passNo;
   }
   TEST_ASSERT_EQUAL_size_t(0, stalls);
-  TEST_ASSERT_EQUAL_size_t(10, firstSwept);
-  TEST_ASSERT_EQUAL_size_t(23, firstClose);
-  TEST_ASSERT_EQUAL_size_t(8, n.sweepCloses);
+  TEST_ASSERT_EQUAL_size_t_MESSAGE(10, firstSwept,
+      "the first dead entry is reached on a different pass now (was 35 without the share)");
+  TEST_ASSERT_EQUAL_size_t_MESSAGE(23, firstClose,
+      "the first sweep cycle closes on a different pass now (was 115 without the share)");
+  TEST_ASSERT_EQUAL_size_t_MESSAGE(8, n.sweepCloses,
+      "cycles closed in 200 passes moved (was 1 without the share)");
   // The rows are not starved for it: they still go all the way round, and every
   // list published is a whole one.
   TEST_ASSERT_GREATER_THAN_size_t(0, n.rowCycles);
@@ -1036,9 +1063,14 @@ void test_the_row_cap_knife_edge_no_longer_stalls_the_sweep() {
   TEST_ASSERT_EQUAL_size_t(32, cursor[1]);
   TEST_ASSERT_EQUAL_size_t(48, cursor[2]);
   TEST_ASSERT_EQUAL_size_t(64, cursor[3]);
-  TEST_ASSERT_EQUAL_size_t(72, cursor[4]);      // was 64, and 64 for ever after
+  // The knife edge itself: the pass that used to stop at the cap and stay
+  // there. It goes past it by the records the sweep's half of the budget buys
+  // — 200 ms at 25 ms each is eight positions — which is what the share is.
+  TEST_ASSERT_EQUAL_size_t_MESSAGE(kRowCap + Rns::rowShareMs(Rns::kWalkBudgetMs) / 25,
+      cursor[4], "the pass that broke the knife edge moved; was 64, and 64 for ever after");
   TEST_ASSERT_EQUAL_size_t(80, cursor[5]);
-  TEST_ASSERT_EQUAL_size_t(21, firstClose);
+  TEST_ASSERT_EQUAL_size_t_MESSAGE(21, firstClose,
+      "the pass the cycle first closes on moved; it never closed at all before the share");
   TEST_ASSERT_GREATER_OR_EQUAL_size_t(1, n.sweepCloses);
 }
 
@@ -1067,6 +1099,58 @@ void test_a_cycle_the_share_cut_short_is_kept_as_a_prefix() {
   TEST_ASSERT_EQUAL_size_t(75, r.stoppedAt);
 }
 
+void test_a_record_over_the_row_share_can_still_deny_the_sweep() {
+  // Where the share's guarantee stops, which is not where the header used to
+  // say it did. "A single record that costs the whole budget" is the uniform
+  // reading; the boundary for mixed costs is half of it, and mixed is the real
+  // case — one store was measured at 93-162 ms a record, not at a constant
+  // (FileStore.h).
+  // 200 ms, pinned against the budget by
+  // test_the_rows_give_the_sweep_half_the_budget_when_it_is_ahead above.
+  const uint32_t share = Rns::rowShareMs(Rns::kWalkBudgetMs);
+
+  // Uniform, and well over the share: the sweep is served anyway. The first
+  // record spends the whole share by itself, so the walk hands over at 250 ms
+  // and reaches the cursor at 70 with a third of the budget still in hand.
+  const Pass uniform = runWalk(table(200, true), true, 70, 250);
+  TEST_ASSERT_EQUAL_size_t(2, uniform.reads);       // one row, then the sweep's own
+  TEST_ASSERT_EQUAL_size_t(71, uniform.stoppedAt);
+  TEST_ASSERT_EQUAL_size_t(71, Rns::nextCursor(70, uniform.stoppedAt, uniform.ranOut));
+
+  // The same 250 ms among cheap ones, which is the case that fails: sixty-three
+  // 3 ms records creep the clock to just under the share, the sixty-fourth
+  // costs 250, and the pass is past the budget before it reaches position 70.
+  // The cursor stands still for this pass — the one thing the share exists to
+  // prevent, and it takes half the cost the uniform reading asks for.
+  std::vector<uint32_t> costs(kRowCap, 3);
+  costs[kRowCap - 1] = 250;
+  const Pass mixed = runWalk(table(200, true), true, 70, 3, Rns::kWalkYieldMs, 1,
+                             Rns::kWalkBudgetMs, 0, 0, 0, &costs);
+  TEST_ASSERT_TRUE_MESSAGE(mixed.elapsedMs - 250 < share,
+      "the cheap records no longer land the pass just under the share; retune them");
+  TEST_ASSERT_TRUE(mixed.ranOut);
+  TEST_ASSERT_EQUAL_size_t(kRowCap, mixed.stoppedAt);   // short of the cursor at 70
+  TEST_ASSERT_EQUAL_size_t(70, Rns::nextCursor(70, mixed.stoppedAt, mixed.ranOut));
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT32(Rns::kWalkBudgetMs, mixed.elapsedMs);
+
+  // The turning point as the rule rather than as a scenario. The last position
+  // the rows are served at is the last one under the share, so from there a
+  // record of exactly the share leaves the pass one millisecond inside the
+  // budget and one millisecond more does not.
+  TEST_ASSERT_TRUE(Rns::WalkStep::Row == Rns::walkStep(at(1, true, 5, 70, share - 1)));
+  TEST_ASSERT_TRUE(Rns::WalkStep::Skip ==
+                   Rns::walkStep(at(1, true, 6, 70, share - 1 + share)));
+  TEST_ASSERT_TRUE(Rns::WalkStep::StopBudget ==
+                   Rns::walkStep(at(1, true, 6, 70, share - 1 + share + 1)));
+
+  // So the margin this tree actually has is against 200 ms and not 400: the
+  // worst per-record figure measured anywhere in it is 81 % of the share.
+  TEST_ASSERT_LESS_THAN_UINT32(share, kSlowRecordMs);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(81, kSlowRecordMs * 100 / share,
+      "the worst measured record is no longer 81 % of the row share; the margin "
+      "paragraph in SnapshotWalk.h quotes that figure");
+}
+
 // ---------------------------------------------------------------------------
 // Scheduling the next pass against what this one cost
 // ---------------------------------------------------------------------------
@@ -1078,7 +1162,7 @@ void test_the_scheduler_is_inert_at_every_cost_this_tree_has_measured() {
   // the interval on a healthy node would be a tuning knob rather than a guard.
   TEST_ASSERT_EQUAL_UINT32(4, Rns::kPassShareDiv);
   const uint32_t interval = (uint32_t)SNAPSHOT_INTERVAL_MS;
-  const uint32_t ceiling  = 60000;              // kStaleSweepMs, the caller's own
+  const uint32_t ceiling  = kSweepCeilingMs;     // kStaleSweepMs, the caller's own
 
   // The budget plus the worst record anywhere in this tree, which is what a
   // pass costs when the budget ends it.
@@ -1093,7 +1177,7 @@ void test_the_scheduler_is_inert_at_every_cost_this_tree_has_measured() {
 
 void test_a_pass_that_outgrows_its_share_buys_itself_room() {
   const uint32_t interval = (uint32_t)SNAPSHOT_INTERVAL_MS;
-  const uint32_t ceiling  = 60000;
+  const uint32_t ceiling  = kSweepCeilingMs;
 
   // The case this exists for, and it is not hypothetical: passMayStop() may not
   // end a pass that has read nothing, so a pass costs the prefix it steps over
@@ -1117,14 +1201,14 @@ void test_a_pass_that_outgrows_its_share_buys_itself_room() {
 
 void test_the_scheduler_has_a_ceiling_the_abandoned_formula_did_not() {
   const uint32_t interval = (uint32_t)SNAPSHOT_INTERVAL_MS;
-  const uint32_t ceiling  = 60000;
+  const uint32_t ceiling  = kSweepCeilingMs;
 
   // max(walkMs * 4, SNAPSHOT_INTERVAL_MS) — the version on the abandoned branch
   // — has no upper end, so a node whose passes cost a minute would be put on a
   // four-minute interval, and a node that slow needs its cleanup more often
   // than that rather than less.
-  TEST_ASSERT_EQUAL_UINT32(240000, 60000u * 4);
-  TEST_ASSERT_EQUAL_UINT32(ceiling, Rns::nextIntervalMs(60000, interval, ceiling));
+  TEST_ASSERT_GREATER_THAN_UINT32(ceiling, ceiling * Rns::kPassShareDiv);
+  TEST_ASSERT_EQUAL_UINT32(ceiling, Rns::nextIntervalMs(ceiling, interval, ceiling));
   // The clamp begins at a quarter of the ceiling, where four times the cost
   // would first exceed it.
   TEST_ASSERT_EQUAL_UINT32(ceiling, Rns::nextIntervalMs(ceiling / 4, interval, ceiling));
@@ -1152,7 +1236,7 @@ void test_passes_cannot_run_back_to_back_under_the_worst_timing() {
   // round its loop and sleeping 10 ms at a time, which is the only core the
   // priority-1 loopTask gets (SnapshotWalk.h).
   const uint32_t interval = (uint32_t)SNAPSHOT_INTERVAL_MS;
-  const uint32_t ceiling  = 60000;
+  const uint32_t ceiling  = kSweepCeilingMs;
 
   // A pass that outlasts the interval leaves nothing at all under the fixed
   // gate — the gate is open the moment the pass returns and the next one starts
@@ -1164,10 +1248,15 @@ void test_passes_cannot_run_back_to_back_under_the_worst_timing() {
   // The general form: up to the ceiling's quarter, the gap is at least four
   // times the pass, so the task is out of this function for at least three
   // quarters of every window whatever a pass comes to cost.
-  for (uint32_t cost = 0; cost <= ceiling / 4; cost += 61) {
+  // Every cost in the linear branch rather than a sample of them. The property
+  // is an algebraic identity inside that branch, so a stride proves nothing a
+  // step does not — and the branch is fifteen thousand values, which costs
+  // this suite nothing.
+  for (uint32_t cost = 0; cost <= ceiling / Rns::kPassShareDiv; cost++) {
     const uint32_t next = Rns::nextIntervalMs(cost, interval, ceiling);
-    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(cost * 4, next);
-    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(cost * 3, next - cost);   // idle >= 3x the pass
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(cost * Rns::kPassShareDiv, next);
+    // ...and so out of it for all but one share of every window.
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(cost * (Rns::kPassShareDiv - 1), next - cost);
   }
   // Past that quarter the ceiling takes over and the margin is given up on
   // purpose: a node spending a quarter of a minute in one pass is broken in a
@@ -1300,6 +1389,7 @@ int main() {
   RUN_TEST(test_the_sweep_cursor_advances_on_every_sweeping_pass);
   RUN_TEST(test_the_row_cap_knife_edge_no_longer_stalls_the_sweep);
   RUN_TEST(test_a_cycle_the_share_cut_short_is_kept_as_a_prefix);
+  RUN_TEST(test_a_record_over_the_row_share_can_still_deny_the_sweep);
   RUN_TEST(test_the_scheduler_is_inert_at_every_cost_this_tree_has_measured);
   RUN_TEST(test_a_pass_that_outgrows_its_share_buys_itself_room);
   RUN_TEST(test_the_scheduler_has_a_ceiling_the_abandoned_formula_did_not);

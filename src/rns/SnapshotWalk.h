@@ -464,10 +464,31 @@ constexpr uint32_t rowShareMs(uint32_t budgetMs) { return budgetMs / 2; }
 //
 // What it guarantees, exactly: the sweep cursor advances on every sweeping
 // pass, because once the share is spent every position below the sweep's cursor
-// is stepped over for free and the budget is only half gone. The one exception
-// is a single record that costs the whole budget by itself, which no share can
-// legislate against — the same "checked between records, never inside one" the
-// budget itself is subject to.
+// is stepped over for free and the budget is only half gone. The exception is a
+// single record expensive enough to carry the pass from inside the share to
+// past the budget, which no share can legislate against — the same "checked
+// between records, never inside one" the budget itself is subject to.
+//
+// Where that boundary is depends on whether records cost the same, and the
+// difference is a factor of two. A record is served for the rows only while the
+// clock is still *under* the share, so the row half can hand over as late as
+// rowShareMs + c, and the sweep's record is then read only if that is still
+// under the budget:
+//
+//   * Uniform cost: the first record of the pass already spends the whole
+//     share, so the walk hands over at c and reaches the sweep for any
+//     c < kWalkBudgetMs. The exception is c >= 400 ms — a record costing the
+//     whole budget by itself, as the paragraph above says.
+//   * Mixed costs: cheap records creep the clock to one millisecond short of
+//     the share, and one record over rowShareMs then lands the pass at or past
+//     the budget. The exception starts at c > 200 ms, half the figure the
+//     uniform reading gives.
+//
+// Mixed is the real case — a filesystem charges what it charges, and one store
+// was measured at 93-162 ms for a record (FileStore.h) — so 200 ms is the
+// margin to hold this against, and the worst per-record cost measured anywhere
+// in this tree is 81 % of it rather than 40 %. Both boundaries are driven in
+// test_snapshot_walk rather than reasoned about here.
 inline bool rowShareSpent(const WalkState& w) {
   return w.sweeping && w.sweepPos > w.rowPos &&
          w.elapsedMs >= rowShareMs(w.budgetMs);

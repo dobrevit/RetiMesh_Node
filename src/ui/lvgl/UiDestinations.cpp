@@ -165,14 +165,12 @@ void openDestinations() {
   lv_obj_set_flex_grow(list, 1);
   if (!sCount) {
     // "Nothing there" and "not read yet" render as the same empty list and are
-    // not the same node. The path table is read under a budget and the rows are
-    // published only once a pass has been all the way round it, so a node whose
-    // table is bigger than one pass shows no rows at all until the first cycle
-    // closes — while the count beside it is the table's own size and is exact
-    // from the first pass. Home's PEERS SEEN is that count, so on exactly that
-    // node the two screens used to contradict each other: "500" there and
-    // "nothing announced yet" here.
-    if (!snap.tables.snapRowsWhole && snap.pathTotal) {
+    // not the same node. Home's PEERS SEEN is the table's own size and is exact
+    // from the first pass, so on exactly that node the two screens used to
+    // contradict each other: "500" there and "nothing announced yet" here.
+    // The rule itself is Snapshot::stillReadingPaths() — one definition, asked
+    // here, by the nav page's peer plot and by the web portal.
+    if (snap.stillReadingPaths()) {
       char line[48];
       snprintf(line, sizeof(line), "still reading %u path%s…", (unsigned)snap.pathTotal,
                snap.pathTotal == 1 ? "" : "s");

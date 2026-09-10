@@ -198,11 +198,11 @@ void plotRefresh(lv_timer_t*) {
   // identical readings is churn on the task the glass is painted from. The
   // caption's inputs are in the stamp too, since it is redrawn with them.
   const size_t held = PeerPositions::count();
-  // A third caption, and so a third stamp input: the path rows are published
-  // only once a pass has been all the way round the table, so a node bigger
-  // than one pass has none to plot from and is not the same as a node with no
-  // peer positions on the air.
-  const bool stillReading = !snap.tables.snapRowsWhole && snap.pathTotal > 0;
+  // A third caption, and so a third stamp input: a node still reading its own
+  // path table has no rows to plot from and is not the same as a node with no
+  // peer positions on the air. The rule is Snapshot::stillReadingPaths(), the
+  // same one the destinations page and the web portal ask.
+  const bool stillReading = snap.stillReadingPaths();
   uint32_t stamp = (uint32_t)count * 131u + (uint32_t)held * 7u + (own.valid ? 1u : 0u);
   stamp = stamp * 31u + (stillReading ? (uint32_t)snap.pathTotal + 1u : 0u);
   for (size_t i = 0; i < count; i++) {
