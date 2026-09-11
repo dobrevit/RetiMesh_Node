@@ -135,11 +135,17 @@ struct Tables {
   // is being cut off, which is survivable (the cursors resume) but is the node
   // saying its table has outgrown one pass.
   uint32_t snapBudgetStops;
-  // Whether the published path rows are a whole cycle. A pass stopped by the
-  // budget keeps its prefix in staging rather than publishing it, so a list
-  // that has been published is complete by construction and this is false only
-  // until the first cycle closes — or for ever, on a node that cannot finish
-  // one, which beside a non-zero `paths` is the reading that says so.
+  // Whether the published path rows are a whole cycle over the table as it now
+  // stands. A pass stopped by the budget keeps its prefix in staging rather
+  // than publishing it, so a published list is complete for the table the
+  // cycle that built it closed over — and this goes false again when the table
+  // has since grown past that, which beside a non-zero `paths` is a node
+  // part-way through reading its own table. False until the first cycle closes,
+  // and for ever on a node that can never close one.
+  //
+  // Not a latch: a list published over an empty table, which is every node's
+  // first pass, is not an answer for the two hundred paths it goes on to learn.
+  // The rule and what it costs are Rns::rowsWhole (SnapshotWalk.h).
   bool     snapRowsWhole;
   // How long the node is currently leaving between two passes.
   //
@@ -179,18 +185,21 @@ struct Snapshot {
   // Whether an empty path list means "nothing there" or "not read yet".
   //
   // Those are two different nodes and they render identically. The rows are
-  // published only once a pass has been all the way round the table
-  // (tables.snapRowsWhole), while pathTotal is the table's own size and is
-  // exact from the first pass — so a node whose table is bigger than one pass
-  // shows a count with no rows under it until the first cycle closes, or for
-  // ever if it can never close one. Every surface that draws that list has to
-  // tell the two apart, and the OLED's PEERS SEEN beside an empty list is
-  // exactly the contradiction an operator reads as a bug.
+  // published only once a pass has been all the way round the table, and only
+  // while they are still a whole answer for it (tables.snapRowsWhole), while
+  // pathTotal is the table's own size and is exact from the first pass — so a
+  // node whose table is bigger than one pass shows a count with no rows under
+  // it until the first cycle closes, or for ever if it can never close one, and
+  // a node whose table has outgrown its last closed cycle shows the older list
+  // until the next one closes. Every surface that draws that list has to tell
+  // the two apart, and the OLED's PEERS SEEN beside an empty list is exactly
+  // the contradiction an operator reads as a bug.
   //
   // Here rather than at each caller: the LVGL destinations page, the nav
   // page's peer plot and the web portal all ask it, and when the rule sharpens
-  // — plausibly to pathRows < pathTotal, once the row cap and the cycle are
-  // told apart — it has to sharpen for all of them at once.
+  // it has to sharpen for all of them at once. It sharpened once already —
+  // snapRowsWhole is the table the last cycle covered rather than a latch
+  // (Rns::rowsWhole) — and that landed here, in one place, for all three.
   bool stillReadingPaths() const { return !tables.snapRowsWhole && pathTotal > 0; }
 };
 Snapshot snapshot(PathInfo* pathOut, size_t maxPaths,

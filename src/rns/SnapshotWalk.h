@@ -600,6 +600,103 @@ inline bool rowCycleDone(size_t rowsCollected, size_t rowCap, bool cutShort) {
   return rowsCollected >= rowCap || !cutShort;
 }
 
+// What the last closed row cycle covered, and whether one has closed at all.
+//
+// Carried across passes by the caller and written only where a list is
+// published, which is the pass rowCycleDone() above says yes on.
+struct RowCycle {
+  bool   closed    = false;   // a list has been published at least once
+  bool   filledCap = false;   // the last one ended at the row cap...
+  size_t tableSize = 0;       // ...and this is how big the table was when it closed
+};
+
+// Record a cycle closing: the list about to be published, and the table it
+// closed over.
+//
+// The table as it stands at the pass that closes the cycle, not as it stood
+// when the cycle started. A cycle can span many passes and the table is mutated
+// between them, so there is no one size the cycle "walked"; this is the figure
+// the published list is going to be read beside, which is the one the question
+// below is asked about.
+inline void closeRowCycle(RowCycle& c, size_t rowsCollected, size_t rowCap,
+                          size_t tableSize) {
+  c.closed    = true;
+  c.filledCap = rowsCollected >= rowCap;
+  c.tableSize = tableSize;
+}
+
+// Whether the published rows are a whole cycle over the table *as it now
+// stands* — which is the question Snapshot::stillReadingPaths() asks of them,
+// and the one a plain "has a cycle ever closed" latch answers wrongly.
+//
+// What the latch got wrong is every node's first boot, not a corner. A node
+// that has heard nothing has an empty path table, the first pass walks it to
+// the end and closes a cycle over it, and the latch was true from then on. Let
+// that node learn two hundred paths and start a cycle it needs several passes
+// for, and it went on calling the *empty* list it published at boot whole:
+// stillReadingPaths() read false beside a count in the hundreds, and every
+// surface drawing that list said "nothing announced yet" about a node that was
+// part-way through reading its own table.
+//
+// The rule
+// --------
+// A closed cycle is credited to the table it closed over, and answers for that
+// table only:
+//
+//   * it stays whole while the table has not grown past what it covered — a
+//     table that has shrunk, or churned without growing, is still described by
+//     that list;
+//   * a cycle that closed at the row cap stays whole whatever the table grows
+//     to, because the cap and not the cycle is what ended the list: the cap is
+//     the most any cycle can ever publish, so a bigger table cannot make that
+//     list less complete than it was;
+//   * and a table that has grown past a cycle that closed *below* the cap reads
+//     "still reading" until the next cycle closes.
+//
+// The trade
+// ---------
+// The third clause is what a node pays, and how long it pays it for is how many
+// passes a cycle takes.
+//
+// A table the walk gets round inside one pass closes a cycle on every pass, and
+// the caller republishes this flag at the end of each — so such a node never
+// reads "still reading" at all: the pass that would have reported it closed a
+// cycle over the grown table first. That is a table of about fourteen records
+// at the 30 ms a record this firmware links (kWalkBudgetMs / 30), or about
+// seven on a pass sweeping from ahead of the rows, which is where the rows get
+// half the budget (rowShareSpent).
+//
+// Past that the reading lasts the passes of the cycle that follows the growth,
+// during which the node is telling the truth: it is reading its table, and the
+// rows on screen are from before the table grew. At the cap and those fourteen
+// records a pass, that cycle is five passes, so four of them read "still
+// reading".
+//
+// What it must not do is read "still reading" for the life of a large node,
+// which is exactly what the third clause on its own would do: a node whose
+// table keeps growing would start a new multi-pass cycle for every growth and
+// never be caught up with. The cap clause is what stops it. A table holding
+// more than SNAPSHOT_MAX_PATHS paths the walk can render closes its cycles at
+// the cap, so such a node is whole from the first cycle that fills and stays
+// whole however much the table grows afterwards.
+//
+// Two readings this deliberately does *not* call "still reading", because
+// neither is one:
+//
+//   * a table whose entries have no receiving interface. They are counted in
+//     tableSize and contribute no rows, so a cycle over them closes whole with
+//     a short list — which is what it is: the cycle did cover the table, and
+//     those entries are the dead-path sweep's to remove.
+//   * a table smaller than the one the cycle closed over. The list is a cycle
+//     old, not a prefix.
+//
+// One predicate, not two: this produces Tables::snapRowsWhole and
+// Snapshot::stillReadingPaths() is still the only thing that reads it beside a
+// count (RnsTransport.h).
+inline bool rowsWhole(const RowCycle& c, size_t tableNow) {
+  return c.closed && (c.filledCap || tableNow <= c.tableSize);
+}
+
 // Whether the walk should give the core up before touching this record.
 //
 // `elapsedMs` and `lastYieldMs` are both measured from the start of the walk,

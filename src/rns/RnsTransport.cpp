@@ -2019,6 +2019,33 @@ static void refreshSnapshots(bool allowSweep) {
   // only after the publish below, is what /api/status reports the age from, so
   // a snapshot that stopped updating says so instead of looking fresh.
   sSnapAtMs = millis();
+  // The other half of that, and it is the half the entry stamp cannot cover.
+  // sSnapIntervalMs is written at the end of this function, after the walk and
+  // the removal have both come back, so a pass that throws leaves the interval
+  // it was gated on standing — and a pass that had already run longer than that
+  // interval before it threw has the gate open again the moment it leaves.
+  // Repeated slow failures then run back to back, which is the shape the gate
+  // exists to prevent, on the sick filesystem that is the case it matters on.
+  //
+  // So the scheduler is asked however the pass leaves, off the same
+  // Rns::nextIntervalMs() the ordinary path uses rather than a second formula,
+  // and a pass that throws still costs the node a gap proportional to how long
+  // it ran before throwing. That gap runs from where the pass stopped rather
+  // than from where it started, which is what keeps a pass that outlasted its
+  // own interval — or the ceiling — from coming straight back.
+  //
+  // A destructor rather than a catch here: containment is Diag::guard's job and
+  // is one rule in one place (Diag.h), and this function is called from inside
+  // it (loop() below). The same reasoning as Sys::Lock at the publish.
+  struct PassBackOff {
+    bool done = false;
+    ~PassBackOff() {
+      if (done) return;                  // the pass reached its own scheduler
+      const uint32_t costMs = (uint32_t)(millis() - sSnapAtMs);   // the entry stamp above
+      sSnapIntervalMs = Rns::nextIntervalMs(costMs, SNAPSHOT_INTERVAL_MS, kStaleSweepMs);
+      sSnapAtMs       = millis();
+    }
+  } backOff;
   // clear() keeps the capacity reserved at begin(), so the push_back()s below
   // write into memory this node already owns.
   //
@@ -2172,12 +2199,16 @@ static void refreshSnapshots(bool allowSweep) {
   // is a cosmetic wrong on a panel that corrects itself on the next one, and
   // pathCount() beside it is the table's own size() and is never wrong.
   static size_t sRowPos    = 0;
-  // Whether what is published in sPaths is a whole cycle. False only until the
-  // first one closes: a prefix is never published, so once a list has been
-  // swapped in it is by construction complete. It stays false on a node that
-  // cannot finish a cycle at all, which — beside a pathCount() in the dozens —
-  // is exactly the reading an operator needs and had no way to get.
-  static bool   sRowsWhole = false;
+  // What the last cycle to publish a list covered, which is what decides
+  // whether that list is still a whole answer for the table (Rns::rowsWhole).
+  //
+  // A bool that latched true on the first closed cycle was wrong on every
+  // node's first boot: the empty table a node starts with closes a cycle on the
+  // first pass, and the empty list that published went on being called whole
+  // after the node had learned two hundred paths. The rule, what it deliberately
+  // does not call "still reading", and what a node pays for it are in
+  // SnapshotWalk.h beside the other row-cycle rules, where the host drives them.
+  static Rns::RowCycle sRowCycle;
   // Whether the last pass got as far as writing the row cursor back. What that
   // buys, and why a pass that did not gets its cycle started again rather than
   // resumed, is Rns::resumeRowCursor() — the rule is there with the other two
@@ -2340,6 +2371,8 @@ static void refreshSnapshots(bool allowSweep) {
   // walk did.
   const bool rowsShort = ranOut || rowsCut;
   const bool rowsDone  = Rns::rowCycleDone(p.size(), SNAPSHOT_MAX_PATHS, rowsShort);
+  // Read here rather than at the publish below, where p has been swapped away.
+  const size_t rowsCollected = p.size();
   sRowPos = rowsDone ? 0 : Rns::nextCursor(sRowPos, rowStopPos, rowsShort);
   sRowPassClean = true;                 // list and cursor agree again
   if (sweeping) {
@@ -2497,7 +2530,9 @@ static void refreshSnapshots(bool allowSweep) {
   // the TCP console there was no way to tell them apart at all.
   t.snapWalkPos     = (uint32_t)pos;
   t.snapBudgetStops = sSnapBudgetStops;
-  t.snapRowsWhole   = sRowsWhole || rowsDone;
+  // snapRowsWhole is not set here with the rest: it describes the list that is
+  // published below, and the two must not be able to disagree. It is written
+  // under the lock, beside the publish it is about.
   t.snapIntervalMs  = sSnapIntervalMs;
 
   // Sys::Lock, not a hand-written pair. Lock.h states the rule: this whole
@@ -2511,13 +2546,20 @@ static void refreshSnapshots(bool allowSweep) {
   // budget-stopped pass has a valid prefix and nothing else, and a panel given
   // four paths on a node holding eighty has no way to say which it is looking
   // at — so what stays published is the last whole list, and t.snapRowsWhole
-  // says whether one has ever been built. The interface list, the counts and
-  // the table sizes are published every pass as before: they cost one pass each
-  // and are never partial.
+  // says whether that list is still a whole answer for the table as it now
+  // stands (Rns::rowsWhole). The interface list, the counts and the table sizes
+  // are published every pass as before: they cost one pass each and are never
+  // partial.
   //
   // sPathCount is pathTable.size() and is untruncated whatever the rows did, so
   // the figure beside the list is exact on every pass including this one.
-  if (rowsDone) { sPaths.swap(p); sRowsWhole = true; }
+  if (rowsDone) {
+    sPaths.swap(p);
+    // Credited to the table it closed over, not to the run: this is what makes
+    // the flag go false again when the table grows past it (Rns::rowsWhole).
+    Rns::closeRowCycle(sRowCycle, rowsCollected, SNAPSHOT_MAX_PATHS, pathTotal);
+  }
+  t.snapRowsWhole = Rns::rowsWhole(sRowCycle, pathTotal);
   sIfaces.swap(i);
   sPathCount = pathTotal; sIfaceCount = ifaceCount;
   sTables = t;
@@ -2528,6 +2570,7 @@ static void refreshSnapshots(bool allowSweep) {
   // several passes to walk can be a cycle older than this; snapRowsWhole and
   // snapWalkPos above are what describe that.
   sSnapOkMs = millis();                 // only here: a pass that threw never reaches this
+  backOff.done = true;                  // and the back-off above is what a pass that did not costs
 }
 
 size_t interfaces(IfaceInfo* out, size_t max) {

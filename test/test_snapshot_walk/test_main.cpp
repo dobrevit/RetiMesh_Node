@@ -58,7 +58,13 @@
 //   * a pass that threw between its last row and its cursor starts the cycle
 //     again rather than collecting those rows a second time;
 //   * the removal that follows the walk is on the *walk's* clock, so the two
-//     together are one budget and not two.
+//     together are one budget and not two;
+//   * a closed row cycle answers only for the table it closed over, so the
+//     empty one every node boots with stops being called whole the moment the
+//     table grows past it — and a cycle that closed at the cap keeps answering,
+//     so a large node does not read "still reading" for the life of the run;
+//   * and a pass that threw buys the node the same back-off a pass that
+//     returned does, measured from where it stopped.
 //
 // refreshSnapshots() itself cannot be built for the host — [env:native] has no
 // framework, no microReticulum, no LittleFS and no FreeRTOS — so the rule was
@@ -252,13 +258,27 @@ struct Node {
   size_t rowPos       = 0;
   size_t staged       = 0;      // rows the current cycle has collected so far
   size_t published    = 0;      // rows in the list readers actually see
-  bool   rowsWhole    = false;  // a cycle has been published at least once
+  // What the last cycle to publish covered, and what the node serves as
+  // snapRowsWhole because of it: the firmware's sRowCycle and the
+  // Rns::rowsWhole() it is read through, carried here for the same reason the
+  // cursors are — so the harness cannot describe a node this firmware is not.
+  Rns::RowCycle cycle;
+  bool   rowsWhole    = false;  // Tables::snapRowsWhole, recomputed every pass
   bool   rowPassClean = true;   // the last pass wrote its row cursor back
   size_t rowCycles    = 0;
   size_t sweepCloses  = 0;
   size_t sweptTotal   = 0;
   size_t budgetStops  = 0;
 };
+
+// Snapshot::stillReadingPaths() — !snapRowsWhole && pathTotal > 0
+// (RnsTransport.h). That header cannot be built for the host any more than
+// refreshSnapshots() can, so the one predicate every surface asks is driven
+// here through its two inputs, the way the walk itself is written out again
+// above.
+bool stillReading(const Node& n, size_t tableSize) {
+  return !n.rowsWhole && tableSize > 0;
+}
 
 // `aborts` is a pass that throws mid-walk: Diag::guard catches it in the
 // firmware and nothing after the walk runs — no cursor written back, no
@@ -288,7 +308,14 @@ Pass onePass(Node& n, const std::vector<bool>& live, uint32_t recordMs,
     n.sweepPos = Rns::nextCursor(n.sweepPos, r.stoppedAt, r.ranOut);
     if (!r.ranOut) n.sweepCloses++;
   }
-  if (rowsDone) { n.published = r.rows; n.rowsWhole = true; n.rowCycles++; }
+  if (rowsDone) {
+    n.published = r.rows;
+    Rns::closeRowCycle(n.cycle, r.rows, kRowCap, live.size());
+    n.rowCycles++;
+  }
+  // Every pass publishes the flag, whether or not it published a list: it
+  // describes the list readers are holding against the table as it is now.
+  n.rowsWhole = Rns::rowsWhole(n.cycle, live.size());
   return r;
 }
 
@@ -329,6 +356,44 @@ Removal runRemoval(size_t stale, uint32_t walkElapsedMs, uint32_t removeMs,
   }
   return r;
 }
+
+// ---------------------------------------------------------------------------
+// The gate refreshSnapshots() is entered through, and what a pass costs the
+// node on its way out of it whichever way it leaves.
+//
+// Two statics and the scheduler between them, as the call site applies them:
+// sSnapAtMs, stamped on the way in so a fast throw cannot come straight back;
+// sSnapIntervalMs, which the gate is read against; and Rns::nextIntervalMs(),
+// asked with what the pass cost. Written out again here for the same reason the
+// walk is — refreshSnapshots() cannot be built for the host — and kept as close
+// to it.
+// ---------------------------------------------------------------------------
+struct Gate {
+  uint32_t atMs       = 0;
+  uint32_t intervalMs = (uint32_t)SNAPSHOT_INTERVAL_MS;
+
+  bool dueAt(uint32_t nowMs) const { return (uint32_t)(nowMs - atMs) >= intervalMs; }
+
+  void enter(uint32_t startMs) { atMs = startMs; }          // the entry stamp
+
+  // A pass that returned. Its cost buys the gap, measured from where the pass
+  // started, which is what the gate has always meant.
+  void passed(uint32_t startMs, uint32_t costMs) {
+    enter(startMs);
+    intervalMs = Rns::nextIntervalMs(costMs, (uint32_t)SNAPSHOT_INTERVAL_MS, kSweepCeilingMs);
+  }
+
+  // A pass that threw. Diag::guard catches it and nothing after the throw runs,
+  // so the back-off is taken on the way out of the function instead — and the
+  // gap it buys runs from where the pass stopped, because a pass that has
+  // already outlasted its own interval would otherwise be due the instant it
+  // left.
+  void threw(uint32_t startMs, uint32_t costMs) {
+    enter(startMs);
+    intervalMs = Rns::nextIntervalMs(costMs, (uint32_t)SNAPSHOT_INTERVAL_MS, kSweepCeilingMs);
+    atMs = startMs + costMs;
+  }
+};
 
 } // namespace
 
@@ -818,6 +883,102 @@ void test_only_a_whole_list_is_published() {
   TEST_ASSERT_EQUAL_size_t(0, small.rowPos);
 }
 
+void test_a_cycle_over_an_empty_table_does_not_answer_for_a_full_one() {
+  // The transition nothing exercised, and it is every node's first boot rather
+  // than a corner: the table is empty until something is announced, so the
+  // first pass walks it to the end and closes a cycle over nothing. A flag that
+  // latched on that first close then said "whole" for the rest of the run, and
+  // the empty list it was published with went on being called a whole answer
+  // after the node had learned two hundred paths — stillReadingPaths() false
+  // beside a count in the hundreds, which every surface draws as "nothing
+  // announced yet".
+  Node n;
+  onePass(n, table(0, true), kFastRecordMs, /*sweeping=*/false);
+  TEST_ASSERT_EQUAL_size_t(1, n.rowCycles);
+  TEST_ASSERT_EQUAL_size_t(0, n.published);
+  TEST_ASSERT_TRUE(n.rowsWhole);                 // an empty table, wholly read
+  // And that is the right answer for it: with no paths in the table there is
+  // nothing to be still reading, which is what the second half of the predicate
+  // is for.
+  TEST_ASSERT_FALSE(stillReading(n, 0));
+
+  // Then the node learns two hundred paths. No pass walks that in one — fourteen
+  // records fit in the budget at 30 ms a record — so the cycle takes five, and
+  // for four of them what readers hold is still the empty list from boot.
+  const std::vector<bool> grown = table(200, true);
+  for (int k = 0; k < 4; k++) {
+    onePass(n, grown, kFastRecordMs, /*sweeping=*/false);
+    TEST_ASSERT_EQUAL_size_t(0, n.published);
+    TEST_ASSERT_EQUAL_size_t(1, n.rowCycles);    // none has closed since
+    TEST_ASSERT_FALSE(n.rowsWhole);              // the latch said true here
+    TEST_ASSERT_TRUE(stillReading(n, grown.size()));
+  }
+  // The fifth closes the cycle at the cap and publishes it.
+  onePass(n, grown, kFastRecordMs, /*sweeping=*/false);
+  TEST_ASSERT_EQUAL_size_t(2, n.rowCycles);
+  TEST_ASSERT_EQUAL_size_t(kRowCap, n.published);
+  TEST_ASSERT_TRUE(n.rowsWhole);
+  TEST_ASSERT_FALSE(stillReading(n, grown.size()));
+}
+
+void test_a_node_that_has_read_its_table_does_not_flap_between_the_two() {
+  // The other half of the rule, and the one that decides whether it is usable:
+  // a node that has read its table must not alternate between whole and partial
+  // on every pass, or the reading means nothing on any surface that draws it.
+  //
+  // Two nodes, because there are two ways a cycle closes.
+  //
+  // A table the walk gets round inside one pass closes a cycle every pass, so
+  // the flag never leaves true — this is the ordinary node.
+  Node small;
+  const std::vector<bool> few = table(6, true);
+  for (int k = 0; k < 6; k++) {
+    onePass(small, few, kFastRecordMs, /*sweeping=*/false);
+    TEST_ASSERT_TRUE(small.rowsWhole);
+    TEST_ASSERT_FALSE(stillReading(small, few.size()));
+    TEST_ASSERT_EQUAL_size_t(6, small.published);
+  }
+
+  // And a table past the cap, which is the case a per-cycle rule could ruin:
+  // its cycles take five passes each, so a rule that went partial whenever a
+  // cycle was under way would read "still reading" four passes in five for the
+  // life of the node. It does not, because such a cycle closes at the *cap* —
+  // sixty-four rows is the most any cycle can publish, so a bigger table cannot
+  // make that list less complete than it was.
+  Node big;
+  const std::vector<bool> many = table(200, true);
+  for (int k = 0; k < 5; k++) onePass(big, many, kFastRecordMs, /*sweeping=*/false);
+  TEST_ASSERT_EQUAL_size_t(kRowCap, big.published);
+  TEST_ASSERT_TRUE(big.rowsWhole);
+  const std::vector<bool> bigger = table(400, true);
+  for (int k = 0; k < 4; k++) {           // four passes of the next cycle, mid-cycle
+    onePass(big, bigger, kFastRecordMs, /*sweeping=*/false);
+    TEST_ASSERT_EQUAL_size_t(kRowCap, big.published);
+    TEST_ASSERT_TRUE(big.rowsWhole);
+    TEST_ASSERT_FALSE(stillReading(big, bigger.size()));
+  }
+
+  // The rule on its own, all four clauses of it.
+  Rns::RowCycle none;
+  TEST_ASSERT_FALSE(Rns::rowsWhole(none, 0));    // nothing has closed yet
+  TEST_ASSERT_FALSE(Rns::rowsWhole(none, 200));
+  Rns::RowCycle closed;
+  Rns::closeRowCycle(closed, 10, kRowCap, 10);   // ten rows over a ten-row table
+  TEST_ASSERT_TRUE(Rns::rowsWhole(closed, 10));
+  TEST_ASSERT_TRUE(Rns::rowsWhole(closed, 4));   // a table that has since shrunk
+  TEST_ASSERT_FALSE(Rns::rowsWhole(closed, 11)); // one it has since grown past
+  Rns::RowCycle capped;
+  Rns::closeRowCycle(capped, kRowCap, kRowCap, 200);
+  TEST_ASSERT_TRUE(Rns::rowsWhole(capped, 200));
+  TEST_ASSERT_TRUE(Rns::rowsWhole(capped, 5000));  // the cap ended it, not the table
+  // A cycle that walked a table of dead entries to the end publishes a short
+  // list and is whole, which is what it is: the cycle did cover the table, and
+  // those entries are the sweep's to remove rather than rows nobody has read.
+  Rns::RowCycle sparse;
+  Rns::closeRowCycle(sparse, 0, kRowCap, 40);
+  TEST_ASSERT_TRUE(Rns::rowsWhole(sparse, 40));
+}
+
 // ---------------------------------------------------------------------------
 // A pass that threw, and the removal's clock
 // ---------------------------------------------------------------------------
@@ -1270,6 +1431,68 @@ void test_passes_cannot_run_back_to_back_under_the_worst_timing() {
   TEST_ASSERT_EQUAL_UINT32(ceiling, Rns::nextIntervalMs(45000, interval, ceiling));
 }
 
+void test_a_pass_that_threw_costs_the_node_the_same_back_off() {
+  // The scheduler was asked only where a pass returned: sSnapIntervalMs was
+  // written after the walk and the removal had both come back, so a pass that
+  // threw left the interval it had been gated on standing. The entry stamp
+  // stops a *fast* throw coming back on the next 10 ms tick and that part
+  // worked; what it cannot do is stop a slow one, because by the time such a
+  // pass throws the interval it was gated on has already gone.
+  const uint32_t start = 10000;
+  const uint32_t cost  = 7500;          // the T-Beam's figure, and past the interval
+
+  // What that looked like: the entry stamp, an interval nobody updated, and a
+  // gate already open at the moment of the throw.
+  Gate unfixed;
+  unfixed.enter(start);
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)SNAPSHOT_INTERVAL_MS, unfixed.intervalMs);
+  TEST_ASSERT_TRUE(unfixed.dueAt(start + cost));
+
+  // With the back-off taken on the way out, the same pass costs the node the
+  // 30 s its cost earns — and from where it stopped, so the gap is real rather
+  // than one the pass has already spent.
+  Gate g;
+  g.threw(start, cost);
+  TEST_ASSERT_EQUAL_UINT32(30000, g.intervalMs);
+  TEST_ASSERT_FALSE(g.dueAt(start + cost));
+  TEST_ASSERT_FALSE(g.dueAt(start + cost + 29999));
+  TEST_ASSERT_TRUE(g.dueAt(start + cost + 30000));
+
+  // Repeated slow failures, which is the sick filesystem this is for: every one
+  // of them buys a gap instead of the passes running back to back.
+  uint32_t at = start;
+  for (int k = 0; k < 4; k++) {
+    g.threw(at, cost);
+    TEST_ASSERT_FALSE(g.dueAt(at + cost));
+    at = at + cost + g.intervalMs;
+    TEST_ASSERT_TRUE(g.dueAt(at));
+  }
+
+  // A pass slower than the ceiling itself is the case the entry stamp alone
+  // cannot cover at all: 60 s is the most the scheduler will ask for, and a
+  // pass that ran longer than that has spent it before it throws. Measured from
+  // where it stopped, it still leaves the node a minute.
+  Gate slow;
+  slow.threw(start, 70000);
+  TEST_ASSERT_EQUAL_UINT32(kSweepCeilingMs, slow.intervalMs);
+  TEST_ASSERT_FALSE(slow.dueAt(start + 70000));
+  TEST_ASSERT_TRUE(slow.dueAt(start + 70000 + kSweepCeilingMs));
+
+  // And a throw that is not slow is not punished for it: under the quarter the
+  // scheduler is inert, so the node is back on its configured interval.
+  Gate fast;
+  fast.threw(start, 5);
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)SNAPSHOT_INTERVAL_MS, fast.intervalMs);
+  TEST_ASSERT_TRUE(fast.dueAt(start + 5 + SNAPSHOT_INTERVAL_MS));
+
+  // One formula for both ways out, which is the other half of the fix: a pass
+  // that threw and a pass that returned having cost the same are given the same
+  // interval, and only where it is measured from differs.
+  Gate ok;
+  ok.passed(start, cost);
+  TEST_ASSERT_EQUAL_UINT32(g.intervalMs, ok.intervalMs);
+}
+
 // ---------------------------------------------------------------------------
 // The yield cadence
 // ---------------------------------------------------------------------------
@@ -1386,6 +1609,8 @@ int main() {
   RUN_TEST(test_a_pass_reaches_its_own_cursor_even_if_stepping_stops_being_free);
   RUN_TEST(test_a_resuming_pass_does_not_end_at_its_own_front_door);
   RUN_TEST(test_only_a_whole_list_is_published);
+  RUN_TEST(test_a_cycle_over_an_empty_table_does_not_answer_for_a_full_one);
+  RUN_TEST(test_a_node_that_has_read_its_table_does_not_flap_between_the_two);
   RUN_TEST(test_a_pass_that_threw_starts_the_row_cycle_again);
   RUN_TEST(test_the_removal_is_bounded_by_the_walks_clock_and_not_a_fresh_one);
   RUN_TEST(test_the_rows_give_the_sweep_half_the_budget_when_it_is_ahead);
@@ -1397,6 +1622,7 @@ int main() {
   RUN_TEST(test_a_pass_that_outgrows_its_share_buys_itself_room);
   RUN_TEST(test_the_scheduler_has_a_ceiling_the_abandoned_formula_did_not);
   RUN_TEST(test_passes_cannot_run_back_to_back_under_the_worst_timing);
+  RUN_TEST(test_a_pass_that_threw_costs_the_node_the_same_back_off);
   RUN_TEST(test_the_yield_cadence_fires_more_than_once_inside_one_budget);
   RUN_TEST(test_the_feed_cadence_would_not_yield_at_all);
   RUN_TEST(test_the_yield_ceiling_does_not_move_with_the_record_cost);

@@ -102,7 +102,8 @@ function fmtAge(s) { return s < 60 ? s + " s" : s < 3600 ? Math.floor(s/60) + " 
 // Whether an empty path list means "nothing there" or "not read yet".
 //
 // The node's own rule, off the node's own two fields: the path rows are
-// published only once a snapshot pass has been all the way round the table
+// published only once a snapshot pass has been all the way round the table,
+// and the node says so only while they are still a whole answer for it
 // (diag.tables.snap_rows_whole), while path_count is the table's size and is
 // exact from the first pass. So a node bigger than one pass serves a count
 // with no rows under it, and this page used to render that as

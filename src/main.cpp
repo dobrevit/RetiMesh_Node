@@ -609,11 +609,12 @@ void loop() {
     // its own cannot tell a node that finished its table in 380 ms from one cut
     // off at 400: `pos` against `paths` says how far the last pass actually
     // got, `stops` says how often the budget has ended one, `rows` says whether
-    // what /api/status and the panels are showing is a whole list or a node
-    // that has never managed to build one, and `every` is how often a pass
-    // happens at all — 5000 ms until a pass costs enough to buy itself room,
-    // and the only figure here that explains the rest going stale
-    // (RnsTransport.h).
+    // what /api/status and the panels are showing is still a whole list for the
+    // table as it now stands — "partial" is a node that has never managed to
+    // build one, or one whose table has outgrown the last it did — and `every`
+    // is how often a pass happens at all — 5000 ms until a pass costs enough to
+    // buy itself room, and the only figure here that explains the rest going
+    // stale (RnsTransport.h).
     log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu "
           "snap %lums pos %lu stops %lu rows %s every %lums",
           (unsigned long)t.paths, (unsigned long)t.links, (unsigned long)t.activeLinks,

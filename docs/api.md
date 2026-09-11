@@ -428,11 +428,23 @@ and carries a cursor from one pass to the next.
   being cut off: survivable, because the cursors resume where they stopped, but
   it is the node saying its table has outgrown a single pass.
 - `snap_rows_whole` — whether the `transport.paths` rows above are a complete
-  cycle. A pass cut off by the budget keeps its partial list to itself rather
-  than publishing a prefix that looks like the whole table, so this is `true` on
-  any node that has finished a cycle at least once. `false` beside a non-zero
-  `paths` means the node has never got all the way round its own table — the
-  count is still exact, the list is empty rather than misleading.
+  cycle **over the table as it now stands**. A pass cut off by the budget keeps
+  its partial list to itself rather than publishing a prefix that looks like the
+  whole table, so a published list is complete for the table the cycle that
+  built it closed over. It is not a latch: a cycle that closed below the row cap
+  of 64 stops counting as whole once `paths` has grown past what it covered, and
+  a cycle that closed **at** the cap stays whole whatever `paths` grows to,
+  because the cap and not the cycle is what ended that list. `false` beside a
+  non-zero `paths` is a node part-way through reading its own table — it has
+  never got all the way round, or its table has outgrown the last time it did.
+  The count is exact either way; the list is the older one rather than a
+  misleading prefix. A table the walk gets round inside one pass closes a cycle
+  on every pass and so never reads `false` at all; a bigger one reads `false`
+  for the passes of the cycle that follows the growth — four of the five a
+  cap-filling cycle takes at the per-record cost this firmware links — and a
+  table holding more than 64 renderable paths closes its cycles at the cap, so
+  it reads `true` from the first cycle that fills however much it grows
+  afterwards.
 - `snap_interval_ms` — how long the node is currently leaving between two
   passes, and the only field here that explains the others going stale. `5000`
   on any node whose last pass cost less than a quarter of that, which is every
@@ -444,7 +456,10 @@ and carries a cursor from one pass to the next.
   concluding a reading is fresh: at anything above `5000`, `snapshot_age_s` and
   the path rows are older than the five seconds they would otherwise imply, and
   the node is telling you a pass has become expensive. `snap_walk_max_ms` beside
-  it says how expensive.
+  it says how expensive — with one exception: a pass that *failed* part-way buys
+  the same gap, off what it had spent before it failed, and it never reaches the
+  high-water mark. `diag.faults.contained` climbing beside a raised interval
+  with `snap_walk_max_ms` flat is that node.
 
 `tables.paths` and `transport.path_count` are the whole table on every pass
 whatever the walk did: they are the table's own size and are never truncated.
