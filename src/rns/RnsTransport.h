@@ -73,7 +73,6 @@ void clientDisconnected(uint32_t id);
 // eye, and a truncated one makes two different peers read as the same.
 struct PathInfo  { char hash[33]; char via[INTERFACE_NAME_MAX]; uint8_t hops; uint32_t ageS; };
 struct IfaceInfo { char name[INTERFACE_NAME_MAX]; char mode[14]; uint32_t rxb, txb; };
-size_t paths(PathInfo* out, size_t max);
 size_t interfaces(IfaceInfo* out, size_t max);
 size_t pathCount();
 size_t interfaceCount();                   // whole list, even when a caller reads fewer

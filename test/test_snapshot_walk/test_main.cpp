@@ -994,7 +994,10 @@ void test_the_sweep_cursor_advances_on_every_sweeping_pass() {
   // Before it, the sweep advanced only in the one pass per row cycle where the
   // row cursor caught up to it: the cursor sat at 70 for five passes, then 76
   // for five, then 82, and the first dead entry was reached on pass 35 with the
-  // cycle closing on pass 115. With it, the cursor moves on every pass, the
+  // cycle closing on pass 115. Those are measurements of the pre-share rules,
+  // which this tree no longer has — narrative here and in SnapshotWalk.h, and
+  // not re-derivable from anything below; only the with-share figures are
+  // asserted. With it, the cursor moves on every pass, the
   // first dead entry comes on pass 10 and the cycle closes on pass 23 — and
   // goes round eight times in two hundred passes rather than once.
   std::vector<bool> live = table(200, true);
@@ -1272,8 +1275,8 @@ void test_passes_cannot_run_back_to_back_under_the_worst_timing() {
 // ---------------------------------------------------------------------------
 
 void test_the_yield_cadence_fires_more_than_once_inside_one_budget() {
-  // At the cost this firmware links: yields at the first record past 100, 200
-  // and 300 ms of walk time.
+  // At the cost this firmware links, one budget's walk yields three times.
+  // Where those three land is asserted below, and is not the tidy 100/200/300.
   const Pass fast = runWalk(table(200, true), false, 0, kFastRecordMs);
   TEST_ASSERT_EQUAL_size_t(3, fast.yields);
   // Where they land, which the header quotes and used to divide out wrongly.

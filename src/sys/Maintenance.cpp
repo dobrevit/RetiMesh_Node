@@ -391,13 +391,20 @@ static void doStatus() {
   //
   // rx_drain_capped is on the same line and is not a third fault: it counts the
   // Reticulum-task passes whose batch of received frames ended with more still
-  // in the ring, which loses nothing and is expected after a long path-table
-  // sweep. The format below prints it after the rx=/tx= pair and before the two
-  // carrier-sense counters — with the traffic figures it is about, and without
-  // splitting the two an operator reads together — and it is on the console at
-  // all because a node reachable only over TCP 4243 has no other way to be
-  // asked. /api/status carries it as radio.rx_drain_capped, and real loss on
-  // this path is radio.rx_dropped_ring.
+  // in the ring, which loses nothing. The pass after a full-budget path-table
+  // walk is the case to expect — the budget covers the whole walk now, not the
+  // sweep half, so on a table too big to read in one pass it ends most passes,
+  // every five seconds, for as long as the table stays that big. A total that
+  // climbs steadily is therefore this node getting round its own table as
+  // readily as a busy channel (Config.h, loraRxDrainCapped). Nothing on this
+  // line tells the two apart: the console has never carried table figures, and
+  // diag.tables.snap_budget_stops in /api/status is what says which. The format
+  // below prints it after the rx=/tx= pair and before the two carrier-sense
+  // counters — with the traffic figures it is about, and without splitting the
+  // two an operator reads together — and it is on the console at all because a
+  // node reachable only over TCP 4243 has no other way to be asked.
+  // /api/status carries it as radio.rx_drain_capped, and real loss on this path
+  // is radio.rx_dropped_ring.
   dataf("STATUS", "radio=%s model=%s rx=%lu tx=%lu rx_drain_capped=%lu "
                   "cad_timeouts=%lu cad_arm_errors=%lu",
         g_stats.radioOnline ? "online" : "offline", g_stats.radioModel,

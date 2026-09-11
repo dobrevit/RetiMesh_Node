@@ -179,8 +179,10 @@ the ordinary reading on the shipped channel and needs no action.
                  "interfaces": [ { "name": "LoRa", "mode": "full", "rx_bytes": 1234, "tx_bytes": 567 },
                                  { "name": "WiFi/10.42.0.2:51022", "mode": "full", "rx_bytes": 0, "tx_bytes": 0 },
                                  { "name": "Auto/fe80::2cdb:d4ff:fe82:1f20", "mode": "full", "rx_bytes": 9012, "tx_bytes": 3400 } ],
-                 "path_count": 2, "interface_count": 3, "snapshot_age_s": 2,
-                 "paths": [ { "hash": "5168bb90…", "hops": 1, "via": "WiFi/10.42.0.2:51022", "age_s": 40 } ] },
+                 "path_count": 3, "interface_count": 3, "snapshot_age_s": 2,
+                 "paths": [ { "hash": "5168bb90…", "hops": 1, "via": "WiFi/10.42.0.2:51022", "age_s": 40 },
+                            { "hash": "a31c7d04…", "hops": 2, "via": "LoRa", "age_s": 112 },
+                            { "hash": "bf40e2a7…", "hops": 1, "via": "Auto/fe80::2cdb:d4ff:fe82:1f20", "age_s": 7 } ] },
   "neighbors": [ { "name": "Anonymous Peer", "version": "", "kind": "announce", "hash": "5168bb90…",
                    "aspect": "lxmf.delivery", "hops": 0, "via": "wifi", "rssi": 0, "snr": 0, "age_s": 40, "count": 3 } ]
 }
@@ -446,9 +448,10 @@ and carries a cursor from one pass to the next.
 
 `tables.paths` and `transport.path_count` are the whole table on every pass
 whatever the walk did: they are the table's own size and are never truncated.
-`transport.paths` is a capped list of rows out of it, and on a table that takes
-several passes to walk it can be a cycle older than `transport.snapshot_age_s`,
-which is the age of the reading as a whole.
+`transport.paths` is a capped list of rows out of it — at most 32 here, out of
+the 64 a pass collects — and on a table that takes several passes to walk it can
+be a cycle older than `transport.snapshot_age_s`, which is the age of the
+reading as a whole.
 
 `airtime` reports channel use and the transmit budget:
 `{"short_pct":0.46,"long_pct":0.02,"band":"869.4-869.65 (10 %)",

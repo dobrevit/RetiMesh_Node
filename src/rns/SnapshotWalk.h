@@ -451,8 +451,14 @@ constexpr uint32_t rowShareMs(uint32_t budgetMs) { return budgetMs / 2; }
 // exactly — sixteen of them, at 25 ms a record — the row half fills the cap
 // precisely as the budget runs out, and the cursor stopped at 64 and stayed
 // there until the per-record cost happened to jitter. A cleanup that never runs
-// is not a slow cleanup. All of those figures are driven in test_snapshot_walk
-// rather than reasoned about here.
+// is not a slow cleanup.
+//
+// Only the figures *with* the share — pass 10, pass 23, and a knife-edge cursor
+// that goes past 64 — are asserted, in test_snapshot_walk. The ones without it
+// are not, and cannot be from this tree: the rules they were measured under are
+// the ones the share replaced. They are recorded as what they are, measurements
+// of the old behaviour reproduced once in review, and as why the share exists —
+// not as anything this code can be checked against.
 //
 // The condition
 // -------------

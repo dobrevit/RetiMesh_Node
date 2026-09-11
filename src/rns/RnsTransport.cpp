@@ -2080,11 +2080,12 @@ static void refreshSnapshots(bool allowSweep) {
   // all. Rns::rowShareSpent() is the rule and carries the figures.
   //
   // What is deliberately not here: any cap on the table itself. Nothing bounds
-  // it — path_table_maxsize() is never called from src/, so microStore's
-  // policy_max_recs stays 0 and neither its eviction nor its dead-record
-  // compaction can run, and no TTL is set — which makes this sweep the only
-  // thing that ever removes a stored path, at an estimated 70-90 B of internal
-  // DRAM apiece on every board, PSRAM ones included. That is a real
+  // it — nothing on this node sets path_table_maxsize() (the sweep-cursor note
+  // below carries that argument in full, the library's own caller included), so
+  // microStore's policy_max_recs stays 0 and neither its eviction nor its
+  // dead-record compaction can run, and no TTL is set — which makes this sweep
+  // the only thing that ever removes a stored path, at an estimated 70-90 B of
+  // internal DRAM apiece on every board, PSRAM ones included. That is a real
   // unbounded-growth concern and a different one from this walk's cost; it
   // wants its own change rather than a cap smuggled in here.
   static std::vector<RNS::Bytes> stale;
@@ -2122,8 +2123,18 @@ static void refreshSnapshots(bool allowSweep) {
   //     reorder (FileStore.h). Its sibling, the dead-record-threshold
   //     compaction, is *not* reachable on this store: compact_if_threshold() is
   //     gated on policy_max_recs > 0, that member defaults to
-  //     USTORE_DEFAULT_MAX_RECS which is 0, and the only thing that would set it
-  //     — Transport::path_table_maxsize() — is never called from src/.
+  //     USTORE_DEFAULT_MAX_RECS which is 0, and the only thing that would set
+  //     it is Transport::path_table_maxsize(uint16_t), and nothing calls it.
+  //     Not src/, and not the library in the image either — though the library
+  //     is where its one caller lives: register_builtin_namespaces() exposes
+  //     the setter as a provisioning field (Provisioning/BuiltinNamespaces.cpp)
+  //     and that file is compiled. It is reached only from
+  //     Provisioner::begin(), which Reticulum::start() calls under #ifdef
+  //     RNS_USE_PROVISIONING — a macro no env in platformio.ini defines — so
+  //     the call is compiled out, nothing references the registration and the
+  //     linker drops it: the t3s3 firmware.elf carries no provisioning symbol
+  //     at all, and no path_table_maxsize beyond the member it would write.
+  //     Defining that macro is what would end the premise.
   //
   // So the cursor is an approximation between passes rather than an identity,
   // and entries either side of a shift are examined twice or skipped for a
@@ -2494,13 +2505,6 @@ static void refreshSnapshots(bool allowSweep) {
   // several passes to walk can be a cycle older than this; snapRowsWhole and
   // snapWalkPos above are what describe that.
   sSnapOkMs = millis();                 // only here: a pass that threw never reaches this
-}
-
-size_t paths(PathInfo* out, size_t max) {
-  Sys::Lock held(sSnapLock);
-  size_t n = min(max, sPaths.size());
-  for (size_t k = 0; k < n; k++) out[k] = sPaths[k];
-  return n;
 }
 
 size_t interfaces(IfaceInfo* out, size_t max) {
