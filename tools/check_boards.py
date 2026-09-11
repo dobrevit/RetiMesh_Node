@@ -172,6 +172,16 @@ for section in ini.sections():
                         "as a T3-S3 — name the board, or add the env to DEFAULT_HEADER_ENVS "
                         "here if that really is what it wants")
 
+# The capability catalogue. The rule lives in board_facts.validate_capability
+# so that this gate and tools/tests/test_board_catalogue.py ask the same
+# question rather than growing two answers to it — and so that every claim is
+# compared against what the build actually resolves rather than against a
+# second copy typed here.
+sys.path.insert(0, str(ROOT / "tools"))
+import board_facts  # noqa: E402
+problems.extend(board_facts.validate_capability(
+    boards, board_facts.Ini(ROOT / "platformio.ini"), warnings))
+
 ident = boards.get("_usb_identity")
 if isinstance(ident, dict):
     for key in ("vid", "pid", "manufacturer", "product", "network_interface"):
@@ -193,6 +203,6 @@ for p in problems:
 for w in warnings:
     print("boards.json: warning:", w)
 print(f"{len([k for k in boards if not k.startswith('_')])} boards checked against "
-      f"platformio.ini and src/Config.h, "
+      f"platformio.ini, src/Config.h and the board headers, "
       f"{len(problems)} problem(s), {len(warnings)} warning(s)")
 sys.exit(1 if problems else 0)
