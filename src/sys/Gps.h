@@ -53,6 +53,14 @@
 
 namespace Gps {
 
+// Which UART the receiver owns, stated outside the HAS_GPS guard so anything
+// asking "is this port free" can ask rather than re-type it. It lived only in
+// this module's HardwareSerial constructor, which meant a board that moved the
+// receiver would have left UartLink's collision check silently agreeing to the
+// clash it exists to refuse.
+constexpr int kUartInstance = 1;
+
+
 struct Fix {
   bool     enabled   = false;
   bool     valid     = false;      // a fix the receiver still stands behind

@@ -39,7 +39,7 @@ const uint32_t SYNC_INTERVAL = 3600000;
 // would be a hundred a second and a log line with each.
 const uint32_t PORT_RETRY_MS = 5000;
 
-HardwareSerial   sSerial(1);
+HardwareSerial   sSerial(Gps::kUartInstance);   // the one statement of which port
 SemaphoreHandle_t sLock = nullptr;
 // Set by the task itself before its first pass; setEnabled(true) uses it to
 // wake a task parked in the disabled branch's notify-wait immediately,
