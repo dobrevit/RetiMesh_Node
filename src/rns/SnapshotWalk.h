@@ -303,9 +303,15 @@ constexpr bool walkBudgetFitsInterval(uint32_t intervalMs) {
 //   * The budget is consulted between records and never inside one, so a pass
 //     costs the budget plus the record in hand. At the worst per-record figure
 //     anywhere in this tree — 162 ms, microStore's own measurement on a
-//     200-record store (FileStore.h) — that is 562 ms against a 1250 ms
-//     quarter. Comfortable, and this function returns the configured interval
-//     unchanged for it.
+//     200-record store (FileStore.h) — that is 562 ms against the quarter, and
+//     this function hands back the configured interval unchanged for it. What
+//     the record in hand actually has is not a constant worth quoting but an
+//     expression — SNAPSHOT_INTERVAL_MS / kPassShareDiv - kWalkBudgetMs, the
+//     share a pass is allowed less the share the budget has already spent. On
+//     the shipped figures that is 5000 / 4 - 400 = 850 ms against a 162 ms
+//     record, which is comfortable for exactly as long as all three of those
+//     numbers stay where they are. "What reaches the branch" below is the list
+//     of ways they do not.
 //   * passMayStop() may not end a pass that has dereferenced nothing. That is
 //     the forward-progress guarantee, and its price is stated where it is
 //     defined: a pass costs the prefix it steps over plus one record, not the
@@ -315,6 +321,34 @@ constexpr bool walkBudgetFitsInterval(uint32_t intervalMs) {
 //     the abandoned branch fix/snapshot-walk-starves-loop ran on a microStore
 //     where stepping *did* load. A 50-position prefix at 30 ms a record is
 //     1530 ms; the 87-path T-Beam at 162 ms is seconds.
+//
+// What reaches the branch
+// -----------------------
+// Three routes, each read off this tree rather than supposed:
+//
+//   * A retune this file permits. walkBudgetFitsInterval() asks only
+//     kWalkBudgetMs <= intervalMs / kPassShareDiv, so a budget of 1250
+//     static_asserts clean at the shipped interval — and takes the expression
+//     above to zero. The no-op branch here is passCostMs <= intervalMs /
+//     kPassShareDiv, the same 1250, and a budget-stopped pass costs the budget
+//     *plus* the record in hand, so it is always over it: every budget-stopped
+//     pass would reschedule. This function fires on precisely the retune the
+//     static_assert lets through, which is why the node wants both.
+//   * One slow record, or one slow removal. The budget is read between records
+//     and never inside one, and the removal attempts one entry past it whatever
+//     the clock says — passMayStop()'s didSomething, and the attempts > 0 it is
+//     answered with at the removal in RnsTransport.cpp. Nor is the store
+//     necessarily on LittleFS: RnsFileSystem::useSd() points it at the SD card
+//     on a board that has one, and a card stalling in its own housekeeping goes
+//     well past the slack a 162 ms record leaves.
+//   * Time the task did not get. walkMs is millis() - walkStartMs, wall clock,
+//     so whatever preempts a pass is charged to the pass. The radio task is
+//     priority 5 on core 1 and the RNS task is priority 3 on the same core
+//     (main.cpp), so a burst of traffic during a pass counts against the
+//     measurement. That is the behaviour to want — the gap to the next pass
+//     should reflect how long the node was really away from forwarding — but it
+//     does mean this branch is reachable on a node whose own work sits well
+//     inside the budget.
 //
 // So the missing half is the measured one, and this is it. Nothing else in the
 // pass watches what the pass came to, and the gate it feeds — "has

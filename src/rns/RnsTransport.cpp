@@ -2080,14 +2080,37 @@ static void refreshSnapshots(bool allowSweep) {
   // all. Rns::rowShareSpent() is the rule and carries the figures.
   //
   // What is deliberately not here: any cap on the table itself. Nothing bounds
-  // it — nothing on this node sets path_table_maxsize() (the sweep-cursor note
-  // below carries that argument in full, the library's own caller included), so
-  // microStore's policy_max_recs stays 0 and neither its eviction nor its
-  // dead-record compaction can run, and no TTL is set — which makes this sweep
-  // the only thing that ever removes a stored path, at an estimated 70-90 B of
-  // internal DRAM apiece on every board, PSRAM ones included. That is a real
-  // unbounded-growth concern and a different one from this walk's cost; it
-  // wants its own change rather than a cap smuggled in here.
+  // how many paths it holds — nothing on this node sets path_table_maxsize()
+  // (the sweep-cursor note below carries that argument in full, the library's
+  // own caller included), so microStore's policy_max_recs stays 0 and neither
+  // its eviction nor its dead-record compaction can run.
+  //
+  // Their age is bounded, though, and by the library rather than by this sweep.
+  // What is not set is a store-wide TTL *policy* — set_ttl_secs() has no caller
+  // in src/ — but every path carries a TTL of its own: Transport::inbound's
+  // announce handling passes AP_PATH_TIME (1 day), ROAMING_PATH_TIME (6 h) or
+  // DESTINATION_TIMEOUT (1 week) to _new_path_table.put() by the receiving
+  // interface's mode, and a record's own TTL is the one is_ttl_expired() uses
+  // (policy_ttl_secs is only the fallback for a record whose TTL is 0). So this
+  // sweep is not the only thing that removes a stored path: get() and exists()
+  // each drop an expired record from the index and report not-found
+  // (FileStore.h), and Transport::has_path() is exists().
+  //
+  // What survives is that removal happens on *access*, never on a clock.
+  // Nothing scans for expired records — the store's own sweep() only clamps
+  // timestamps that lie in the future, and the iterator this walk uses reads a
+  // record without consulting its TTL at all. So an entry goes when something
+  // asks after that destination again, and a destination nobody asks after is
+  // exactly the one whose path has gone dead. The table is bounded by liveness
+  // rather than by size, then: paths still in use age out, paths whose
+  // interface went away are this sweep's job, and the never-asked-after
+  // remainder is what accumulates, at an estimated 70-90 B of internal DRAM
+  // apiece — a 16-byte key plus its vector header, a 16-byte IndexValue, the
+  // map node's link and cached hash, a bucket slot, and an allocator header on
+  // each of the two blocks — on every board, PSRAM ones included, because
+  // RNS_CONTAINER_ALLOCATOR is left at its ESP32 default of RNS_HEAP_ALLOCATOR,
+  // which is plain operator new. A smaller concern than "nothing ever removes a
+  // path", and still its own change rather than a cap smuggled in here.
   static std::vector<RNS::Bytes> stale;
   static uint32_t sSweptMs = 0;
   // Where the last sweep ran out of budget, and so where the next one starts.
