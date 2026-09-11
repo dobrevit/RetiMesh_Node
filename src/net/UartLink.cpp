@@ -52,6 +52,15 @@ std::atomic<bool>     sStop{false};
 std::atomic<bool>     sTaskAlive{false};
 std::atomic<uint32_t> sBaud{0};
 std::atomic<uint32_t> sFramesRx{0}, sBytesRx{0};
+// The deframer's own drop count, mirrored where another task may read it.
+// `counters()` is documented safe from any task, and reading the deframer's
+// plain member while the reader writes it is a race whatever the width makes
+// of it in practice — the same reasoning Diag gives for mirroring its fault
+// counts rather than exporting the originals.
+std::atomic<uint32_t> sOversized{0};
+// Passes the guard caught. A sink that throws every frame would otherwise
+// spin silently: caught, skipped, caught again, with nothing said.
+std::atomic<uint32_t> sGuardCaught{0};
 
 FrameSink sSink = nullptr;
 void*     sCtx  = nullptr;
@@ -73,6 +82,11 @@ constexpr uint32_t kIdleMs = 5;
 // past its watchdog (issue 47) before that drain was capped.
 constexpr uint32_t kPassBudgetMs = 50;
 
+// Passes that threw before the link says so, the same shape the sensors use
+// for a part that has stopped answering: complain once at a threshold rather
+// than on every occurrence.
+constexpr uint32_t kComplainAfter = 3;
+
 void deliver(const uint8_t* frame, size_t len) {
   sFramesRx.fetch_add(1, std::memory_order_relaxed);
   if (sSink) sSink(frame, len, sCtx);
@@ -89,7 +103,11 @@ void readerTask(void*) {
     // otherwise unwind through the deframer and out of this function, where
     // nothing catches it and Diag's terminate handler aborts the node. One bad
     // pass is skipped; the link survives.
-    Diag::guard("the serial task", [&out] {
+    // Diag::guard returns false when it caught something. Counted and said
+    // once at a threshold rather than every pass: a sink that throws on every
+    // frame would otherwise be a silent spin — caught, skipped, caught again —
+    // which looks exactly like a quiet link from every surface.
+    const bool clean = Diag::guard("the serial task", [&out] {
       const uint32_t started = millis();
       size_t sinceFeed = 0;
       bool did = false;
@@ -103,6 +121,7 @@ void readerTask(void*) {
       // core at 115200 and far worse at the top of the ladder, which is the
       // cost the roadmap says to measure before promising 921600. PppUart's
       // reader takes 256 bytes a call for the same reason.
+      sOversized.store(sDeframer.oversized(), std::memory_order_relaxed);
       uint8_t chunk[64];
       while ((uint32_t)(millis() - started) < kPassBudgetMs) {
         const size_t n = sPort.read(chunk, sizeof(chunk));
@@ -139,6 +158,16 @@ void readerTask(void*) {
       // removes the dependency on that arithmetic.
       vTaskDelay(pdMS_TO_TICKS(did ? 1 : kIdleMs));
     });
+    if (!clean) {
+      const uint32_t n = sGuardCaught.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (n == kComplainAfter)
+        log_w("serial: %u passes running have thrown — the frame sink is "
+              "failing, and the link is dropping what it reads",
+              (unsigned)kComplainAfter);
+      // A pass that threw did no yielding of its own, so it yields here: a
+      // throw on the first byte every time would otherwise be a tight loop.
+      vTaskDelay(pdMS_TO_TICKS(kIdleMs));
+    }
   }
   // Before the task goes, and this is not optional: nothing in IDF clears a
   // watchdog subscription when its task exits, so an entry left behind can
@@ -184,6 +213,16 @@ bool begin(uint32_t baud, FrameSink sink, void* ctx) {
   if (sTaskAlive.load(std::memory_order_relaxed)) {
     log_w("serial: the previous reader has not stopped yet");
     return false;
+  }
+  if (sArena || sSlots) {
+    // A previous end() timed out and never finished. Allocating again here is
+    // what would leak the old arena, so the teardown is completed first.
+    log_w("serial: a previous teardown did not finish — completing it");
+    taskENTER_CRITICAL(&sLock);
+    sQueue.detach();
+    taskEXIT_CRITICAL(&sLock);
+    delete[] sArena; sArena = nullptr;
+    delete[] sSlots; sSlots = nullptr;
   }
 
   // LocalLink's predicate, whole, rather than its primitive reassembled here.
@@ -272,7 +311,11 @@ bool begin(uint32_t baud, FrameSink sink, void* ctx) {
 
 bool end() {
   if (!sUp.load(std::memory_order_relaxed)) return true;
-  sUp.store(false, std::memory_order_relaxed);
+  // `sUp` stays true until the link really is down. Cleared here, a timeout
+  // below would leave the node reporting a link that is switched off while its
+  // task still runs and still owns the port — and once that task did exit,
+  // `begin()` would see nothing in its way and allocate a second arena on top
+  // of the first, leaking two kilobytes for every cycle.
   sStop.store(true, std::memory_order_relaxed);
   // The task deletes itself; wait for it rather than freeing the arena under
   // it, which is the one ordering here that can crash a node.
@@ -283,10 +326,15 @@ bool end() {
     // live reader is the one ordering here that can crash a node, and saying
     // "released" afterwards would make the log a lie as well — the shape
     // AutoInterface::end() already uses when its task will not stop.
-    log_w("serial: the reader did not stop inside a second — port and queue "
-          "left in place rather than freed under it");
+    // `sStop` is deliberately left set and `sUp` left true: the link still owns
+    // its port and its memory, and calling end() again is the way out — the
+    // retry finds the task gone and completes the teardown properly. Anything
+    // else here either frees memory under a running task or abandons it.
+    log_w("serial: the reader did not stop inside a second — the link still "
+          "holds its port and queue; call end() again");
     return false;
   }
+  sUp.store(false, std::memory_order_relaxed);
   sPort.end();
   taskENTER_CRITICAL(&sLock);
   sQueue.detach();
@@ -328,7 +376,7 @@ Counters counters() {
   taskEXIT_CRITICAL(&sLock);
   c.framesReceived = sFramesRx.load(std::memory_order_relaxed);
   c.bytesReceived  = sBytesRx.load(std::memory_order_relaxed);
-  c.oversized      = sDeframer.oversized();
+  c.oversized      = sOversized.load(std::memory_order_relaxed);
   return c;
 }
 

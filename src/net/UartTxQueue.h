@@ -85,14 +85,22 @@ public:
     _used = 0;
   }
 
-  // Hands the memory back. The counters survive deliberately: a link switched
-  // off and on again has not un-dropped the frames it dropped, and a surface
-  // that showed them should not start lying because somebody toggled it.
+  // Hands the memory back. The totals survive deliberately: a link switched off
+  // and on again has not un-dropped the frames it dropped, and a surface that
+  // showed them should not start lying because somebody toggled it.
+  //
+  // `depth` is not one of the totals and does go to zero. It is a gauge — what
+  // is waiting *now* — and a detached queue is holding nothing, so leaving it
+  // at its last value made `counters().depth` report frames that no longer
+  // exist, for ever, on a link that was switched off. The rest of this class
+  // keeps `_c.depth` in step with `_depth` on every push and pop; this was the
+  // one path that did not.
   void detach() {
     _arena = nullptr; _slots = nullptr;
     _cap = _slotCap = 0;
     _head = _tail = _depth = 0;
     _used = 0;
+    _c.depth = 0;
   }
 
   // Capacity is part of being attached, not merely the pointers: the ring

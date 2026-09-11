@@ -254,6 +254,21 @@ static void test_bytes_and_frames_are_counted_on_both_sides() {
   TEST_ASSERT_EQUAL_UINT16(1, c.depth);
 }
 
+static void test_the_depth_gauge_goes_to_zero_on_detach() {
+  // The totals survive a detach; the gauge must not. `depth` is what is
+  // waiting *now*, and a detached queue holds nothing — left at its last
+  // value it reported frames that no longer existed, for ever, on a link that
+  // had been switched off. Every other path keeps _c.depth in step; this was
+  // the one that did not.
+  for (int i = 0; i < 3; i++) TEST_ASSERT_TRUE(pushPattern((uint8_t)i, 4));
+  TEST_ASSERT_EQUAL_UINT16(3, q.counters().depth);
+  q.detach();
+  TEST_ASSERT_EQUAL_UINT16(0, q.depth());
+  TEST_ASSERT_EQUAL_UINT16(0, q.counters().depth);
+  // ...and the high-water mark, which is a total, still remembers the burst.
+  TEST_ASSERT_EQUAL_UINT16(3, q.counters().depthHighWater);
+}
+
 static void test_counters_survive_a_detach() {
   // A link switched off has not un-dropped what it dropped, and a surface
   // that showed the figure must not start lying because somebody toggled it.
@@ -318,6 +333,7 @@ int main() {
   RUN_TEST(test_a_drain_returns_every_byte_it_took);
   RUN_TEST(test_the_high_water_mark_remembers_a_burst_the_depth_forgets);
   RUN_TEST(test_bytes_and_frames_are_counted_on_both_sides);
+  RUN_TEST(test_the_depth_gauge_goes_to_zero_on_detach);
   RUN_TEST(test_counters_survive_a_detach);
   RUN_TEST(test_an_unattached_queue_refuses_and_counts_rather_than_crashing);
   RUN_TEST(test_a_zero_sized_arena_is_not_attached);
