@@ -37,6 +37,7 @@
 #include "LxmfCommands.h"
 #include "Telemetry.h"
 #include "PathWait.h"
+#include "SnapshotWalk.h"
 #include "NomadNet.h"
 #include "Diag.h"
 #include "Watchdog.h"
@@ -226,9 +227,9 @@ public:
     // consecutive radio drains of the order of 410 ms apart rather than 10.
     // That figure is derived in RingDrain.h; what follows is a summary of that
     // derivation rather than a second one, and it goes stale with it: the short
-    // of it is that kWalkBudgetMs — 400 ms, declared further down this file —
-    // bounds only the part of the walk that runs after the snapshot's rows are
-    // full, so 410 ms is the least such a gap can be and not the most.
+    // of it is that Rns::kWalkBudgetMs — 400 ms, in SnapshotWalk.h — bounds the
+    // walk but is checked only between records, and the walk is one part of a
+    // pass, so 410 ms is the least such a gap can be and not the most.
     //
     // At the fastest channel the settings will accept — SF7, the floor on every
     // part in RadioCaps; 500 kHz sub-GHz or 1625 kHz on the SX1280; CR 4/5; the
@@ -1904,7 +1905,9 @@ static void processEvents() {
 // See RingDrain.h. The feeds this takes are the first reporting after the RNS
 // task's own feed at the top of the pass (main.cpp): the radio drain feeds
 // again from inside reticulum.loop(), which runs next, and refreshSnapshots()
-// three times after that.
+// three times after that — either side of its path-table walk, and once more
+// after the removal that follows it. That walk being bounded, and the removal
+// now sharing its budget, is what makes three enough.
 static void drainTcp() {
   size_t sz = 0;
   const Sys::RingDrain::Pass pass = Sys::RingDrain::drain(
@@ -1945,30 +1948,58 @@ static void drainTcp() {
 static uint32_t sSnapAtMs = 0;
 static uint32_t sSnapOkMs = 0;          // last pass that actually published; the age readers see
 // Dead paths are cleaned up on a slower clock than the reading is refreshed:
-// the reading is capped and cheap, the sweep walks the whole table.
-static const uint32_t kStaleSweepMs = 60000;
-// How long the sweep phase of one pass may spend reading path records back off
-// the filesystem.
+// the reading is capped and cheap, the sweep walks the whole table. The figure
+// is Config.h's because test_snapshot_walk drives the scheduler this is the
+// ceiling for, and a figure written out in both places is a figure that gets
+// retuned in one.
+static const uint32_t kStaleSweepMs = SNAPSHOT_SWEEP_INTERVAL_MS;
+// How long one pass of the walk may spend reading path records back off the
+// filesystem, and how often it gives the core up while it does. Both live in
+// SnapshotWalk.h beside the per-position rule they parameterise, which is where
+// their derivations are and where test/test_snapshot_walk asserts them: this
+// file cannot be compiled for the host, so a rule that only exists here cannot
+// be pinned by anything. What one pass does not get through, the next one does.
 //
-// Not a tuning knob — a bound this walk did not have. Every record examined is
-// one file opened, sought, read and closed, and on LittleFS that is a
-// directory lookup plus several 512-byte reads, each of which disables the
-// flash cache and stalls the other core while it runs. The sweep dereferenced
-// the whole table in one pass, so its cost grew with the table, and on a node
-// whose table had grown large enough the pass outlasted the 30-second
-// watchdog. The node then rebooted every ninety seconds for two days without
-// once saying why, because the watchdog's own report died on the way out (see
-// Watchdog.h). Nothing here is allowed to be unbounded again.
-//
-// 400 ms is picked to be obviously survivable rather than optimal: two orders
-// of magnitude inside the watchdog, and small next to the five seconds between
-// passes. What it bounds is the sweep and not the whole walk — the check below
-// is guarded on !wantRow, so the row phase ahead of it runs unbudgeted, and
-// RingDrain.h works through what that leaves for the gap between two drains of
-// a ring. What one pass does not get through, the next one does.
-static const uint32_t kWalkBudgetMs = 400;
+// The one part of that derivation the header cannot assert for itself, because
+// SNAPSHOT_INTERVAL_MS is Config.h's: the budget has to leave the pass ending
+// well inside the interval the pass is gated on. That is what returns this task
+// to the 10 ms sleep in main.cpp hundreds of times per window, and it is what
+// actually keeps loopTask running — a walk that outlasts the interval makes the
+// gate below a no-op and the passes run back to back, which is the shape that
+// took a T-Beam down. Raising kWalkBudgetMs past a quarter of the interval
+// fails the build rather than the node.
+static_assert(Rns::walkBudgetFitsInterval(SNAPSHOT_INTERVAL_MS),
+              "the walk's budget must stay well inside SNAPSHOT_INTERVAL_MS, or "
+              "snapshot passes run back to back and starve loopTask");
+// The ceiling on the gap the measured pass cost may buy itself, and the reason
+// it is this figure: kStaleSweepMs is the slowest clock a pass carries, so
+// passes have to come round at least that often or the minute between sweep
+// cycles is not a minute (Rns::nextIntervalMs). A ceiling below the interval
+// would be a misconfiguration, and the guard for it costs nothing here.
+static_assert(kStaleSweepMs >= SNAPSHOT_INTERVAL_MS,
+              "the scheduler's ceiling cannot be shorter than the interval it "
+              "is a ceiling over");
 static size_t   sPathCount = 0;          // full table size; sPaths is capped
 static uint32_t sSnapWalkMaxMs = 0;      // worst snapshot walk since boot; see Tables
+static uint32_t sSnapBudgetStops = 0;    // passes the budget ended; see Tables
+// What the last pass's cost bought: SNAPSHOT_INTERVAL_MS on any node whose
+// passes cost less than a quarter of it, which is every node at every
+// per-record figure this tree has measured, and more than that on one where a
+// pass has come to cost more (Rns::nextIntervalMs, where the arithmetic is).
+static uint32_t sSnapIntervalMs = SNAPSHOT_INTERVAL_MS;
+// Whether the log has already said this node backed itself off, which is not
+// the same question as whether it is backed off right now — see the transition
+// test in refreshSnapshots(). Held separately so the published interval above
+// stays the node's real answer while the log holds its tongue.
+static bool     sSnapBackOffSaid = false;
+// How cheap a pass has to become before the log says the node is back on its
+// configured interval: half the quarter nextIntervalMs() backs off at. This is
+// the hysteresis, and it is the whole point of the pair — a cost oscillating
+// either side of the quarter crosses the transition test on *every* pass, so
+// without a margin the node reports backing off and recovering alternately,
+// once every five seconds, while it is already struggling.
+static const uint32_t kSnapBackOffClearMs =
+    SNAPSHOT_INTERVAL_MS / (Rns::kPassShareDiv * 2);
 static size_t   sIfaceCount = 0;         // likewise, so a capped list still counts true
 static Tables   sTables = {};            // table sizes, for soak monitoring
 
@@ -1976,18 +2007,53 @@ static void refreshSnapshots(bool allowSweep) {
   // Walking the path table reads every record back through microStore
   // (LittleFS or the SD card), so refresh it slowly and keep the list short —
   // the count is free, the rows are not.
-  if (millis() - sSnapAtMs < SNAPSHOT_INTERVAL_MS) return;
+  // Against the interval the last pass earned rather than the configured one.
+  // They are the same figure until a pass costs more than a quarter of it, at
+  // which point the gate is the only thing that can keep passes from running
+  // back to back — the budget bounds what this file chooses and not what a pass
+  // comes to (Rns::nextIntervalMs).
+  if (millis() - sSnapAtMs < sSnapIntervalMs) return;
   // Stamped on the way in, so a pass that throws does not come straight back
   // on the next 10 ms tick and spend the node's remaining memory logging about
   // it. What it must not do is imply the reading is current: sSnapOkMs, set
   // only after the publish below, is what /api/status reports the age from, so
   // a snapshot that stopped updating says so instead of looking fresh.
   sSnapAtMs = millis();
+  // The other half of that, and it is the half the entry stamp cannot cover.
+  // sSnapIntervalMs is written at the end of this function, after the walk and
+  // the removal have both come back, so a pass that throws leaves the interval
+  // it was gated on standing — and a pass that had already run longer than that
+  // interval before it threw has the gate open again the moment it leaves.
+  // Repeated slow failures then run back to back, which is the shape the gate
+  // exists to prevent, on the sick filesystem that is the case it matters on.
+  //
+  // So the scheduler is asked however the pass leaves, off the same
+  // Rns::nextIntervalMs() the ordinary path uses rather than a second formula,
+  // and a pass that throws still costs the node a gap proportional to how long
+  // it ran before throwing. That gap runs from where the pass stopped rather
+  // than from where it started, which is what keeps a pass that outlasted its
+  // own interval — or the ceiling — from coming straight back.
+  //
+  // A destructor rather than a catch here: containment is Diag::guard's job and
+  // is one rule in one place (Diag.h), and this function is called from inside
+  // it (loop() below). The same reasoning as Sys::Lock at the publish.
+  struct PassBackOff {
+    bool done = false;
+    ~PassBackOff() {
+      if (done) return;                  // the pass reached its own scheduler
+      const uint32_t costMs = (uint32_t)(millis() - sSnapAtMs);   // the entry stamp above
+      sSnapIntervalMs = Rns::nextIntervalMs(costMs, SNAPSHOT_INTERVAL_MS, kStaleSweepMs);
+      sSnapAtMs       = millis();
+    }
+  } backOff;
   // clear() keeps the capacity reserved at begin(), so the push_back()s below
   // write into memory this node already owns.
+  //
+  // The path staging list is *not* cleared here any more: it accumulates across
+  // passes now, and is emptied only when a cycle starts (below, once the row
+  // cursor has been checked against the table).
   std::vector<PathInfo>&  p = sPathsStaging;
   std::vector<IfaceInfo>& i = sIfacesStaging;
-  p.clear();
   i.clear();
   double now = RNS::Utilities::OS::time();
   // Paths live in the microStore-backed table (Transport::path_table() is the
@@ -2020,8 +2086,58 @@ static void refreshSnapshots(bool allowSweep) {
   // that with an unbounded pass: reading a record back is a file opened on
   // LittleFS, so the pass cost whatever the table had grown to, and past a few
   // hundred entries it outlasted the watchdog and took the node down with it.
-  // A sweep now spends kWalkBudgetMs per pass and remembers where it stopped,
-  // which keeps both properties — every entry is reached, and no pass is long.
+  // A pass now spends Rns::kWalkBudgetMs and remembers where the sweep stopped,
+  // so no pass is long.
+  //
+  // Rows are collected across as many passes as it takes as well, and for the
+  // same reason. Bounding the row half left them being re-collected from the
+  // front on every pass: on a table slow enough that the budget runs out before
+  // the rows are full, the walk never got past that prefix, so the cursor never
+  // advanced, the cycle never closed and not one entry beyond the prefix was
+  // ever reached. Row collection now has a cursor of its own, resumed by the
+  // same two rules the sweep's is (Rns::resumeCursor, Rns::nextCursor), and a
+  // list reaches sPaths only when a cycle has been all the way round.
+  //
+  // And the two halves share the budget rather than the rows taking it and the
+  // sweep getting the remainder. Rows go back to the front of the table when
+  // their cycle closes and the sweep does not, so every pass afterwards spent
+  // its whole budget re-reading the front and stopped before it reached the
+  // sweep's cursor — which then moved only in the one pass per row cycle where
+  // the rows caught up to it, and on one arrangement of costs did not move at
+  // all. Rns::rowShareSpent() is the rule and carries the figures.
+  //
+  // What is deliberately not here: any cap on the table itself. Nothing bounds
+  // how many paths it holds — nothing on this node sets path_table_maxsize()
+  // (the sweep-cursor note below carries that argument in full, the library's
+  // own caller included), so microStore's policy_max_recs stays 0 and neither
+  // its eviction nor its dead-record compaction can run.
+  //
+  // Their age is bounded, though, and by the library rather than by this sweep.
+  // What is not set is a store-wide TTL *policy* — set_ttl_secs() has no caller
+  // in src/ — but every path carries a TTL of its own: Transport::inbound's
+  // announce handling passes AP_PATH_TIME (1 day), ROAMING_PATH_TIME (6 h) or
+  // DESTINATION_TIMEOUT (1 week) to _new_path_table.put() by the receiving
+  // interface's mode, and a record's own TTL is the one is_ttl_expired() uses
+  // (policy_ttl_secs is only the fallback for a record whose TTL is 0). So this
+  // sweep is not the only thing that removes a stored path: get() and exists()
+  // each drop an expired record from the index and report not-found
+  // (FileStore.h), and Transport::has_path() is exists().
+  //
+  // What survives is that removal happens on *access*, never on a clock.
+  // Nothing scans for expired records — the store's own sweep() only clamps
+  // timestamps that lie in the future, and the iterator this walk uses reads a
+  // record without consulting its TTL at all. So an entry goes when something
+  // asks after that destination again, and a destination nobody asks after is
+  // exactly the one whose path has gone dead. The table is bounded by liveness
+  // rather than by size, then: paths still in use age out, paths whose
+  // interface went away are this sweep's job, and the never-asked-after
+  // remainder is what accumulates, at an estimated 70-90 B of internal DRAM
+  // apiece — a 16-byte key plus its vector header, a 16-byte IndexValue, the
+  // map node's link and cached hash, a bucket slot, and an allocator header on
+  // each of the two blocks — on every board, PSRAM ones included, because
+  // RNS_CONTAINER_ALLOCATOR is left at its ESP32 default of RNS_HEAP_ALLOCATOR,
+  // which is plain operator new. A smaller concern than "nothing ever removes a
+  // path", and still its own change rather than a cap smuggled in here.
   static std::vector<RNS::Bytes> stale;
   static uint32_t sSweptMs = 0;
   // Where the last sweep ran out of budget, and so where the next one starts.
@@ -2029,13 +2145,97 @@ static void refreshSnapshots(bool allowSweep) {
   //
   // An offset rather than a saved iterator, because the table is mutated
   // between passes — by the removal at the end of this very function, among
-  // others — and no iterator survives that. The cost is that an entry inserted
-  // or dropped ahead of the cursor shifts everything after it by one, so that
-  // entry is examined twice or skipped once. For a cleanup sweep that is one
-  // more cycle, which is the right price for not holding an iterator across a
-  // deletion.
+  // others — and no iterator survives that.
+  //
+  // What an offset costs is that it is an *ordinal*, not an address: the number
+  // of ++it steps from begin(). The index behind NewPathTable is a
+  // std::unordered_map (microStore's FileStore.h) and the store's iterator
+  // walks it — operator++ is ++pos_ on the map's own iterator — so the position
+  // means the same place from one pass to the next only while nothing has
+  // shifted the count. Three things do:
+  //
+  //   * An erase. It does not rehash and the survivors keep their buckets, but
+  //     every element after the erased one loses an ordinal — an entry dropped
+  //     ahead of the cursor shifts the whole tail behind it by one. This is the
+  //     ordinary path, not an exotic one: the removal at the end of this
+  //     function drops as many entries as what is left of the pass's budget
+  //     allows — up to SNAPSHOT_MAX_PATHS on a pass whose walk finished early,
+  //     and exactly one on a pass whose walk spent the whole of it. And a stale
+  //     entry is collected on the Row step as well as the Examine step — that
+  //     is, at the front of the table, behind a cursor that has already worked
+  //     its way past it.
+  //   * An insert that rehashes, which reorders the whole table rather than
+  //     shifting a tail.
+  //   * Segment-rotation compaction. A put() that fills the active segment
+  //     calls rotate_segment_if_needed(), which on the last segment calls
+  //     compact(); that ends in finalize_compaction(), which does _index.clear()
+  //     and rebuilds the map by rescanning the compacted segment — a wholesale
+  //     reorder (FileStore.h). Its sibling, the dead-record-threshold
+  //     compaction, is *not* reachable on this store: compact_if_threshold() is
+  //     gated on policy_max_recs > 0, that member defaults to
+  //     USTORE_DEFAULT_MAX_RECS which is 0, and the only thing that would set
+  //     it is Transport::path_table_maxsize(uint16_t), and nothing calls it.
+  //     Not src/, and not the library in the image either — though the library
+  //     is where its one caller lives: register_builtin_namespaces() exposes
+  //     the setter as a provisioning field (Provisioning/BuiltinNamespaces.cpp)
+  //     and that file is compiled. It is reached only from
+  //     Provisioner::begin(), which Reticulum::start() calls under #ifdef
+  //     RNS_USE_PROVISIONING — a macro no env in platformio.ini defines — so
+  //     the call is compiled out, nothing references the registration and the
+  //     linker drops it: the t3s3 firmware.elf carries no provisioning symbol
+  //     at all, and no path_table_maxsize beyond the member it would write.
+  //     Defining that macro is what would end the premise.
+  //
+  // So the cursor is an approximation between passes rather than an identity,
+  // and entries either side of a shift are examined twice or skipped for a
+  // cycle. For a cleanup sweep that is one more minute, which is the right
+  // price for not holding an iterator across a deletion. What it must not do is
+  // point outside the table altogether, which is resumeCursor() below.
   static size_t sSweepPos = 0;
+  // Row collection's own cursor, and it means the same thing under the same
+  // rules: where the next pass picks the list up, 0 for a fresh cycle. Every
+  // caveat above about an ordinal into a mutating table applies to it too — a
+  // shift under a part-built list drops or repeats a row for one cycle, which
+  // is a cosmetic wrong on a panel that corrects itself on the next one, and
+  // pathCount() beside it is the table's own size() and is never wrong.
+  static size_t sRowPos    = 0;
+  // What the last cycle to publish a list covered, which is what decides
+  // whether that list is still a whole answer for the table (Rns::rowsWhole).
+  //
+  // A bool that latched true on the first closed cycle was wrong on every
+  // node's first boot: the empty table a node starts with closes a cycle on the
+  // first pass, and the empty list that published went on being called whole
+  // after the node had learned two hundred paths. The rule, what it deliberately
+  // does not call "still reading", and what a node pays for it are in
+  // SnapshotWalk.h beside the other row-cycle rules, where the host drives them.
+  static Rns::RowCycle sRowCycle;
+  // Whether the last pass got as far as writing the row cursor back. What that
+  // buys, and why a pass that did not gets its cycle started again rather than
+  // resumed, is Rns::resumeRowCursor() — the rule is there with the other two
+  // cursor rules, where the host can drive it.
+  static bool   sRowPassClean = true;
   stale.clear();
+  // A cursor the table has outgrown is not a cursor. `stale` is capped at
+  // SNAPSHOT_MAX_PATHS, so the removal at the end of a pass can take 64 entries
+  // out from under a cursor sitting beyond them — and nothing downstream would
+  // ever bring it back, because nextCursor() only moves forwards and no
+  // position at or past the stale value exists to end the pass anywhere else.
+  // The sweep would then be part-way through for ever: `sweeping` latched true,
+  // sSweptMs never stamped again, the cycle never closed (SnapshotWalk.h).
+  // Asked before `sweeping` is decided, so the pass that finds it stale is the
+  // one that starts the cycle afresh.
+  sSweepPos = Rns::resumeCursor(sSweepPos, pathTable.size());
+  // And the row cursor by the same rule, against the same hazard: stranded
+  // beyond a shrunken table it would stop any cycle ever closing, so nothing
+  // would ever be published at all — plus the one condition that is the row
+  // cursor's alone, a previous pass that threw before writing it back
+  // (Rns::resumeRowCursor, where both are decided together).
+  sRowPos = Rns::resumeRowCursor(sRowPos, pathTable.size(), sRowPassClean);
+  // A fresh cycle starts an empty list; a resuming one keeps what earlier
+  // passes collected. This is the only clear(), which is why it is here and not
+  // at the top of the function with the interface list's.
+  if (sRowPos == 0) p.clear();
+  sRowPassClean = false;                // set again when the cursor is written back
   // A sweep begins on the minute clock, and once begun it continues on every
   // pass until it has been all the way round. Waiting a minute between slices
   // as well would put a full cycle on a large table hours away, which is not
@@ -2044,40 +2244,113 @@ static void refreshSnapshots(bool allowSweep) {
   const bool sweeping = allowSweep &&
                         (sSweepPos != 0 || (uint32_t)(millis() - sSweptMs) >= kStaleSweepMs);
   const uint32_t walkStartMs = millis();
-  size_t pos = 0;         // position in the table, for the sweep cursor
-  size_t reads = 0;       // records actually read back, for the feed clock
-  bool   ranOut = false;  // budget ended the walk before the table did
+  size_t   pos = 0;         // position in the table, and where the *sweep* stopped
+  size_t   reads = 0;       // records dereferenced this pass; see Rns::passMayStop
+  uint32_t lastYieldMs = 0; // walk time at the last yield, for the yield clock
+  bool     ranOut = false;  // budget ended the walk before the table did
+  // Row collection's own two, which used to be `pos` and `ranOut` as well. They
+  // are not the same figures any more: once the rows have spent their share of
+  // a sweeping pass the walk carries on to the sweep's cursor without them
+  // (Rns::rowShareSpent), so `pos` is where the *sweep* stopped and this is
+  // where the rows did. Writing `pos` into the row cursor there would skip
+  // every position between the two, which is the whole table's worth of rows on
+  // a node whose sweep is far ahead.
+  size_t   rowStopPos = 0;      // one past the last position the rows were served at
+  bool     rowsCut    = false;  // the share ended the row half before the list did
   Watchdog::feed();
   for (auto it = pathTable.begin(); it != pathTable.end(); ++it, ++pos) {
     // Incrementing reads the in-memory index and nothing else; only the
     // dereference below opens a file. So positions this pass has no use for
     // are stepped over for free, and the budget is spent entirely on records
-    // that are going to be looked at.
-    const bool wantRow   = p.size() < SNAPSHOT_MAX_PATHS;
-    const bool wantSweep = sweeping && pos >= sSweepPos;
-    if (!wantRow && !sweeping) break;       // rows are full and nothing else needs the rest
-    if (!wantRow && !wantSweep) continue;   // ahead of the rows, behind the cursor
-    // The budget ends the sweep, never the rows. Rows are bounded already —
-    // there are at most SNAPSHOT_MAX_PATHS of them and the walk stops asking
-    // once they are full — so letting them finish costs a known amount. It
-    // also keeps the cursor honest: the only way to reach this line with the
-    // rows full is with wantSweep set, so pos is at or past sSweepPos and the
-    // cursor written below can only ever move forwards.
-    if (!wantRow && (uint32_t)(millis() - walkStartMs) >= kWalkBudgetMs) { ranOut = true; break; }
-    // kWalkBudgetMs ends the sweep, but it is only checked between records, and
-    // one record on a sick filesystem can take a long time on its own — so the
-    // walk keeps reporting while it runs rather than relying on finishing. The
-    // cadence is Sys::RingDrain::kFeedEvery rather than a 16 of this walk's
-    // own: one definition, so a retune cannot move the drains and leave this
-    // behind (RingDrain.h).
-    if (++reads % Sys::RingDrain::kFeedEvery == 0) Watchdog::feed();
+    // that are going to be looked at. That is a promise of a dependency pinned
+    // to a branch rather than a commit, so it is not left as prose:
+    // test/test_snapshot_walk drives the rule below, and
+    // test/test_typed_store_iterator asserts the promise itself at both layers
+    // — TypedStore's and the file store's — against the microStore this build
+    // resolves.
+    Rns::WalkState w;
+    w.rowsCollected = p.size();          // this cycle's list, not this pass's share of it
+    w.rowCap        = SNAPSHOT_MAX_PATHS;
+    w.rowPos        = sRowPos;
+    w.sweeping      = sweeping;
+    w.pos           = pos;
+    w.sweepPos      = sSweepPos;
+    w.elapsedMs     = (uint32_t)(millis() - walkStartMs);
+    w.readAny       = reads > 0;
+    // One budget, and it covers every position: the rows, the sweep and the
+    // free step-over alike (SnapshotWalk.h). Exempting the rows was the defect
+    // — the exemption was justified on their being bounded by count, which they
+    // are, and which is not the same as bounded by time.
+    const Rns::WalkStep step = Rns::walkStep(w);
+    if (step == Rns::WalkStep::StopRowsFull) break;      // nothing else needs the rest
+    if (step == Rns::WalkStep::StopBudget) { ranOut = true; break; }
+    // Before the step-over below, because a position the share denied the rows
+    // comes back as a Skip when the sweep does not want it either — which is
+    // every position between the two cursors once the share is spent.
+    if (step == Rns::WalkStep::Row)      rowStopPos = pos + 1;
+    else if (Rns::rowShareDenied(w))     rowsCut    = true;
+    if (step == Rns::WalkStep::Skip) continue;           // neither half wants this one
+    // No feed inside the loop, and that is a deliberate removal rather than an
+    // omission. This walk used to feed every Sys::RingDrain::kFeedEvery records
+    // on the drains' reasoning — a pass that cannot be stopped mid-item has to
+    // report while it runs — and here that reasoning is upside down. 16 records
+    // is 480 ms at the 30 ms a record this firmware links, and 1.5-2.6 s in the
+    // reopen-per-record regime; both are longer than the whole budget, so the
+    // sixteenth record is never reached and the feed never fired at either cost
+    // this tree has measured. The sicker the filesystem the fewer records fit
+    // in a pass, so the case it was justified by is the case it can do least
+    // for (the arithmetic is in SnapshotWalk.h).
+    //
+    // Nor is there anything for it to do. The loop is bounded to kWalkBudgetMs
+    // plus the record in hand — 400 ms plus the 162 ms that is the worst
+    // per-record cost anywhere in this tree — against a 30 s watchdog
+    // (WATCHDOG_TIMEOUT_S), and the feeds either side of the loop bracket it.
+    // The one thing that could still get near the timeout is a single record
+    // that takes for ever, and no between-record cadence covers that.
+    //
+    // What the walk does instead is yield, on a clock of its own, because
+    // feeding was never the problem. esp_task_wdt_reset() reports on behalf of
+    // the running task and there is no way to report for another, and the task
+    // being starved is Arduino's loopTask: priority 1 against this task's 3 on
+    // the same core, so it does not run at all while this one is runnable, and
+    // its watchdog is the one that fired. A yield is worth 0-3 ms of core 1 per
+    // pass and is a margin, not the rescue — the rescue is this walk ending
+    // inside its budget so the task reaches the sleep at the end of its loop.
+    // Both are derived in SnapshotWalk.h.
+    //
+    // Yielding here holds a live store iterator across the delay, which is safe
+    // because nothing another task calls can *mutate* this store. Transport is
+    // single-threaded and the RNS task owns every call into it (main.cpp), and
+    // no other translation unit in src/ names RNS:: at all. Nearly every entry
+    // point in this one that another task calls posts to a queue, sets an
+    // atomic, or copies an already-published value under sSnapLock. The
+    // exceptions are nomadAddress() and lxmf(), which do reach into RNS:: from
+    // loopTask (Maintenance.cpp), the AsyncTCP task (WifiManager.cpp) and the
+    // display task (UiHome.cpp, UiIdentity.cpp) — but only for
+    // Destination::hash(), which returns a Bytes cached on the destination
+    // object and touches no store at all. So nothing can put, remove or compact
+    // the store while this delay runs, which matters because microStore
+    // documents mutating a store during iteration as undefined (FileStore.h).
+    // That is a property held by convention and a grep rather than by the type
+    // system, so the checkable form of it is written down here: an interface
+    // that mutated a store from its own task would break this line first.
+    if (Rns::walkShouldYield(w.elapsedMs, lastYieldMs)) {
+      lastYieldMs = w.elapsedMs;
+      // A bare tick count, not pdMS_TO_TICKS(1): at any tick rate below 1 kHz
+      // that truncates to 0, and vTaskDelay(0) yields only to this priority and
+      // above — never to the priority-1 task this exists for (SnapshotWalk.h).
+      vTaskDelay(1);
+    }
 
+    reads++;                                          // before, not after: the budget's
+                                                      // forward-progress rule counts the
+                                                      // record in hand (SnapshotWalk.h)
     RNS::Persistence::NewPathTable::Entry& e = *it;   // reads the record off the filesystem
     if (!e.value.receiving_interface()) {
       if (sweeping && stale.size() < SNAPSHOT_MAX_PATHS) stale.push_back(e.key);
       continue;
     }
-    if (!wantRow) continue;                 // swept, not rendered
+    if (step != Rns::WalkStep::Row) continue;   // swept, not rendered
     PathInfo pi = {};
     strlcpy(pi.hash, e.key.toHex().c_str(), sizeof(pi.hash));
     pi.hops = e.value._hops;
@@ -2086,12 +2359,32 @@ static void refreshSnapshots(bool allowSweep) {
     p.push_back(pi);
   }
   Watchdog::feed();
+  if (ranOut) sSnapBudgetStops++;
+  // Whether the list this cycle has been building is finished — the cap filled,
+  // or the table walked all the way to the end. Anything else is a prefix, and
+  // a prefix is kept in staging for the next pass rather than published
+  // (SnapshotWalk.h). The cursor follows the same two rules the sweep's does:
+  // forwards only within a cycle, back to the front when the cycle closes.
+  //
+  // Both figures are the row half's own: what cut the cycle short is the budget
+  // or the share, and where it stopped is where the rows stopped, not where the
+  // walk did.
+  const bool rowsShort = ranOut || rowsCut;
+  const bool rowsDone  = Rns::rowCycleDone(p.size(), SNAPSHOT_MAX_PATHS, rowsShort);
+  // Read here rather than at the publish below, where p has been swapped away.
+  const size_t rowsCollected = p.size();
+  sRowPos = rowsDone ? 0 : Rns::nextCursor(sRowPos, rowStopPos, rowsShort);
+  sRowPassClean = true;                 // list and cursor agree again
   if (sweeping) {
     // Reaching the end closes the cycle and puts the next one a minute out;
     // running out of budget leaves the cursor where it stopped, which is what
     // keeps the sweep coming back on the next pass rather than the next minute.
     const bool started = (sSweepPos == 0);
-    sSweepPos = ranOut ? pos : 0;
+    // Forwards only, and that is not decoration: the budget can now end the
+    // walk in the row half, which is at the front of the table and so behind
+    // the cursor. Writing pos in unconditionally would drag the sweep back
+    // there and leave the tail never examined (SnapshotWalk.h).
+    sSweepPos = Rns::nextCursor(sSweepPos, pos, ranOut);
     if (!ranOut) sSweptMs = millis();
     // Once per cycle, not once per pass: a table that needs twenty passes
     // should say so, and then be quiet about it until the next minute. This is
@@ -2101,18 +2394,107 @@ static void refreshSnapshots(bool allowSweep) {
       log_i("path table is %u entries; sweeping %u per pass at %u ms",
             (unsigned)pathTable.size(), (unsigned)pos, (unsigned)(millis() - walkStartMs));
   }
+  if (!stale.empty()) {
+    // The removal is on the same clock and the same budget as the walk, and it
+    // was on neither. It is not free: every entry here is a
+    // BasicFileStore::remove() — a tombstone appended and flush_buffer()'d (a
+    // write and a flush of the segment file), then persist_index_entry(), a
+    // second write and an explicit flush of the index file (FileStore.h). All
+    // that bounded it was `stale` being capped at SNAPSHOT_MAX_PATHS, so up to
+    // 64 write-and-sync pairs ran with nothing watching the clock — which is
+    // "bounded by count is not bounded by time", the fallacy the walk's own
+    // budget exists to kill, one screen below the code that killed it.
+    //
+    // One at a time rather than Transport::remove_paths(), because a whole
+    // vector cannot be stopped part-way.
+    //
+    // What the budget leaves is not lost, but it is not free either, and the
+    // shape of that is worth being exact about because the obvious sentence —
+    // "the next sweeping pass finds it again" — is not true of the entries
+    // that matter. `stale` is cleared at the top of every pass, so an
+    // un-removed key is discarded and has to be *re-found* by a later walk;
+    // and both cursors have already been written past the positions the walk
+    // reached, so the next pass does not look there. An entry left behind is
+    // re-found when row collection comes round to the front of the table again
+    // — which is every row cycle, and so soon — if it lies within the stretch
+    // the rows reach. One beyond that stretch waits for the sweep cursor to
+    // come all the way round, which is a whole sweep cycle.
+    //
+    // Hence back to front. `stale` is in table order, so its tail is exactly
+    // the part the rows will not reach again this cycle, and its head is the
+    // part they will. Removing from the tail spends a short budget on the
+    // entries that would otherwise wait longest. It changes nothing else: every
+    // key here sits behind the cursor already, so each removal shifts the tail
+    // under it whichever order they go in (the ordinal paragraph above).
+    //
+    // On a pass whose walk spent the whole budget this removes one entry and
+    // stops — passMayStop()'s forward-progress rule is what makes it one rather
+    // than none. That is deliberate: the pass that is already at its limit is
+    // the last one that should be handed 64 flash syncs. A pass whose walk
+    // finished early hands the removal everything that is left, which on the
+    // tables this cleanup is for is the ordinary case.
+    const uint32_t removeStartMs = millis();
+    size_t dropped  = 0;
+    size_t attempts = 0;
+    for (size_t k = stale.size(); k-- > 0; ) {
+      // Attempts, not successes. passMayStop()'s second argument is "this pass
+      // has done something", and the walk answers it with reads attempted
+      // (SnapshotWalk.h). Answering it with removals that *succeeded* would
+      // mean a `stale` whose keys have all gone already — every remove_path()
+      // returning false — running all 64 iterations with the clock switched
+      // off. Harmless today, since BasicFileStore::remove() misses in the
+      // index and returns before it touches flash, but it is not what the rule
+      // says and the two must not drift.
+      if (Rns::passMayStop((uint32_t)(millis() - walkStartMs), attempts > 0)) break;
+      attempts++;
+      if (RNS::Transport::remove_path(stale[k])) dropped++;
+    }
+    log_i("dropped %u of %u stored path(s) whose interface is gone, in %u ms",
+          (unsigned)dropped, (unsigned)stale.size(),
+          (unsigned)(millis() - removeStartMs));
+    Watchdog::feed();
+  }
   // The high-water mark rather than the last reading, because the pass that
   // matters is the worst one and it is not the one an operator happens to be
   // looking at. The first pass after a boot is routinely several times the
   // cost of the ones after it — the filesystem has read nothing yet — so a
   // spot reading understates the exposure by exactly the amount that would
   // have mattered.
+  //
+  // Taken after the removal rather than before it, because the removal is now
+  // inside the same budget and is part of what the RNS task spends before it
+  // gets back to forwarding. Read before, this figure said 400 ms on a pass
+  // that had gone on to spend an unmeasured amount more.
   const uint32_t walkMs = millis() - walkStartMs;
   if (walkMs > sSnapWalkMaxMs) sSnapWalkMaxMs = walkMs;
-  if (!stale.empty()) {
-    uint16_t dropped = RNS::Transport::remove_paths(stale);
-    log_i("dropped %u stored path(s) whose interface is gone", (unsigned)dropped);
+  // And the next pass is scheduled against it. On every node this tree has
+  // measured this hands back SNAPSHOT_INTERVAL_MS unchanged; it is the pass
+  // that has come to cost more than a quarter of the window it runs in that
+  // this exists for, and the gate above is where it takes effect.
+  const uint32_t nextGapMs =
+      Rns::nextIntervalMs(walkMs, SNAPSHOT_INTERVAL_MS, kStaleSweepMs);
+  // Once when it starts and once when it stops, not once per pass — with a
+  // margin on the way back, because a bare "is it backed off now, was it last
+  // pass" transition is crossed on every pass by a cost that oscillates across
+  // the quarter, which is exactly the node this log is about: it would say
+  // both lines alternately, once every five seconds (kSnapBackOffClearMs).
+  // Backing off is reported the moment it happens; recovering is reported only
+  // once a pass has come in at half the quarter or less, which jitter around
+  // the threshold cannot reach. The reading itself is served as
+  // snap_interval_ms, which is what an operator watching a node go stale needs
+  // — the log is for the one who has a log.
+  const bool backedOff = nextGapMs > SNAPSHOT_INTERVAL_MS;
+  if (backedOff && !sSnapBackOffSaid) {
+    sSnapBackOffSaid = true;
+    log_w("snapshot pass cost %u ms of the %u ms between passes; backing off to "
+          "one every %u ms (%u paths)", (unsigned)walkMs, (unsigned)SNAPSHOT_INTERVAL_MS,
+          (unsigned)nextGapMs, (unsigned)pathTable.size());
+  } else if (!backedOff && sSnapBackOffSaid && walkMs <= kSnapBackOffClearMs) {
+    sSnapBackOffSaid = false;
+    log_i("snapshot pass back to %u ms; one every %u ms again",
+          (unsigned)walkMs, (unsigned)nextGapMs);
   }
+  sSnapIntervalMs = nextGapMs;
   // Counted into locals and published below with the lists they describe. As
   // members they were written here, outside the lock every reader takes, and
   // sIfaceCount was zeroed and counted back up mid-scan — so a panel or a
@@ -2141,6 +2523,17 @@ static void refreshSnapshots(bool allowSweep) {
   t.heldAnnounces = (uint32_t)RNS::Transport::held_announces().size();
   t.rates         = (uint32_t)RNS::Transport::announce_rate_table().size();
   t.snapWalkMaxMs = sSnapWalkMaxMs;
+  // What the walk actually did this pass, which nothing reported before. A high
+  // water mark on its own cannot tell "finished the table in 380 ms" from "cut
+  // off at 400": the first is a healthy node, the second is a node that is only
+  // seeing part of its own table per pass, and on a solar node reachable over
+  // the TCP console there was no way to tell them apart at all.
+  t.snapWalkPos     = (uint32_t)pos;
+  t.snapBudgetStops = sSnapBudgetStops;
+  // snapRowsWhole is not set here with the rest: it describes the list that is
+  // published below, and the two must not be able to disagree. It is written
+  // under the lock, beside the publish it is about.
+  t.snapIntervalMs  = sSnapIntervalMs;
 
   // Sys::Lock, not a hand-written pair. Lock.h states the rule: this whole
   // function now runs under Diag::guard, so there is a way out of the scope
@@ -2149,17 +2542,35 @@ static void refreshSnapshots(bool allowSweep) {
   // Nothing in here throws today; the point is that it no longer has to be
   // checked before anything is added.
   Sys::Lock held(sSnapLock);
-  sPaths.swap(p); sIfaces.swap(i);
+  // The rows are swapped in only when the cycle that built them finished. A
+  // budget-stopped pass has a valid prefix and nothing else, and a panel given
+  // four paths on a node holding eighty has no way to say which it is looking
+  // at — so what stays published is the last whole list, and t.snapRowsWhole
+  // says whether that list is still a whole answer for the table as it now
+  // stands (Rns::rowsWhole). The interface list, the counts and the table sizes
+  // are published every pass as before: they cost one pass each and are never
+  // partial.
+  //
+  // sPathCount is pathTable.size() and is untruncated whatever the rows did, so
+  // the figure beside the list is exact on every pass including this one.
+  if (rowsDone) {
+    sPaths.swap(p);
+    // Credited to the table it closed over, not to the run: this is what makes
+    // the flag go false again when the table grows past it (Rns::rowsWhole).
+    Rns::closeRowCycle(sRowCycle, rowsCollected, SNAPSHOT_MAX_PATHS, pathTotal);
+  }
+  t.snapRowsWhole = Rns::rowsWhole(sRowCycle, pathTotal);
+  sIfaces.swap(i);
   sPathCount = pathTotal; sIfaceCount = ifaceCount;
   sTables = t;
+  // Every pass that gets here published something — the interfaces, the counts
+  // and the tables at least — so this keeps meaning what it always did: the
+  // last pass that completed rather than the last one attempted. What it does
+  // not measure is the age of the path *rows*, which on a table that takes
+  // several passes to walk can be a cycle older than this; snapRowsWhole and
+  // snapWalkPos above are what describe that.
   sSnapOkMs = millis();                 // only here: a pass that threw never reaches this
-}
-
-size_t paths(PathInfo* out, size_t max) {
-  Sys::Lock held(sSnapLock);
-  size_t n = min(max, sPaths.size());
-  for (size_t k = 0; k < n; k++) out[k] = sPaths[k];
-  return n;
+  backOff.done = true;                  // and the back-off above is what a pass that did not costs
 }
 
 size_t interfaces(IfaceInfo* out, size_t max) {

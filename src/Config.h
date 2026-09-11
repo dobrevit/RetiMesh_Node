@@ -633,6 +633,14 @@
 // through microStore (flash or SD), so this is deliberately unhurried.
 #define SNAPSHOT_INTERVAL_MS  5000
 #define SNAPSHOT_MAX_PATHS    64
+// How often dead paths are swept out, which is a slower clock than the reading
+// is refreshed on: the reading is capped and cheap, the sweep walks the whole
+// table. It is also the ceiling the pass scheduler is held to — a pass carrying
+// a minute's clock has to come round at least once a minute or that clock is
+// not honoured at all (Rns::nextIntervalMs) — so the firmware and the host
+// tests that drive that scheduler read the same figure from here rather than
+// each writing 60000 out for itself.
+#define SNAPSHOT_SWEEP_INTERVAL_MS 60000
 #define SD_LOG_MAX_BYTES    (1024UL * 1024UL)
 
 // ---------------------------------------------------------------------------
@@ -1662,9 +1670,17 @@ struct NodeStats {
   // batch at a time (RingDrain.h) and what a batch leaves stays in the ring for
   // the next pass, so this counts passes rather than frames. It rises when
   // frames arrived faster than one pass could take them — the pass after a
-  // full-budget path-table sweep is the case to expect, since two drains can be
-  // 400 ms apart rather than 10. Real loss on this path is loraRxDropRing
-  // above, which is what the producer counts when the ring has no room left.
+  // full-budget path-table walk is the case to expect, since two drains can be
+  // 400 ms apart rather than 10.
+  //
+  // The walk, not the sweep: the budget covers the whole pass now, the rows
+  // included, so the gap is any pass the budget ends and not only one that was
+  // cleaning up. On a table too big to read in one pass that is most passes,
+  // for as long as the table stays that big, so a total that climbs steadily is
+  // this node getting round its own table rather than a channel fault —
+  // RnsTransport.h's snapBudgetStops is what tells the two apart. Real loss on
+  // this path is loraRxDropRing above, which is what the producer counts when
+  // the ring has no room left.
   volatile uint32_t loraRxDrainCapped = 0;  // passes the batch cap ended with more queued
   // The other half of the radio's health, on the transmit side. A carrier-sense
   // probe that never reports is read as a busy channel — the only safe reading

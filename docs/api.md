@@ -145,7 +145,10 @@ the ordinary reading on the shipped channel and needs no action.
             "stacks": { "loopTask": 3120, "rns": 6284, "radio": 2960, "gps": 1180 },
             "stack_lowest": 1180, "stack_lowest_task": "gps",
             "tables": { "paths": 3, "links": 1, "links_active": 1, "links_pending": 0,
-                        "destinations": 2, "announces": 0, "announces_held": 0, "rates": 4 } },
+                        "destinations": 2, "announces": 0, "announces_held": 0, "rates": 4,
+                        "snap_walk_max_ms": 62, "snap_walk_pos": 3,
+                        "snap_budget_stops": 0, "snap_rows_whole": true,
+                        "snap_interval_ms": 5000 } },
   "radio": { "online": true, "model": "SX1276", "freq_mhz": 868.1, "bw_khz": 125,
              "sf": 8, "cr": 5, "tx_dbm": 7, "sync_word": 18, "preamble": 18,
              "announce_interval": 600, "beacon_interval": 0, "callsign": "retimesh-8249CC",
@@ -176,8 +179,10 @@ the ordinary reading on the shipped channel and needs no action.
                  "interfaces": [ { "name": "LoRa", "mode": "full", "rx_bytes": 1234, "tx_bytes": 567 },
                                  { "name": "WiFi/10.42.0.2:51022", "mode": "full", "rx_bytes": 0, "tx_bytes": 0 },
                                  { "name": "Auto/fe80::2cdb:d4ff:fe82:1f20", "mode": "full", "rx_bytes": 9012, "tx_bytes": 3400 } ],
-                 "path_count": 2,
-                 "paths": [ { "hash": "5168bb90…", "hops": 1, "via": "WiFi/10.42.0.2:51022", "age_s": 40 } ] },
+                 "path_count": 3, "interface_count": 3, "snapshot_age_s": 2,
+                 "paths": [ { "hash": "5168bb90…", "hops": 1, "via": "WiFi/10.42.0.2:51022", "age_s": 40 },
+                            { "hash": "a31c7d04…", "hops": 2, "via": "LoRa", "age_s": 112 },
+                            { "hash": "bf40e2a7…", "hops": 1, "via": "Auto/fe80::2cdb:d4ff:fe82:1f20", "age_s": 7 } ] },
   "neighbors": [ { "name": "Anonymous Peer", "version": "", "kind": "announce", "hash": "5168bb90…",
                    "aspect": "lxmf.delivery", "hops": 0, "via": "wifi", "rssi": 0, "snr": 0, "age_s": 40, "count": 3 } ]
 }
@@ -258,10 +263,14 @@ catches up on the passes that follow.
 
 - **Zero** is the ordinary reading on any normal channel.
 - **A small total that stops growing** is that catch-up, and needs nothing.
-- **Rising steadily** means frames are arriving faster than this node takes
-  them off the ring, for long stretches. Still nothing dropped: the counter to
-  read next to it is `rx_dropped_ring`, which is the radio finding no room left
-  in the ring, and that one *is* loss.
+- **Rising steadily** — read `diag.tables.snap_budget_stops` first. A node whose
+  path-table walk is cut off on every pass opens that gap itself, every five
+  seconds, for as long as its table stays too big to read in one pass; the
+  `snap_*` fields under `diag.tables`, described below, are where a gap is
+  diagnosed, and this counter only shows what one cost. With `snap_budget_stops`
+  flat, frames really are arriving faster than this node takes them off the
+  ring. Either way nothing has been dropped by the cap: the counter that *is*
+  loss is `rx_dropped_ring`, the radio finding no room left in the ring.
 
 It is on the console's `STATUS` line as `rx_drain_capped=`, printed after the
 `rx=`/`tx=` pair it belongs with and before the two carrier-sense counters.
@@ -391,6 +400,73 @@ SD card) are omitted rather than reported as zero.
 `tables` are the Reticulum structures that grow with traffic. A table that
 climbs and never falls is where a week-long run runs out of memory, and it is
 the part a heap figure alone will not explain.
+
+The `snap_*` fields beside them describe the pass that reads the path table,
+because on a large table that pass no longer sees all of it at once. It runs
+every five seconds under a budget, reading path records back off the filesystem,
+and carries a cursor from one pass to the next.
+
+- `snap_walk_max_ms` — the longest one pass has taken since boot, the walk plus
+  the removal of dead entries that follows it. Tens of milliseconds is ordinary.
+  A figure in the seconds means the Reticulum task is spending that long not
+  forwarding, on a filesystem or a table that has gone past what this node can
+  read in a pass.
+- `snap_walk_pos` — how far the last pass got, as an offset into the table. A
+  pass ends in one of three ways and the offset reads differently in each, so
+  it means nothing read on its own:
+  - **at or past `paths`** — it reached the end of the table. (Past, on a pass
+    that went on to remove dead entries: `paths` is read after the removal.)
+  - **below `paths`, `snap_budget_stops` not moving** — the row cap of 64 rows
+    filled and nothing else wanted the rest of the table. This is the ordinary
+    end of a pass on any node holding more than 64 paths, `snap_rows_whole` is
+    `true` beside it, and the next pass starts again at the **front** rather
+    than from this offset.
+  - **below `paths`, `snap_budget_stops` climbing** — the budget cut the pass
+    off there, and the next one carries on from that offset.
+- `snap_budget_stops` — how many passes the budget has ended since boot. Zero on
+  a node that walks its table comfortably. Climbing steadily means every pass is
+  being cut off: survivable, because the cursors resume where they stopped, but
+  it is the node saying its table has outgrown a single pass.
+- `snap_rows_whole` — whether the `transport.paths` rows above are a complete
+  cycle **over the table as it now stands**. A pass cut off by the budget keeps
+  its partial list to itself rather than publishing a prefix that looks like the
+  whole table, so a published list is complete for the table the cycle that
+  built it closed over. It is not a latch: a cycle that closed below the row cap
+  of 64 stops counting as whole once `paths` has grown past what it covered, and
+  a cycle that closed **at** the cap stays whole whatever `paths` grows to,
+  because the cap and not the cycle is what ended that list. `false` beside a
+  non-zero `paths` is a node part-way through reading its own table — it has
+  never got all the way round, or its table has outgrown the last time it did.
+  The count is exact either way; the list is the older one rather than a
+  misleading prefix. A table the walk gets round inside one pass closes a cycle
+  on every pass and so never reads `false` at all; a bigger one reads `false`
+  for the passes of the cycle that follows the growth — four of the five a
+  cap-filling cycle takes at the per-record cost this firmware links — and a
+  table holding more than 64 renderable paths closes its cycles at the cap, so
+  it reads `true` from the first cycle that fills however much it grows
+  afterwards.
+- `snap_interval_ms` — how long the node is currently leaving between two
+  passes, and the only field here that explains the others going stale. `5000`
+  on any node whose last pass cost less than a quarter of that, which is every
+  node under any cost this firmware has been measured at. A larger figure is the
+  node having measured its own pass and given itself room: a pass costing more
+  than a quarter of its window is scheduled four times its own cost out, up to a
+  ceiling of 60 s — the minute between dead-path sweeps, which is the slowest
+  clock a pass carries and so the least often passes may come. Read it before
+  concluding a reading is fresh: at anything above `5000`, `snapshot_age_s` and
+  the path rows are older than the five seconds they would otherwise imply, and
+  the node is telling you a pass has become expensive. `snap_walk_max_ms` beside
+  it says how expensive — with one exception: a pass that *failed* part-way buys
+  the same gap, off what it had spent before it failed, and it never reaches the
+  high-water mark. `diag.faults.contained` climbing beside a raised interval
+  with `snap_walk_max_ms` flat is that node.
+
+`tables.paths` and `transport.path_count` are the whole table on every pass
+whatever the walk did: they are the table's own size and are never truncated.
+`transport.paths` is a capped list of rows out of it — at most 32 here, out of
+the 64 a pass collects — and on a table that takes several passes to walk it can
+be a cycle older than `transport.snapshot_age_s`, which is the age of the
+reading as a whole.
 
 `airtime` reports channel use and the transmit budget:
 `{"short_pct":0.46,"long_pct":0.02,"band":"869.4-869.65 (10 %)",

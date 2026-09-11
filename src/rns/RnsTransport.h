@@ -73,7 +73,6 @@ void clientDisconnected(uint32_t id);
 // eye, and a truncated one makes two different peers read as the same.
 struct PathInfo  { char hash[33]; char via[INTERFACE_NAME_MAX]; uint8_t hops; uint32_t ageS; };
 struct IfaceInfo { char name[INTERFACE_NAME_MAX]; char mode[14]; uint32_t rxb, txb; };
-size_t paths(PathInfo* out, size_t max);
 size_t interfaces(IfaceInfo* out, size_t max);
 size_t pathCount();
 size_t interfaceCount();                   // whole list, even when a caller reads fewer
@@ -91,14 +90,77 @@ struct Tables {
   uint32_t announces;      // announce table awaiting retransmission
   uint32_t heldAnnounces;
   uint32_t rates;          // per-destination announce rate table
-  // Longest the snapshot pass has taken to read path records back off the
-  // filesystem, since boot. Reported because it is the figure that decides
-  // whether this node is near the edge the V4 went over: the walk is bounded
-  // and feeds the watchdog now, but a record costs whatever the filesystem
-  // charges, and a table big enough or a filesystem slow enough still makes a
-  // pass long. A number here in the seconds means the RNS task is spending
-  // that long not forwarding.
+  // Longest one snapshot pass has taken, since boot: the path-table walk plus
+  // the removal that follows it, which share one budget. Reported because it is
+  // the figure that decides whether this node is near the edge the V4 went
+  // over: the pass is bounded and feeds the watchdog now, but a record costs
+  // whatever the filesystem charges, and a table big enough or a filesystem
+  // slow enough still makes a pass long. A number here in the seconds means the
+  // RNS task is spending that long not forwarding.
   uint32_t snapWalkMaxMs;
+  // The three below say what that high-water mark cannot: whether the node is
+  // getting through its own table. snapWalkMaxMs alone reads the same for a
+  // pass that finished the table in 380 ms and one that was cut off at 400.
+  //
+  // Where the last pass's walk stopped — an offset into the path table in
+  // iteration order.
+  //
+  // A pass ends in exactly one of three ways (SnapshotWalk.h: the end of the
+  // table, WalkStep::StopRowsFull, WalkStep::StopBudget) and this offset reads
+  // differently in each, so on its own it says nothing. This is the canonical
+  // statement of the three; docs/api.md follows it.
+  //
+  //   * It reached the end of the table. The offset is at `paths` — positions
+  //     run 0..size-1, so the size itself is one past the last — or past it on
+  //     a pass that went on to remove dead entries, since `paths` is read
+  //     after the removal and is the smaller table.
+  //   * The row cap filled and no sweep wanted the rest of the table. The
+  //     offset is one past the position that filled it, which on a table
+  //     larger than SNAPSHOT_MAX_PATHS is below `paths` and is a healthy
+  //     reading: snapRowsWhole is true, snapBudgetStops did not move, and the
+  //     next pass starts again at the front rather than here, because a
+  //     finished cycle returns the row cursor to 0. This is the ordinary end
+  //     of a pass on any node holding more paths than the cap — a sweep runs
+  //     on a minute's clock and a pass on five seconds, so most passes are not
+  //     sweeping and stop this way.
+  //   * The budget ended it. The offset is where it stopped, below `paths`,
+  //     snapBudgetStops moved with it, and the next pass carries on from that
+  //     offset.
+  //
+  // So "below `paths`" is the cap on a healthy node and the budget on a
+  // struggling one, and snapBudgetStops is what tells them apart.
+  uint32_t snapWalkPos;
+  // How many passes the budget has ended since boot. Zero on a node that walks
+  // its table comfortably; climbing by one every five seconds means every pass
+  // is being cut off, which is survivable (the cursors resume) but is the node
+  // saying its table has outgrown one pass.
+  uint32_t snapBudgetStops;
+  // Whether the published path rows are a whole cycle over the table as it now
+  // stands. A pass stopped by the budget keeps its prefix in staging rather
+  // than publishing it, so a published list is complete for the table the
+  // cycle that built it closed over — and this goes false again when the table
+  // has since grown past that, which beside a non-zero `paths` is a node
+  // part-way through reading its own table. False until the first cycle closes,
+  // and for ever on a node that can never close one.
+  //
+  // Not a latch: a list published over an empty table, which is every node's
+  // first pass, is not an answer for the two hundred paths it goes on to learn.
+  // The rule and what it costs are Rns::rowsWhole (SnapshotWalk.h).
+  bool     snapRowsWhole;
+  // How long the node is currently leaving between two passes.
+  //
+  // SNAPSHOT_INTERVAL_MS — 5000 ms — on any node whose last pass cost less than
+  // a quarter of it, which is every node at every per-record cost this tree has
+  // measured. A larger figure is the node having measured its own pass and
+  // given itself room: a pass that costs more than a quarter of its window is
+  // scheduled four times its own cost out, up to a ceiling of the minute
+  // between sweep cycles (Rns::nextIntervalMs).
+  //
+  // Reported because it is the only field that explains the others going stale.
+  // Everything else here describes a pass; this says how often one happens, and
+  // on a node that has backed itself off, snapshot_age_s and the path rows are
+  // older than the five seconds a reader would otherwise assume.
+  uint32_t snapIntervalMs;
 };
 Tables tables();
 
@@ -119,6 +181,26 @@ struct Snapshot {
   size_t   pathRows;       // rows actually written to the caller's arrays
   size_t   ifaceRows;
   uint32_t ageMs;
+
+  // Whether an empty path list means "nothing there" or "not read yet".
+  //
+  // Those are two different nodes and they render identically. The rows are
+  // published only once a pass has been all the way round the table, and only
+  // while they are still a whole answer for it (tables.snapRowsWhole), while
+  // pathTotal is the table's own size and is exact from the first pass — so a
+  // node whose table is bigger than one pass shows a count with no rows under
+  // it until the first cycle closes, or for ever if it can never close one, and
+  // a node whose table has outgrown its last closed cycle shows the older list
+  // until the next one closes. Every surface that draws that list has to tell
+  // the two apart, and the OLED's PEERS SEEN beside an empty list is exactly
+  // the contradiction an operator reads as a bug.
+  //
+  // Here rather than at each caller: the LVGL destinations page, the nav
+  // page's peer plot and the web portal all ask it, and when the rule sharpens
+  // it has to sharpen for all of them at once. It sharpened once already —
+  // snapRowsWhole is the table the last cycle covered rather than a latch
+  // (Rns::rowsWhole) — and that landed here, in one place, for all three.
+  bool stillReadingPaths() const { return !tables.snapRowsWhole && pathTotal > 0; }
 };
 Snapshot snapshot(PathInfo* pathOut, size_t maxPaths,
                   IfaceInfo* ifaceOut, size_t maxIfaces);

@@ -54,6 +54,10 @@ jobs:
           env: ${{ matrix.env }}
           version: ${{ steps.ver.outputs.version }}
 
+  # No dependency cache here on purpose: test_typed_store_iterator is a
+  # tripwire on a branch-pinned lib_dep, and platformio.ini's [env:native]
+  # comment says what caching .pio/libdeps would cost it and what key any
+  # cache added here would need.
   tests:
     name: unit tests (native)
     runs-on: ubuntu-latest

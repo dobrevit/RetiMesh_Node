@@ -592,9 +592,12 @@ void loop() {
     // (RingDrain.h). They are here because the cap is what keeps a full ring
     // from holding that task past the watchdog — so with it in place, a node
     // routing late has no other outward sign at all. On the radio side the pass
-    // after a full-budget path-table sweep is the case to expect, since two
-    // drains can be 400 ms apart rather than 10; what was really lost there is
-    // the "ring" figure in the line above.
+    // after a full-budget path-table walk is the case to expect, since two
+    // drains can be 400 ms apart rather than 10 — and on a table too big to
+    // read in one pass that is most passes rather than the odd one, so a total
+    // that climbs steadily is the `stops` figure in the tables line below
+    // rather than the channel. What was really lost is the "ring" figure in the
+    // line above.
     if (g_stats.loraRxDrainCapped || g_stats.tcpDrainCapped)
       log_i("drain cap: lora %u passes, tcp inbound %u passes ended with more "
             "queued (nothing dropped; the rest went on the following pass)",
@@ -602,11 +605,24 @@ void loop() {
     // Reticulum's tables are the other thing that grows with traffic, and the
     // one a heap figure alone will not explain.
     RnsTransport::Tables t = RnsTransport::tables();
-    log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu snap %lums",
+    // The five snapshot figures travel together on purpose. The worst pass on
+    // its own cannot tell a node that finished its table in 380 ms from one cut
+    // off at 400: `pos` against `paths` says how far the last pass actually
+    // got, `stops` says how often the budget has ended one, `rows` says whether
+    // what /api/status and the panels are showing is still a whole list for the
+    // table as it now stands — "partial" is a node that has never managed to
+    // build one, or one whose table has outgrown the last it did — and `every`
+    // is how often a pass happens at all — 5000 ms until a pass costs enough to
+    // buy itself room, and the only figure here that explains the rest going
+    // stale (RnsTransport.h).
+    log_i("tables: paths %lu links %lu (%lu active, %lu pending) dests %lu announces %lu (%lu held) rates %lu "
+          "snap %lums pos %lu stops %lu rows %s every %lums",
           (unsigned long)t.paths, (unsigned long)t.links, (unsigned long)t.activeLinks,
           (unsigned long)t.pendingLinks, (unsigned long)t.destinations,
           (unsigned long)t.announces, (unsigned long)t.heldAnnounces, (unsigned long)t.rates,
-          (unsigned long)t.snapWalkMaxMs);
+          (unsigned long)t.snapWalkMaxMs, (unsigned long)t.snapWalkPos,
+          (unsigned long)t.snapBudgetStops, t.snapRowsWhole ? "whole" : "partial",
+          (unsigned long)t.snapIntervalMs);
     #if HAS_GPS
       // The satellite count is the number that tells you whether the antenna
       // has a view of the sky; the sentence count tells you the receiver is

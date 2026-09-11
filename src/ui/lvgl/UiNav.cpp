@@ -165,11 +165,18 @@ void plotRefresh(lv_timer_t*) {
   static RnsTransport::PathInfo sPaths[24];
   size_t count = 0;
   const Gps::Fix own = Gps::fix();
+  // One reading, under one lock — the list screen and Display.cpp's transport
+  // panel take theirs the same way. Asked outside the fix check because the
+  // caption below needs it either way: an empty plot on a node that has not
+  // finished reading its own path table looks exactly like an empty plot on a
+  // node nobody has announced to, and the two want different answers
+  // (RnsTransport.h).
+  const RnsTransport::Snapshot snap = RnsTransport::snapshot(sPaths, 24, nullptr, 0);
   if (own.valid) {
     // Peers with announced positions, north-up from our fix: ring one is a
     // kilometre, the rim two, and beyond clamps just inside the rim — not on
     // the compass letters.
-    const size_t n = RnsTransport::paths(sPaths, 24);
+    const size_t n = snap.pathRows;
     for (size_t i = 0; i < n && count < 8; i++) {
       PeerPositions::Position pp;
       if (!PeerPositions::getByHex(sPaths[i].hash, pp)) continue;
@@ -191,7 +198,13 @@ void plotRefresh(lv_timer_t*) {
   // identical readings is churn on the task the glass is painted from. The
   // caption's inputs are in the stamp too, since it is redrawn with them.
   const size_t held = PeerPositions::count();
+  // A third caption, and so a third stamp input: a node still reading its own
+  // path table has no rows to plot from and is not the same as a node with no
+  // peer positions on the air. The rule is Snapshot::stillReadingPaths(), the
+  // same one the destinations page and the web portal ask.
+  const bool stillReading = snap.stillReadingPaths();
   uint32_t stamp = (uint32_t)count * 131u + (uint32_t)held * 7u + (own.valid ? 1u : 0u);
+  stamp = stamp * 31u + (stillReading ? (uint32_t)snap.pathTotal + 1u : 0u);
   for (size_t i = 0; i < count; i++) {
     stamp = stamp * 31u + (uint32_t)(sPlaced[i].x + 1024) * 2048u
                         + (uint32_t)(sPlaced[i].y + 1024);
@@ -215,11 +228,17 @@ void plotRefresh(lv_timer_t*) {
   if (count)
     lv_label_set_text_fmt(sPlotCap, "NORTH UP · %u peer%s placed", (unsigned)count,
                           count == 1 ? "" : "s");
-  else if (held)
+  else if (held && (!own.valid || !stillReading))
     // The store knows the truth the old caption guessed at: positions are
-    // on the air; the missing half is our own fix.
+    // on the air; the missing half is our own fix. Without a fix that is the
+    // whole answer whatever the path table is doing, which is why it is asked
+    // first; with one, a table still being read is the better explanation for
+    // an empty plot and gets the caption instead.
     lv_label_set_text_fmt(sPlotCap, "NORTH UP · own fix needed — %u position%s held",
                           (unsigned)held, held == 1 ? "" : "s");
+  else if (stillReading)
+    lv_label_set_text_fmt(sPlotCap, "NORTH UP · still reading %u path%s",
+                          (unsigned)snap.pathTotal, snap.pathTotal == 1 ? "" : "s");
   else
     lv_label_set_text(sPlotCap, "NORTH UP · no peer positions on the air yet");
 }

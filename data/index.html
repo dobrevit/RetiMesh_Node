@@ -99,6 +99,26 @@ function fmtUptime(s) {
 
 function fmtAge(s) { return s < 60 ? s + " s" : s < 3600 ? Math.floor(s/60) + " min" : Math.floor(s/3600) + " h"; }
 
+// Whether an empty path list means "nothing there" or "not read yet".
+//
+// The node's own rule, off the node's own two fields: the path rows are
+// published only once a snapshot pass has been all the way round the table,
+// and the node says so only while they are still a whole answer for it
+// (diag.tables.snap_rows_whole), while path_count is the table's size and is
+// exact from the first pass. So a node bigger than one pass serves a count
+// with no rows under it, and this page used to render that as
+// "Transport node - 500 known paths" over nothing at all. The same rule is
+// Snapshot::stillReadingPaths() in src/rns/RnsTransport.h, which the display
+// pages ask; if it sharpens there it has to sharpen here.
+//
+// Explicitly false rather than falsy: a document without the field is a page
+// and a firmware from different builds, and that is the asset stamp's
+// complaint to make, not a claim about the path table.
+function stillReadingPaths(s) {
+  const t = s.transport, d = s.diag && s.diag.tables;
+  return !!(t && d && t.path_count > 0 && d.snap_rows_whole === false);
+}
+
 // What the card in the slot is, for the one line this page gives the store.
 // Whether it may be taken at all is the node's answer — sd.can_adopt, the same
 // one the settings page's button is drawn from — and this does not re-derive
@@ -316,6 +336,12 @@ async function refreshStatus() {
       for (const p of (s.transport.paths || [])) {
         const e = document.createElement("div"); e.className = "post";
         e.textContent = "<" + p.hash.slice(0, 12) + "…> " + p.hops + " hop" + (p.hops === 1 ? "" : "s") + " via " + p.via + " · " + fmtAge(p.age_s) + " ago";
+        tr.append(e);
+      }
+      if (!(s.transport.paths || []).length && stillReadingPaths(s)) {
+        const e = document.createElement("div"); e.className = "post";
+        e.textContent = "Still reading " + s.transport.path_count + " path" + (s.transport.path_count === 1 ? "" : "s")
+                      + " — rows appear once a pass has been all the way round the table.";
         tr.append(e);
       }
     }

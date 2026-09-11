@@ -105,11 +105,30 @@ FIELDS = [
     # leaves is taken on the next pass — but they are the only sign the node is
     # being outrun, because the cap is also what keeps that condition from
     # reaching the watchdog. `rx_drain_capped` is the radio's and is expected to
-    # move a little: two passes can be 400 ms apart when a path-table sweep runs
-    # its whole budget between them, which on a fast channel is more than one
-    # batch of frames. Real loss is drop_ring above. Appended, per the rule
-    # above.
+    # move: two passes can be 400 ms apart when the path-table walk runs its
+    # whole budget between them, which on a fast channel is more than one batch
+    # of frames. The walk, not the sweep — the budget covers the whole pass, so
+    # any pass it ends produces that gap, and on a table too big to read in one
+    # pass that is most passes. Real loss is drop_ring above. Appended, per the
+    # rule above.
     "tcp_drain_capped", "rx_drain_capped",
+    # The snapshot pass's own health, which is what says whether the column
+    # above is the node reading its own table or the channel. `paths` alone
+    # cannot: it is the table's size and is exact whatever the walk managed.
+    # snap_walk_pos is per-pass and means nothing without `paths` beside it,
+    # which is why the whole set is recorded rather than a chosen subset — every
+    # snap_* field /api/status serves, so a run can be read against the API's
+    # own documentation (docs/api.md). snap_rows_whole is 1/0/blank through
+    # fmt_bool(): a firmware too old to serve it did not say "no". Appended, per
+    # the rule above.
+    "snap_walk_max_ms", "snap_walk_pos", "snap_budget_stops", "snap_rows_whole",
+    # How often a pass happens at all. 5000 on any ordinary node; more where the
+    # node measured a pass costing more than a quarter of its window and gave
+    # itself room. Recorded because it is what makes the columns above readable:
+    # at anything above 5000 the readings in a row are older than the sampling
+    # interval suggests, and a table that looks like it stopped growing may only
+    # be being read less often. Appended, per the rule above.
+    "snap_interval_ms",
 ]
 
 # Every task a healthy node of any board runs. A board without the hardware
@@ -163,6 +182,13 @@ def sample(host, timeout=8):
         links=tables.get("links", ""),
         destinations=tables.get("destinations", ""),
         announces=tables.get("announces", ""),
+        snap_walk_max_ms=tables.get("snap_walk_max_ms", ""),
+        snap_walk_pos=tables.get("snap_walk_pos", ""),
+        snap_budget_stops=tables.get("snap_budget_stops", ""),
+        snap_interval_ms=tables.get("snap_interval_ms", ""),
+        # Tri-state, like battery_charging: blank is a firmware that does not
+        # serve the field, which must not be read as "the list is a prefix".
+        snap_rows_whole=fmt_bool(tables.get("snap_rows_whole")),
         neighbours=len(d.get("neighbors", [])),
         airtime_long_pct=d.get("airtime", {}).get("long_pct", ""),
         transport_online=int(bool(d.get("transport", {}).get("online"))),
@@ -353,8 +379,8 @@ def discharge(up, band=None):
     # One discharge, not several. The CSV is appended to by design, so a file
     # can hold last week's run, a recharge and today's; and a restart can be a
     # node that was replugged, which is a different draw. Split on both and
-    # measure the longest clean stretch, the way announce_segments() splits the
-    # announce counter at every boot.
+    # measure the longest clean stretch, the way boot_segments() splits a
+    # since-boot counter at every boot.
     segs, seg = [], [0]
     for i in range(1, len(volts)):
         recharged = volts[i][1] > volts[i - 1][1] + 0.030      # 30 mV up: not noise
@@ -457,20 +483,24 @@ def summarise(path, band=None):
         print("no samples")
         return
 
-    def announce_segments(rows):
-        """The announce counter, split at every restart, over the samples that
-        actually carry it. It is a RAM counter and starts again at zero on
-        every boot, so a run spanning one holds several counters rather than
-        one long one; and a sample that does not report it (a node running
-        firmware from before the column existed) says nothing about any
-        window, so it is not part of one."""
+    def boot_segments(rows, key):
+        """A since-boot counter, split at every restart, over the samples that
+        actually carry it. Such a counter starts again at zero on every boot,
+        so a run spanning one holds several counters rather than one long one;
+        and a sample that does not report it (a node running firmware from
+        before the column existed) says nothing about any window, so it is not
+        part of one.
+
+        Keyed rather than written out per counter: announces_tx was the first
+        to need it and snap_budget_stops is the second, and two copies of this
+        are two places for a restart to stop being noticed."""
         segments, current, boot = [], [], object()
         for r in rows:
             if r.get("boot_count", "") != boot:
                 boot = r.get("boot_count", "")
                 current = []
                 segments.append(current)
-            v = num(r.get("announces_tx"))
+            v = num(r.get(key))
             if v is not None:
                 current.append((parse_ts(r["ts"]), v))
         return [s for s in segments if s]
@@ -551,7 +581,7 @@ def summarise(path, band=None):
         # either way, and then the check runs as it always did.
         intervals = {num(r.get("announce_interval")) for r in up
                      if num(r.get("announce_interval")) is not None}
-        segments = announce_segments(up)
+        segments = boot_segments(up, "announces_tx")
         if intervals == {0.0}:
             print("   announces: switched off (announce_interval 0)")
         elif segments:
@@ -659,18 +689,25 @@ def summarise(path, band=None):
         # producer-side ring-full: logged on the TCP side, counted as drop_ring
         # on the radio side. docs/troubleshooting.md has the row for each.
         #
-        # The radio one is expected to be small and non-zero on a fast channel:
-        # two drains can be 400 ms apart when a path-table sweep runs its whole
-        # budget between them, and the node catches up on the passes after. It
-        # is worth printing because the figure that is *not* expected — a total
-        # that keeps climbing — reads the same way on the line.
+        # The radio one is expected to be non-zero on a fast channel: two
+        # drains can be 400 ms apart when the path-table walk runs its whole
+        # budget between them, and the node catches up on the passes after.
+        #
+        # A total that keeps climbing is *also* expected, and that is the part
+        # this note used to have backwards. The budget covers the whole walk
+        # now, rows included, so every pass it ends produces that gap — and on a
+        # table too big to read in one pass the budget ends most passes, every
+        # five seconds, for as long as the table stays that big. The figure that
+        # separates the two readings is snap_budget_stops, printed below: rising
+        # beside this one is the node getting round its own table, flat beside
+        # it is the channel.
         capped_meaning = {
             "tcp_drain_capped":
                 "the inbound TCP ring's batch cap ended that many Reticulum-task passes "
                 "with traffic still queued: a client outrunning this node's routing",
             "rx_drain_capped":
                 "the RX ring's batch cap ended that many Reticulum-task passes with frames "
-                "still queued: expected in small totals after a path-table sweep, and real "
+                "still queued: check snap_budget_stops beside it before the radio, and real "
                 "loss on that path is drop_ring",
         }
         for key, meaning in capped_meaning.items():
@@ -680,6 +717,76 @@ def summarise(path, band=None):
             print(f"   {key}: {capped[0]:.0f} -> {capped[-1]:.0f} "
                   f"(peak {max(capped):.0f}) — {meaning}, and nothing lost by the cap "
                   f"(docs/troubleshooting.md)")
+
+        # The snapshot pass, which is what the line above defers to. Recorded
+        # since the firmware began serving it, and read here rather than left to
+        # ride the CSV: `paths` climbing said the table was growing and nothing
+        # said whether the node was still able to read it.
+        #
+        # snap_budget_stops counts since boot, so it is read per boot and not
+        # off the last sample. Read off the last sample, a node that stopped
+        # hundreds of passes and then rebooted reports nothing at all: the
+        # counter is back at zero and the whole finding disappears. And the
+        # first-to-last range it used to print spans the reset, which reads as a
+        # counter that went backwards. boot_segments() is the same split the
+        # announce counter above gets, for the same reason.
+        #
+        # Per segment rather than per window: the value is the count since that
+        # boot, so the last sample of a segment is that run's own total —
+        # including the stops before the first sample, which is what keeps a run
+        # started after the stops began from losing the finding.
+        stop_runs = boot_segments(up, "snap_budget_stops")
+        if any(s[-1][1] > 0 for s in stop_runs):
+            totals = ", ".join(f"{s[-1][1]:.0f}" for s in stop_runs)
+            span = (f"{totals} over {len(stop_runs)} boots" if len(stop_runs) > 1
+                    else f"{stop_runs[0][0][1]:.0f} -> {stop_runs[0][-1][1]:.0f}")
+            print(f"   snap_budget_stops: {span} — the budget "
+                  f"ended that many path-table passes; the walk resumes where it stopped, "
+                  f"so this is the table being bigger than one pass rather than a fault "
+                  f"(docs/api.md)")
+        # The high-water mark is a peak and not a total, so a reboot in the
+        # middle of the run cannot hide it the way it hides a counter: max()
+        # over every sample still reports the worst pass on either side of one.
+        walk = [v for v in (num(r.get("snap_walk_max_ms")) for r in up) if v is not None]
+        if walk and max(walk) > 0:
+            print(f"   snap_walk_max_ms: peak {max(walk):.0f} ms — the worst single pass "
+                  f"the Reticulum task spent reading the path table instead of forwarding")
+        # And whether the node has backed its own passes off, which is the one
+        # thing here that makes every other reading older than it looks.
+        #
+        # Read as a change rather than against 5000, so this file does not carry
+        # a second copy of the firmware's SNAPSHOT_INTERVAL_MS: the scheduler
+        # only ever raises the interval above the configured one, so a run in
+        # which the figure moved at all is a run in which it happened. What that
+        # misses is a node already backed off before the first sample and still
+        # backed off at the last — for which snap_walk_max_ms above is the tell,
+        # and it is printed whenever it is non-zero.
+        gaps = [v for v in (num(r.get("snap_interval_ms")) for r in up) if v is not None]
+        if gaps and max(gaps) != min(gaps):
+            print(f"   ⚠ snap_interval_ms up to {max(gaps):.0f} ms (from {min(gaps):.0f}) — this "
+                  f"node measured a pass costing more than a quarter of its window and put "
+                  f"the next one further out; every reading above is that much older than "
+                  f"the sample interval suggests (docs/api.md)")
+        # The one reading here that is a warning. `paths` is the table's own
+        # size and is exact on every pass, so a node can report hundreds of
+        # paths while the list it serves and renders is empty: false here beside
+        # a non-zero paths is a node part-way through reading its own table —
+        # it has never got all the way round, or its table has grown past the
+        # last cycle that did (docs/api.md).
+        #
+        # Counted per sample and not per boot, unlike the counter above: this is
+        # a state and not a total, so a restart does not hide it — the samples
+        # after one report the state of the node after it.
+        never = [r for r in up
+                 if not is_blank(r.get("snap_rows_whole"))
+                 and not is_true(r.get("snap_rows_whole"))
+                 and (num(r.get("paths")) or 0) > 0]
+        if never:
+            print(f"   ⚠ snap_rows_whole false in {len(never)}/{len(up)} samples with paths "
+                  f"in the table — in those samples the node was part-way through reading "
+                  f"its own path table, so the rows /api/status and the panels showed were "
+                  f"the previous cycle's, or none at all if it has never closed one "
+                  f"(docs/api.md)")
 
 
 def appender(f, path):

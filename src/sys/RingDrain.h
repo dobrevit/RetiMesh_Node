@@ -44,7 +44,7 @@
 //
 //  That last step is read off the code, not off a log. No such reset has been
 //  observed on this ring: the two-day reboot loop the neighbouring scar
-//  describes is the path-table sweep's (RnsTransport.cpp, kWalkBudgetMs), a
+//  describes is the path-table sweep's (SnapshotWalk.h, kWalkBudgetMs), a
 //  different unbounded loop, and the bench reproduction for this one —
 //  flooding the ring from a host on the access point — has not been run.
 //  Where the reset itself is named it is named as something that *can*
@@ -89,31 +89,29 @@ namespace RingDrain {
 // explain the counter to a reader quote the walk's 400 ms budget as the gap:
 // main.cpp's heartbeat line, Config.h beside loraRxDrainCapped,
 // tools/soak.py's column notes, docs/api.md and docs/troubleshooting.md.
-// Retuning kWalkBudgetMs means visiting all of those, and the radio drain's
-// frames-per-gap arithmetic in RnsTransport.cpp is derived from this figure
-// and moves with it — test_airtime pins the two frame times that arithmetic
-// rests on, not the frames it puts in the gap.
+// Retuning kWalkBudgetMs (SnapshotWalk.h) means visiting all of those, and the
+// radio drain's frames-per-gap arithmetic in RnsTransport.cpp is derived from
+// this figure and moves with it — test_airtime pins the two frame times that
+// arithmetic rests on, not the frames it puts in the gap.
 //
 // The RNS task delays 10 ms between passes (main.cpp), but the interval
 // between two drains of the same ring is that delay plus a whole pass, and a
 // pass contains refreshSnapshots(), whose path-table walk reads records back
 // off the filesystem under a kWalkBudgetMs — 400 ms — budget
-// (RnsTransport.cpp).
+// (SnapshotWalk.h).
 //
-// That budget is a floor under the gap, not a ceiling over it. It is consulted
-// only once the snapshot's rows are full — the check is guarded on !wantRow,
-// and the walk states the rule itself: "the budget ends the sweep, never the
-// rows". While rows are still being collected it is not consulted at all, and
-// a record whose interface has gone away is read off the filesystem and then
-// skipped without filling a row, which is the very thing the sweep exists to
-// clean up. A table of those keeps the row phase going to the end of the table
-// with no budget in force. The row phase is bounded by the table, not by the
-// clock, and it runs ahead of the budgeted part.
+// That budget is a floor under the gap, not a ceiling over it. It covers every
+// position of the walk now, rows included — it used to be guarded on !wantRow,
+// so the row phase ahead of it ran unbudgeted and a table of entries whose
+// interfaces had gone away, which fill no row, kept that phase going to the end
+// of the table with no bound in force at all. What keeps it a floor rather than
+// a ceiling is the rest: the budget is consulted between records and never
+// inside one, and the walk is one part of a pass.
 //
 // Two consecutive drains of one ring are therefore of the order of 410 ms
-// apart rather than 10 — the sweep's budget plus the tick — and that is the
-// least of it, before the row phase ahead of the budget or the rest of the
-// pass is counted at all, and further again after a pass that threw, which
+// apart rather than 10 — the walk's budget plus the tick — and that is the
+// least of it, before the record in hand when the budget ran out or the rest of
+// the pass is counted at all, and further again after a pass that threw, which
 // adds loop()'s 250 ms back-off.
 //
 // So the cap does bind, on both rings, after a long walk: 410 ms on its own is
@@ -133,12 +131,20 @@ namespace RingDrain {
 // is also what keeps it from showing up as anything else.
 constexpr size_t kBatch = 64;
 
-// Items between watchdog feeds, and the one definition of that cadence: the
-// record walk in refreshSnapshots() reads it from here rather than keeping its
-// own 16, so the two cannot drift apart. The cap ends the pass, but it is only
-// checked between items and one item can be a whole packet through
-// microReticulum — so the drain keeps reporting while it runs rather than
-// relying on finishing.
+// Items between watchdog feeds. The cap ends the pass, but it is only checked
+// between items and one item can be a whole packet through microReticulum — so
+// the drain keeps reporting while it runs rather than relying on finishing.
+//
+// The rings' cadence and no one else's, now. The path-table walk in
+// refreshSnapshots() used to borrow this number for its own feeds, on the
+// reasoning above and for the sake of one definition; the arithmetic does not
+// carry across. A ring item is a memcpy and a handler, and 64 of them are what
+// one pass takes; a record is a file opened on LittleFS, and at 30 ms — or the
+// 93-162 ms of the reopen-per-record regime — sixteen of them are longer than
+// that walk's whole 400 ms budget, so neither a feed nor a yield on this
+// cadence could fire there at all. The walk feeds either side of its loop
+// instead, being bounded, and yields on an elapsed-time cadence of its own:
+// both are in SnapshotWalk.h, with the arithmetic and the test that drives it.
 constexpr size_t kFeedEvery = 16;
 
 // What one pass did.
@@ -193,14 +199,21 @@ inline Pass drain(size_t cap, size_t feedEvery,
   while (pass.handled < cap) {
     auto item = receive();
     if (!item) { ranDry = true; break; }
-    // Feeds bracket the work the way the snapshot walk's do: one before the
-    // first item, one every `every` items through it, one after the last. Not
-    // before the receive, though — this is called a hundred times a second on
-    // a ring that is usually empty, and a pass with no work has nothing to
-    // report and no reason to take the watchdog's lock to say so.
+    // Feeds bracket the work: one before the first item, one every `every`
+    // items through it, one after the last. Not before the receive, though —
+    // this is called a hundred times a second on a ring that is usually empty,
+    // and a pass with no work has nothing to report and no reason to take the
+    // watchdog's lock to say so.
+    //
+    // The cadence in the middle is this drain's own and no longer has a
+    // sibling: the snapshot walk used to feed on the same rule and does not any
+    // more, because a bounded pass needs no feed inside it and 16 records is
+    // longer than the whole of that pass's budget anyway (SnapshotWalk.h). Here
+    // an item is a ring item rather than a file read, a batch is 64 of them,
+    // and nothing bounds one by time — so the cadence stands on that.
     if (pass.handled == 0) feed();
-    // Counted, and fed for, before the item is handled: as in the walk, the
-    // feed has to come before the expensive part, not after it.
+    // Counted, and fed for, before the item is handled: the feed has to come
+    // before the expensive part, not after it.
     if (++pass.handled % every == 0) feed();
     handle(item);
   }

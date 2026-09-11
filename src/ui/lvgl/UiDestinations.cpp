@@ -145,7 +145,12 @@ namespace Ui {
 void openDestinations() {
   lv_obj_t* body = newScreen("Mesh");
 
-  sCount = RnsTransport::paths(sPaths, kMax);
+  // One reading, under one lock — Display.cpp's transport panel uses the same
+  // idiom. The rows, the total that describes them and whether the rows are a
+  // whole cycle all come out of one pass, which is what lets the empty case
+  // below say which empty it is (RnsTransport.h).
+  const RnsTransport::Snapshot snap = RnsTransport::snapshot(sPaths, kMax, nullptr, 0);
+  sCount = snap.pathRows;
   // Nearest and freshest first, the order a person routes by.
   for (size_t i = 0; i + 1 < sCount; i++)
     for (size_t j = 0; j + 1 < sCount - i; j++) {
@@ -158,7 +163,22 @@ void openDestinations() {
   lv_obj_t* list = lv_list_create(body);
   lv_obj_set_width(list, lv_pct(100));
   lv_obj_set_flex_grow(list, 1);
-  if (!sCount) lv_list_add_text(list, "nothing announced yet");
+  if (!sCount) {
+    // "Nothing there" and "not read yet" render as the same empty list and are
+    // not the same node. Home's PEERS SEEN is the table's own size and is exact
+    // from the first pass, so on exactly that node the two screens used to
+    // contradict each other: "500" there and "nothing announced yet" here.
+    // The rule itself is Snapshot::stillReadingPaths() — one definition, asked
+    // here, by the nav page's peer plot and by the web portal.
+    if (snap.stillReadingPaths()) {
+      char line[48];
+      snprintf(line, sizeof(line), "still reading %u path%s…", (unsigned)snap.pathTotal,
+               snap.pathTotal == 1 ? "" : "s");
+      lv_list_add_text(list, line);
+    } else {
+      lv_list_add_text(list, "nothing announced yet");
+    }
+  }
   for (size_t i = 0; i < sCount; i++) {
     char age[8], line[80];
     Ui::ageTextS(sPaths[i].ageS, age, sizeof(age));
