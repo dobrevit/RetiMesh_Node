@@ -117,6 +117,60 @@
 #else
   #define HAS_PPP 0
 #endif
+// ---------------------------------------------------------------------------
+// Serial byte-stream link (UartLink.h)
+// ---------------------------------------------------------------------------
+// A UART carrying HDLC frames and knowing nothing of Reticulum, so the serial
+// RNS interface and the later remote-radio link can both sit on it rather than
+// each writing a UART of their own (roadmap 2.2).
+//
+// Off unless a board names a free port, and deliberately no board does yet.
+// Which UART is free is a per-board fact with three claimants already — the
+// bridge UART is the console's and PPP's (BOARD_UART_INSTANCE, arbitrated in
+// PppArbiter.h), and UART1 is the GNSS receiver's on every board that has one
+// (Gps.cpp constructs HardwareSerial(1)) — and the pins for whatever is left
+// are a wiring question a bench answers, not one this file can. Naming a port
+// here without that answer would claim a link that does not exist.
+//
+// Costing nothing until then is the point: everything behind HAS_SERIAL_LINK
+// compiles out, so the driver is infrastructure for issues 10 and 18 rather
+// than weight every board carries. docs/serial.md says what enabling it needs.
+#ifndef BOARD_SERIAL_UART
+  #define BOARD_SERIAL_UART   -1          // -1 = this board has no free UART
+#endif
+#ifndef PIN_SERIAL_LINK_RX
+  #define PIN_SERIAL_LINK_RX  -1
+#endif
+#ifndef PIN_SERIAL_LINK_TX
+  #define PIN_SERIAL_LINK_TX  -1
+#endif
+#if BOARD_SERIAL_UART >= 0 && PIN_SERIAL_LINK_RX >= 0 && PIN_SERIAL_LINK_TX >= 0
+  #define HAS_SERIAL_LINK 1
+#else
+  #define HAS_SERIAL_LINK 0
+#endif
+// The transmit queue's bound, in frames and in bytes. Both are checked on
+// every push and either one running out is the queue being full: a link is as
+// likely to be held up by many small frames as by a few large ones, and a
+// bound that only counted one of them would be no bound at all in the other
+// direction. Sized to hold a handful of full-MTU frames — enough to ride out a
+// scheduling hiccup, not enough to hide a wire that has stopped working.
+#ifndef SERIAL_LINK_TX_FRAMES
+  #define SERIAL_LINK_TX_FRAMES   8
+#endif
+#ifndef SERIAL_LINK_TX_BYTES
+  #define SERIAL_LINK_TX_BYTES    (4 * RNS_MTU)
+#endif
+// The driver's own receive ring, given to the UART driver at install. What
+// does not fit while the reader is behind is lost on the wire and the far end
+// resynchronises, which is the same bargain PPP's ring makes above.
+#ifndef SERIAL_LINK_RX_RING
+  #define SERIAL_LINK_RX_RING     2048
+#endif
+#ifndef SERIAL_LINK_TASK_STACK
+  #define SERIAL_LINK_TASK_STACK  3072
+#endif
+
 // PPP over the bridge UART (PppUart.h). The receive ring is the UART
 // driver's own, sized here; what does not fit while the reader is behind is
 // dropped and PPP retransmits — the radio never waits for the serial port.

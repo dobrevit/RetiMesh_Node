@@ -13,6 +13,7 @@ anyone who joins its Wi-Fi is on the mesh with Sideband — no host computer.
 | [Hardware](hardware.md) | supported boards, pins, microSD, adding a board |
 | [HTTP API](api.md) | `/api/status`, `/api/board`, `/api/settings/*`, `/api/system/*` |
 | [Local links & flashing](local-link.md) | how a host reaches the node (Wi-Fi, USB, PPP), the maintenance console, the bootloader manager, automatic flashing, recovery, the board capability matrix |
+| [Serial byte-stream link](serial.md) | a UART carrying HDLC frames for the serial and remote-radio interfaces — why no board enables it yet, what enabling it costs, and what has not been proved |
 | [Examples](examples/) | rnsd config, Python listeners, remote node setup, curl |
 | [Troubleshooting](troubleshooting.md) | the things that actually go wrong |
 | [Development](development.md) | build, CI, releases, debugging, contributing |
