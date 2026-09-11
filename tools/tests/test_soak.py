@@ -436,6 +436,49 @@ class TheSnapshotWalkIsRecordedAndRead(unittest.TestCase):
         self.assertIn("snap_budget_stops", text)
         self.assertIn("snap_walk_max_ms", text)
 
+    def test_a_reboot_does_not_erase_the_budget_stops_behind_it(self):
+        # snap_budget_stops counts since boot. Read off the last sample alone, a
+        # node that stopped hundreds of passes and then restarted reports
+        # nothing at all — the counter is back at zero and the finding is gone
+        # with it, which is the one shape a soak run most needs to keep.
+        rows = []
+        for k in range(3):                       # boot 7: the stops
+            body = _status(clean=True, count=7)
+            body["diag"]["tables"] = {"paths": 200, "links": 0, "destinations": 2,
+                                      "announces": 0, "snap_walk_max_ms": 402,
+                                      "snap_walk_pos": 14, "snap_budget_stops": 100 + 20 * k,
+                                      "snap_rows_whole": True, "snap_interval_ms": 5000}
+            with _mocked_node(body):
+                rows.append(soak.sample("node"))
+        for k in range(2):                       # boot 8: the counter starts again
+            body = _status(clean=True, count=8)
+            body["diag"]["tables"] = {"paths": 200, "links": 0, "destinations": 2,
+                                      "announces": 0, "snap_walk_max_ms": 402,
+                                      "snap_walk_pos": 14, "snap_budget_stops": 0,
+                                      "snap_rows_whole": True, "snap_interval_ms": 5000}
+            with _mocked_node(body):
+                rows.append(soak.sample("node"))
+        text = _summary_of(rows)
+        # Both runs' own totals, per boot, and not a first-to-last range across
+        # the reset — which would have read "100 -> 0", a counter going
+        # backwards.
+        self.assertIn("snap_budget_stops: 140, 0 over 2 boots", text)
+        self.assertNotIn("100 -> 0", text)
+
+    def test_the_stops_of_a_run_that_never_restarted_read_as_one_range(self):
+        rows = []
+        for k in range(4):
+            body = _status(clean=True, count=7)
+            body["diag"]["tables"] = {"paths": 200, "links": 0, "destinations": 2,
+                                      "announces": 0, "snap_walk_max_ms": 402,
+                                      "snap_walk_pos": 14, "snap_budget_stops": 20 * k,
+                                      "snap_rows_whole": True, "snap_interval_ms": 5000}
+            with _mocked_node(body):
+                rows.append(soak.sample("node"))
+        text = _summary_of(rows)
+        self.assertIn("snap_budget_stops: 0 -> 60", text)
+        self.assertNotIn("boots", text)
+
     def test_a_node_that_backed_its_own_passes_off_is_a_warning(self):
         # The reading that makes every other one older than it looks: the node
         # measured a pass costing more than a quarter of its window and put the

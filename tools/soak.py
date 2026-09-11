@@ -379,8 +379,8 @@ def discharge(up, band=None):
     # One discharge, not several. The CSV is appended to by design, so a file
     # can hold last week's run, a recharge and today's; and a restart can be a
     # node that was replugged, which is a different draw. Split on both and
-    # measure the longest clean stretch, the way announce_segments() splits the
-    # announce counter at every boot.
+    # measure the longest clean stretch, the way boot_segments() splits a
+    # since-boot counter at every boot.
     segs, seg = [], [0]
     for i in range(1, len(volts)):
         recharged = volts[i][1] > volts[i - 1][1] + 0.030      # 30 mV up: not noise
@@ -483,20 +483,24 @@ def summarise(path, band=None):
         print("no samples")
         return
 
-    def announce_segments(rows):
-        """The announce counter, split at every restart, over the samples that
-        actually carry it. It is a RAM counter and starts again at zero on
-        every boot, so a run spanning one holds several counters rather than
-        one long one; and a sample that does not report it (a node running
-        firmware from before the column existed) says nothing about any
-        window, so it is not part of one."""
+    def boot_segments(rows, key):
+        """A since-boot counter, split at every restart, over the samples that
+        actually carry it. Such a counter starts again at zero on every boot,
+        so a run spanning one holds several counters rather than one long one;
+        and a sample that does not report it (a node running firmware from
+        before the column existed) says nothing about any window, so it is not
+        part of one.
+
+        Keyed rather than written out per counter: announces_tx was the first
+        to need it and snap_budget_stops is the second, and two copies of this
+        are two places for a restart to stop being noticed."""
         segments, current, boot = [], [], object()
         for r in rows:
             if r.get("boot_count", "") != boot:
                 boot = r.get("boot_count", "")
                 current = []
                 segments.append(current)
-            v = num(r.get("announces_tx"))
+            v = num(r.get(key))
             if v is not None:
                 current.append((parse_ts(r["ts"]), v))
         return [s for s in segments if s]
@@ -577,7 +581,7 @@ def summarise(path, band=None):
         # either way, and then the check runs as it always did.
         intervals = {num(r.get("announce_interval")) for r in up
                      if num(r.get("announce_interval")) is not None}
-        segments = announce_segments(up)
+        segments = boot_segments(up, "announces_tx")
         if intervals == {0.0}:
             print("   announces: switched off (announce_interval 0)")
         elif segments:
@@ -718,15 +722,32 @@ def summarise(path, band=None):
         # since the firmware began serving it, and read here rather than left to
         # ride the CSV: `paths` climbing said the table was growing and nothing
         # said whether the node was still able to read it.
-        stops = [v for v in (num(r.get("snap_budget_stops")) for r in up) if v is not None]
-        walk = [v for v in (num(r.get("snap_walk_max_ms")) for r in up) if v is not None]
-        if stops and stops[-1] > 0:
-            # Per sample rather than first-to-last, like the caps above: a run
-            # that started after the stops began still has the finding in it.
-            print(f"   snap_budget_stops: {stops[0]:.0f} -> {stops[-1]:.0f} — the budget "
+        #
+        # snap_budget_stops counts since boot, so it is read per boot and not
+        # off the last sample. Read off the last sample, a node that stopped
+        # hundreds of passes and then rebooted reports nothing at all: the
+        # counter is back at zero and the whole finding disappears. And the
+        # first-to-last range it used to print spans the reset, which reads as a
+        # counter that went backwards. boot_segments() is the same split the
+        # announce counter above gets, for the same reason.
+        #
+        # Per segment rather than per window: the value is the count since that
+        # boot, so the last sample of a segment is that run's own total —
+        # including the stops before the first sample, which is what keeps a run
+        # started after the stops began from losing the finding.
+        stop_runs = boot_segments(up, "snap_budget_stops")
+        if any(s[-1][1] > 0 for s in stop_runs):
+            totals = ", ".join(f"{s[-1][1]:.0f}" for s in stop_runs)
+            span = (f"{totals} over {len(stop_runs)} boots" if len(stop_runs) > 1
+                    else f"{stop_runs[0][0][1]:.0f} -> {stop_runs[0][-1][1]:.0f}")
+            print(f"   snap_budget_stops: {span} — the budget "
                   f"ended that many path-table passes; the walk resumes where it stopped, "
                   f"so this is the table being bigger than one pass rather than a fault "
                   f"(docs/api.md)")
+        # The high-water mark is a peak and not a total, so a reboot in the
+        # middle of the run cannot hide it the way it hides a counter: max()
+        # over every sample still reports the worst pass on either side of one.
+        walk = [v for v in (num(r.get("snap_walk_max_ms")) for r in up) if v is not None]
         if walk and max(walk) > 0:
             print(f"   snap_walk_max_ms: peak {max(walk):.0f} ms — the worst single pass "
                   f"the Reticulum task spent reading the path table instead of forwarding")
@@ -749,15 +770,23 @@ def summarise(path, band=None):
         # The one reading here that is a warning. `paths` is the table's own
         # size and is exact on every pass, so a node can report hundreds of
         # paths while the list it serves and renders is empty: false here beside
-        # a non-zero paths is a node that has never got all the way round.
+        # a non-zero paths is a node part-way through reading its own table —
+        # it has never got all the way round, or its table has grown past the
+        # last cycle that did (docs/api.md).
+        #
+        # Counted per sample and not per boot, unlike the counter above: this is
+        # a state and not a total, so a restart does not hide it — the samples
+        # after one report the state of the node after it.
         never = [r for r in up
                  if not is_blank(r.get("snap_rows_whole"))
                  and not is_true(r.get("snap_rows_whole"))
                  and (num(r.get("paths")) or 0) > 0]
         if never:
             print(f"   ⚠ snap_rows_whole false in {len(never)}/{len(up)} samples with paths "
-                  f"in the table — this node has never finished one pass round its own path "
-                  f"table, so /api/status and the panels show no path rows at all")
+                  f"in the table — in those samples the node was part-way through reading "
+                  f"its own path table, so the rows /api/status and the panels showed were "
+                  f"the previous cycle's, or none at all if it has never closed one "
+                  f"(docs/api.md)")
 
 
 def appender(f, path):
