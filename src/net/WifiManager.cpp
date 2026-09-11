@@ -1777,6 +1777,31 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
   doc["heap_min_free"] = g_stats.heapMinFree;
   doc["psram_free"]   = ESP.getFreePsram();
 
+  // One reading of the Reticulum tables for the whole document, taken here
+  // because the two halves of it are served four hundred lines apart: the
+  // `diag.tables` object below, and the interfaces, counts and path rows under
+  // `transport` near the end. Taken as tables() there and snapshot() here, they
+  // were two acquisitions of the snapshot lock with a refresh free to land
+  // between them — so this document could carry snap_rows_whole from one pass
+  // beside a path_count and rows from another, which is exactly the pair
+  // Snapshot::stillReadingPaths() combines (RnsTransport.h). A reply that
+  // contradicts its own predicate is worse than a stale one.
+  //
+  // Sized for every interface Transport can hold — the radio, the clients and
+  // the Auto peers. Sized for the clients alone, this listed the first five and
+  // quietly left the rest out. Off the stack because that is a kilobyte and a
+  // half on a task that has other things to do with it, and off the heap for
+  // the reason given at the peer list further down: asked for on every poll, it
+  // is the size that a long-running node can no longer find in one piece, and
+  // failing to find it aborted the node. Safe as statics because /api handlers
+  // all run on the one AsyncTCP service task, so no two are ever inside this at
+  // once (platformio.ini pins CONFIG_ASYNC_TCP_RUNNING_CORE and the library
+  // runs a single one).
+  static RnsTransport::IfaceInfo ifs[RNS_MAX_INTERFACES];
+  static RnsTransport::PathInfo  ps[32];
+  const RnsTransport::Snapshot rnsSnap =
+      RnsTransport::snapshot(ps, 32, ifs, RNS_MAX_INTERFACES);
+
   // Everything a soak run needs to read off a node it cannot reach a console
   // on: why it last restarted, how long that run lasted, and what it is
   // running out of. See Diag.h.
@@ -1835,7 +1860,9 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     dg["stack_lowest"]      = lowest;
     dg["stack_lowest_task"] = lowestName ? lowestName : "none";
 
-    RnsTransport::Tables t = RnsTransport::tables();
+    // From the one reading taken at the top of this handler, not a second
+    // acquisition: Snapshot carries the same Tables tables() returns.
+    const RnsTransport::Tables& t = rnsSnap.tables;
     JsonObject tb = dg["tables"].to<JsonObject>();
     tb["paths"]          = t.paths;
     tb["links"]          = t.links;
@@ -2267,34 +2294,20 @@ void WifiManager::handleStatus(AsyncWebServerRequest* request) {
     }
   }
   {
-    // Sized for every interface Transport can hold — the radio, the clients
-    // and the Auto peers. Sized for the clients alone, this listed the first
-    // five and quietly left the rest out. Off the stack because that is a
-    // kilobyte and a half on a task that has other things to do with it, and
-    // off the heap for the reason given at the peer list above: asked for on
-    // every poll, it is the size that a long-running node can no longer find
-    // in one piece, and failing to find it aborted the node.
-    static RnsTransport::IfaceInfo ifs[RNS_MAX_INTERFACES];
-    static RnsTransport::PathInfo  ps[32];
-    // Interfaces, paths and the totals that describe them, out of one pass —
-    // otherwise this document can report a path_count from one refresh beside
-    // rows from another, which is a status page contradicting itself.
-    const RnsTransport::Snapshot snap =
-        RnsTransport::snapshot(ps, 32, ifs, RNS_MAX_INTERFACES);
-    const size_t k = snap.ifaceRows;
+    const size_t k = rnsSnap.ifaceRows;
     JsonArray ia = tr["interfaces"].to<JsonArray>();
     for (size_t i = 0; i < k; i++) {
       JsonObject o = ia.add<JsonObject>();
       o["name"] = ifs[i].name; o["mode"] = ifs[i].mode; o["rx_bytes"] = ifs[i].rxb; o["tx_bytes"] = ifs[i].txb;
     }
-    const size_t pk = snap.pathRows;
-    tr["path_count"]     = snap.pathTotal;
-    tr["interface_count"] = snap.ifaceTotal;
+    const size_t pk = rnsSnap.pathRows;
+    tr["path_count"]     = rnsSnap.pathTotal;
+    tr["interface_count"] = rnsSnap.ifaceTotal;
     // How old the reading is. A refresh that fails leaves the previous values
     // in place, and without this they are indistinguishable from current ones
     // — on exactly the node an operator is looking at to find out what is
     // wrong with it.
-    tr["snapshot_age_s"] = snap.ageMs / 1000;
+    tr["snapshot_age_s"] = rnsSnap.ageMs / 1000;
     JsonArray pa = tr["paths"].to<JsonArray>();
     for (size_t i = 0; i < pk; i++) {
       JsonObject o = pa.add<JsonObject>();
