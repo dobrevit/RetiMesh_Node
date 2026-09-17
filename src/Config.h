@@ -644,7 +644,7 @@
 #define SD_LOG_MAX_BYTES    (1024UL * 1024UL)
 
 // ---------------------------------------------------------------------------
-// Display — SSD1306 128x64 on I2C by default (T3-S3: SDA 18 / SCL 17, 0x3C)
+// Display — SSD1306 128x64 on I2C by default (0x3C; the board names the pins)
 // ---------------------------------------------------------------------------
 #ifndef HAS_DISPLAY
   #define HAS_DISPLAY       1
@@ -681,11 +681,23 @@
 #ifndef OLED_CONTROLLER
   #define OLED_CONTROLLER   OLED_CONTROLLER_SSD1306
 #endif
+// The panel's pair, which a board with an OLED names in its own header. There
+// is no default pair, and -1 is what "no such bus" reads as — I2cReg::mainBus()
+// does not start a bus on pin -1 and hosts() does not list one. The default used to be 18/17, the T3-S3's
+// pair, and the two boards that name none inherited it: the Wireless Bridge,
+// which has no panel, and the Wireless Paper, whose panel is on SPI. Through
+// PIN_I2C_* below that handed each a general bus on pins it uses for something
+// else, and the first STATUS after boot scans that bus — on the Bridge, GPIO 18
+// is the radio's chip select and GPIO 17 the D0WDQ6's PSRAM clock, and the scan
+// panicked the node into a restart loop that came out of it with no PSRAM.
 #ifndef PIN_OLED_SDA
-  #define PIN_OLED_SDA      18
+  #define PIN_OLED_SDA      -1
 #endif
 #ifndef PIN_OLED_SCL
-  #define PIN_OLED_SCL      17
+  #define PIN_OLED_SCL      -1
+#endif
+#if HAS_DISPLAY && DISPLAY_KIND == DISPLAY_KIND_OLED && (PIN_OLED_SDA < 0 || PIN_OLED_SCL < 0)
+  #error "an OLED board must name its panel's pins (PIN_OLED_SDA/PIN_OLED_SCL) in its header; a board with no panel sets HAS_DISPLAY 0"
 #endif
 // The board's general-purpose I2C — the bus that carries whatever is not the
 // panel: a charger, an accelerometer, a touch controller, a keyboard. Most
@@ -702,6 +714,25 @@
 #ifndef PIN_I2C_SCL
   #define PIN_I2C_SCL       PIN_OLED_SCL
 #endif
+// Nothing may start this bus on a pin the board has already given to something
+// that dies when it is clocked: the radio's SPI and control lines, and on a
+// classic ESP32 with PSRAM the PSRAM's chip select and clock — GPIO 16 and 17
+// on the D0WD parts, read from the core's sdkconfig rather than restated here.
+// Wire.begin() takes the pins over from whatever held them, so a clash is not
+// a bus with nothing on it; it is the radio or the heap failing underneath a
+// console command. Refused here, so a header that clashes does not compile.
+#define RM_PIN_IS_RADIO(p) ((p) >= 0 && ((p) == PIN_LORA_SCK || (p) == PIN_LORA_MISO || \
+    (p) == PIN_LORA_MOSI || (p) == PIN_LORA_CS || (p) == PIN_LORA_RST ||              \
+    (p) == PIN_LORA_DIO0 || (p) == PIN_LORA_DIO1 || (p) == PIN_LORA_BUSY))
+#if RM_PIN_IS_RADIO(PIN_I2C_SDA) || RM_PIN_IS_RADIO(PIN_I2C_SCL)
+  #error "PIN_I2C_SDA/PIN_I2C_SCL name one of the radio's pins; a board with no general I2C bus leaves them -1"
+#endif
+#if defined(CONFIG_IDF_TARGET_ESP32) && defined(BOARD_HAS_PSRAM) && defined(CONFIG_D0WD_PSRAM_CLK_IO) && \
+    (PIN_I2C_SDA == CONFIG_D0WD_PSRAM_CS_IO || PIN_I2C_SDA == CONFIG_D0WD_PSRAM_CLK_IO || \
+     PIN_I2C_SCL == CONFIG_D0WD_PSRAM_CS_IO || PIN_I2C_SCL == CONFIG_D0WD_PSRAM_CLK_IO)
+  #error "PIN_I2C_SDA/PIN_I2C_SCL name the PSRAM's chip select or clock (CONFIG_D0WD_PSRAM_CS_IO/CLK_IO)"
+#endif
+#undef RM_PIN_IS_RADIO
 // Panels on a switched rail need it brought up before they are probed, and it
 // is active low on every board that has one so far.
 #ifndef HAS_DISPLAY_VEXT

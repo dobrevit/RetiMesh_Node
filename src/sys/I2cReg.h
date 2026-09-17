@@ -23,6 +23,7 @@ namespace I2cReg {
 // and none would agree about the pins.
 namespace detail {
 inline bool& mainStarted() { static bool v = false; return v; }
+inline bool& mainUp()      { static bool v = false; return v; }
 inline bool& h1Started()   { static bool v = false; return v; }
 inline int&  h1Sda()       { static int  v = -1;    return v; }
 inline int&  h1Scl()       { static int  v = -1;    return v; }
@@ -37,9 +38,21 @@ inline int&  h1Scl()       { static int  v = -1;    return v; }
 // and its keyboard on this one: two drivers, neither of which owns the bus,
 // both of which need it up, and each initialised at a different point in
 // setup(). Whoever asks first brings it up; everyone else gets the same bus.
+//
+// A board that names no general pair has no such bus, and this is the one
+// place that holds to it. Wire.begin(-1, -1) does not mean "no pins" to the
+// core: TwoWire::initPins() swaps a negative pin for the variant's SDA/SCL,
+// which on the Wireless Bridge is 21/22 — its Vext and its LoRa LED. So the
+// call is not made at all, and the Wire object left unstarted refuses every
+// transaction rather than clocking someone else's pins.
 inline TwoWire& mainBus() {
   if (!detail::mainStarted()) {
-    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, I2C_HZ);
+#if PIN_I2C_SDA >= 0 && PIN_I2C_SCL >= 0
+    detail::mainUp() = Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, I2C_HZ);
+#else
+    log_e("I2C: this board names no general pair (PIN_I2C_SDA/PIN_I2C_SCL), so that bus is not started");
+    detail::mainUp() = false;
+#endif
     detail::mainStarted() = true;
   }
   return Wire;
@@ -59,8 +72,9 @@ inline TwoWire& mainBus() {
 // before it decides its part is missing.
 inline TwoWire& busFor(int sda, int scl, uint32_t hz, bool* up = nullptr) {
   if (sda == PIN_I2C_SDA && scl == PIN_I2C_SCL) {
-    if (up) *up = true;
-    return mainBus();
+    TwoWire& bus = mainBus();
+    if (up) *up = detail::mainUp();
+    return bus;
   }
   if (!detail::h1Started()) {
     detail::h1Started() = Wire1.begin(sda, scl, hz);
