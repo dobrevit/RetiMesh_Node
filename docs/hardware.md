@@ -926,6 +926,19 @@ performs; and BOOT + RST recovers any of them.
    Everything in `Config.h` is `#ifndef`-guarded, so the board header wins and
    anything it omits falls back to a sensible default. Host connectivity is
    **not** declared here — it comes from `boards.json` (next step).
+   I2C pins are the exception to "a sensible default": there is none. A panel
+   on I2C names its pair (`PIN_OLED_SDA`/`PIN_OLED_SCL`), a board with parts
+   on a general-purpose bus of its own names that pair (`PIN_I2C_SDA`/
+   `PIN_I2C_SCL`), and a board with neither says nothing, which reads as -1:
+   no bus. Pins matter even where nothing sits on them, because the console's
+   `STATUS` and `I2C` scan the general bus and starting it takes those pins
+   over — the default used to be the T3-S3's 18/17, and on the Wireless Bridge
+   that is the radio's chip select and the PSRAM clock, which the first
+   `STATUS` after boot turned into a restart loop. The build now refuses a
+   general I2C pair (`PIN_I2C_SDA`/`PIN_I2C_SCL`) that lands on one of the
+   radio's pins, or on the PSRAM's chip select or clock on a classic ESP32
+   with PSRAM; and with no pair named the bus is never started, so a driver
+   that asks for it is told it is down.
 2. `src/Config.h`: one line in the board-selection block mapping `-DBOARD_<X>`
    to the header.
 3. `platformio.ini`: a new `[env:<name>]` (board, partitions, `-DBOARD_<X>`,
