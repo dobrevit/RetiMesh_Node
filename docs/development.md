@@ -58,13 +58,22 @@ from the tag).
 ### Library dependencies and the forks
 
 microReticulum and microStore are pulled from our forks
-(`dobrevit/microReticulum#retimesh/combined`,
-`dobrevit/microStore#fix/close-active-segment-before-compaction`) until the
-upstream PRs land: attermann/microReticulum#82 (configurable housekeeping
-interval), #85 (packet-carrying `AnnounceHandler` callback) and
-attermann/microStore#6 (compaction closes the active segment). The firmware
-relies on those APIs (`Reticulum::jobs_interval()`, the 4-argument
-`received_announce`). Once merged, point `lib_deps` back at upstream.
+(`dobrevit/microReticulum#retimesh/combined` and
+`dobrevit/microStore#retimesh/combined`). Each branch is upstream master plus
+one change that is still an upstream PR:
+
+- microReticulum: attermann/microReticulum#85, the packet-carrying
+  `AnnounceHandler::received_announce` the neighbour list is built on. The
+  firmware does not build without it.
+- microStore: `FileStore::init()` keeps records whose timestamp is ahead of
+  the clock instead of deleting them. Without it a node loses the paths it
+  learned since its clock offset was last saved every time it reboots.
+
+Once both are merged, point `lib_deps` back at upstream.
+
+The path table holds at most `RNS_PATH_TABLE_MAX` paths (200, set in
+`platformio.ini`); the library evicts the oldest path to make room for a new
+one.
 
 To hack on the libraries themselves, `[env:t3s3-local]` builds against sibling
 checkouts (`../microReticulum`, `../microStore`) instead of git:

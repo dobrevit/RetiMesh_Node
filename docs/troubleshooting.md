@@ -71,7 +71,7 @@ ROM, and a power cycle boots whatever is in flash.
 | Settings page asks for a password | admin auth | `admin` / `retimesh` by default; factory reset restores it |
 | Wi-Fi security `wpa3` greyed out | the firmware was built on an ESP-IDF 4.4 core, which has no SoftAP SAE | flash a current build (core 3.x / IDF 5), or use WPA2 |
 | Node reboots after saving Wi-Fi/transport settings | by design — those need re-registration | reconnect to the (possibly new) SSID |
-| `esp_littlefs: Failed to unlink … Has open FD` | microStore compaction deleting a segment it still holds open (fixed in our fork, upstream PR attermann/microStore#6) | update the firmware; harmless on older builds |
+| `esp_littlefs: Failed to unlink … Has open FD` | microStore compaction deleting a segment it still holds open (fixed upstream in attermann/microStore#6) | update the firmware; harmless on older builds |
 | SD card shows `partial` | the FAT volume covers only part of the card (Raspberry Pi image, phone card) | *Format card* on the settings page (erases it) |
 | SD card shows `unformatted` | ext4/exFAT/other filesystem, or a blank card | same — format from the settings page |
 | A card was put in and the page still says no card | the node backs off from an empty slot (3, 6, 12, 24 s, then every 30 s) so it stops paying half a second per look for an answer that never changes, and the settings page's own 10 s refresh adds to that | wait up to half a minute; or press the node's button after inserting the card, which puts the slot back on the 3 s beat and looks straight away |
