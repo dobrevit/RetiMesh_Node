@@ -1715,9 +1715,6 @@ bool begin(RingbufHandle_t txRing, RingbufHandle_t rxRing, RingbufHandle_t tcpIn
     // before the restart (RnsAdmin.h).
     Rns::Admin::begin();
     reticulum.transport_enabled(true);
-    // Housekeeping (announce rebroadcasts, link/receipt timeouts) every
-    // second instead of the library default of 60 s (fork / upstream PR #82).
-    RNS::Reticulum::jobs_interval(1.0f);
     RNS::Transport::register_announce_handler(std::make_shared<NeighborAnnounceHandler>());
 
     // One identity for everything: transport signs with the same keys that
@@ -2106,11 +2103,13 @@ static void refreshSnapshots(bool allowSweep) {
   // the rows caught up to it, and on one arrangement of costs did not move at
   // all. Rns::rowShareSpent() is the rule and carries the figures.
   //
-  // What is deliberately not here: any cap on the table itself. Nothing bounds
-  // how many paths it holds — nothing on this node sets path_table_maxsize()
-  // (the sweep-cursor note below carries that argument in full, the library's
-  // own caller included), so microStore's policy_max_recs stays 0 and neither
-  // its eviction nor its dead-record compaction can run.
+  // What is deliberately not here: any cap on the table itself. The library
+  // owns that. Transport::start() hands RNS_PATH_TABLE_MAX (platformio.ini) to
+  // the store as its policy_max_recs, so a put() of a new destination into a
+  // full table first evicts the path with the oldest timestamp, and init()
+  // prunes a table that is over the cap at boot. The sweep-cursor note below
+  // says what that eviction, and the compaction the same cap enables, do to a
+  // walk in progress.
   //
   // Their age is bounded, though, and by the library rather than by this sweep.
   // What is not set is a store-wide TTL *policy* — set_ttl_secs() has no caller
@@ -2128,16 +2127,15 @@ static void refreshSnapshots(bool allowSweep) {
   // timestamps that lie in the future, and the iterator this walk uses reads a
   // record without consulting its TTL at all. So an entry goes when something
   // asks after that destination again, and a destination nobody asks after is
-  // exactly the one whose path has gone dead. The table is bounded by liveness
-  // rather than by size, then: paths still in use age out, paths whose
-  // interface went away are this sweep's job, and the never-asked-after
-  // remainder is what accumulates, at an estimated 70-90 B of internal DRAM
-  // apiece — a 16-byte key plus its vector header, a 16-byte IndexValue, the
-  // map node's link and cached hash, a bucket slot, and an allocator header on
-  // each of the two blocks — on every board, PSRAM ones included, because
+  // exactly the one whose path has gone dead. Paths still in use age out,
+  // paths whose interface went away are this sweep's job, and the
+  // never-asked-after remainder accumulates until the cap evicts it. That
+  // remainder costs an estimated 70-90 B of internal DRAM apiece — a 16-byte
+  // key plus its vector header, a 16-byte IndexValue, the map node's link and
+  // cached hash, a bucket slot, and an allocator header on each of the two
+  // blocks — on every board, PSRAM ones included, because
   // RNS_CONTAINER_ALLOCATOR is left at its ESP32 default of RNS_HEAP_ALLOCATOR,
-  // which is plain operator new. A smaller concern than "nothing ever removes a
-  // path", and still its own change rather than a cap smuggled in here.
+  // which is plain operator new. The cap is what bounds that sum.
   static std::vector<RNS::Bytes> stale;
   static uint32_t sSweptMs = 0;
   // Where the last sweep ran out of budget, and so where the next one starts.
@@ -2163,7 +2161,8 @@ static void refreshSnapshots(bool allowSweep) {
   //     and exactly one on a pass whose walk spent the whole of it. And a stale
   //     entry is collected on the Row step as well as the Examine step — that
   //     is, at the front of the table, behind a cursor that has already worked
-  //     its way past it.
+  //     its way past it. Cap eviction is the same kind of erase, made by the
+  //     library inside a put() for a new destination when the table is full.
   //   * An insert that rehashes, which reorders the whole table rather than
   //     shifting a tail.
   //   * Segment-rotation compaction. A put() that fills the active segment
@@ -2171,20 +2170,12 @@ static void refreshSnapshots(bool allowSweep) {
   //     compact(); that ends in finalize_compaction(), which does _index.clear()
   //     and rebuilds the map by rescanning the compacted segment — a wholesale
   //     reorder (FileStore.h). Its sibling, the dead-record-threshold
-  //     compaction, is *not* reachable on this store: compact_if_threshold() is
-  //     gated on policy_max_recs > 0, that member defaults to
-  //     USTORE_DEFAULT_MAX_RECS which is 0, and the only thing that would set
-  //     it is Transport::path_table_maxsize(uint16_t), and nothing calls it.
-  //     Not src/, and not the library in the image either — though the library
-  //     is where its one caller lives: register_builtin_namespaces() exposes
-  //     the setter as a provisioning field (Provisioning/BuiltinNamespaces.cpp)
-  //     and that file is compiled. It is reached only from
-  //     Provisioner::begin(), which Reticulum::start() calls under #ifdef
-  //     RNS_USE_PROVISIONING — a macro no env in platformio.ini defines — so
-  //     the call is compiled out, nothing references the registration and the
-  //     linker drops it: the t3s3 firmware.elf carries no provisioning symbol
-  //     at all, and no path_table_maxsize beyond the member it would write.
-  //     Defining that macro is what would end the premise.
+  //     compaction, ends the same way, and with the cap set it is routine:
+  //     compact_if_threshold() runs once the records superseded or removed
+  //     since the last compaction reach USTORE_COMPACT_THRESHOLD (25%) of
+  //     policy_max_recs. Every announce that refreshes a known path supersedes
+  //     one, so at the cap of 200 a busy node reorders the table every fifty
+  //     or so path updates.
   //
   // So the cursor is an approximation between passes rather than an identity,
   // and entries either side of a shift are examined twice or skipped for a
@@ -2723,7 +2714,7 @@ void loop() {
     }
     processEvents();
     drainTcp();
-    reticulum.loop();                      // interface loops + housekeeping (jobs_interval = 1 s)
+    reticulum.loop();                      // interface loops + housekeeping
 
     // sStarted is what says the schedule is valid; testing sNextAnnounceMs for
     // truth as well used to mean that the one millis() in every 49 days that
